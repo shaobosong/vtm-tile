@@ -597,6 +597,7 @@ namespace netxs::app::tile
                             auto deleted_item = boss.pop_back();
                             if (item_ptr)
                             {
+                                input::hids::cleanup(*item_ptr);
                                 boss.attach(item_ptr);
                                 item_ptr->base::broadcast(tier::anycast, e2::form::upon::started);
                             }

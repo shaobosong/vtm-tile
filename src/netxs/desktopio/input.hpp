@@ -1627,6 +1627,31 @@ namespace netxs::input
         {
             return id != 0;
         }
+
+        // hids: Safely clear mouse focus.
+        static void cleanup(base& item)
+        {
+            while (item.mouse_focus.size())
+            {
+                auto size = item.mouse_focus.size();
+                auto& rec = item.mouse_focus.back();
+                if (auto gear_ptr = std::static_pointer_cast<input::hids>(rec.gear_wptr.lock()))
+                {
+                    gear_ptr->mouse_leave(item);
+                    gear_ptr->setfree();
+                    gear_ptr->hover = {};
+                }
+
+                // Safety check: ensure the item was removed.
+                // mouse_leave should pop the item, but if it fails (e.g. gear not found),
+                // we must manually pop to avoid an infinite loop.
+                if (item.mouse_focus.size() == size)
+                {
+                    item.mouse_focus.pop_back();
+                }
+            }
+        }
+
         void set_multihome()
         {
             if (auto world_ptr = multihome.world_wptr.lock())
