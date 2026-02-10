@@ -565,6 +565,8 @@ namespace netxs::app::shared
                 auto classname_list = config.settings::take_value_list_of(menuitem_ptr, "id");
                 item.label   = config.settings::take_value_from(menuitem_ptr, "label", " "s);
                 item.tooltip = config.settings::take_value_from(menuitem_ptr, "tooltip", ""s);
+                if (auto color = config.settings::take("hover/bgc", ui32{ 0 })) item.hover.bgc(color);
+                if (auto color = config.settings::take("hover/fgc", ui32{ 0 })) item.hover.fgc(color);
                 auto setup = [classname_list = std::move(classname_list)](ui::item& boss, menu::item& item)
                 {
                     auto& luafx = boss.bell::indexer.luafx;

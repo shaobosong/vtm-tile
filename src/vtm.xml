@@ -241,7 +241,9 @@ R"==(
             <item label="  >|<  " tooltip=/Ns/Tile/EqualizeSplitRatio/tooltip script=OnLeftClick|TileEqualizeSplitRatio/>
             <item label="  <->  " tooltip=/Ns/Tile/SwapPanes/tooltip          script=OnLeftClick|TileSwapPanes/>
             <item label="  -/-  " tooltip=/Ns/Tile/SplitOrientation/tooltip   script=OnLeftClick|TileSplitOrientation/>
-            <item label="\e[38;5;208m  =D-  \e[0m" tooltip=" Disconnect "     script=OnLeftClick|TileDisconnect/>
+            <item label="  =D-  " tooltip=" Disconnect "                      script=OnLeftClick|TileDisconnect>
+                <hover fgc="0xFFFFFFFF" bgc="0xFFFF8700"/>
+            </item>
             <!-- <item label="  #  " tooltip=/Ns/Tile/SetManagerTitle/tooltip    script=OnLeftClick|TileSetManagerTitle/> -->
             <!-- <item label="  <  "   tooltip=" Focus the previous pane or the split grip " script=OnLeftClick|TileFocusPrev    /> -->
             <!-- <item label="  >  "   tooltip=" Focus the next pane or the split grip "     script=OnLeftClick|TileFocusNext    /> -->
