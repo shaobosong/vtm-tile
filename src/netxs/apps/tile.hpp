@@ -149,6 +149,7 @@ namespace netxs::app::tile
         X(SetTitle           ) \
         X(ZoomPane           ) \
         X(ClosePane          ) \
+        X(SetMenuColor       ) \
         X(Disconnect         ) \
         X(Shutdown           ) \
 
@@ -1067,6 +1068,8 @@ namespace netxs::app::tile
                 ->plugin<pro::keybd>();
             auto& window_clr = object->base::field(skin::color(tone::window_clr));
             auto& is_focused = object->base::field(faux);
+            auto& color_focused = object->base::field(skin::color(tone::winfocus));
+            auto& color_passive = object->base::field(skin::color(tone::window_clr));
             object ->invoke([&](auto& boss)
             {
                 boss.LISTEN(tier::release, e2::form::state::focus::count, count)
@@ -1074,8 +1077,8 @@ namespace netxs::app::tile
                     if (std::exchange(is_focused, !!count) != is_focused)
                     {
                         boss.base::deface(); // Trigger to update pro::cache.
-                        window_clr = is_focused ? skin::color(tone::winfocus)
-                                                : skin::color(tone::window_clr);
+                        window_clr = is_focused ? color_focused
+                                                : color_passive;
                     }
                 };
             });
@@ -1272,7 +1275,7 @@ namespace netxs::app::tile
                                                                 boss.base::signal(tier::preview, app::tile::events::ui::selectapp, { gear, dir });
                                                             });
                                                         }},
-                        { methods::SelectedApp,        [&]
+                        { methods::SelectedApp,         [&]
                                                         {
                                                             auto state = app::tile::events::app_state{};
                                                             boss.base::signal(tier::preview, app::tile::events::ui::selected_app, &state);
@@ -1335,6 +1338,19 @@ namespace netxs::app::tile
                                                             {
                                                                 boss.base::signal(tier::preview, app::tile::events::ui::close, gear);
                                                             });
+                                                        }},
+                        { methods::SetMenuColor,        [&, menu_data]
+                                                        {
+                                                            auto p_clr = luafx.get_args_or(1, ui32{ 0 });
+                                                            auto f_clr = luafx.get_args_or(2, ui32{ 0 });
+                                                            if (p_clr && f_clr)
+                                                            {
+                                                                color_passive.bgc(p_clr);
+                                                                color_focused.bgc(f_clr);
+                                                                window_clr = is_focused ? color_focused : color_passive;
+                                                                menu_data->active()->shader(window_clr);
+                                                                boss.base::deface();
+                                                            }
                                                         }},
                         { methods::Disconnect,          [&]
                                                         {
