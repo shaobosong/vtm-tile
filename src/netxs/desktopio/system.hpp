@@ -5250,6 +5250,7 @@ namespace netxs::os
                             {
                                 changed++;
                                 m.wheelfp = wheeldt / (fp32)WHEEL_DELTA; // Sync with consrv.hpp.
+                                if (dtvt::wheelrate) m.wheelfp *= dtvt::wheelrate;
                                 if (accumfp * m.wheelfp < 0) accumfp = {}; // Reset accum if direction has changed.
                                 accumfp += m.wheelfp;
                                 m.wheelsi = (si32)accumfp;
