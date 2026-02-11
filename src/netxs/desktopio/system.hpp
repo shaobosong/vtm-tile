@@ -5150,7 +5150,7 @@ namespace netxs::os
                                     m.wheelsi = 0;
                                     m.timecod = datetime::now();
                                     m.changed++;
-                                    mouse(m); // Fire mouse event to update kb modifiers.
+                                    //mouse(m); // Fire mouse event to update kb modifiers.
                                 }
                             }
                             if (utf::to_code(r.Event.KeyEvent.uChar.UnicodeChar, point))
