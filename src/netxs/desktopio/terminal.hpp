@@ -4600,17 +4600,22 @@ namespace netxs::ui
                     }
                     if (count)
                     {
-                        curln.splice<faux>(start, count, blank);
-
-                        // curln.crop(start, blank);
-                        // curln.shrink(blank);
-                        batch.recalc(curln);
-                        // index_rebuild();
-
-                        width = curln.length();
-                        auto& mapln = index[coord.y];
-                        mapln.width = wraps ? std::min(panel.x, width - mapln.start)
-                                            : width;
+                        if (n == 1) // Erase to Left.
+                        {
+                            curln.splice<faux>(start, count, blank);
+                            batch.recalc(curln);
+                            width = curln.length();
+                            auto& mapln = index[coord.y];
+                            mapln.width = wraps ? std::min(panel.x, width - mapln.start)
+                                                : width;
+                        }
+                        else
+                        {
+                            curln.crop(start, blank);
+                            curln.shrink(blank);
+                            batch.recalc(curln);
+                            index_rebuild();
+                        }
                     }
                 }
                 else alt_screen::_el(n, ctx.block, coord, panel, blank);
@@ -4643,7 +4648,9 @@ namespace netxs::ui
                 {
                     auto& curln = batch.current();
                     curln.cutoff(batch.caret, n, blank, panel.x);
+                    curln.shrink(blank);
                     batch.recalc(curln);
+                    index_rebuild();
                 }
                 else ctx.block.cutoff(coord, n, blank);
             }
@@ -4792,13 +4799,24 @@ namespace netxs::ui
                     //todo revise (brush != default ? see windows console)
                     //if (c == whitespace) curln.splice<faux>(batch.caret, n, blank);
                     //else                 curln.splice<true>(batch.caret, n, blank);
-                    curln.splice<true>(batch.caret, n, blank);
-                    batch.recalc(curln);
-                    auto& mapln = index[coord.y];
-                    auto  width = curln.length();
-                    auto  wraps = curln.wrapped();
-                    mapln.width = wraps ? std::min(panel.x, width - mapln.start)
+
+                    if ((c == '\0' || c == ' ') && batch.caret + n >= curln.length())
+                    {
+                        curln.crop(batch.caret, blank);
+                        curln.shrink(blank);
+                        batch.recalc(curln);
+                        index_rebuild();
+                    }
+                    else
+                    {
+                        curln.splice<false>(batch.caret, n, blank);
+                        batch.recalc(curln);
+                        auto& mapln = index[coord.y];
+                        auto  width = curln.length();
+                        auto  wraps = curln.wrapped();
+                        mapln.width = wraps ? std::min(panel.x, width - mapln.start)
                                             : width;
+                    }
                 }
                 else ctx.block.splice(coord, n, blank);
             }
@@ -5338,6 +5356,7 @@ namespace netxs::ui
                     if (fresh)
                     {
                         curln.trimto(start, brush.spc());
+                        curln.shrink(brush.spc());
                     }
                     else
                     {
@@ -5346,17 +5365,19 @@ namespace netxs::ui
                         {
                             mapln.width = panel.x;
                             auto x = std::min(coor.x, panel.x); // Trim unwrapped lines by viewport.
-                            curln.splice<true>(start + x, panel.x - x, blank);
-                            curln.trimto(start + panel.x, brush.spc());
+                            curln.crop(start + x, blank);
+                            curln.shrink(blank);
                         }
                         else
                         {
                             mapln.width = coor.x;
                             curln.trimto(start + coor.x, brush.spc());
+                            curln.shrink(brush.spc());
                         }
                         assert(mapln.start == 0 || curln.wrapped());
                     }
                     batch.recalc(curln);
+                    index_rebuild();
 
                     sync_coord();
 
@@ -5447,6 +5468,7 @@ namespace netxs::ui
 
                     auto& newln = *curit;
                     newln.splice(0, tmpln.substr(start), cell::shaders::full, brush.spc());
+                    newln.shrink(brush.spc());
                     batch.undock_base_back(tmpln);
                     batch.invite(newln);
 
@@ -5455,6 +5477,7 @@ namespace netxs::ui
                         auto& curln = *(curit - 1);
                         curln = std::move(tmpln);
                         curln.trimto(start, brush.spc());
+                        curln.shrink(brush.spc());
                         batch.invite(curln);
                     }
 
