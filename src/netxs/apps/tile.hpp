@@ -643,23 +643,24 @@ namespace netxs::app::tile
                         {
                             boss.back()->base::signal(tier::release, e2::form::size::restore);
                         }
-                        else if (auto node = std::static_pointer_cast<ui::fork>(boss.base::parent()))
-                        {
-                            auto ratio = node->get_ratio();
-                            if (ratio == min_ratio)
-                            {
-                                node->set_ratio(saved_ratio);
-                                pro::focus::set(boss.This(), gear.id, gear.meta(hids::anyCtrl) ? solo::off : solo::on, true);
-                            }
-                            else
-                            {
-                                saved_ratio = ratio;
-                                node->set_ratio(min_state);
-                                min_ratio = node->get_ratio();
-                                pro::focus::off(boss.This(), gear.id);
-                            }
-                            node->base::reflow();
-                        }
+                        // else if (auto node = std::static_pointer_cast<ui::fork>(boss.base::parent()))
+                        // {
+                        //     auto ratio = node->get_ratio();
+                        //     if (ratio == min_ratio)
+                        //     {
+                        //         node->set_ratio(saved_ratio);
+                        //         pro::focus::set(boss.This(), gear.id, gear.meta(hids::anyCtrl) ? solo::off : solo::on, true);
+                        //     }
+                        //     else
+                        //     {
+                        //         saved_ratio = ratio;
+                        //         node->set_ratio(min_state);
+                        //         min_ratio = node->get_ratio();
+                        //         pro::focus::off(boss.This(), gear.id);
+                        //     }
+                        //     node->base::reflow();
+                        // }
+                        pro::focus::set(boss.back(), gear.id, solo::on, true);
                     };
                     boss.LISTEN(tier::preview, e2::form::size::enlarge::any, gear, -, (oneoff = subs{}))
                     {
@@ -675,6 +676,7 @@ namespace netxs::app::tile
                             {
                                 auto fullscreen_item = boss.back();
                                 auto& fullscreen_inst = *fullscreen_item;
+                                pro::focus::set(fullscreen_item, gear.id, solo::on, true);
                                 boss.base::riseup(tier::release, e2::form::proceed::attach, fullscreen_item);
                                 fullscreen_item->LISTEN(tier::release, e2::form::size::restore, p, oneoff)
                                 {
