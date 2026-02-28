@@ -1673,6 +1673,17 @@ namespace netxs::input
                 mouse::nodbl = true;
             }
         }
+        void break_click_chain()
+        {
+            mouse::nodbl = true;
+            if (auto button = mouse::bttn_id)
+            {
+                if (auto iter = stamp.find(button); iter != stamp.end())
+                {
+                    iter->second = {};
+                }
+            }
+        }
         void dismiss_dblclick()
         {
             nodbl = true;

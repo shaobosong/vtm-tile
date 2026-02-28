@@ -412,6 +412,7 @@ namespace netxs::app::shared
                         boss.on(tier::mouserelease, input::key::LeftClick, [&](hids& gear)
                         {
                             boss.base::riseup(tier::preview, e2::form::size::minimize, gear);
+                            gear.break_click_chain();
                             gear.dismiss();
                         });
                     }},
@@ -421,6 +422,7 @@ namespace netxs::app::shared
                         boss.on(tier::mouserelease, input::key::LeftClick, [&](hids& gear)
                         {
                             boss.base::riseup(tier::preview, e2::form::size::enlarge::maximize, gear);
+                            gear.break_click_chain();
                             gear.dismiss();
                         });
                     }},
@@ -432,6 +434,7 @@ namespace netxs::app::shared
                         {
                             auto backup = boss.This(); //todo revise backup
                             boss.base::signal(tier::anycast, e2::form::proceed::quit::one, faux); // fast=faux: Show closing process.
+                            gear.break_click_chain();
                             gear.dismiss();
                         });
                     }},
