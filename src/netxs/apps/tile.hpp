@@ -83,6 +83,16 @@ namespace netxs::app::tile
         utf::replace_all(appcfg.env, "$0", current_module_file);
     }
 
+    static auto set_pane_title(auto& applet, text const& title)
+    {
+        if (title.empty()) return;
+        applet->base::property("applet.header") = title;
+        applet->LISTEN(tier::preview, e2::form::prop::ui::header, new_title, -, (fixed_title = title))
+        {
+            new_title = fixed_title;
+        };
+    }
+
     struct apps_data_t
     {
         text selected_id;
@@ -823,6 +833,7 @@ namespace netxs::app::tile
                             text app_type;
                             text cmd;
                             text menuid;
+                            text title;
                             for (auto& item_ptr : item_list)
                             {
                                 auto item_id = config.settings::take_value_from(item_ptr, "id", text{});
@@ -830,6 +841,7 @@ namespace netxs::app::tile
                                 {
                                     app_type = config.settings::take_value_from(item_ptr, "type", text{});
                                     cmd = config.settings::take_value_from(item_ptr, "cmd", text{});
+                                    title = config.settings::take_value_from(item_ptr, "title", text{});
                                     menuid = item_id;
                                     break;
                                 }
@@ -840,6 +852,7 @@ namespace netxs::app::tile
                             auto appcfg = eccc{ .cmd = cmd };
                             expand_appcfg(appcfg);
                             auto applet = app::shared::builder(app_type)(appcfg, config);
+                            set_pane_title(applet, title);
                             auto what = vtm::events::handoff.param();
                             what.applet = applet;
                             what.type = app_type;
@@ -877,6 +890,7 @@ namespace netxs::app::tile
                 text app_type;
                 text cmd;
                 text menuid;
+                text title;
                 for (auto& item_ptr : item_list)
                 {
                     auto item_id = config.settings::take_value_from(item_ptr, "id", text{});
@@ -884,6 +898,7 @@ namespace netxs::app::tile
                     {
                         app_type = config.settings::take_value_from(item_ptr, "type", text{});
                         cmd = config.settings::take_value_from(item_ptr, "cmd", text{});
+                        title = config.settings::take_value_from(item_ptr, "title", text{});
                         menuid = item_id;
                         break;
                     }
@@ -894,6 +909,7 @@ namespace netxs::app::tile
                 auto appcfg = eccc{ .cmd = cmd };
                 expand_appcfg(appcfg);
                 auto applet = app::shared::builder(app_type)(appcfg, config);
+                set_pane_title(applet, title);
                 auto what = vtm::events::handoff.param();
                 what.applet = applet;
                 what.type = app_type;
