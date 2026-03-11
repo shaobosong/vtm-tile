@@ -692,21 +692,32 @@ namespace netxs::app::vtm
                         what.applet = applet_ptr;
                     }
                 };
+                auto sync_window_state = [&]
+                {
+                    auto state = base::signal(tier::request, e2::form::prop::window::state);
+                    base::broadcast(tier::release, e2::form::prop::window::state, state);
+                };
                 auto& last_state = base::field(faux);
-                LISTEN(tier::release, e2::form::layout::selected, gear)
+                LISTEN(tier::release, e2::form::layout::selected, gear, -, (sync_window_state))
                 {
                     last_state = base::hidden;
-                    base::hidden = faux; // Restore if it is hidden.
+                    if (base::hidden)
+                    {
+                        base::hidden = faux; // Restore if it is hidden.
+                        sync_window_state();
+                    }
                 };
-                LISTEN(tier::release, e2::form::layout::unselect, gear)
+                LISTEN(tier::release, e2::form::layout::unselect, gear, -, (sync_window_state))
                 {
                     if (last_state == true) // Return to hidden state.
                     {
                         base::hidden = true;
+                        sync_window_state();
                     }
                 };
-                LISTEN(tier::preview, e2::form::size::minimize, gear)
+                LISTEN(tier::preview, e2::form::size::minimize, gear, -, (sync_window_state))
                 {
+                    auto hidden = base::hidden;
                     auto window_ptr = This();
                     if (base::hidden) // Restore if it is hidden.
                     {
@@ -742,6 +753,10 @@ namespace netxs::app::vtm
                             if (window_ptr) pro::focus::off(window_ptr, gear.id);
                         }
                     }
+                    if (hidden != base::hidden)
+                    {
+                        sync_window_state();
+                    }
                 };
                 LISTEN(tier::release, e2::form::prop::ui::header, new_title)
                 {
@@ -749,6 +764,10 @@ namespace netxs::app::vtm
                     base::signal(tier::preview, e2::form::prop::ui::tooltip, tooltip_body);
                 };
                 LISTEN(tier::request, e2::form::prop::window::instance, window_ptr)
+                {
+                    window_ptr = This();
+                };
+                LISTEN(tier::request, e2::form::prop::window::statesrc, window_ptr)
                 {
                     window_ptr = This();
                 };
@@ -826,7 +845,7 @@ namespace netxs::app::vtm
                     //todo window_ptr->base::riseup(vtm::events::gate::fullscreen...
                     gear.owner.base::signal(tier::release, vtm::events::gate::fullscreen, what);
                 };
-                LISTEN(tier::release, e2::form::size::restore, p)
+                LISTEN(tier::release, e2::form::size::restore, p, -, (sync_window_state))
                 {
                     if (maximize_token.size())
                     {
@@ -836,9 +855,10 @@ namespace netxs::app::vtm
                             base::extend(saved_area); // Restore window size and relative coor.
                         }
                         maximize_token.clear();
+                        sync_window_state();
                     }
                 };
-                LISTEN(tier::preview, e2::form::size::enlarge::maximize, gear)
+                LISTEN(tier::preview, e2::form::size::enlarge::maximize, gear, -, (sync_window_state))
                 {
                     auto viewport = gear.owner.base::signal(tier::request, e2::form::prop::viewport);
                     auto recalc = [&](auto viewport)
@@ -905,6 +925,7 @@ namespace netxs::app::vtm
                                 base::signal(tier::release, e2::form::size::restore);
                             }
                         };
+                        sync_window_state();
                     }
                 };
                 LISTEN(tier::request, e2::form::prop::window::state, state)
@@ -925,6 +946,7 @@ namespace netxs::app::vtm
                         {
                             base::hidden = faux;
                             base::deface();
+                            sync_window_state();
                         }
                         else base::strike();
                     }

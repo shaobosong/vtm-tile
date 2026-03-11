@@ -467,6 +467,7 @@ namespace netxs::events::userland
                         EVENT_XS( size    , twod     ), // Set window size.
                         EVENT_XS( fullsize, rect     ), // Request window size with titles and borders.
                         EVENT_XS( instance, ui::sptr ), // Request window instance.
+                        EVENT_XS( statesrc, ui::sptr ), // Request window state source for menu controls.
                         EVENT_XS( state   , si32     ), // Request window state.
                     };
                     SUBSET_XS( ui )

@@ -234,6 +234,15 @@ namespace netxs::ui
                 auto& path = lock.thing.path;
                 notify(e2::form::prop::cwd, path, tier::anycast);
             }
+            void handle(s11n::xs::window_state lock)
+            {
+                owner.base::enqueue([&, state = lock.thing.state](auto& /*boss*/)
+                {
+                    owner.window_state = state;
+                    owner.set_fullscreen(state == winstate::fullscreen);
+                    owner.base::broadcast(tier::release, e2::form::prop::window::state, state);
+                });
+            }
             void handle(s11n::xs::sysclose    lock)
             {
                 // Immediately reply (w/o queueing) on sysclose request to avoid deadlock.
@@ -474,6 +483,7 @@ namespace netxs::ui
         bool       direct; // gate: .
         bool       yield; // gate: Indicator that the current frame has been successfully sent.
         bool       fullscreen; // gate: .
+        si32       window_state; // gate: Host window state visible to nested menus.
         face       canvas; // gate: .
         bool       preserve_on_close{ false }; // gate: Don't send quit on cleanup (for persistent tile sessions).
         std::map<si32, ui::page> gate_overlays; // gate: User defined overlays (for Lua scripting output).
@@ -825,6 +835,7 @@ namespace netxs::ui
               direct{ !!(vtmode & (ui::console::direct | ui::console::gui)) },
               yield{ faux },
               fullscreen{ faux },
+              window_state{ winstate::normal },
               debug{ base::plugin<pro::debug>() },
               multihome{ base::property<input::multihome_t>("multihome") }
         {
@@ -1087,6 +1098,14 @@ namespace netxs::ui
             LISTEN(tier::request, e2::form::prop::viewport, viewport)
             {
                 viewport = base::area();
+            };
+            LISTEN(tier::request, e2::form::prop::window::statesrc, window_ptr)
+            {
+                window_ptr = This();
+            };
+            LISTEN(tier::request, e2::form::prop::window::state, state)
+            {
+                state = window_state;
             };
             //todo unify creation (delete simple create wo gear)
             LISTEN(tier::preview, e2::form::proceed::create, dest_region)

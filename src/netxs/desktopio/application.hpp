@@ -245,6 +245,19 @@ namespace netxs::app::shared
                                         gear.set_handled();
                                         luafx.set_return(zorder);
                                     }},
+            { "State",              [&]
+                                    {
+                                        auto state = boss.base::riseup(tier::request, e2::form::prop::window::state);
+                                        switch (state)
+                                        {
+                                            default:                   luafx.set_return("undefined");  break;
+                                            case winstate::normal:     luafx.set_return("normal");     break;
+                                            case winstate::minimized:  luafx.set_return("minimized");  break;
+                                            case winstate::maximized:  luafx.set_return("maximized");  break;
+                                            case winstate::fullscreen: luafx.set_return("fullscreen"); break;
+                                            case winstate::tiled:      luafx.set_return("tiled");      break;
+                                        }
+                                    }},
             { "Close",              [&]
                                     {
                                         auto gui_cmd = e2::command::gui.param();
@@ -324,6 +337,7 @@ namespace netxs::app::shared
             static const auto minimized  = "minimized"s;
             static const auto maximized  = "maximized"s;
             static const auto fullscreen = "fullscreen"s;
+            static const auto tiled      = "tiled"s;
         }
 
         static auto options = utf::unordered_map<text, si32>
@@ -331,7 +345,8 @@ namespace netxs::app::shared
             { type::normal,     winstate::normal     },
             { type::minimized,  winstate::minimized  },
             { type::maximized,  winstate::maximized  },
-            { type::fullscreen, winstate::fullscreen }};
+            { type::fullscreen, winstate::fullscreen },
+            { type::tiled,      winstate::tiled      }};
     }
 
     namespace menu
@@ -419,6 +434,38 @@ namespace netxs::app::shared
                     { menu::item{ .alive = true, .label = "  □  ", .tooltip = skin::globals().NsMaximizeWindow_tooltip },//, .hover = c6 },
                     [](auto& boss, auto& /*item*/)
                     {
+                        auto sync = [](auto& boss, auto state)
+                        {
+                            auto restore = state == winstate::maximized
+                                        || state == winstate::fullscreen;
+                            auto label = restore ? "  ▣  "sv
+                                                 : "  □  "sv;
+                            if (boss.get() != label)
+                            {
+                                boss.set(label);
+                                boss.base::deface();
+                            }
+                        };
+                        auto state_watch_ptr = &boss.base::field(hook{});
+                        boss.LISTEN(tier::anycast, e2::form::upon::started, root_ptr, -, (sync, state_watch_ptr))
+                        {
+                            auto& state_watch = *state_watch_ptr;
+                            state_watch = {};
+                            auto state = boss.base::riseup(tier::request, e2::form::prop::window::state);
+                            sync(boss, state);
+                            auto target = boss.base::riseup(tier::request, e2::form::prop::window::statesrc);
+                            if (target)
+                            {
+                                auto button_shadow = ptr::shadow(boss.This());
+                                target->LISTEN(tier::release, e2::form::prop::window::state, state, state_watch, (button_shadow, sync))
+                                {
+                                    if (auto button_ptr = button_shadow.lock())
+                                    {
+                                        sync(*button_ptr, state);
+                                    }
+                                };
+                            }
+                        };
                         boss.on(tier::mouserelease, input::key::LeftClick, [&](hids& gear)
                         {
                             boss.base::riseup(tier::preview, e2::form::size::enlarge::maximize, gear);

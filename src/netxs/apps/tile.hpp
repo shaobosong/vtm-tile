@@ -286,6 +286,8 @@ namespace netxs::app::tile
         };
         auto app_window = [](auto& what)
         {
+            auto base_state = what.type == netxs::app::tile::id ? winstate::tiled
+                                                                : winstate::normal;
             return ui::fork::ctor(axis::Y)
                     ->template plugin<pro::title>(what.applet->base::property("applet.header"), what.applet->base::property("applet.footer"), true, faux, true)
                     ->template plugin<pro::light>() //todo gcc requires template keyword
@@ -295,6 +297,28 @@ namespace netxs::app::tile
                     ->active()
                     ->invoke([&](auto& boss)
                     {
+                        auto& pane_state = boss.base::field(base_state);
+                        auto pane_state_value = [&boss, base_state]
+                        {
+                            auto state = base_state;
+                            if (auto parent_ptr = boss.base::parent())
+                            {
+                                if (parent_ptr->base::subset.size() > 2)
+                                {
+                                    state = winstate::maximized;
+                                }
+                            }
+                            return state;
+                        };
+                        auto sync_pane_state = [&boss, &pane_state, pane_state_value](bool forced = faux)
+                        {
+                            auto state = pane_state_value();
+                            if (forced || pane_state != state)
+                            {
+                                pane_state = state;
+                                boss.base::broadcast(tier::release, e2::form::prop::window::state, pane_state);
+                            }
+                        };
                         mouse_subs(boss);
                         if (what.applet->size() != dot_00) boss.resize(what.applet->size() + dot_01/*approx title height*/);
                         auto applet_shadow = ptr::shadow(what.applet);
@@ -305,12 +329,22 @@ namespace netxs::app::tile
                             pro::focus::set(boss.This(), gear.id, solo::on);
                         });
                         boss.on(tier::mouserelease, input::key::MiddleClick);
-                        boss.LISTEN(tier::anycast, e2::form::upon::started, root_ptr)
+                        boss.LISTEN(tier::anycast, e2::form::upon::started, root_ptr, -, (sync_pane_state))
                         {
                             boss.base::riseup(tier::release, tile::events::enlist, boss.This());
+                            sync_pane_state(true);
                         };
-                        boss.LISTEN(tier::release, e2::form::upon::vtree::attached, parent)
+                        boss.LISTEN(tier::request, e2::form::prop::window::statesrc, window_ptr)
                         {
+                            window_ptr = boss.This();
+                        };
+                        boss.LISTEN(tier::request, e2::form::prop::window::state, state, -, (pane_state_value))
+                        {
+                            state = pane_state_value();
+                        };
+                        boss.LISTEN(tier::release, e2::form::upon::vtree::attached, parent, -, (sync_pane_state))
+                        {
+                            sync_pane_state();
                             parent->LISTEN(tier::anycast, e2::form::prop::cwd, path, boss.relyon)
                             {
                                 boss.base::signal(tier::anycast, e2::form::prop::cwd, path);
@@ -1205,6 +1239,10 @@ namespace netxs::app::tile
                     boss.LISTEN(tier::request, e2::form::prop::window::state, state)
                     {
                         state = winstate::tiled;
+                    };
+                    boss.LISTEN(tier::request, e2::form::prop::window::statesrc, window_ptr)
+                    {
+                        window_ptr = boss.This();
                     };
                     boss.LISTEN(tier::preview, e2::form::prop::cwd, path)
                     {

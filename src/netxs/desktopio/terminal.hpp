@@ -9416,6 +9416,14 @@ namespace netxs::ui
         {
             ipccon.output(data);
         }
+        void sync_window_state()
+        {
+            if (ipccon)
+            {
+                auto state = base::riseup(tier::request, e2::form::prop::window::state);
+                stream.window_state.send(*this, state);
+            }
+        }
         // dtvt: Attach a new process.
         template<class T = noop>
         void start_dtvt(eccc& appcfg, T connect_fx = {})
@@ -9449,6 +9457,7 @@ namespace netxs::ui
                 });
             };
             ipccon.run_dtvt_app(appcfg, base::size(), connect_fx, receiver_fx, shutdown_fx);
+            sync_window_state();
         }
         // dtvt: Return true if application has never sent its canvas.
         auto is_nodtvt()
@@ -9570,6 +9579,10 @@ namespace netxs::ui
             LISTEN(tier::anycast, e2::form::prop::cwd, path)
             {
                 stream.cwd.send(*this, path);
+            };
+            LISTEN(tier::release, e2::form::prop::window::state, state)
+            {
+                sync_window_state();
             };
             LISTEN(tier::release, e2::area, new_area)
             {
