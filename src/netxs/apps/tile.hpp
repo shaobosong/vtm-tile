@@ -45,6 +45,7 @@ namespace netxs::events::userland
                 {
                     EVENT_XS( next    , input::hids ),
                     EVENT_XS( prev    , input::hids ),
+                    EVENT_XS( lastpane, input::hids ),
                     EVENT_XS( nextpane, input::hids ),
                     EVENT_XS( prevpane, input::hids ),
                     EVENT_XS( nextgrip, input::hids ),
@@ -91,6 +92,118 @@ namespace netxs::app::tile
         {
             new_title = fixed_title;
         };
+    }
+
+    struct focus_history_t
+    {
+        std::unordered_map<id_t, ui::wptr> current;
+        std::unordered_map<id_t, ui::wptr> previous;
+        std::unordered_map<void const*, ui::wptr> owners;
+
+        void remember(id_t gear_id, ui::sptr const& slot_ptr)
+        {
+            if (!slot_ptr) return;
+
+            auto& current_slot = current[gear_id];
+            auto active_slot = current_slot.lock();
+            if (active_slot == slot_ptr) return;
+
+            if (active_slot) previous[gear_id] = active_slot;
+            current_slot = slot_ptr;
+        }
+
+        void replace(ui::sptr const& old_slot_ptr, ui::sptr const& new_slot_ptr)
+        {
+            if (!old_slot_ptr) return;
+
+            auto replace_slot = [&](auto& slots)
+            {
+                for (auto& [gear_id, slot_wptr] : slots)
+                {
+                    if (slot_wptr.lock() == old_slot_ptr)
+                    {
+                        slot_wptr = new_slot_ptr;
+                    }
+                }
+            };
+            replace_slot(current);
+            replace_slot(previous);
+        }
+
+        void bind(ui::sptr const& focus_target_ptr, ui::sptr const& slot_ptr)
+        {
+            if (!focus_target_ptr) return;
+            owners[focus_target_ptr.get()] = slot_ptr;
+        }
+
+        auto owner(ui::sptr const& focus_target_ptr)
+        {
+            if (!focus_target_ptr) return ui::sptr{};
+            if (auto iter = owners.find(focus_target_ptr.get()); iter != owners.end())
+            {
+                if (auto slot_ptr = iter->second.lock())
+                {
+                    return slot_ptr;
+                }
+                owners.erase(iter);
+            }
+            return ui::sptr{};
+        }
+
+        auto last(id_t gear_id)
+        {
+            if (auto iter = previous.find(gear_id); iter != previous.end())
+            {
+                if (auto slot_ptr = iter->second.lock())
+                {
+                    return slot_ptr;
+                }
+                previous.erase(iter);
+            }
+            return ui::sptr{};
+        }
+    };
+
+    static auto track_slot_focus(auto focus_target_ptr, auto slot_ptr, auto focus_history_ptr)
+    {
+        if (focus_history_ptr) focus_history_ptr->bind(focus_target_ptr, slot_ptr);
+
+        auto target_shadow = ptr::shadow(focus_target_ptr);
+        focus_target_ptr->LISTEN(tier::release, e2::form::state::focus::on, gear_id, -, (focus_history_ptr, target_shadow))
+        {
+            if (focus_history_ptr)
+            if (auto target_ptr = target_shadow.lock())
+            if (auto slot_ptr = focus_history_ptr->owner(target_ptr))
+            {
+                focus_history_ptr->remember(gear_id, slot_ptr);
+            }
+        };
+        return focus_target_ptr;
+    }
+
+    static auto get_slot_focus_target(ui::sptr const& slot_ptr)
+    {
+        if (!slot_ptr) return ui::sptr{};
+
+        auto node_veer_ptr = std::dynamic_pointer_cast<ui::veer>(slot_ptr);
+        if (!node_veer_ptr || !node_veer_ptr->count()) return ui::sptr{};
+
+        auto item_ptr = node_veer_ptr->back();
+        if (!item_ptr) return ui::sptr{};
+
+        if (node_veer_ptr->count() == 1) return item_ptr; // Empty slot.
+
+        if (item_ptr->root())
+        {
+            if (auto applet_host_ptr = std::dynamic_pointer_cast<ui::fork>(item_ptr))
+            {
+                if (auto applet_ptr = applet_host_ptr->get(slot::_2))
+                {
+                    return applet_ptr;
+                }
+            }
+        }
+        return item_ptr;
     }
 
     struct apps_data_t
@@ -141,6 +254,7 @@ namespace netxs::app::tile
     #define proc_list \
         X(FocusNextPaneOrGrip) \
         X(FocusNextPane      ) \
+        X(LastPane           ) \
         X(FocusLeftPane      ) \
         X(FocusRightPane     ) \
         X(FocusUpPane        ) \
@@ -284,11 +398,11 @@ namespace netxs::app::tile
                 gear.dismiss();
             });
         };
-        auto app_window = [](auto& what)
+        auto app_window = [](auto& what, auto slot_ptr, auto focus_history_ptr)
         {
             auto base_state = what.type == netxs::app::tile::id ? winstate::tiled
                                                                 : winstate::normal;
-            return ui::fork::ctor(axis::Y)
+            return track_slot_focus(ui::fork::ctor(axis::Y)
                     ->template plugin<pro::title>(what.applet->base::property("applet.header"), what.applet->base::property("applet.footer"), true, faux, true)
                     ->template plugin<pro::light>() //todo gcc requires template keyword
                     ->template plugin<pro::focus>()
@@ -321,7 +435,6 @@ namespace netxs::app::tile
                         };
                         mouse_subs(boss);
                         if (what.applet->size() != dot_00) boss.resize(what.applet->size() + dot_01/*approx title height*/);
-                        auto applet_shadow = ptr::shadow(what.applet);
                         boss.on(tier::mouserelease, input::key::LeftDragStart, [&](hids& gear) { (void)gear; });
                         boss.on(tier::mouserelease, input::key::LeftRightDragStart);
                         boss.on(tier::mouserelease, input::key::RightClick, [&](hids& gear)
@@ -376,7 +489,7 @@ namespace netxs::app::tile
                                 };
                             };
                         }))
-                    ->branch(slot::_2, what.applet);
+                    ->branch(slot::_2, what.applet), slot_ptr, focus_history_ptr);
         };
         auto build_node = [](auto tag, auto slot1, auto slot2, auto grip_width, auto grip_bindings_ptr)
         {
@@ -494,7 +607,7 @@ namespace netxs::app::tile
                     }));
             return node;
         };
-        auto empty_slot = []
+        auto empty_slot = [](auto slot_ptr, auto focus_history_ptr)
         {
             auto window_clr = skin::color(tone::window_clr);
             window_clr.bga(0x60);
@@ -557,7 +670,7 @@ namespace netxs::app::tile
                 };
             });
 
-            return ui::cake::ctor()
+            return track_slot_focus(ui::cake::ctor()
                 ->isroot(true, base::placeholder)
                 ->limits(dot_00, -dot_11)
                 ->plugin<pro::focus>(pro::focus::mode::focusable)
@@ -587,7 +700,7 @@ namespace netxs::app::tile
                             target = boss.This();
                         }
                     };
-                    boss.LISTEN(tier::release, vtm::events::d_n_d::drop, what)
+                    boss.LISTEN(tier::release, vtm::events::d_n_d::drop, what, -, (focus_history_ptr))
                     {
                         if (auto parent_ptr = boss.base::parent())
                         if (parent_ptr->base::subset.size() == 1) // Only empty slot available.
@@ -595,7 +708,7 @@ namespace netxs::app::tile
                             highlight(faux);
                             // Solo focus will be set in pro::d_n_d::proceed.
                             //pro::focus::off(boss.back()); // Unset focus from node_veer if it is focused.
-                            auto app = app_window(what);
+                            auto app = app_window(what, parent_ptr, focus_history_ptr);
                             parent_ptr->attach(app);
                             app->base::broadcast(tier::anycast, e2::form::upon::started);
                             app->base::reflow();
@@ -617,11 +730,11 @@ namespace netxs::app::tile
                 ->branch
                 (
                     menu_block->alignment({ snap::head, snap::head })
-                );
+                ), slot_ptr, focus_history_ptr);
         };
-        auto node_veer = [](auto&& node_veer, auto min_state, auto grip_bindings_ptr) -> netxs::sptr<ui::veer>
+        auto node_veer = [](auto&& node_veer, auto min_state, auto grip_bindings_ptr, auto focus_history_ptr) -> netxs::sptr<ui::veer>
         {
-            return ui::veer::ctor()
+            auto slot_ptr = ui::veer::ctor()
                 ->plugin<pro::focus>()
                 ->active()
                 ->invoke([&](auto& boss)
@@ -630,7 +743,7 @@ namespace netxs::app::tile
                     {
                         // Block a rising up of this event: dtvt object fires this event on exit.
                     };
-                    boss.LISTEN(tier::release, e2::form::proceed::swap, item_ptr)
+                    boss.LISTEN(tier::release, e2::form::proceed::swap, item_ptr, -, (focus_history_ptr))
                     {
                         if (boss.count() == 1) // Only empty slot available.
                         {
@@ -642,6 +755,14 @@ namespace netxs::app::tile
                             auto deleted_item = boss.pop_back();
                             if (item_ptr)
                             {
+                                if (focus_history_ptr)
+                                {
+                                    if (auto old_slot_ptr = focus_history_ptr->owner(item_ptr))
+                                    {
+                                        focus_history_ptr->replace(old_slot_ptr, boss.This());
+                                    }
+                                    focus_history_ptr->bind(item_ptr, boss.This());
+                                }
                                 input::hids::cleanup(*item_ptr);
                                 boss.attach(item_ptr);
                                 item_ptr->base::broadcast(tier::anycast, e2::form::upon::started);
@@ -741,7 +862,7 @@ namespace netxs::app::tile
                             }
                         }
                     };
-                    boss.LISTEN(tier::release, app::tile::events::ui::split::any, gear, -, (grip_bindings_ptr))
+                    boss.LISTEN(tier::release, app::tile::events::ui::split::any, gear, -, (grip_bindings_ptr, focus_history_ptr))
                     {
                         auto deed = boss.bell::protos();
                         auto depth = 0;
@@ -756,18 +877,23 @@ namespace netxs::app::tile
 
                         auto heading = deed == app::tile::events::ui::split::vt.id;
                         auto newnode = build_node(heading ? 'v':'h', 1, 1, heading ? 1 : 2, grip_bindings_ptr);
-                        auto empty_1 = node_veer(node_veer, ui::fork::min_ratio, grip_bindings_ptr);
-                        auto empty_2 = node_veer(node_veer, ui::fork::max_ratio, grip_bindings_ptr);
+                        auto empty_1 = node_veer(node_veer, ui::fork::min_ratio, grip_bindings_ptr, focus_history_ptr);
+                        auto empty_2 = node_veer(node_veer, ui::fork::max_ratio, grip_bindings_ptr, focus_history_ptr);
                         auto gear_id_list = pro::focus::cut(boss.back());
                         auto curitem = boss.pop_back();
                         if (boss.empty())
                         {
-                            boss.attach(empty_slot());
+                            boss.attach(empty_slot(boss.This(), focus_history_ptr));
                             empty_1->pop_back();
                         }
                         auto slot_1 = newnode->attach(slot::_1, empty_1->branch(curitem));
                         auto slot_2 = newnode->attach(slot::_2, empty_2);
                         boss.attach(newnode);
+                        if (focus_history_ptr)
+                        {
+                            focus_history_ptr->replace(boss.This(), slot_1);
+                            focus_history_ptr->bind(curitem, slot_1);
+                        }
                         newnode->base::broadcast(tier::anycast, e2::form::upon::started);
                         slot_2->base::signal(tier::request, e2::form::proceed::createby, gear);
                     };
@@ -824,7 +950,7 @@ namespace netxs::app::tile
                             boss.base::reflow();
                         }
                     };
-                    boss.LISTEN(tier::request, e2::form::proceed::createby, gear)
+                    boss.LISTEN(tier::request, e2::form::proceed::createby, gear, -, (focus_history_ptr))
                     {
                         if (boss.count() != 1) return; // Create new apps at the empty slots only.
                         auto& gate = gear.owner;
@@ -834,7 +960,7 @@ namespace netxs::app::tile
                             auto what = world_ptr->base::signal(tier::request, vtm::events::apptype, { .menuid = current_default });
                             if (what.type == netxs::app::site::id) return; // Deny any desktop viewport markers inside the tiling manager.
                             world_ptr->base::signal(tier::request, vtm::events::newapp, what);
-                            auto app = app_window(what);
+                            auto app = app_window(what, boss.This(), focus_history_ptr);
                             pro::focus::off(boss.back());
                             boss.attach(app);
                             app->base::signal(tier::anycast, vtm::events::attached, world_ptr);
@@ -891,7 +1017,7 @@ namespace netxs::app::tile
                             what.applet = applet;
                             what.type = app_type;
                             what.menuid = menuid;
-                            auto app = app_window(what);
+                            auto app = app_window(what, boss.This(), focus_history_ptr);
                             pro::focus::off(boss.back());
                             boss.attach(app);
                             auto root_ptr = what.applet;
@@ -907,12 +1033,13 @@ namespace netxs::app::tile
                     //    insts_count--;
                     //    if constexpr (debugmode) log(prompt::tile, "Instance detached: id:", id, "; left:", insts_count);
                     //};
-                })
-                ->branch(empty_slot());
+                });
+            slot_ptr->attach(empty_slot(slot_ptr, focus_history_ptr));
+            return slot_ptr;
         };
-        auto parse_data = [](auto&& parse_data, view& utf8, auto min_ratio, auto grip_bindings_ptr) -> netxs::sptr<ui::veer>
+        auto parse_data = [](auto&& parse_data, view& utf8, auto min_ratio, auto grip_bindings_ptr, auto focus_history_ptr) -> netxs::sptr<ui::veer>
         {
-            auto slot_ptr = node_veer(node_veer, min_ratio, grip_bindings_ptr);
+            auto slot_ptr = node_veer(node_veer, min_ratio, grip_bindings_ptr, focus_history_ptr);
             utf::trim_front(utf8, ", ");
             if (utf8.empty())
             {
@@ -948,7 +1075,7 @@ namespace netxs::app::tile
                 what.applet = applet;
                 what.type = app_type;
                 what.menuid = menuid;
-                auto app = app_window(what);
+                auto app = app_window(what, slot_ptr, focus_history_ptr);
                 if (slot_ptr->count()) pro::focus::off(slot_ptr->back());
                 slot_ptr->attach(app);
                 auto root_ptr = what.applet;
@@ -988,8 +1115,8 @@ namespace netxs::app::tile
                 if (utf8.empty() || utf8.front() != '(') return slot_ptr;
                 utf8.remove_prefix(1);
                 auto node = build_node(tag, s1, s2, w, grip_bindings_ptr);
-                auto slot1 = node->attach(slot::_1, parse_data(parse_data, utf8, ui::fork::min_ratio, grip_bindings_ptr));
-                auto slot2 = node->attach(slot::_2, parse_data(parse_data, utf8, ui::fork::max_ratio, grip_bindings_ptr));
+                auto slot1 = node->attach(slot::_1, parse_data(parse_data, utf8, ui::fork::min_ratio, grip_bindings_ptr, focus_history_ptr));
+                auto slot2 = node->attach(slot::_2, parse_data(parse_data, utf8, ui::fork::max_ratio, grip_bindings_ptr, focus_history_ptr));
                 slot_ptr->attach(node);
                 utf::trim_front(utf8, ") ");
             }
@@ -1004,10 +1131,10 @@ namespace netxs::app::tile
 
                 auto& s = *slot_ptr;
                 auto& oneshot = s.base::field(hook{});
-                s.LISTEN(tier::anycast, vtm::events::attached, world_ptr, oneshot, (menuid))
+                s.LISTEN(tier::anycast, vtm::events::attached, world_ptr, oneshot, (menuid, focus_history_ptr))
                 {
                     auto what = world_ptr->base::signal(tier::request, vtm::events::newapp, { .menuid = menuid });
-                    auto inst_ptr = app_window(what);
+                    auto inst_ptr = app_window(what, s.This(), focus_history_ptr);
                     s.attach(inst_ptr);
                     inst_ptr->base::signal(tier::anycast, vtm::events::attached, world_ptr);
                     s.base::unfield(oneshot);
@@ -1138,6 +1265,7 @@ namespace netxs::app::tile
             auto tile_context = config.settings::push_context("/config/events/tile/grip/");
             auto script_list = config.settings::take_ptr_list_for_name("script");
             auto grip_bindings_ptr = ptr::shared(input::bindings::load(config, script_list));
+            auto focus_history_ptr = ptr::shared(focus_history_t{});
             tile_context = config.settings::push_context("/config/tile/");
             auto [menu_block, cover, menu_data] = menu::load(config);
             object->attach(slot::_1, menu_block)
@@ -1168,7 +1296,7 @@ namespace netxs::app::tile
                 if (err) log("%%Failed to change current directory to '%cwd%', error code: %error%", prompt::tile, appcfg.cwd, err.value());
                 else     log("%%Change current directory to '%cwd%'", prompt::tile, appcfg.cwd);
             }
-            auto root_veer_ptr = object->attach(slot::_2, parse_data(parse_data, param, ui::fork::min_ratio, grip_bindings_ptr))
+            auto root_veer_ptr = object->attach(slot::_2, parse_data(parse_data, param, ui::fork::min_ratio, grip_bindings_ptr, focus_history_ptr))
                 ->invoke([&](auto& boss)
                 {
                     boss.LISTEN(tier::release, e2::form::proceed::attach, fullscreen_item)
@@ -1275,6 +1403,13 @@ namespace netxs::app::tile
                                                                 auto dir = luafx.get_args_or(1, si32{ 1 });
                                                                 dir < 0 ? boss.base::signal(tier::preview, app::tile::events::ui::focus::prevpane, gear)
                                                                         : boss.base::signal(tier::preview, app::tile::events::ui::focus::nextpane, gear);
+                                                            });
+                                                        }},
+                        { methods::LastPane,            [&]
+                                                        {
+                                                            luafx.run_with_gear([&](auto& gear)
+                                                            {
+                                                                boss.base::signal(tier::preview, app::tile::events::ui::focus::lastpane, gear);
                                                             });
                                                         }},
                         { methods::FocusNextGrip,       [&]
@@ -1726,6 +1861,19 @@ namespace netxs::app::tile
                             }
                         }
                     };
+                    boss.LISTEN(tier::preview, app::tile::events::ui::focus::lastpane, gear, -, (focus_history_ptr))
+                    {
+                        if (!focus_history_ptr) return;
+                        if (auto slot_ptr = focus_history_ptr->last(gear.id))
+                        if (auto item_ptr = get_slot_focus_target(slot_ptr))
+                        {
+                            item_ptr->base::enqueue([item_ptr, gear_id = gear.id](auto& /*boss*/)
+                            {
+                                pro::focus::set(item_ptr, gear_id, solo::on);
+                            });
+                            gear.set_handled();
+                        }
+                    };
                     boss.LISTEN(tier::preview, app::tile::events::ui::focus::prevgrip, gear)
                     {
                         if (nothing_to_iterate()) return;
@@ -1810,7 +1958,7 @@ namespace netxs::app::tile
                     {
                         navigate(gear, twod{ 0, 1 });
                     };
-                    boss.LISTEN(tier::preview, app::tile::events::ui::swap, gear)
+                    boss.LISTEN(tier::preview, app::tile::events::ui::swap, gear, -, (focus_history_ptr))
                     {
                         if (nothing_to_iterate()) return;
                         auto node_veer_list = std::vector<netxs::sptr<ui::veer>>{};
@@ -1858,11 +2006,13 @@ namespace netxs::app::tile
                                 }
                                 if (emp_slot)
                                 {
+                                    if (focus_history_ptr) focus_history_ptr->bind(emp_slot, s);
                                     s->attach(emp_slot);
                                     if (!app_slot) pro::focus::set(emp_slot, gear.id, solo::off); // Refocus.
                                 }
                                 if (app_slot)
                                 {
+                                    if (focus_history_ptr) focus_history_ptr->bind(app_slot, s);
                                     s->attach(app_slot);
                                     pro::focus::set(app_slot, gear.id, solo::off); // Refocus.
                                     app_slot->base::riseup(tier::release, tile::events::enlist, app_slot);
@@ -1873,11 +2023,13 @@ namespace netxs::app::tile
                             auto& first_item_ptr = node_veer_list.front();
                             if (emp_slot)
                             {
+                                if (focus_history_ptr) focus_history_ptr->bind(emp_slot, first_item_ptr);
                                 first_item_ptr->attach(emp_slot);
                                 if (!app_slot) pro::focus::set(emp_slot, gear.id, solo::off); // Refocus.
                             }
                             if (app_slot)
                             {
+                                if (focus_history_ptr) focus_history_ptr->bind(app_slot, first_item_ptr);
                                 first_item_ptr->attach(app_slot);
                                 pro::focus::set(app_slot, gear.id, solo::off); // Refocus.
                                 app_slot->base::riseup(tier::release, tile::events::enlist, app_slot);

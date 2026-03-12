@@ -1179,6 +1179,7 @@ R"==(
     <TileFocusNext         ="vtm.tile.FocusNextPaneOrGrip( 1);"/>  <!-- Focus the next pane or the split grip. -->
     <TileFocusPrevPane     ="vtm.tile.FocusNextPane(-1);"/>        <!-- Focus the previous pane. -->
     <TileFocusNextPane     ="vtm.tile.FocusNextPane( 1);"/>        <!-- Focus the next pane. -->
+    <TileLastPane          ="vtm.tile.LastPane();"/>               <!-- Focus the previously focused pane. -->
     <TileFocusLeftPane     ="vtm.tile.FocusLeftPane();"/>          <!-- Focus the nearest pane to the left. -->
     <TileFocusRightPane    ="vtm.tile.FocusRightPane();"/>         <!-- Focus the nearest pane to the right. -->
     <TileFocusUpPane       ="vtm.tile.FocusUpPane();"/>            <!-- Focus the nearest pane above. -->

@@ -619,6 +619,7 @@ Standard object names
 |                 |                          | `vtm.taskbar.GetHeight() -> int h1, h2`            | Get taskbar height (h1) and line height (h2).
 |`tile`           | Tiling window manager    | `vtm.tile.FocusNextPaneOrGrip(int n)`              | Set focus to the next (n=1) or previous (n=-1) tile's pane or pane splitter.
 |                 |                          | `vtm.tile.FocusNextPane(int n)`                    | Set focus to the next (n=1) or previous (n=-1) tile's pane.
+|                 |                          | `vtm.tile.LastPane()`                              | Set focus to the previously focused tile's pane.
 |                 |                          | `vtm.tile.FocusNextGrip(int n)`                    | Set focus to the next (n=1) or previous (n=-1) pane splitter.
 |                 |                          | `vtm.tile.FocusLeftPane()`                         | Set focus to the nearest pane to the left of the currently focused pane.
 |                 |                          | `vtm.tile.FocusRightPane()`                        | Set focus to the nearest pane to the right of the currently focused pane.
@@ -1925,6 +1926,7 @@ Notes
     <TileFocusNext         ="vtm.tile.FocusNextPaneOrGrip( 1);"/>  <!-- Focus the next pane or the split grip. -->
     <TileFocusPrevPane     ="vtm.tile.FocusNextPane(-1);"/>        <!-- Focus the previous pane. -->
     <TileFocusNextPane     ="vtm.tile.FocusNextPane( 1);"/>        <!-- Focus the next pane. -->
+    <TileLastPane          ="vtm.tile.LastPane();"/>               <!-- Focus the previously focused pane. -->
     <TileFocusLeftPane     ="vtm.tile.FocusLeftPane();"/>          <!-- Focus the nearest pane to the left. -->
     <TileFocusRightPane    ="vtm.tile.FocusRightPane();"/>         <!-- Focus the nearest pane to the right. -->
     <TileFocusUpPane       ="vtm.tile.FocusUpPane();"/>            <!-- Focus the nearest pane above. -->
