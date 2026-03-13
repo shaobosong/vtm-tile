@@ -421,6 +421,8 @@ Tag                 | Belongs to           | Value           | Description
 
 The `preview:` prefix of the EventID is an indication that event processing should be performed in reverse order - from the container to the nested objects. By default, the visual tree traversal order is from the nested objects to the container.
 
+Use `preview:` on container bindings when a parent object should get the key before the focused child object. This is useful for manager shortcuts with a child fallback, e.g. a `tile` binding on `preview:Ctrl+;` and a `terminal` binding on `Ctrl+;`, so the terminal fallback runs only if the tile binding leaves the event unhandled.
+
 Note: Using an empty string in the `script=""` attribute, while specifying a non-empty event value in the `on="EventID"` tag, will reset all existing subscriptions for that specific EventID.
 
 #### Keyboard events
@@ -700,8 +702,22 @@ Configuration                                                | Interpretation
 `<script="..."  on="KeyChord"/>`                             | Append existing bindings with the directly specified Lua script body.
 `<script="..."><on="KeyChord" source="ObjectID"/></script>`  | Binding to an event source using a specific `ObjectID`.
 `<script=""     on="KeyChord"/>`                             | Remove all existing bindings for the specified key combination `KeyChord`.
+`<script="..."  on="preview:KeyChord"/>`                     | Handle the key on the container side before focused nested objects receive the non-preview event.
 `<script="..."  on="KeyChord" prerun="if (something) vtm.gear.Bypass() end"/>` | Bypass the `KeyChord` event if something. Works only with non-preview KeyChords.
 `<script="..."  on=""         />`                            | Do nothing.
+
+Container-first keyboard fallback example:
+```xml
+<events>
+    <tile script*>
+        <script=TileLastPane on="preview:Ctrl+;"/>
+    </tile>
+    <terminal script*>
+        <script="vtm.terminal.SendKey(';')" on="Ctrl+;"/>
+    </terminal>
+</events>
+```
+The `terminal` binding runs only if the `tile` binding leaves the event unhandled.
 
 EventId's:
 
