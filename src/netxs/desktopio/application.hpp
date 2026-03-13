@@ -848,6 +848,7 @@ namespace netxs::app::shared
             overlay_config(defcfg, clicfg);
 
             resultant.document.swap(defcfg);
+            input::key::kmap::strict_modifiers_only(resultant.settings::take("/config/input/strictchords", faux));
         }
     }
 

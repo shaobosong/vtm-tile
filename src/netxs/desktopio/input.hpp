@@ -373,6 +373,40 @@ namespace netxs::input
             cmap pushed{}; // kmap: Pushed key map.
             bool keyout{}; // kmap: Some key has left the key chord.
 
+            static std::atomic_bool& strict_modifiers_only_mode()
+            {
+                static auto enabled = std::atomic_bool{ faux };
+                return enabled;
+            }
+            static void strict_modifiers_only(bool enabled)
+            {
+                strict_modifiers_only_mode().store(enabled, std::memory_order_relaxed);
+            }
+            static bool strict_modifiers_only()
+            {
+                return strict_modifiers_only_mode().load(std::memory_order_relaxed);
+            }
+            static bool is_modifier_key(si32 keyid)
+            {
+                switch (keyid)
+                {
+                    case input::key::LeftCtrl:
+                    case input::key::RightCtrl:
+                    case input::key::LeftAlt:
+                    case input::key::RightAlt:
+                    case input::key::LeftShift:
+                    case input::key::RightShift:
+                    case input::key::LeftWin:
+                    case input::key::RightWin:
+                    case input::key::NumLock:
+                    case input::key::CapsLock:
+                    case input::key::ScrollLock:
+                        return true;
+                    default:
+                        return faux;
+                }
+            }
+
             void reset(auto& k)
             {
                 k.vkchord.clear();
@@ -430,6 +464,7 @@ namespace netxs::input
                     auto sc_valid = k.scancod > 0;
                     if (!keyout || k.keystat != input::key::released)
                     {
+                        auto modifiers_only = strict_modifiers_only();
                         keyout = k.keystat == input::key::released;
                         //log(" erasing %%", k.keystat == input::key::released ? "key::released" : k.keystat == input::key::pressed ? "key::pressed" : "key::repeated");
                         std::erase_if(pushed, [&](auto& rec)
@@ -439,6 +474,7 @@ namespace netxs::input
                             auto is_released = test_key_released(val.index); // Check if it is still pressed.
                             if (!is_released && keyid != k.keycode/*exclude repeated key*/)
                             {
+                                if (modifiers_only && !is_modifier_key(keyid)) return faux;
                                 if (keyid <= input::key::config) vk_valid = faux;
                                 if (val.scode == 0) sc_valid = faux;
                                 push_keyid(true, k.vkchord, keyid);

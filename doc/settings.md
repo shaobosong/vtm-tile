@@ -851,6 +851,9 @@ Notes
         <enabled=true/>
         <color fgc=pureblack bgc=purewhite/>
     </tooltips>
+    <input>
+        <strictchords=false/>  <!-- If enabled, generated key chords inherit only active modifiers. Example: Ctrl+G+L becomes Ctrl+G then Ctrl+L; G+L becomes G then L. -->
+    </input>
     <debug>
         <logs=false/>     <!-- Enable logging. Use the Logs or vtm monitor mode (vtm -m) to see the log output. -->
         <overlay=false/>  <!-- Show debug overlay. -->
