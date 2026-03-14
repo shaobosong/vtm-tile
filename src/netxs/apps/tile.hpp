@@ -206,6 +206,23 @@ namespace netxs::app::tile
         return item_ptr;
     }
 
+    static auto is_standalone_tile(ui::base& boss)
+    {
+        return !boss.base::signal(tier::general, e2::config::creator);
+    }
+
+    static void close_tile_session(ui::base& boss, view reason)
+    {
+        if (is_standalone_tile(boss))
+        {
+            boss.base::signal(tier::general, e2::shutdown, utf::concat(prompt::tile, reason));
+        }
+        else
+        {
+            boss.base::riseup(tier::release, e2::form::proceed::quit::one, true);
+        }
+    }
+
     struct apps_data_t
     {
         text selected_id;
@@ -1378,7 +1395,7 @@ namespace netxs::app::tile
                     };
                     boss.LISTEN(tier::request, e2::form::proceed::swap, item_ptr) // Close the tile window manager if we receive a `swap-request` from the top-level `empty-slot`.
                     {
-                        boss.base::riseup(tier::release, e2::form::proceed::quit::one, true);
+                        close_tile_session(boss, "Shutdown on last empty slot closed");
                     };
                     auto& luafx = boss.bell::indexer.luafx;
                     tile_context = config.settings::push_context("/config/events/tile/");
