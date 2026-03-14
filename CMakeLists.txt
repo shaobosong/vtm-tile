@@ -36,6 +36,12 @@ target_link_libraries(vtm PRIVATE Lua::Lua Freetype::Freetype harfbuzz::harfbuzz
 # target_link_libraries(term PRIVATE Lua::Lua Freetype::Freetype harfbuzz::harfbuzz)
 # target_link_libraries(calc PRIVATE Lua::Lua Freetype::Freetype harfbuzz::harfbuzz)
 
+option(VTM_BUILD_TESTS "Build vtm regression tests" OFF)
+if(VTM_BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(test)
+endif()
+
 if(NOT WIN32)
     install(TARGETS vtm DESTINATION bin)
 endif()
