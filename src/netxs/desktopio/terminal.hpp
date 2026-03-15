@@ -2880,6 +2880,11 @@ namespace netxs::ui
             {
                 seltop.y += n;
                 selend.y += n;
+                if (dragbase.ready)
+                {
+                    dragbase.head.y += n;
+                    dragbase.tail.y += n;
+                }
                 canvas.scroll(top, end + 1, n, cell{ '\0' }.bgc(brush.bgc())); // We use "BCE on scrolling" in altbuf mode only (vim).
             }
             // alt_screen: Horizontal tab.
