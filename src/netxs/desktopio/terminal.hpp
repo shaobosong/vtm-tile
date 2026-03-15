@@ -86,6 +86,12 @@ namespace netxs::ui
         : public ui::form<term>
     {
         static constexpr auto classname = basename::terminal;
+        enum class dragmode
+        {
+            none,
+            word,
+            line,
+        };
         static constexpr auto event_source_name = std::to_array(
         {
             "keyboard",
@@ -1333,7 +1339,14 @@ namespace netxs::ui
             virtual bool selection_extend(twod coor, bool mode)           = 0;
             virtual void selection_follow(twod coor, bool lock)           = 0;
             virtual void selection_byword(twod coor)                      = 0;
+            virtual void selection_byword(twod from, twod to)             = 0;
             virtual void selection_byline(twod coor)                      = 0;
+            virtual void selection_byline(twod from, twod to)             = 0;
+            virtual void selection_drag_word_start(twod coor)             = 0;
+            virtual void selection_drag_word_pull(twod coor)              = 0;
+            virtual void selection_drag_line_start(twod coor)             = 0;
+            virtual void selection_drag_line_pull(twod coor)              = 0;
+            virtual void selection_drag_clear()                           = 0;
             virtual void selection_bymark(twod coor)                      = 0;
             virtual void selection_selall()                               = 0;
             virtual text selection_pickup(si32 selmod)                    = 0;
@@ -2572,9 +2585,17 @@ namespace netxs::ui
         struct alt_screen
             : public bufferbase
         {
+            struct dragspan
+            {
+                twod head{};
+                twod tail{};
+                bool ready{};
+            };
+
             rich canvas; // alt_screen: Terminal screen.
             twod seltop; // alt_screen: Selected area head.
             twod selend; // alt_screen: Selected area tail.
+            dragspan dragbase;
 
             alt_screen(term& boss)
                 : bufferbase{ boss }
@@ -2985,15 +3006,102 @@ namespace netxs::ui
                 selection_selbox(faux);
                 selection_update(faux);
             }
+            void selection_byword(twod from, twod to) override
+            {
+                auto limits = panel - dot_11;
+                auto locate = [&](twod coor)
+                {
+                    coor = std::clamp(coor, dot_00, limits);
+                    auto head = coor;
+                    auto tail = coor;
+                    head.x = canvas.word<feed::rev>(coor);
+                    tail.x = canvas.word<feed::fwd>(coor);
+                    return std::pair{ head, tail };
+                };
+                auto earlier = [](twod const& a, twod const& b)
+                {
+                    return a.y < b.y
+                        || (a.y == b.y && a.x < b.x);
+                };
+                auto [head_1, tail_1] = locate(from);
+                auto [head_2, tail_2] = locate(to);
+                seltop = earlier(head_2, head_1) ? head_2 : head_1;
+                selend = earlier(tail_1, tail_2) ? tail_2 : tail_1;
+                selection_locked(faux);
+                selection_selbox(faux);
+                selection_update(faux);
+            }
             // alt_screen: Select line.
             void selection_byline(twod coor) override
             {
-                seltop.y = selend.y = coor.y;
+                selection_byline(coor, coor);
+            }
+            void selection_byline(twod from, twod to) override
+            {
+                auto limits = panel - dot_11;
+                from = std::clamp(from, dot_00, limits);
+                to   = std::clamp(to,   dot_00, limits);
+                seltop.y = std::min(from.y, to.y);
+                selend.y = std::max(from.y, to.y);
                 seltop.x = 0;
                 selend.x = panel.x - 1;
                 selection_locked(faux);
                 selection_selbox(faux);
                 selection_update(faux);
+            }
+            void selection_drag_word_start(twod coor) override
+            {
+                selection_byword(coor);
+                dragbase = { .head = seltop, .tail = selend, .ready = true };
+            }
+            void selection_drag_word_pull(twod coor) override
+            {
+                if (!dragbase.ready)
+                {
+                    selection_drag_word_start(coor);
+                    return;
+                }
+                auto earlier = [](twod const& a, twod const& b)
+                {
+                    return a.y < b.y
+                        || (a.y == b.y && a.x < b.x);
+                };
+                selection_byword(coor);
+                auto edge = dragspan{ .head = seltop, .tail = selend, .ready = true };
+                seltop = earlier(edge.head, dragbase.head) ? edge.head : dragbase.head;
+                selend = earlier(dragbase.tail, edge.tail) ? edge.tail : dragbase.tail;
+                selection_locked(faux);
+                selection_selbox(faux);
+                selection_update(faux);
+            }
+            void selection_drag_line_start(twod coor) override
+            {
+                selection_byline(coor);
+                dragbase = { .head = seltop, .tail = selend, .ready = true };
+            }
+            void selection_drag_line_pull(twod coor) override
+            {
+                if (!dragbase.ready)
+                {
+                    selection_drag_line_start(coor);
+                    return;
+                }
+                auto earlier = [](twod const& a, twod const& b)
+                {
+                    return a.y < b.y
+                        || (a.y == b.y && a.x < b.x);
+                };
+                selection_byline(coor);
+                auto edge = dragspan{ .head = seltop, .tail = selend, .ready = true };
+                seltop = earlier(edge.head, dragbase.head) ? edge.head : dragbase.head;
+                selend = earlier(dragbase.tail, edge.tail) ? edge.tail : dragbase.tail;
+                selection_locked(faux);
+                selection_selbox(faux);
+                selection_update(faux);
+            }
+            void selection_drag_clear() override
+            {
+                dragbase.ready = faux;
             }
             // alt_screen: Select all.
             void selection_selall() override
@@ -3093,6 +3201,7 @@ namespace netxs::ui
             // alt_screen: Cancel text selection.
             bool selection_cancel() override
             {
+                selection_drag_clear();
                 bufferbase::uirev = faux;
                 bufferbase::uifwd = faux;
                 return bufferbase::selection_cancel();
@@ -3140,6 +3249,18 @@ namespace netxs::ui
             enum class part
             {
                 top, mid, end,
+            };
+            struct selspan
+            {
+                part place;
+                grip upmid;
+                grip dnmid;
+                grip uptop;
+                grip dntop;
+                grip upend;
+                grip dnend;
+                twod head;
+                twod tail;
             };
             using ring = generics::ring<std::vector<line>, true>;
             using indx = generics::ring<std::vector<index_item>>;
@@ -3393,6 +3514,8 @@ namespace netxs::ui
             grip dnend; // scroll_buf: Selection second grip inside the bottom margin.
             part place; // scroll_buf: Selection last active region.
             si32 shore; // scroll_buf: Left and right scrollbuffer additional indents.
+            selspan dragbase{};
+            bool    dragset{};
 
             static constexpr auto approx_threshold = si32{ 10000 }; //todo make it configurable
 
@@ -3401,7 +3524,8 @@ namespace netxs::ui
                        batch{ boss.defcfg.def_length, boss.defcfg.def_growdt, boss.defcfg.def_growmx },
                        index{ 1    },
                        place{      },
-                       shore{ boss.defcfg.def_margin }
+                       shore{ boss.defcfg.def_margin },
+                     dragset{ faux }
             {
                 parser::style.wrp(boss.defcfg.def_wrpmod);
                 batch.invite(0, deco{}.wrp(boss.defcfg.def_wrpmod == wrap::on), cell{}); // At least one line must exist.
@@ -5753,6 +5877,75 @@ namespace netxs::ui
                 coor2 = std::clamp(coor2, minlim, maxlim);
                 return std::pair{ coor1, coor2 };
             }
+            auto selection_take_span()
+            {
+                auto span = selspan
+                {
+                    .place = place,
+                    .upmid = upmid,
+                    .dnmid = dnmid,
+                    .uptop = uptop,
+                    .dntop = dntop,
+                    .upend = upend,
+                    .dnend = dnend,
+                };
+                if (span.uptop.role == grip::base
+                 && span.dntop.role == grip::base)
+                {
+                    auto basis = twod{ -owner.origin.x, batch.slide };
+                    span.head = span.uptop.coor + basis;
+                    span.tail = span.dntop.coor + basis;
+                }
+                else if (span.upmid.role == grip::base
+                      && span.dnmid.role == grip::base)
+                {
+                    std::tie(span.head, span.tail) = selection_take_grips();
+                }
+                else
+                {
+                    auto basis = twod{ -owner.origin.x, batch.slide + y_top + arena };
+                    span.head = span.upend.coor + basis;
+                    span.tail = span.dnend.coor + basis;
+                }
+                return span;
+            }
+            void selection_set_span(selspan const& span)
+            {
+                place = span.place;
+                upmid = span.upmid;
+                dnmid = span.dnmid;
+                uptop = span.uptop;
+                dntop = span.dntop;
+                upend = span.upend;
+                dnend = span.dnend;
+            }
+            void selection_drag_store()
+            {
+                dragbase = selection_take_span();
+                dragset = true;
+            }
+            void selection_drag_merge(selspan const& edge)
+            {
+                auto earlier = [](twod const& a, twod const& b)
+                {
+                    return a.y < b.y
+                        || (a.y == b.y && a.x < b.x);
+                };
+                selection_set_span(dragbase);
+                if (earlier(edge.head, dragbase.head))
+                {
+                    selection_follow(edge.head, faux);
+                    selection_extend(edge.head, faux);
+                }
+                else
+                {
+                    selection_follow(edge.tail, faux);
+                    selection_extend(edge.tail, faux);
+                }
+                selection_locked(faux);
+                selection_selbox(faux);
+                selection_update(faux);
+            }
             // scroll_buf: Start text selection.
             void selection_create(twod coor, bool mode) override
             {
@@ -6141,6 +6334,48 @@ namespace netxs::ui
                 selection_selbox(faux);
                 selection_update(faux);
             }
+            void selection_byword(twod from, twod to) override
+            {
+                auto earlier = [](twod const& a, twod const& b)
+                {
+                    return a.y < b.y
+                        || (a.y == b.y && a.x < b.x);
+                };
+                selection_byword(from);
+                auto base = selection_take_span();
+                selection_byword(to);
+                auto edge = selection_take_span();
+                selection_set_span(base);
+                if (earlier(edge.head, base.head))
+                {
+                    selection_follow(edge.head, faux);
+                    selection_extend(edge.head, faux);
+                }
+                else
+                {
+                    selection_follow(edge.tail, faux);
+                    selection_extend(edge.tail, faux);
+                }
+                selection_locked(faux);
+                selection_selbox(faux);
+                selection_update(faux);
+            }
+            void selection_drag_word_start(twod coor) override
+            {
+                selection_byword(coor);
+                selection_drag_store();
+            }
+            void selection_drag_word_pull(twod coor) override
+            {
+                if (!dragset)
+                {
+                    selection_drag_word_start(coor);
+                    return;
+                }
+                selection_byword(coor);
+                auto edge = selection_take_span();
+                selection_drag_merge(edge);
+            }
             // scroll_buf: Select line.
             void selection_byline(twod coor) override
             {
@@ -6184,6 +6419,52 @@ namespace netxs::ui
                 selection_locked(faux);
                 selection_selbox(faux);
                 selection_update(faux);
+            }
+            void selection_byline(twod from, twod to) override
+            {
+                auto earlier = [](twod const& a, twod const& b)
+                {
+                    return a.y < b.y
+                        || (a.y == b.y && a.x < b.x);
+                };
+                selection_byline(from);
+                auto base = selection_take_span();
+                selection_byline(to);
+                auto edge = selection_take_span();
+                selection_set_span(base);
+                if (earlier(edge.head, base.head))
+                {
+                    selection_follow(edge.head, faux);
+                    selection_extend(edge.head, faux);
+                }
+                else
+                {
+                    selection_follow(edge.tail, faux);
+                    selection_extend(edge.tail, faux);
+                }
+                selection_locked(faux);
+                selection_selbox(faux);
+                selection_update(faux);
+            }
+            void selection_drag_line_start(twod coor) override
+            {
+                selection_byline(coor);
+                selection_drag_store();
+            }
+            void selection_drag_line_pull(twod coor) override
+            {
+                if (!dragset)
+                {
+                    selection_drag_line_start(coor);
+                    return;
+                }
+                selection_byline(coor);
+                auto edge = selection_take_span();
+                selection_drag_merge(edge);
+            }
+            void selection_drag_clear() override
+            {
+                dragset = faux;
             }
             // scroll_buf: Select all (ignore non-scrolling regions).
             void selection_selall() override
@@ -7081,6 +7362,11 @@ namespace netxs::ui
                 }
                 return forward_is_available | reverse_is_available;
             }
+            bool selection_cancel() override
+            {
+                selection_drag_clear();
+                return bufferbase::selection_cancel();
+            }
         };
 
         using prot = input::keybd::prot;
@@ -7111,6 +7397,7 @@ namespace netxs::ui
         bool       styled; // term: Line style reporting.
         bool       io_log; // term: Stdio logging.
         bool       selalt; // term: Selection form (rectangular/linear).
+        dragmode   seldrag; // term: Special drag selection mode.
         flag       resume; // term: Restart scheduled.
         flag       forced; // term: Forced shutdown.
         si32       selmod; // term: Selection mode.
@@ -7704,8 +7991,14 @@ namespace netxs::ui
             target->selection_update();
             base::deface();
         }
+        void selection_drag_cancel()
+        {
+            target->selection_drag_clear();
+            seldrag = dragmode::none;
+        }
         auto selection_cancel()
         {
+            selection_drag_cancel();
             auto active = target->selection_cancel();
             if (active)
             {
@@ -7864,22 +8157,66 @@ namespace netxs::ui
             }
             else selection_cancel();
         }
+        void selection_dblpress(hids& gear)
+        {
+            seldrag = dragmode::word;
+            target->selection_drag_word_start(gear.coord);
+            gear.dismiss();
+            base::deface();
+        }
+        void selection_tplpress(hids& gear)
+        {
+            if (gear.clicked != 3) return;
+            seldrag = dragmode::line;
+            target->selection_drag_line_start(gear.coord);
+            gear.dismiss();
+            base::deface();
+        }
         void selection_dblclk(hids& gear)
         {
+            selection_drag_cancel();
             target->selection_byword(gear.coord);
             gear.dismiss();
             base::deface();
         }
         void selection_tplclk(hids& gear)
         {
-                 if (gear.clicked == 3) target->selection_byline(gear.coord);
+            selection_drag_cancel();
+            if (gear.clicked == 3) target->selection_byline(gear.coord);
             else if (gear.clicked == 4) target->selection_bymark(gear.coord);
             else if (gear.clicked == 5) target->selection_selall();
             gear.dismiss();
             base::deface();
         }
+        void selection_worddrag(twod coord)
+        {
+            auto limits = rect{ -origin, target->panel };
+            for (auto a : { axis::X, axis::Y })
+            {
+                     if (coord[a] <  limits.coor[a])                 coord[a] = limits.coor[a];
+                else if (coord[a] >= limits.coor[a] + limits.size[a]) coord[a] = limits.coor[a] + limits.size[a] - 1;
+            }
+            target->selection_drag_word_pull(coord);
+            base::deface();
+        }
+        void selection_linedrag(twod coord)
+        {
+            auto limits = rect{ -origin, target->panel };
+            for (auto a : { axis::X, axis::Y })
+            {
+                     if (coord[a] <  limits.coor[a])                 coord[a] = limits.coor[a];
+                else if (coord[a] >= limits.coor[a] + limits.size[a]) coord[a] = limits.coor[a] + limits.size[a] - 1;
+            }
+            target->selection_drag_line_pull(coord);
+            base::deface();
+        }
         void selection_create(hids& gear)
         {
+            if (seldrag != dragmode::none)
+            {
+                base::deface();
+                return;
+            }
             auto& console = *target;
             auto boxed = selalt ^ !!gear.meta(hids::anyAlt);
             auto go_on = gear.meta(hids::anyCtrl);
@@ -7909,6 +8246,7 @@ namespace netxs::ui
         {
             // Check bounds and scroll if needed.
             auto& console = *target;
+            auto specialdrag = seldrag;
             auto boxed = selalt ^ !!gear.meta(hids::anyAlt);
             auto coord = twod{ gear.coord };
             auto vport = rect{ -origin, console.panel };
@@ -7923,11 +8261,21 @@ namespace netxs::ui
                 auto shift = scrollby(delta);
                 coord += delta - shift;
                 delta -= delta * 3 / 4; // Decrease scrolling speed.
-                timer.actify(0ms, [&, delta, coord, boxed](auto) mutable // 0ms = current FPS ticks/sec.
+                timer.actify(0ms, [&, delta, coord, boxed, specialdrag](auto) mutable // 0ms = current FPS ticks/sec.
                                     {
                                         auto shift = scrollby(delta);
                                         coord -= shift;
-                                        if (console.selection_extend(coord, boxed))
+                                        if (specialdrag == dragmode::word)
+                                        {
+                                            selection_worddrag(coord);
+                                            return !!shift;
+                                        }
+                                        else if (specialdrag == dragmode::line)
+                                        {
+                                            selection_linedrag(coord);
+                                            return !!shift;
+                                        }
+                                        else if (console.selection_extend(coord, boxed))
                                         {
                                             base::deface();
                                             return !!shift;
@@ -7937,7 +8285,15 @@ namespace netxs::ui
             }
             else timer.pacify();
 
-            if (console.selection_extend(coord, boxed))
+            if (specialdrag == dragmode::word)
+            {
+                selection_worddrag(coord);
+            }
+            else if (specialdrag == dragmode::line)
+            {
+                selection_linedrag(coord);
+            }
+            else if (console.selection_extend(coord, boxed))
             {
                 base::deface();
             }
@@ -7946,6 +8302,7 @@ namespace netxs::ui
         {
             //todo option: copy on select
             //...
+            selection_drag_cancel();
             timer.pacify();
             base::deface();
         }
@@ -7958,7 +8315,9 @@ namespace netxs::ui
             on(tier::mouserelease, input::key::RightClick,                [&](hids& gear){                         selection_pickup(gear); });
             on(tier::mouserelease, input::key::LeftClick,                 [&](hids& gear){                         selection_lclick(gear); });
             on(tier::mouserelease, input::key::MiddleClick,               [&](hids& gear){                         selection_mclick(gear); });
+            on(tier::mouserelease, input::key::LeftDoublePress,           [&](hids& gear){ if (selection_passed()) selection_dblpress(gear); });
             on(tier::mouserelease, input::key::LeftDoubleClick,           [&](hids& gear){ if (selection_passed()) selection_dblclk(gear); });
+            on(tier::mouserelease, input::key::LeftMultiPress,            [&](hids& gear){ if (selection_passed()) selection_tplpress(gear); });
             on(tier::mouserelease, input::key::LeftMultiClick,            [&](hids& gear){ if (selection_passed()) selection_tplclk(gear); });
             on(tier::mouserelease, input::key::MouseWheel, [&](hids& gear)
             {
@@ -8395,6 +8754,7 @@ namespace netxs::ui
               styled{ faux },
               io_log{ defcfg.def_io_log },
               selalt{ defcfg.def_selalt },
+              seldrag{ dragmode::none },
               resume{ faux },
               forced{ faux },
               selmod{ defcfg.def_selmod },
