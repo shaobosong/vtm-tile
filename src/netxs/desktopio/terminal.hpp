@@ -2918,6 +2918,54 @@ namespace netxs::ui
                 canvas.del_below({ 0, 1 }, brush.spare.dry());
                 set_coord({ coord.x, 0 });
             }
+            // alt_screen: Snap linear selection edges to complete grapheme boundaries.
+            void normalize_linear_edges(twod& edge_1, twod& edge_2)
+            {
+                if (panel.x <= 0 || panel.y <= 0) return;
+                auto limits = panel - dot_11;
+                edge_1 = std::clamp(edge_1, dot_00, limits);
+                edge_2 = std::clamp(edge_2, dot_00, limits);
+
+                auto to_offset = [&](auto p)
+                {
+                    return p.x + p.y * panel.x;
+                };
+                auto to_coord = [&](auto offset)
+                {
+                    return twod{ offset % panel.x, offset / panel.x };
+                };
+                auto cells = panel.x * panel.y;
+                auto head = to_offset(edge_1);
+                auto tail = to_offset(edge_2);
+                auto swap = head > tail;
+                if (swap) std::swap(head, tail);
+
+                auto normalize = [&](auto& offset, auto start_edge)
+                {
+                    offset = std::clamp(offset, 0, cells - 1);
+                    auto const& c = *(canvas.begin() + offset);
+                    auto [w, h, x, y] = c.whxy();
+                    if (h == 1 && w > 1)
+                    {
+                        if (start_edge && x > 1) offset -= x - 1;
+                        else if (!start_edge && x < w) offset += w - x;
+                        offset = std::clamp(offset, 0, cells - 1);
+                    }
+                };
+                normalize(head, true );
+                normalize(tail, faux);
+
+                if (swap)
+                {
+                    edge_1 = to_coord(tail);
+                    edge_2 = to_coord(head);
+                }
+                else
+                {
+                    edge_1 = to_coord(head);
+                    edge_2 = to_coord(tail);
+                }
+            }
             //text get_current_line() override
             //{
             //    auto crop = escx{};
@@ -3154,6 +3202,10 @@ namespace netxs::ui
             // alt_screen: Update selection internals.
             void selection_update(bool despace = true) override
             {
+                if (!selection_selbox())
+                {
+                    normalize_linear_edges(seltop, selend);
+                }
                 if (selection_selbox()
                  && seltop.y != selend.y)
                 {
@@ -4518,7 +4570,7 @@ namespace netxs::ui
             }
             // scroll_buf: .
             template<feed Dir>
-            auto xconv(si32 x, bias align, si32 remain)
+            auto xconv(si32 x, bias align, si32 remain) const
             {
                 // forward: screen -> offset
                 // reverse: offset -> screen
@@ -4537,7 +4589,7 @@ namespace netxs::ui
                 return x;
             }
             // scroll_buf: .
-            auto screen_to_offset(line& curln, twod coor)
+            auto screen_to_offset(line const& curln, twod coor) const
             {
                 auto length = curln.length();
                 auto adjust = curln.style.jet();
@@ -4557,7 +4609,7 @@ namespace netxs::ui
                 return coor.x;
             }
             // scroll_buf: .
-            auto offset_to_screen(line& curln, si32 offset)
+            auto offset_to_screen(line const& curln, si32 offset) const
             {
                 auto size = curln.length();
                 auto last = size ? size - 1 : 0;
@@ -4571,6 +4623,85 @@ namespace netxs::ui
                 }
                 coor.x = xconv<feed::rev>(coor.x, curln.style.jet(), size);
                 return coor;
+            }
+            // scroll_buf: Snap linear selection edges to complete grapheme boundaries.
+            void normalize_line_edge(line const& curln, twod& edge, bool start_edge) const
+            {
+                auto length = curln.length();
+                if (length <= 0) return;
+
+                auto offset = screen_to_offset(curln, edge);
+                offset = std::clamp(offset, 0, length - 1);
+                auto const& c = curln.at(offset);
+                auto [w, h, x, y] = c.whxy();
+                auto adjusted = faux;
+                if (h == 1 && w > 1)
+                {
+                    if (start_edge && x > 1)
+                    {
+                        offset -= x - 1;
+                        adjusted = true;
+                    }
+                    else if (!start_edge && x < w)
+                    {
+                        offset += w - x;
+                        adjusted = true;
+                    }
+                    if (adjusted)
+                    {
+                        offset = std::clamp(offset, 0, length - 1);
+                        edge = offset_to_screen(curln, offset);
+                    }
+                }
+            }
+            // scroll_buf: Snap linear selection edges to complete grapheme boundaries.
+            void normalize_canvas_edges(rich const& board, twod& edge_1, twod& edge_2) const
+            {
+                auto size = board.size();
+                if (size.x <= 0 || size.y <= 0) return;
+                auto limits = size - dot_11;
+                edge_1 = std::clamp(edge_1, dot_00, limits);
+                edge_2 = std::clamp(edge_2, dot_00, limits);
+
+                auto to_offset = [&](auto p)
+                {
+                    return p.x + p.y * size.x;
+                };
+                auto to_coord = [&](auto offset)
+                {
+                    return twod{ offset % size.x, offset / size.x };
+                };
+                auto cells = size.x * size.y;
+                auto head = to_offset(edge_1);
+                auto tail = to_offset(edge_2);
+                auto swap = head > tail;
+                if (swap) std::swap(head, tail);
+
+                auto normalize = [&](auto& offset, auto start_edge)
+                {
+                    offset = std::clamp(offset, 0, cells - 1);
+                    auto const& c = *(board.begin() + offset);
+                    auto [w, h, x, y] = c.whxy();
+                    if (h == 1 && w > 1)
+                    {
+                        if (start_edge && x > 1) offset -= x - 1;
+                        else if (!start_edge && x < w) offset += w - x;
+                        offset = std::clamp(offset, 0, cells - 1);
+                    }
+                };
+                normalize(head, true );
+                normalize(tail, faux);
+
+                if (swap)
+                {
+                    edge_1 = to_coord(tail);
+                    edge_2 = to_coord(head);
+                }
+                else
+                {
+                    edge_1 = to_coord(head);
+                    edge_2 = to_coord(tail);
+                }
             }
             // scroll_buf: Update current SGR attributes. (! Check coord.y context)
             void _set_style(deco const& new_style)
@@ -7080,6 +7211,55 @@ namespace netxs::ui
             // scroll_buf: Update selection internals.
             void selection_update(bool despace = true) override
             {
+                if (!selection_selbox())
+                {
+                    if (upmid.role == grip::base
+                     && dnmid.role == grip::base)
+                    {
+                        auto up_i = batch.index_by_id(upmid.link);
+                        auto dn_i = batch.index_by_id(dnmid.link);
+                        if (up_i >= 0 && dn_i >= 0)
+                        {
+                            auto up_first = up_i < dn_i
+                                         || (up_i == dn_i
+                                          && (upmid.coor.y < dnmid.coor.y
+                                           || (upmid.coor.y == dnmid.coor.y
+                                            && upmid.coor.x <= dnmid.coor.x)));
+                            if (up_first)
+                            {
+                                auto& upln = batch.item_by_id(upmid.link);
+                                auto& dnln = batch.item_by_id(dnmid.link);
+                                normalize_line_edge(upln, upmid.coor, true);
+                                normalize_line_edge(dnln, dnmid.coor, faux);
+                            }
+                            else
+                            {
+                                auto& dnln = batch.item_by_id(dnmid.link);
+                                auto& upln = batch.item_by_id(upmid.link);
+                                normalize_line_edge(dnln, dnmid.coor, true);
+                                normalize_line_edge(upln, upmid.coor, faux);
+                            }
+                        }
+                    }
+                    if (uptop.role == grip::base
+                     && dntop.role == grip::base)
+                    {
+                        auto p1 = uptop.coor;
+                        auto p2 = dntop.coor;
+                        normalize_canvas_edges(upbox, p1, p2);
+                        uptop.coor = p1;
+                        dntop.coor = p2;
+                    }
+                    if (upend.role == grip::base
+                     && dnend.role == grip::base)
+                    {
+                        auto p1 = upend.coor;
+                        auto p2 = dnend.coor;
+                        normalize_canvas_edges(dnbox, p1, p2);
+                        upend.coor = p1;
+                        dnend.coor = p2;
+                    }
+                }
                 if (upmid.role == grip::base
                  && dnmid.role == grip::base
                  && upmid.link == dnmid.link
