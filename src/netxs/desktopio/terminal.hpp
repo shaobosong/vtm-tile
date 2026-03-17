@@ -2991,26 +2991,8 @@ namespace netxs::ui
             void selection_create(twod coor, bool mode) override
             {
                 auto limits = panel - dot_11;
-                auto curtop = std::clamp(seltop, dot_00, limits);
-                auto curend = std::clamp(selend, dot_00, limits);
-                if (selection_active())
-                {
-                    if (coor == curtop)
-                    {
-                        seltop = curend;
-                        selend = coor;
-                    }
-                    else if (coor != curend)
-                    {
-                        seltop = std::clamp(coor, dot_00, limits);
-                        selend = curtop;
-                    }
-                }
-                else
-                {
-                    seltop = std::clamp(coor, dot_00, limits);
-                    selend = curtop;
-                }
+                seltop = std::clamp(coor, dot_00, limits);
+                selend = seltop;
                 selection_selbox(mode);
                 selection_update();
             }
@@ -6085,56 +6067,34 @@ namespace netxs::ui
             // scroll_buf: Start text selection.
             void selection_create(twod coor, bool mode) override
             {
-                auto nohits = [&](auto upcoor, auto dncoor, auto& top, auto& end)
-                {
-                    if (coor == upcoor && top.role == grip::base)// std::swap(top, end);
-                    {
-                        std::swap(uptop, dntop);
-                        std::swap(upmid, dnmid);
-                        std::swap(upend, dnend);
-                    }
-                    else if (coor != dncoor || end.role != grip::base) return true;
-                    selection_locked(true);
-                    return faux;
-                };
                 auto scrolling_margin = batch.slide + y_top;
                 if (coor.y < scrolling_margin) // Inside the top margin.
                 {
                     place = part::top;
                     coor -= {-owner.origin.x, batch.slide };
-                    if (!selection_active() || nohits(uptop.coor, dntop.coor, uptop, dntop))
-                    {
-                        upmid.role = dnmid.role = grip::idle;
-                        upend.role = dnend.role = grip::idle;
-                        uptop.role = grip::base;
-                        uptop.coor = coor;
-                        dntop = uptop;
-                    }
+                    upmid.role = dnmid.role = grip::idle;
+                    upend.role = dnend.role = grip::idle;
+                    uptop.role = grip::base;
+                    uptop.coor = coor;
+                    dntop = uptop;
                 }
                 else if (coor.y < scrolling_margin + arena) // Inside the scrolling region.
                 {
                     place = part::mid;
-                    auto [seltop, selend] = selection_take_grips();
-                    if (!selection_active() || nohits(seltop, selend, upmid, dnmid))
-                    {
-                        uptop.role = dntop.role = grip::idle;
-                        upend.role = dnend.role = grip::idle;
-                        upmid = selection_coor_to_grip(coor, grip::base);
-                        dnmid = upmid;
-                    }
+                    uptop.role = dntop.role = grip::idle;
+                    upend.role = dnend.role = grip::idle;
+                    upmid = selection_coor_to_grip(coor, grip::base);
+                    dnmid = upmid;
                 }
                 else // Inside the bottom margin.
                 {
                     place = part::end;
                     coor -= {-owner.origin.x, scrolling_margin + arena };
-                    if (!selection_active() || nohits(upend.coor, dnend.coor, upend, dnend))
-                    {
-                        upmid.role = dnmid.role = grip::idle;
-                        uptop.role = dntop.role = grip::idle;
-                        upend.role = grip::base;
-                        upend.coor = coor;
-                        dnend = upend;
-                    }
+                    upmid.role = dnmid.role = grip::idle;
+                    uptop.role = dntop.role = grip::idle;
+                    upend.role = grip::base;
+                    upend.coor = coor;
+                    dnend = upend;
                 }
                 selection_selbox(mode);
                 selection_update();
