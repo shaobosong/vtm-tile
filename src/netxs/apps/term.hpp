@@ -35,7 +35,14 @@ namespace netxs::app::terminal
         {
             if (root_ptr) // root_ptr is empty when d_n_d.
             {
-                boss.start_term(appcfg);
+                auto& startup_hook = boss.base::field(hook{});
+                boss.LISTEN(tier::release, e2::area, new_area, startup_hook, (appcfg))
+                {
+                    // Delay PTY startup until the first post-start layout pass,
+                    // otherwise the shell sees the temporary bootstrap width.
+                    boss.start_term(appcfg);
+                    boss.base::unfield(startup_hook);
+                };
             }
         };
         boss.LISTEN(tier::anycast, e2::form::upon::started, root_ptr)
