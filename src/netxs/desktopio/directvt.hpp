@@ -1349,11 +1349,8 @@ namespace netxs::directvt
                                             utf8.remove_suffix(3); // Cut rotation modifier.
                                             l -= 3;
                                         }
-                                        if (coord1 != 0)
-                                        {
-                                            coord.x = (si32)coord1;
-                                            stream::block.basevt::locate(coord);
-                                        }
+                                        coord.x = (si32)coord1;
+                                        stream::block.basevt::locate(coord);
                                         if (has_custom_cluster && c.rtl()) print_rtl(c, utf8);
                                         else                               print(c, utf8);
                                         if (src != end)
