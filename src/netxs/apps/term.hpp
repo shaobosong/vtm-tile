@@ -35,14 +35,26 @@ namespace netxs::app::terminal
         {
             if (root_ptr) // root_ptr is empty when d_n_d.
             {
-                auto& startup_hook = boss.base::field(hook{});
-                boss.LISTEN(tier::release, e2::area, new_area, startup_hook, (appcfg))
+                auto self_start = root_ptr == boss.This();
+                if (self_start && boss.base::size())
                 {
-                    // Delay PTY startup until the first post-start layout pass,
-                    // otherwise the shell sees the temporary bootstrap width.
-                    boss.start_term(appcfg);
-                    boss.base::unfield(startup_hook);
-                };
+                    boss.base::enqueue([&, appcfg, backup = boss.This()](ui::base& /*widget*/) mutable
+                    {
+                        boss.start_term(appcfg);
+                        backup.reset(); // Backup should dtored under the lock.
+                    });
+                }
+                else
+                {
+                    auto& startup_hook = boss.base::field(hook{});
+                    boss.LISTEN(tier::release, e2::area, new_area, startup_hook, (appcfg))
+                    {
+                        // Delay PTY startup until the first post-start layout pass,
+                        // otherwise the shell sees the temporary bootstrap width.
+                        boss.start_term(appcfg);
+                        boss.base::unfield(startup_hook);
+                    };
+                }
             }
         };
         boss.LISTEN(tier::anycast, e2::form::upon::started, root_ptr)

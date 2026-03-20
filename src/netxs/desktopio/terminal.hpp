@@ -543,6 +543,13 @@ namespace netxs::ui
                     }
                 }
             }
+            void reset()
+            {
+                if (state != mode::none) disable(state);
+                encod = prot::x11;
+                coord = {};
+                smode = owner.selmod;
+            }
             void setmode(prot p) { encod = p; }
         };
 
@@ -590,6 +597,13 @@ namespace netxs::ui
             w_tracking(term& owner)
                 : owner{ owner }
             { }
+            void reset()
+            {
+                props.clear();
+                stack.clear();
+                queue.clear();
+                set(ansi::osc_title);
+            }
             // w_tracking: Get terminal window property.
             auto& get(text const& property)
             {
@@ -7587,6 +7601,7 @@ namespace netxs::ui
         bool       selalt; // term: Selection form (rectangular/linear).
         dragmode   seldrag; // term: Special drag selection mode.
         flag       resume; // term: Restart scheduled.
+        flag       restart_pending; // term: Reset the session state before the next launch.
         flag       forced; // term: Forced shutdown.
         si32       selmod; // term: Selection mode.
         si32       onesht; // term: Selection one-shot mode.
@@ -7746,6 +7761,46 @@ namespace netxs::ui
             altscr = defcfg.def_alt_on;
             normal.brush.reset();
             ipccon.reset();
+        }
+        // term: Reset terminal attributes to defaults without touching UI preferences.
+        void reset_attrs()
+        {
+            auto& console = *target;
+            defclr.txt('\0').fgc(defcfg.def_fcolor).bgc(defcfg.def_bcolor).link(base::id);
+            console.brush.reset(defclr);
+            console.style.reset();
+            console.style.wrp(defcfg.def_wrpmod);
+            console.setpad(defcfg.def_margin);
+            caret.style(defcfg.def_cursor);
+        }
+        // term: Reset runtime state before starting a new session.
+        void reset_session()
+        {
+            decstr();
+            insmod = faux;
+            styled = faux;
+            origin = {};
+            follow = { 0, 1 };
+            unsync = true;
+            ime_on = faux;
+            imetxt.clear();
+            imebox.wipe();
+            imefmt.flow::reset();
+            w32key.clear();
+            event_sources = {};
+            onerun.reset();
+            timer.pacify();
+            robot.pacify();
+            mtrack.reset();
+            ftrack.set(faux);
+            ctrack.reset();
+            reset_attrs();
+            caret.color(defcfg.def_curclr);
+            caret.blink_period(defcfg.def_period);
+            if (defcfg.def_cur_on) caret.show();
+            else                   caret.hide();
+            wtrack.reset();
+            base::deface();
         }
         // term: Set termnail parameters. (DECSET).
         void _decset(si32 n)
@@ -8092,14 +8147,8 @@ namespace netxs::ui
         // term: Reset to defaults.
         void setdef()
         {
-            auto& console = *target;
-            defclr.txt('\0').fgc(defcfg.def_fcolor).bgc(defcfg.def_bcolor).link(base::id);
-            console.brush.reset(defclr);
-            console.style.reset();
-            console.style.wrp(defcfg.def_wrpmod);
-            console.setpad(defcfg.def_margin);
+            reset_attrs();
             selection_selmod(defcfg.def_selmod);
-            caret.style(defcfg.def_cursor);
         }
         // term: Set terminal background.
         void setsgr(fifo& q)
@@ -8718,7 +8767,9 @@ namespace netxs::ui
                             {
                                 //todo key
                                 case key::Esc:      close(); onerun.reset(); break;
-                                case key::KeyEnter: start(); onerun.reset(); break;
+                                case key::KeyEnter: restart_pending.exchange(true);
+                                                    start();
+                                                    onerun.reset(); break;
                             }
                         }
                     };
@@ -8728,6 +8779,7 @@ namespace netxs::ui
                 {
                     auto byemsg = error().add("\n");
                     ondata(byemsg);
+                    restart_pending.exchange(true);
                     start();
                 };
                      if (forced)                close();
@@ -8754,6 +8806,10 @@ namespace netxs::ui
             appcfg = cfg;
             if (!ipccon)
             {
+                if (restart_pending.exchange(faux))
+                {
+                    reset_session();
+                }
                 base::enqueue([&, backup = This()](auto& /*boss*/) mutable // We can't request the title before conio.run(), so we queue the request.
                 {
                     auto& title = wtrack.get(ansi::osc_title);
@@ -8774,7 +8830,12 @@ namespace netxs::ui
         void restart()
         {
             resume.exchange(true);
-            ipccon.sighup(faux);
+            restart_pending.exchange(true);
+            if (!ipccon.sighup(faux) && !ipccon.stdwrite.joinable())
+            {
+                resume.exchange(faux);
+                start();
+            }
         }
         void close(bool fast = true, bool notify = true)
         {
@@ -8944,6 +9005,7 @@ namespace netxs::ui
               selalt{ defcfg.def_selalt },
               seldrag{ dragmode::none },
               resume{ faux },
+              restart_pending{ faux },
               forced{ faux },
               selmod{ defcfg.def_selmod },
               onesht{ mime::disabled },
