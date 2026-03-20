@@ -30,6 +30,10 @@ struct consrv
     virtual void style(si32 style) = 0;
     virtual std::optional<text> get_current_line() = 0;
     virtual void sighup() = 0;
+    virtual bool vt_input_mode()
+    {
+        return faux;
+    }
     virtual ui32 get_cp()
     {
         return 65001u;
@@ -5027,6 +5031,11 @@ struct impl : consrv
     void  undo(bool undo_redo)                 { events.undo(undo_redo);           }
     fd_t watch()                               { return events.ondata;             }
     auto get_current_line()                    { return events.get_current_line(); }
+    bool vt_input_mode()
+    {
+        auto lock = std::lock_guard{ events.locker };
+        return !!(inpmod & nt::console::inmode::vt);
+    }
 
     impl(Term& uiterm)
         : uiterm{ uiterm                                         },
@@ -5284,6 +5293,10 @@ struct consrv : ipc::stdcon
     ui32 get_cp()
     {
         return 65001u;
+    }
+    bool vt_input_mode()
+    {
+        return faux;
     }
     void set_cp(ui32)
     { }

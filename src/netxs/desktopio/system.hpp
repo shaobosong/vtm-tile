@@ -4607,12 +4607,19 @@ namespace netxs::os
 
                 if (attached)
                 {
-                    if (encod == prot::w32) termlink->focus(state);
-                    else
+                    #if defined(_WIN32)
+                    if (encod == prot::dec && termlink->vt_input_mode())
+                    #else
+                    if (encod == prot::dec)
+                    #endif
                     {
                         auto guard = std::lock_guard{ writemtx };
                         writebuf.fcs(state);
                         writesyn.notify_one();
+                    }
+                    else
+                    {
+                        termlink->focus(state);
                     }
                 }
             }
