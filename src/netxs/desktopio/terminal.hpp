@@ -1010,8 +1010,8 @@ namespace netxs::ui
             {
                 #define V []([[maybe_unused]] auto& q, [[maybe_unused]] auto& p)
                 auto& parser = ansi::get_parser<bufferbase>();
-                autocr ? parser.intro[ansi::ctrl::eol] = V{ p->cr(); p->lf(q.pop_all(ansi::ctrl::eol)); }
-                       : parser.intro[ansi::ctrl::eol] = V{          p->lf(q.pop_all(ansi::ctrl::eol)); };
+                autocr ? parser.intro[ansi::ctrl::eol] = V{ p->hard_lf(q.pop_all(ansi::ctrl::eol), true); }
+                       : parser.intro[ansi::ctrl::eol] = V{ p->hard_lf(q.pop_all(ansi::ctrl::eol));       };
                 #undef V
             }
             template<class T>
@@ -1120,7 +1120,7 @@ namespace netxs::ui
                 vt.intro[ctrl::esc][esc_sc    ] = V{ p->scp(); };          // ESC 7  (same as CSI s) Save cursor position.
                 vt.intro[ctrl::esc][esc_rc    ] = V{ p->rcp(); };          // ESC 8  (same as CSI u) Restore cursor position.
                 vt.intro[ctrl::esc][esc_ris   ] = V{ p->owner.decstr(); }; // ESC c  Reset to initial state (same as DECSTR).
-                vt.intro[ctrl::esc][esc_nel   ] = V{ p->cr(); p->dn(1); }; // ESC E  Move cursor down and CR. Same as CSI 1 E
+                vt.intro[ctrl::esc][esc_nel   ] = V{ p->hard_lf(1, true); }; // ESC E  Next line (NEL): hard line break + move down.
                 vt.intro[ctrl::esc][esc_decdhl] = V{ p->dhl(q); };         // ESC # ...  ESC # 3, ESC # 4, ESC # 5, ESC # 6, ESC # 8
 
                 vt.intro[ctrl::esc][esc_apc   ] = V{ p->apc(q); };          // ESC _ ... ST  APC.
@@ -1131,10 +1131,10 @@ namespace netxs::ui
                 vt.intro[ctrl::bs ] = V{ p->cub(q.pop_all(ctrl::bs )); };
                 vt.intro[ctrl::del] = V{ p->del(q.pop_all(ctrl::del)); }; // Move backward and delete character under cursor with wrapping.
                 vt.intro[ctrl::tab] = V{ p->tab(q.pop_all(ctrl::tab)); };
-                vt.intro[ctrl::eol] = V{ p-> lf(q.pop_all(ctrl::eol)); }; // LF
-                vt.intro[ctrl::vt ] = V{ p-> lf(q.pop_all(ctrl::vt )); }; // VT same as LF
-                vt.intro[ctrl::ff ] = V{ p-> lf(q.pop_all(ctrl::ff )); }; // FF same as LF
-                vt.intro[ctrl::cr ] = V{ p-> cr();                     }; // CR
+                vt.intro[ctrl::eol] = V{ p->hard_lf(q.pop_all(ctrl::eol)); }; // LF
+                vt.intro[ctrl::vt ] = V{ p->hard_lf(q.pop_all(ctrl::vt )); }; // VT same as LF
+                vt.intro[ctrl::ff ] = V{ p->hard_lf(q.pop_all(ctrl::ff )); }; // FF same as LF
+                vt.intro[ctrl::cr ] = V{ p->cr();                         }; // CR
 
                 vt.csier.table_quest[dec_set] = V{ p->owner.decset(q); };
                 vt.csier.table_quest[dec_rst] = V{ p->owner.decrst(q); };
@@ -2299,6 +2299,12 @@ namespace netxs::ui
             {
                 parser::flush_data();
                 _lf(n);
+            }
+            // bufferbase: Text newline that may terminate a soft-wrap chain.
+    virtual void hard_lf(si32 n, bool with_cr = faux)
+            {
+                if (with_cr) cr();
+                lf(n);
             }
             // bufferbase: '\r'  CR Cursor return. Go to home of visible line instead of home of paragraph.
     virtual void cr()
@@ -4385,6 +4391,43 @@ namespace netxs::ui
             void   up(si32  n) override { bufferbase::  up(n); sync_coord(); }
             void   dn(si32  n) override { bufferbase::  dn(n); sync_coord(); }
             void   lf(si32  n) override { bufferbase::  lf(n); sync_coord(); }
+            void break_soft_wrap_before_hard_lf()
+            {
+                if (coord.y < y_top || coord.y > y_end) return;
+                if (panel.x <= 0 || arena <= 0) return;
+
+                auto row = coord.y - y_top;
+                if (row < 0 || row >= arena) return;
+
+                auto split = row + 1;
+                if (split > arena) return;
+
+                auto& mapln = index[row];
+                auto& curln = batch.item_by_id(mapln.index);
+                if (!curln.wrapped()) return;
+
+                auto line_height = curln.height(panel.x);
+                if (mapln.start / panel.x + 1 >= line_height) return;
+
+                dissect(split);
+            }
+            void hard_lf(si32 n, bool with_cr = faux) override
+            {
+                parser::flush_data();
+                if (with_cr) cr();
+                if (n <= 0)
+                {
+                    bufferbase::_lf(n);
+                    sync_coord();
+                    return;
+                }
+                while (n-- > 0)
+                {
+                    break_soft_wrap_before_hard_lf();
+                    bufferbase::_lf(1);
+                    sync_coord();
+                }
+            }
             void  _lf(si32  n) override { bufferbase:: _lf(n); sync_coord(); }
             void  _ri(si32  n) override { bufferbase:: _ri(n); sync_coord(); }
             void   ri()        override { bufferbase::  ri();  sync_coord(); }
