@@ -1045,38 +1045,14 @@ namespace netxs::ui
                 vt.csier.table_dollarsn[csi_dlr_fra] = V{ p->fra(q); }; // CSI Char ; Top ; Left ; Bottom ; Right $ x  — Fill rectangular area (DECFRA).
                 vt.csier.table_dollarsn[csi_dlr_cra] = V{ p->owner.deccra(q); }; // CSI srcTop ; srcLeft ; srcBottom ; srcRight ; srcBuffIndex ; dstTop ; dstLeft ; dstBuffIndex $ v  — Copy rectangular area (DECCRA). BuffIndex: 1..6, 1 is default index. All coords are 1-based.
 
-                vt.csier.table[csi_sgr][sgr_fg_blk   ] = V{ p->owner.ctrack.fgc(tint::blackdk  ); };
-                vt.csier.table[csi_sgr][sgr_fg_red   ] = V{ p->owner.ctrack.fgc(tint::reddk    ); };
-                vt.csier.table[csi_sgr][sgr_fg_grn   ] = V{ p->owner.ctrack.fgc(tint::greendk  ); };
-                vt.csier.table[csi_sgr][sgr_fg_ylw   ] = V{ p->owner.ctrack.fgc(tint::yellowdk ); };
-                vt.csier.table[csi_sgr][sgr_fg_blu   ] = V{ p->owner.ctrack.fgc(tint::bluedk   ); };
-                vt.csier.table[csi_sgr][sgr_fg_mgt   ] = V{ p->owner.ctrack.fgc(tint::magentadk); };
-                vt.csier.table[csi_sgr][sgr_fg_cyn   ] = V{ p->owner.ctrack.fgc(tint::cyandk   ); };
-                vt.csier.table[csi_sgr][sgr_fg_wht   ] = V{ p->owner.ctrack.fgc(tint::whitedk  ); };
-                vt.csier.table[csi_sgr][sgr_fg_blk_lt] = V{ p->owner.ctrack.fgc(tint::blacklt  ); };
-                vt.csier.table[csi_sgr][sgr_fg_red_lt] = V{ p->owner.ctrack.fgc(tint::redlt    ); };
-                vt.csier.table[csi_sgr][sgr_fg_grn_lt] = V{ p->owner.ctrack.fgc(tint::greenlt  ); };
-                vt.csier.table[csi_sgr][sgr_fg_ylw_lt] = V{ p->owner.ctrack.fgc(tint::yellowlt ); };
-                vt.csier.table[csi_sgr][sgr_fg_blu_lt] = V{ p->owner.ctrack.fgc(tint::bluelt   ); };
-                vt.csier.table[csi_sgr][sgr_fg_mgt_lt] = V{ p->owner.ctrack.fgc(tint::magentalt); };
-                vt.csier.table[csi_sgr][sgr_fg_cyn_lt] = V{ p->owner.ctrack.fgc(tint::cyanlt   ); };
-                vt.csier.table[csi_sgr][sgr_fg_wht_lt] = V{ p->owner.ctrack.fgc(tint::whitelt  ); };
-                vt.csier.table[csi_sgr][sgr_bg_blk   ] = V{ p->owner.ctrack.bgc(tint::blackdk  ); };
-                vt.csier.table[csi_sgr][sgr_bg_red   ] = V{ p->owner.ctrack.bgc(tint::reddk    ); };
-                vt.csier.table[csi_sgr][sgr_bg_grn   ] = V{ p->owner.ctrack.bgc(tint::greendk  ); };
-                vt.csier.table[csi_sgr][sgr_bg_ylw   ] = V{ p->owner.ctrack.bgc(tint::yellowdk ); };
-                vt.csier.table[csi_sgr][sgr_bg_blu   ] = V{ p->owner.ctrack.bgc(tint::bluedk   ); };
-                vt.csier.table[csi_sgr][sgr_bg_mgt   ] = V{ p->owner.ctrack.bgc(tint::magentadk); };
-                vt.csier.table[csi_sgr][sgr_bg_cyn   ] = V{ p->owner.ctrack.bgc(tint::cyandk   ); };
-                vt.csier.table[csi_sgr][sgr_bg_wht   ] = V{ p->owner.ctrack.bgc(tint::whitedk  ); };
-                vt.csier.table[csi_sgr][sgr_bg_blk_lt] = V{ p->owner.ctrack.bgc(tint::blacklt  ); };
-                vt.csier.table[csi_sgr][sgr_bg_red_lt] = V{ p->owner.ctrack.bgc(tint::redlt    ); };
-                vt.csier.table[csi_sgr][sgr_bg_grn_lt] = V{ p->owner.ctrack.bgc(tint::greenlt  ); };
-                vt.csier.table[csi_sgr][sgr_bg_ylw_lt] = V{ p->owner.ctrack.bgc(tint::yellowlt ); };
-                vt.csier.table[csi_sgr][sgr_bg_blu_lt] = V{ p->owner.ctrack.bgc(tint::bluelt   ); };
-                vt.csier.table[csi_sgr][sgr_bg_mgt_lt] = V{ p->owner.ctrack.bgc(tint::magentalt); };
-                vt.csier.table[csi_sgr][sgr_bg_cyn_lt] = V{ p->owner.ctrack.bgc(tint::cyanlt   ); };
-                vt.csier.table[csi_sgr][sgr_bg_wht_lt] = V{ p->owner.ctrack.bgc(tint::whitelt  ); };
+                vt.csier.sgr_palette_color = [](bufferbase*& p, byte index) -> argb
+                {
+                    return p->owner.ctrack.color[index];
+                };
+                vt.csier.sgr_unsupported = [](si32 code, bufferbase*&)
+                {
+                    log("%%SGR %val% attribute is not supported", prompt::term, code);
+                };
 
                 vt.csier.table[csi_cuu] = V{ p-> up(q(1)); }; // CSI n A  (CUU)
                 vt.csier.table[csi_cud] = V{ p-> dn(q(1)); }; // CSI n B  (CUD)
@@ -1181,16 +1157,6 @@ namespace netxs::ui
                     if (!proc)
                     {
                         proc = [i](auto& q, auto& p){ p->not_implemented_CSI(i, q); };
-                    }
-                }
-                // Log all unimplemented SGR attributes.
-                auto& vt_csier_table_csi_sgr = vt.csier.table[csi_sgr];
-                for (auto i = 0; i < (si32)vt_csier_table_csi_sgr.size(); ++i)
-                {
-                    auto& proc = vt_csier_table_csi_sgr[i];
-                    if (!proc)
-                    {
-                        proc = [i](auto&, auto&){ log("%%SGR %val% attribute is not supported", prompt::term, i); };
                     }
                 }
                 auto& esc_lookup = vt.intro[ctrl::esc];
@@ -8162,15 +8128,9 @@ namespace netxs::ui
             static auto parser = ansi::csi_t<marker, true>{};
 
             auto mark = marker{};
-            mark.brush = defclr;
-            auto param = q.front(ansi::sgr_rst);
-            if (q.issub(param))
-            {
-                auto ptr = &mark;
-                q.settop(q.desub(param));
-                parser.table[ansi::csi_sgr].execute(q, ptr);
-            }
-            else mark.brush = cell{ '\0' }.fgc(defcfg.def_fcolor).bgc(defcfg.def_bcolor);
+            mark.brush.reset(defclr);
+            auto ptr = &mark;
+            parser.dispatch_sgr(q, ptr, true);
             set_color(mark.brush);
         }
         // term: CCC_LSR: Enable line style reporting.

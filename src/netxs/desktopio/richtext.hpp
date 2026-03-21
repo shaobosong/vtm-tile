@@ -2081,12 +2081,14 @@ namespace netxs::ui
             template<svga Mode = svga::vtrgb>
             auto fgc(argb c)
             {
+                if (!base.inv() && base.fnt()) c.faint();
                 base.inv() ? clr(c, bg_1, bg_2)
                            : clr(c, fg_1, fg_2);
             }
             template<svga Mode = svga::vtrgb>
             auto bgc(argb c)
             {
+                if (base.inv() && base.fnt()) c.faint();
                 base.inv() ? clr(c, fg_1, fg_2)
                            : clr(c, bg_1, bg_2);
             }
@@ -2104,6 +2106,12 @@ namespace netxs::ui
             }
             auto unc(argb ) { }
             auto dim(si32 ) { }
+            auto fnt(bool b)
+            {
+                base.fnt(b);
+                if (base.inv()) bgc(base.bgc());
+                else            fgc(base.fgc());
+            }
             auto und(si32 unline)
             {
                 static constexpr auto off = "\\ul0 "sv;
@@ -2231,6 +2239,7 @@ namespace netxs::ui
                         if (data.size()) data += done;
                         auto [bg, fg] = base.inv() ? std::pair{ base.fgc(), base.bgc() }
                                                    : std::pair{ base.bgc(), base.fgc() };
+                        if (base.fnt()) fg.faint();
                         data += bclr;
                         utf::to_hex(bg.chan.r, data);
                         utf::to_hex(bg.chan.g, data);
@@ -2265,6 +2274,7 @@ namespace netxs::ui
             auto bgc(argb ) { }
             auto bld(bool ) { }
             auto itc(bool ) { }
+            auto fnt(bool ) { }
             auto dim(si32 ) { }
             auto und(si32 ) { }
             auto unc(argb ) { }
@@ -2348,6 +2358,7 @@ namespace netxs::ui
             auto bgc(argb ) { }
             auto bld(bool ) { }
             auto itc(bool ) { }
+            auto fnt(bool ) { }
             auto und(si32 ) { }
             auto dim(si32 ) { }
             auto unc(argb ) { }

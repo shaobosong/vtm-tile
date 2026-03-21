@@ -1506,6 +1506,8 @@ namespace netxs::gui
             auto fgc = c.fgc();
             auto bgc = c.bgc();
             if (c.inv()) std::swap(fgc, bgc);
+            auto draw_fgc = fgc;
+            if (c.fnt()) draw_fgc.faint();
             canvas.clip(placeholder);
             auto target_ptr = &canvas;
             if constexpr (std::is_same_v<std::decay_t<T>, noop>)
@@ -1530,7 +1532,7 @@ namespace netxs::gui
                 if (auto u = c.und())
                 {
                     auto index = c.unc();
-                    auto color = index ? argb{ argb::vt256[index] }.alpha(fgc.alpha()) : fgc;
+                    auto color = index ? argb{ argb::vt256[index] }.alpha(fgc.alpha()) : draw_fgc;
                     if (u == unln::line)
                     {
                         auto block = fcache.underline;
@@ -1586,13 +1588,13 @@ namespace netxs::gui
                 {
                     auto block = fcache.strikeout;
                     block.coor += placeholder.coor;
-                    netxs::onrect(target, block, cell::shaders::full(fgc));
+                    netxs::onrect(target, block, cell::shaders::full(draw_fgc));
                 }
                 if (c.ovr())
                 {
                     auto block = fcache.overline;
                     block.coor += placeholder.coor;
-                    netxs::onrect(target, block, cell::shaders::full(fgc));
+                    netxs::onrect(target, block, cell::shaders::full(draw_fgc));
                 }
                 if (c.xy() == 0)
                 {
@@ -1638,10 +1640,10 @@ namespace netxs::gui
                         //    draw_glyph(target, glyph_mask, offset - dot_01 + dot_10, blk);
                         //    draw_glyph(target, glyph_mask, offset + dot_01 - dot_10, blk);
                         //}
-                        draw_glyph(target, glyph_mask, offset, fgc);
+                        draw_glyph(target, glyph_mask, offset, draw_fgc);
                     }
                 }
-                if (bgc.alpha()< 2 && fgc == argb{ purewhite })
+                if (bgc.alpha()< 2 && draw_fgc == argb{ purewhite })
                 {
                     //edge
                 }

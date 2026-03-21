@@ -1205,7 +1205,8 @@ namespace netxs
             static constexpr auto bitmap_mask = (ui64)0b00000000'00000000'00000000'00000000'00000000'00110000'00000000'00000000; // bitmap : 2; // body::pxtype: Cursor losts its colors when it covers bitmap.
             static constexpr auto fusion_mask = (ui64)0b00000000'00000000'00000000'00000000'00000000'11000000'00000000'00000000; // fusion : 2; // todo The outlines of object boundaries must be set when rendering each window (pro::shape).
             static constexpr auto shadow_mask = (ui64)0b00000000'00000000'00000000'00000000'11111111'00000000'00000000'00000000; // shadow : 8; // Shadow bits.
-            static constexpr auto hidden_mask = (ui64)0b00000000'00000000'00000000'00000001'00000000'00000000'00000000'00000000; // shadow : 8; // Hidden character.
+            static constexpr auto hidden_mask = (ui64)0b00000000'00000000'00000000'00000001'00000000'00000000'00000000'00000000; // hidden : 1; // Hidden character.
+            static constexpr auto faint_mask  = (ui64)0b00000000'00000000'00000000'00000010'00000000'00000000'00000000'00000000; // faint  : 1; // Standard SGR 2 intensity state.
             // Unique attributes. From 24th bit.
             static constexpr auto mosaic_mask = (ui64)0b00000000'00000000'11111111'00000000'00000000'00000000'00000000'00000000; // ui32 mosaic : 8; // High 3 bits -> y-fragment (0-4 utf::matrix::ky), low 5 bits -> x-fragment (0-16 utf::matrix::kx). // Ref:  https://gitlab.freedesktop.org/terminal-wg/specifications/-/issues/23
             static constexpr auto curbgc_mask = (ui64)0b00000000'11111111'00000000'00000000'00000000'00000000'00000000'00000000; // bgcclr : 8; // Cursor 256-color 6x6x6-cube index. Alpha not used.
@@ -1292,9 +1293,41 @@ namespace netxs
                         }
                         if constexpr (Mode != svga::vt16) // It is not available in the Linux and Win8 consoles.
                         {
-                            if (auto bolded = token & bolded_mask; bolded != (base.token & bolded_mask)) dest.bld(!!bolded);
                             if (auto italic = token & italic_mask; italic != (base.token & italic_mask)) dest.itc(!!italic);
                             if (auto invert = token & invert_mask; invert != (base.token & invert_mask)) dest.inv(!!invert);
+                            if (auto weight = token & (bolded_mask | faint_mask); weight != (base.token & (bolded_mask | faint_mask)))
+                            {
+                                auto const bolded     = !!(token & bolded_mask);
+                                auto const faint      = !!(token & faint_mask);
+                                auto const base_bold  = !!(base.token & bolded_mask);
+                                auto const base_faint = !!(base.token & faint_mask);
+                                if (!bolded)
+                                {
+                                    if (!faint)
+                                    {
+                                        if (base_bold ) dest.bld(faux);
+                                        if (base_faint) dest.fnt(faux);
+                                    }
+                                    else
+                                    {
+                                        if (base_bold)              dest.bld(faux);
+                                        if (!base_faint || base_bold) dest.fnt(true);
+                                    }
+                                }
+                                else
+                                {
+                                    if (!faint)
+                                    {
+                                        if (base_faint)              dest.fnt(faux);
+                                        if (!base_bold || base_faint) dest.bld(true);
+                                    }
+                                    else
+                                    {
+                                        if (!base_bold ) dest.bld(true);
+                                        if (!base_faint) dest.fnt(true);
+                                    }
+                                }
+                            }
                             if (auto overln = token & overln_mask; overln != (base.token & overln_mask)) dest.ovr(!!overln);
                             if (auto strike = token & strike_mask; strike != (base.token & strike_mask)) dest.stk(!!strike);
                             if (auto blinks = token & blinks_mask; blinks != (base.token & blinks_mask)) dest.blk(!!blinks);
@@ -1320,6 +1353,7 @@ namespace netxs
             }
 
             void bld(bool b)         { token &= ~bolded_mask; token |= ((ui64)b << netxs::field_offset<bolded_mask>()); }
+            void fnt(bool b)         { token &= ~faint_mask;  token |= ((ui64)b << netxs::field_offset<faint_mask>());  }
             void itc(bool b)         { token &= ~italic_mask; token |= ((ui64)b << netxs::field_offset<italic_mask>()); }
             void inv(bool b)         { token &= ~invert_mask; token |= ((ui64)b << netxs::field_offset<invert_mask>()); }
             void ovr(bool b)         { token &= ~overln_mask; token |= ((ui64)b << netxs::field_offset<overln_mask>()); }
@@ -1349,6 +1383,7 @@ namespace netxs
             //void fusion0(ui64 c) { token &= ~fusion_mask; token |= (ui64)(c << netxs::field_offset<fusion_mask>()); }
 
             bool bld()    const { return !!(token & bolded_mask); }
+            bool fnt()    const { return !!(token & faint_mask);  }
             bool itc()    const { return !!(token & italic_mask); }
             bool inv()    const { return !!(token & invert_mask); }
             bool ovr()    const { return !!(token & overln_mask); }
@@ -1919,14 +1954,7 @@ namespace netxs
         }
         auto& dim(si32 n)
         {
-            if (n == -1)
-            {
-                uv.fg.faint();
-            }
-            else
-            {
-                st.dim(std::clamp(n, 0, 255));
-            }
+            st.dim(std::clamp(n, 0, 255));
             return *this;
         }
         // cell: Is the cell not transparent?
@@ -1968,16 +1996,13 @@ namespace netxs
         auto& fga(si32 k)        { uv.fg.chan.a = (byte)k; return *this; } // cell: Set foreground alpha/transparency.
         auto& alpha(si32 k)      { uv.bg.chan.a = (byte)k;
                                    uv.fg.chan.a = (byte)k; return *this; } // cell: Set alpha/transparency (background and foreground).
-        // cell: Set/Reset bold attribute. //todo ? SGR22: If b=faux and st.bld()=faux then un-dim fg color.
+        // cell: Set/Reset bold attribute.
         auto& bld(bool b)
         {
-            //if (st.bld() == faux && b == faux) // Un-dim fg color.
-            //{
-            //    uv.fg.bright(2);
-            //}
             st.bld(b);
             return *this;
         }
+        auto& fnt(bool b)        { st.fnt(b);              return *this; } // cell: Set faint attribute.
         auto& itc(bool b)        { st.itc(b);              return *this; } // cell: Set italic attribute.
         auto& und(si32 n)        { st.und(n);              return *this; } // cell: Set underline attribute.
         auto& unc(argb c)        { st.unc(c.to_256cube()); return *this; } // cell: Set underline color.
@@ -2076,6 +2101,7 @@ namespace netxs
         auto& bgc() const  { return uv.bg;         } // cell: Return background color.
         auto& fgc() const  { return uv.fg;         } // cell: Return foreground color.
         auto  bld() const  { return st.bld();      } // cell: Return bold attribute.
+        auto  fnt() const  { return st.fnt();      } // cell: Return faint attribute.
         auto  itc() const  { return st.itc();      } // cell: Return italic attribute.
         auto  und() const  { return st.und();      } // cell: Return underline/Underscore attribute.
         auto  unc() const  { return st.unc();      } // cell: Return underline color.
@@ -2148,6 +2174,7 @@ namespace netxs
                      << "\n\tblk " <<(c.blk() ? "true" : "faux")
                      << "\n\tinv " <<(c.inv() ? "true" : "faux")
                      << "\n\tbld " <<(c.bld() ? "true" : "faux")
+                     << "\n\tfnt " <<(c.fnt() ? "true" : "faux")
                      << "\n\tund " <<(c.und() == unln::none   ? "none"
                                     : c.und() == unln::line   ? "line"
                                     : c.und() == unln::biline ? "biline"

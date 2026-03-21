@@ -160,7 +160,7 @@ namespace netxs::ansi
     static const auto sgr_rst       = 0;
     static const auto sgr_sav       = 10;
     static const auto sgr_bold      = 1;
-    static const auto sgr_nonbold   = 22;
+    static const auto sgr_nonbldfnt = 22;
     static const auto sgr_faint     = 2;
     static const auto sgr_italic    = 3;
     static const auto sgr_nonitalic = 23;
@@ -370,6 +370,7 @@ namespace netxs::ansi
         }
 
         auto& bld(bool b)    { return add(b ? "\033[1m" : "\033[22m"         ); } // basevt: SGR 𝗕𝗼𝗹𝗱 attribute.
+        auto& fnt(bool b)    { return add(b ? "\033[2m" : "\033[22m"         ); } // basevt: SGR 𝗙𝗮𝗶𝗻𝘁 attribute.
         auto& und(si32 n)    { return n == unln::none   ? add("\033[24m")
                                     : n == unln::line   ? add("\033[4m")
                                     : n == unln::biline ? add("\033[21m")
@@ -938,6 +939,7 @@ namespace netxs::ansi
     auto dch(si32 n)           { return escx{}.dch(n);        } // ansi: Delete (not Erase) letters under the cursor.
     auto del()                 { return escx{}.del( );        } // ansi: Delete cell backwards ('\x7F').
     auto bld(bool b = true)    { return escx{}.bld(b);        } // ansi: SGR 𝗕𝗼𝗹𝗱 attribute.
+    auto fnt(bool b = true)    { return escx{}.fnt(b);        } // ansi: SGR 𝗙𝗮𝗶𝗻𝘁 attribute.
     auto und(si32 n = 1   )    { return escx{}.und(n);        } // ansi: SGR 𝗨𝗻𝗱𝗲𝗿𝗹𝗶𝗻𝗲 attribute. 0: none, 1: line, 2: biline, 3: wavy, 4: dotted, 5: dashed, 6 - 7: unknown.
     auto dim(si32 n)           { return escx{}.dim(n);        } // ansi: SGR Shadow attribute. 0 - 255: 3x3 cube shadow.
     auto unc(argb c)           { return escx{}.unc(c);        } // ansi: SGR SGR 58/59 Underline color. RGB: red, green, blue.
@@ -1239,6 +1241,8 @@ namespace netxs::ansi
     struct csi_t
     {
         using tree = func<fifo, T>;
+        using sgr_palette_proc = argb (*)(T*&, byte);
+        using sgr_report_proc = void (*)(si32, T*&);
 
         tree table         ;
         tree table_quest   ;
@@ -1252,6 +1256,331 @@ namespace netxs::ansi
         tree table_dblqoute;
         tree table_sglqoute;
         tree table_asterisk;
+
+        sgr_palette_proc sgr_palette_color = default_sgr_palette_color;
+        sgr_report_proc  sgr_unsupported   = default_sgr_unsupported;
+
+    private:
+        enum class sgr_color_target
+        {
+            fg,
+            bg,
+            ul,
+        };
+
+        static constexpr auto sgr_missing = fifo::skip;
+
+        static argb default_sgr_palette_color([[maybe_unused]] T*& p, byte index)
+        {
+            return argb{ argb::vt256[index] };
+        }
+        static void default_sgr_unsupported([[maybe_unused]] si32 code, [[maybe_unused]] T*& p)
+        {
+        }
+        static auto peek_sgr_item(fifo& q)
+        {
+            return q.front(sgr_missing);
+        }
+        static auto is_sgr_subparam(fifo& q)
+        {
+            return q && fifo::issub(peek_sgr_item(q));
+        }
+        static auto sgr_value_or(si32 value, si32 fallback)
+        {
+            return fifo::isdef(value) ? fallback
+                                      : value;
+        }
+        static auto normalize_sgr_regular(si32 raw)
+        {
+            return fifo::isdef(raw) ? sgr_missing
+                                    : raw;
+        }
+        static auto normalize_sgr_subparam(si32 raw)
+        {
+            return fifo::isdef(raw) ? sgr_missing
+                                    : fifo::desub(raw);
+        }
+        static auto read_sgr_regular(fifo& q, si32 fallback = 0)
+        {
+            auto value = fallback;
+            if (q && !is_sgr_subparam(q))
+            {
+                value = sgr_value_or(normalize_sgr_regular(q.rawarg(sgr_missing)), fallback);
+            }
+            return value;
+        }
+        static auto read_sgr_subparam(fifo& q, si32 fallback = 0)
+        {
+            auto value = fallback;
+            if (is_sgr_subparam(q))
+            {
+                value = sgr_value_or(normalize_sgr_subparam(q.rawarg(sgr_missing)), fallback);
+            }
+            return value;
+        }
+        template<size_t Size>
+        static auto collect_sgr_subparams(fifo& q, std::array<si32, Size>& values)
+        {
+            auto count = 0_sz;
+            while (is_sgr_subparam(q))
+            {
+                auto value = normalize_sgr_subparam(q.rawarg(sgr_missing));
+                if (count < Size) values[count] = value;
+                ++count;
+            }
+            return std::min(count, Size);
+        }
+        static auto parse_sgr_rgb(si32 r, si32 g, si32 b, argb& color)
+        {
+            if (r < 0 || r > 255
+             || g < 0 || g > 255
+             || b < 0 || b > 255)
+            {
+                return faux;
+            }
+            color = argb{ r, g, b };
+            return true;
+        }
+        static auto parse_sgr_rgba(si32 r, si32 g, si32 b, si32 a, argb& color)
+        {
+            if (r < 0 || r > 255
+             || g < 0 || g > 255
+             || b < 0 || b > 255
+             || a < 0 || a > 255)
+            {
+                return faux;
+            }
+            color = argb{ r, g, b, a };
+            return true;
+        }
+        template<size_t Size>
+        static auto parse_sgr_rgb_subparams(std::array<si32, Size> const& values, size_t count, argb& color)
+        {
+            auto offset = 0_sz;
+            if (count >= 5 || (count == 4 && values[0] == sgr_missing))
+            {
+                auto const colorspace = sgr_value_or(values[0], 0);
+                if (colorspace != 0) return faux;
+                offset = 1;
+            }
+            else if ((count == 1 || count == 2) && fifo::isdef(values[0]))
+            {
+                offset = 1;
+            }
+
+            auto const available = count > offset ? count - offset : 0;
+            auto const r = sgr_value_or(offset + 0 < count ? values[offset + 0] : sgr_missing, 0);
+            auto const g = sgr_value_or(offset + 1 < count ? values[offset + 1] : sgr_missing, 0);
+            auto const b = sgr_value_or(offset + 2 < count ? values[offset + 2] : sgr_missing, 0);
+            if (available >= 4)
+            {
+                auto const a = sgr_value_or(values[offset + 3], 0);
+                return parse_sgr_rgba(r, g, b, a, color);
+            }
+            return parse_sgr_rgb(r, g, b, color);
+        }
+        auto apply_sgr_palette_color(T*& p, sgr_color_target target, si32 index) const
+        {
+            if (index < 0 || index > 255) return faux;
+
+            auto color = sgr_palette_color(p, (byte)index);
+            switch (target)
+            {
+                case sgr_color_target::fg: p->brush.fgc(color); break;
+                case sgr_color_target::bg: p->brush.bgc(color); break;
+                case sgr_color_target::ul: p->brush.unc(color); break;
+            }
+            return true;
+        }
+        auto apply_sgr_rgb_color(T*& p, sgr_color_target target, argb color) const
+        {
+            switch (target)
+            {
+                case sgr_color_target::fg: p->brush.fgc(color); break;
+                case sgr_color_target::bg: p->brush.bgc(color); break;
+                case sgr_color_target::ul: p->brush.unc(color); break;
+            }
+        }
+        void dispatch_sgr_color(fifo& q, T*& p, sgr_color_target target) const
+        {
+            auto mode = sgr_missing;
+            if (is_sgr_subparam(q))
+            {
+                mode = normalize_sgr_subparam(q.rawarg(sgr_missing));
+            }
+            else if (q)
+            {
+                mode = normalize_sgr_regular(q.rawarg(sgr_missing));
+            }
+            else return;
+
+            switch (sgr_value_or(mode, 0))
+            {
+                case 2:
+                {
+                    if (is_sgr_subparam(q))
+                    {
+                        auto subs = std::array<si32, 8>{};
+                        auto count = collect_sgr_subparams(q, subs);
+                        auto color = argb{};
+                        if (parse_sgr_rgb_subparams(subs, count, color))
+                        {
+                            apply_sgr_rgb_color(p, target, color);
+                        }
+                    }
+                    else
+                    {
+                        auto color = argb{};
+                        auto const r = read_sgr_regular(q, 0);
+                        auto const g = read_sgr_regular(q, 0);
+                        auto const b = read_sgr_regular(q, 0);
+                        if (parse_sgr_rgb(r, g, b, color))
+                        {
+                            apply_sgr_rgb_color(p, target, color);
+                        }
+                    }
+                    break;
+                }
+                case 5:
+                {
+                    auto const index = is_sgr_subparam(q)
+                                     ? read_sgr_subparam(q, 0)
+                                     : read_sgr_regular(q, 0);
+                    apply_sgr_palette_color(p, target, index);
+                    while (is_sgr_subparam(q)) q.rawarg(sgr_missing);
+                    break;
+                }
+                default:
+                    while (is_sgr_subparam(q)) q.rawarg(sgr_missing);
+                    break;
+            }
+        }
+        void dispatch_sgr_impl(fifo& q, T*& p, bool accept_subparam_head) const
+        {
+            if (!q)
+            {
+                p->brush.nil();
+                return;
+            }
+
+            while (q)
+            {
+                auto const raw = q.rawarg(sgr_missing);
+                auto const code = fifo::isdef(raw) ? sgr_rst
+                                : fifo::issub(raw) ? accept_subparam_head
+                                                  ? fifo::desub(raw)
+                                                  : sgr_missing
+                                                   : raw;
+                accept_subparam_head = faux;
+
+                switch (code)
+                {
+                    case sgr_rst:       p->brush.nil();      break;
+                    case sgr_sav:       p->brush.sav();      break; // Local extension for ansi::sav().
+                    case sgr_bold:      p->brush.bld(true);  break;
+                    case sgr_nonbldfnt: p->brush.bld(faux);
+                                        p->brush.fnt(faux);  break;
+                    case sgr_italic:    p->brush.itc(true);  break;
+                    case sgr_nonitalic: p->brush.itc(faux);  break;
+                    case sgr_inv:       p->brush.inv(true);  break;
+                    case sgr_noinv:     p->brush.inv(faux);  break;
+                    case sgr_hidden:    p->brush.hid(true);  break;
+                    case sgr_nonhidden: p->brush.hid(faux);  break;
+                    case sgr_slowblink:
+                    case sgr_fastblink: p->brush.blk(true);  break;
+                    case sgr_no_blink:  p->brush.blk(faux);  break;
+                    case sgr_strike:    p->brush.stk(true);  break;
+                    case sgr_nostrike:  p->brush.stk(faux);  break;
+                    case sgr_overln:    p->brush.ovr(true);  break;
+                    case sgr_nooverln:  p->brush.ovr(faux);  break;
+                    case sgr_fg:        p->brush.rfg();      break;
+                    case sgr_bg:        p->brush.rbg();      break;
+                    case sgr_uline_rst: p->brush.unc(0);     break;
+                    case sgr_faint:
+                    {
+                        auto subs = std::array<si32, 4>{};
+                        auto count = collect_sgr_subparams(q, subs);
+                        if (count && !fifo::isdef(subs[0])) p->brush.dim(subs[0]);
+                        else                                p->brush.fnt(true);
+                        break;
+                    }
+                    case sgr_und:
+                    {
+                        auto subs = std::array<si32, 4>{};
+                        auto count = collect_sgr_subparams(q, subs);
+                        auto style = unln::line;
+                        if (count) style = sgr_value_or(subs[0], unln::line);
+                        if (style >= unln::none && style <= 7)
+                        {
+                            p->brush.und(style);
+                        }
+                        break;
+                    }
+                    case sgr_doubleund: p->brush.und(unln::biline); break;
+                    case sgr_nound:     p->brush.und(unln::none);   break;
+                    case sgr_uline_clr: dispatch_sgr_color(q, p, sgr_color_target::ul); break;
+                    case sgr_fg_rgb:    dispatch_sgr_color(q, p, sgr_color_target::fg); break;
+                    case sgr_bg_rgb:    dispatch_sgr_color(q, p, sgr_color_target::bg); break;
+
+                    case sgr_fg_blk:
+                    case sgr_fg_red:
+                    case sgr_fg_grn:
+                    case sgr_fg_ylw:
+                    case sgr_fg_blu:
+                    case sgr_fg_mgt:
+                    case sgr_fg_cyn:
+                    case sgr_fg_wht:
+                        apply_sgr_palette_color(p, sgr_color_target::fg, code - sgr_fg_blk);
+                        break;
+
+                    case sgr_bg_blk:
+                    case sgr_bg_red:
+                    case sgr_bg_grn:
+                    case sgr_bg_ylw:
+                    case sgr_bg_blu:
+                    case sgr_bg_mgt:
+                    case sgr_bg_cyn:
+                    case sgr_bg_wht:
+                        apply_sgr_palette_color(p, sgr_color_target::bg, code - sgr_bg_blk);
+                        break;
+
+                    case sgr_fg_blk_lt:
+                    case sgr_fg_red_lt:
+                    case sgr_fg_grn_lt:
+                    case sgr_fg_ylw_lt:
+                    case sgr_fg_blu_lt:
+                    case sgr_fg_mgt_lt:
+                    case sgr_fg_cyn_lt:
+                    case sgr_fg_wht_lt:
+                        apply_sgr_palette_color(p, sgr_color_target::fg, 8 + code - sgr_fg_blk_lt);
+                        break;
+
+                    case sgr_bg_blk_lt:
+                    case sgr_bg_red_lt:
+                    case sgr_bg_grn_lt:
+                    case sgr_bg_ylw_lt:
+                    case sgr_bg_blu_lt:
+                    case sgr_bg_mgt_lt:
+                    case sgr_bg_cyn_lt:
+                    case sgr_bg_wht_lt:
+                        apply_sgr_palette_color(p, sgr_color_target::bg, 8 + code - sgr_bg_blk_lt);
+                        break;
+
+                    default:
+                        if (!fifo::isdef(code)) sgr_unsupported(code, p);
+                        break;
+                }
+
+                while (is_sgr_subparam(q)) q.rawarg(sgr_missing);
+                if constexpr (NoMultiArg) break;
+            }
+        }
+
+    public:
+        void dispatch_sgr(fifo& q, T*& p, bool accept_subparam_head = faux) const
+        {
+            dispatch_sgr_impl(q, p, accept_subparam_head);
+        }
 
         csi_t()
         {
@@ -1268,6 +1597,7 @@ namespace netxs::ansi
             * - void fgc(argb c);                    // Set foreground color.
             * - void bgc(argb c);                    // Set background color.
             * - void bld(bool b);                    // Set bold attribute.
+            * - void fnt(bool b);                    // Set faint attribute.
             * - void itc(bool b);                    // Set italic attribute.
             * - void inv(bool b);                    // Set inverse attribute.
             * - void stk(bool b);                    // Set strikethgh attribute.
@@ -1369,67 +1699,8 @@ namespace netxs::ansi
                     ccc[ccc_sel] = nullptr;
                     ccc[ccc_pad] = nullptr;
 
-                auto& sgr = table[csi_sgr].resize(0x100);
-                    sgr.template enable_multi_arg<NoMultiArg>();
-                    sgr[sgr_sav      ] = V{ p->brush.sav( );    };
-                    sgr[sgr_rst      ] = V{ p->brush.nil( );    };
-                    sgr[sgr_fg       ] = V{ p->brush.rfg( );    };
-                    sgr[sgr_bg       ] = V{ p->brush.rbg( );    };
-                    sgr[sgr_faint    ] = V{ p->brush.dim(q.subarg(-1)); };
-                    sgr[sgr_bold     ] = V{ p->brush.bld(true); };
-                    sgr[sgr_nonbold  ] = V{ p->brush.bld(faux); };
-                    sgr[sgr_italic   ] = V{ p->brush.itc(true); };
-                    sgr[sgr_nonitalic] = V{ p->brush.itc(faux); };
-                    sgr[sgr_inv      ] = V{ p->brush.inv(true); };
-                    sgr[sgr_noinv    ] = V{ p->brush.inv(faux); };
-                    sgr[sgr_hidden   ] = V{ p->brush.hid(true); };
-                    sgr[sgr_nonhidden] = V{ p->brush.hid(faux); };
-                    sgr[sgr_und      ] = V{ p->brush.und(q.subarg(unln::line)); };
-                    sgr[sgr_doubleund] = V{ p->brush.und(unln::biline        ); };
-                    sgr[sgr_nound    ] = V{ p->brush.und(unln::none          ); };
-                    sgr[sgr_uline_clr] = V{ p->brush.unc(argb{ q });            };
-                    sgr[sgr_uline_rst] = V{ p->brush.unc(0        );            };
-                    sgr[sgr_slowblink] = V{ p->brush.blk(true); };
-                    sgr[sgr_fastblink] = V{ p->brush.blk(true); };
-                    sgr[sgr_no_blink ] = V{ p->brush.blk(faux); };
-                    sgr[sgr_strike   ] = V{ p->brush.stk(true); };
-                    sgr[sgr_nostrike ] = V{ p->brush.stk(faux); };
-                    sgr[sgr_overln   ] = V{ p->brush.ovr(true); };
-                    sgr[sgr_nooverln ] = V{ p->brush.ovr(faux); };
-                    sgr[sgr_fg_rgb   ] = V{ p->brush.fgc(q);    };
-                    sgr[sgr_bg_rgb   ] = V{ p->brush.bgc(q);    };
-                    sgr[sgr_fg_blk   ] = V{ p->brush.fgc(tint::blackdk  ); };
-                    sgr[sgr_fg_red   ] = V{ p->brush.fgc(tint::reddk    ); };
-                    sgr[sgr_fg_grn   ] = V{ p->brush.fgc(tint::greendk  ); };
-                    sgr[sgr_fg_ylw   ] = V{ p->brush.fgc(tint::yellowdk ); };
-                    sgr[sgr_fg_blu   ] = V{ p->brush.fgc(tint::bluedk   ); };
-                    sgr[sgr_fg_mgt   ] = V{ p->brush.fgc(tint::magentadk); };
-                    sgr[sgr_fg_cyn   ] = V{ p->brush.fgc(tint::cyandk   ); };
-                    sgr[sgr_fg_wht   ] = V{ p->brush.fgc(tint::whitedk  ); };
-                    sgr[sgr_fg_blk_lt] = V{ p->brush.fgc(tint::blacklt  ); };
-                    sgr[sgr_fg_red_lt] = V{ p->brush.fgc(tint::redlt    ); };
-                    sgr[sgr_fg_grn_lt] = V{ p->brush.fgc(tint::greenlt  ); };
-                    sgr[sgr_fg_ylw_lt] = V{ p->brush.fgc(tint::yellowlt ); };
-                    sgr[sgr_fg_blu_lt] = V{ p->brush.fgc(tint::bluelt   ); };
-                    sgr[sgr_fg_mgt_lt] = V{ p->brush.fgc(tint::magentalt); };
-                    sgr[sgr_fg_cyn_lt] = V{ p->brush.fgc(tint::cyanlt   ); };
-                    sgr[sgr_fg_wht_lt] = V{ p->brush.fgc(tint::whitelt  ); };
-                    sgr[sgr_bg_blk   ] = V{ p->brush.bgc(tint::blackdk  ); };
-                    sgr[sgr_bg_red   ] = V{ p->brush.bgc(tint::reddk    ); };
-                    sgr[sgr_bg_grn   ] = V{ p->brush.bgc(tint::greendk  ); };
-                    sgr[sgr_bg_ylw   ] = V{ p->brush.bgc(tint::yellowdk ); };
-                    sgr[sgr_bg_blu   ] = V{ p->brush.bgc(tint::bluedk   ); };
-                    sgr[sgr_bg_mgt   ] = V{ p->brush.bgc(tint::magentadk); };
-                    sgr[sgr_bg_cyn   ] = V{ p->brush.bgc(tint::cyandk   ); };
-                    sgr[sgr_bg_wht   ] = V{ p->brush.bgc(tint::whitedk  ); };
-                    sgr[sgr_bg_blk_lt] = V{ p->brush.bgc(tint::blacklt  ); };
-                    sgr[sgr_bg_red_lt] = V{ p->brush.bgc(tint::redlt    ); };
-                    sgr[sgr_bg_grn_lt] = V{ p->brush.bgc(tint::greenlt  ); };
-                    sgr[sgr_bg_ylw_lt] = V{ p->brush.bgc(tint::yellowlt ); };
-                    sgr[sgr_bg_blu_lt] = V{ p->brush.bgc(tint::bluelt   ); };
-                    sgr[sgr_bg_mgt_lt] = V{ p->brush.bgc(tint::magentalt); };
-                    sgr[sgr_bg_cyn_lt] = V{ p->brush.bgc(tint::cyanlt   ); };
-                    sgr[sgr_bg_wht_lt] = V{ p->brush.bgc(tint::whitelt  ); };
+                auto& sgr = table[csi_sgr];
+                    sgr = [this](auto& q, auto& p){ dispatch_sgr(q, p); };
 
             #undef F
             #undef V
