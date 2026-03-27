@@ -1187,13 +1187,18 @@ namespace netxs::ui
                     style = l.style;
                     _size = l._size;
                     _kind = l._kind;
+                    fill = l.fill;
+                    tail = l.tail;
                     l._size = {};
                     l._kind = {};
+                    l.fill = no_fill;
                 }
                 line(line const& l)
                     : rich{ l       },
                      index{ l.index },
-                     style{ l.style }
+                     style{ l.style },
+                      fill{ l.fill  },
+                      tail{ l.tail  }
                 { }
                 line(id_t line_id, deco const& line_style, span dt, twod sz)
                     : rich{ dt, sz     },
@@ -1224,6 +1229,9 @@ namespace netxs::ui
                 deco style{};
                 si32 _size{};
                 type _kind{};
+                static constexpr auto no_fill = -1;
+                si32 fill{ no_fill };
+                cell tail{};
 
                 friend void swap(line& lhs, line& rhs)
                 {
@@ -1232,17 +1240,43 @@ namespace netxs::ui
                     std::swap(lhs.style, rhs.style);
                     std::swap(lhs._size, rhs._size);
                     std::swap(lhs._kind, rhs._kind);
+                    std::swap(lhs.fill, rhs.fill);
+                    std::swap(lhs.tail, rhs.tail);
                 }
                 void wipe()
                 {
                     rich::kill();
                     _size = {};
                     _kind = {};
+                    fill = no_fill;
+                    tail = {};
                 }
                 bool wrapped() const
                 {
                     assert(_kind == style.get_kind());
                     return _kind == type::autowrap;
+                }
+                bool fills_eol() const
+                {
+                    return fill != no_fill;
+                }
+                auto fill_from() const
+                {
+                    return fill;
+                }
+                auto const& fill_cell() const
+                {
+                    return tail;
+                }
+                void fill_to_eol(si32 start, cell const& blank)
+                {
+                    fill = start;
+                    tail = blank;
+                }
+                void reset_fill()
+                {
+                    fill = no_fill;
+                    tail = {};
                 }
                 si32 height(si32 panel_x) const
                 {
@@ -4629,6 +4663,85 @@ namespace netxs::ui
                 coor.x = xconv<feed::rev>(coor.x, curln.style.jet(), size);
                 return coor;
             }
+            void paint_tail_fill(face& dest, line const& curln, twod coor)
+            {
+                if (!curln.fills_eol()) return;
+
+                auto start = std::clamp(curln.fill_from(), 0, panel.x);
+                if (start >= panel.x) return;
+
+                auto width = curln.length();
+                auto from = start;
+                if (auto span = std::clamp(std::max(width, start), 0, panel.x); span > 0)
+                {
+                    from = xconv<feed::rev>(start, curln.style.jet(), span);
+                }
+
+                if (from >= panel.x) return;
+
+                auto area = rect{{ coor.x + from, coor.y }, { panel.x - from, 1 }};
+                dest.fill(area, cell::shaders::full(curln.fill_cell()));
+            }
+            template<class Shader>
+            void output_line(face& dest, line const& curln, twod coor, Shader shader)
+            {
+                paint_tail_fill(dest, curln, coor);
+                dest.output(curln, coor, shader);
+            }
+            void output_line(face& dest, line const& curln, twod coor)
+            {
+                paint_tail_fill(dest, curln, coor);
+                dest.output(curln, coor);
+            }
+            void set_tail_fill(line& curln, si32 start, cell const& blank)
+            {
+                start = std::clamp(start, 0, panel.x);
+                if (start >= panel.x) curln.reset_fill();
+                else                  curln.fill_to_eol(start, blank);
+            }
+            void advance_tail_fill(line& curln, si32 start, si32 count)
+            {
+                if (!curln.fills_eol()) return;
+
+                auto from = curln.fill_from();
+                auto tail = curln.fill_cell();
+                auto end = std::clamp(start + count, 0, panel.x);
+                if (start > from)
+                {
+                    if (curln.length() < from)
+                    {
+                        curln.reset_fill();
+                        return;
+                    }
+                    curln.crop(start, tail);
+                }
+                if (end > from)
+                {
+                    set_tail_fill(curln, end, tail);
+                }
+            }
+            void isolate_current_visual_row()
+            {
+                if (coord.y < y_top || coord.y > y_end) return;
+                if (panel.x <= 0 || arena <= 0) return;
+
+                auto row = coord.y - y_top;
+                if (row < 0 || row >= arena) return;
+
+                auto& mapln = index[row];
+                if (mapln.start != 0)
+                {
+                    dissect(row);
+                }
+
+                auto& current = index[row];
+                auto& curln = batch.item_by_id(current.index);
+                if (curln.wrapped() && curln.height(panel.x) > 1 && row + 1 <= arena)
+                {
+                    dissect(row + 1);
+                }
+                sync_coord();
+            }
             // scroll_buf: Snap linear selection edges to complete grapheme boundaries.
             void normalize_line_edge(line const& curln, twod& edge, bool start_edge) const
             {
@@ -4831,6 +4944,11 @@ namespace netxs::ui
                 //todo revise - nul() or dry()
                 //auto blank = brush.dry();
                 auto blank = brush.spc(); // ok
+                if (coord.y >= y_top
+                 && coord.y <= y_end)
+                {
+                    isolate_current_visual_row();
+                }
                 if (auto ctx = get_context(coord))
                 {
                     auto  start = si32{};
@@ -4868,16 +4986,29 @@ namespace netxs::ui
                         if (n == 1) // Erase to Left.
                         {
                             curln.splice<faux>(start, count, blank);
+                            if (curln.fills_eol() && start + count > curln.fill_from())
+                            {
+                                auto tail = curln.fill_cell();
+                                set_tail_fill(curln, start + count, tail);
+                            }
                             batch.recalc(curln);
                             width = curln.length();
                             auto& mapln = index[coord.y];
                             mapln.width = wraps ? std::min(panel.x, width - mapln.start)
                                                 : width;
                         }
+                        else if (n == commands::erase::line::wraps)
+                        {
+                            curln.crop(start);
+                            curln.shrink(blank);
+                            curln.reset_fill();
+                            batch.recalc(curln);
+                            index_rebuild();
+                        }
                         else
                         {
-                            curln.crop(start, blank);
-                            curln.shrink(blank);
+                            curln.crop(std::min(start, curln.length()));
+                            set_tail_fill(curln, start, blank);
                             batch.recalc(curln);
                             index_rebuild();
                         }
@@ -4894,6 +5025,7 @@ namespace netxs::ui
                 {
                     n = std::min(n, panel.x - coord.x);
                     auto& curln = batch.current();
+                    curln.reset_fill();
                     curln.insert(batch.caret, n, blank, panel.x);
                     batch.recalc(curln); // Line front is filled by blanks. No wrapping.
                     auto  width = curln.length();
@@ -4912,6 +5044,7 @@ namespace netxs::ui
                 if (auto ctx = get_context(coord))
                 {
                     auto& curln = batch.current();
+                    curln.reset_fill();
                     curln.cutoff(batch.caret, n, blank, panel.x);
                     curln.shrink(blank);
                     batch.recalc(curln);
@@ -5061,6 +5194,7 @@ namespace netxs::ui
                 {
                     n = std::min(n, panel.x - coord.x);
                     auto& curln = batch.current();
+                    curln.reset_fill();
                     //todo revise (brush != default ? see windows console)
                     //if (c == whitespace) curln.splice<faux>(batch.caret, n, blank);
                     //else                 curln.splice<true>(batch.caret, n, blank);
@@ -5142,6 +5276,7 @@ namespace netxs::ui
                     coord.y -= y_top;
                     auto& curln = batch.current();
                     auto  start = batch.caret;
+                    advance_tail_fill(curln, start, count);
                     batch.caret += count;
                     coord.x     += count;
                     if (batch.caret <= panel.x || !curln.wrapped()) // case 0.
@@ -5352,6 +5487,7 @@ namespace netxs::ui
                 {
                     auto& curln = batch.current();
                     auto  start = batch.caret;
+                    advance_tail_fill(curln, start, count);
                     auto newlen = batch.caret + count;
                     if (newlen > curln.length())
                     {
@@ -5477,7 +5613,7 @@ namespace netxs::ui
                     auto height = curln.height(panel.x);
                     auto length = curln.length();
                     auto adjust = curln.style.jet();
-                    dest.output(curln, coor, cell::shaders::flat);
+                    output_line(dest, curln, coor, cell::shaders::flat);
                     //dest.output_proxy(curln, coor, [&](auto const& coord, auto const& subblock, auto isr_to_l)
                     //{
                     //    dest.text(coord, subblock, isr_to_l, cell::shaders::fusefull);
@@ -5734,6 +5870,7 @@ namespace netxs::ui
                     auto& newln = *curit;
                     newln.splice(0, tmpln.substr(start), cell::shaders::full, brush.spc());
                     newln.shrink(brush.spc());
+                    newln.reset_fill();
                     batch.undock_base_back(tmpln);
                     batch.invite(newln);
 
@@ -5743,6 +5880,7 @@ namespace netxs::ui
                         curln = std::move(tmpln);
                         curln.trimto(start, brush.spc());
                         curln.shrink(brush.spc());
+                        curln.reset_fill();
                         batch.invite(curln);
                     }
 
@@ -6817,7 +6955,7 @@ namespace netxs::ui
                     {
                         auto& curln = *head++;
                         auto height = curln.height(panel.x);
-                        dest.output(curln, coor);
+                        output_line(dest, curln, coor);
                         coor.y += height;
                     }
                 }
