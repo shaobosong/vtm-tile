@@ -1147,7 +1147,6 @@ namespace netxs::ui
                 vt.oscer[osc_reset_crclr] = V{ p->owner.ctrack.set(osc_reset_crclr, q); };
                 vt.oscer[osc_clipboard  ] = V{ p->owner.forward_clipboard(q);           };
                 vt.oscer[osc_term_notify] = V{ p->owner.osc_notify(q);                  };
-                vt.oscer[osc_semantic_fx] = V{ p->owner.osc_marker(q);                  };
                 #undef V
 
                 // Log all unimplemented CSI commands.
@@ -1361,7 +1360,6 @@ namespace netxs::ui
             virtual void selection_drag_line_start(twod coor)             = 0;
             virtual void selection_drag_line_pull(twod coor)              = 0;
             virtual void selection_drag_clear()                           = 0;
-            virtual void selection_bymark(twod coor)                      = 0;
             virtual void selection_selall()                               = 0;
             virtual text selection_pickup(si32 selmod)                    = 0;
             virtual void selection_render(face& dest)                     = 0;
@@ -2905,7 +2903,7 @@ namespace netxs::ui
                     dragbase.head.y += n;
                     dragbase.tail.y += n;
                 }
-                canvas.scroll(top, end + 1, n, cell{ '\0' }.bgc(brush.bgc())); // We use "BCE on scrolling" in altbuf mode only (vim).
+                canvas.scroll(top, end + 1, n, cell{ '\0' }.bgc(brush.bgc()).link(brush.link())); // We use "BCE on scrolling" in altbuf mode only (vim).
             }
             // alt_screen: Horizontal tab.
             void tab(si32 n) override
@@ -3167,11 +3165,6 @@ namespace netxs::ui
                 selection_locked(faux);
                 selection_selbox(true);
                 selection_update(faux);
-            }
-            // alt_screen: Select lines between OSC marks.
-            void selection_bymark(twod /*coor*/) override
-            {
-                selection_selall();
             }
             // alt_screen: Take selected data.
             text selection_pickup(si32 selmod) override
@@ -6754,98 +6747,6 @@ namespace netxs::ui
                 selection_selbox(faux);
                 selection_update(faux);
             }
-            // scroll_buf: Select lines between OSC marks.
-            void selection_bymark(twod coor) override
-            {
-                auto scrolling_margin = batch.slide + y_top;
-                if (coor.y < scrolling_margin) // Inside the top margin.
-                {
-                    place = part::top;
-                    upmid.role = dnmid.role = grip::idle;
-                    upend.role = dnend.role = grip::idle;
-                    uptop.role = grip::base;
-                    uptop.coor = { 0, sctop - y_top };
-                    dntop.coor = { panel.x - 1, sctop - 1 };
-                }
-                else if (coor.y < scrolling_margin + arena) // Inside the scrolling region.
-                {
-                    upmid = selection_coor_to_grip(coor, grip::base);
-                    dnmid = upmid;
-                    auto curit = batch.iter_by_id(upmid.link);
-                    auto& line = *curit;
-                    auto start = screen_to_offset(line, upmid.coor);
-                    auto group = 0xFF & (line.empty() ? line.link() : line.at(start).link()); // The semantic marker is placed in the low byte of the identifier.
-                    auto check = [&](auto& c){ return (c.link() & 0xFF) != group; };
-                    if (!group) // Semantic markers are not used.
-                    {
-                        selection_selall();
-                    }
-                    else
-                    {
-                        place = part::mid;
-                        auto offup = start;
-                        auto offdn = start;
-                        auto up_rc = line.seek<feed::rev>(offup, check);
-                        auto dn_rc = line.seek<feed::fwd>(offdn, check);
-                        if (up_rc) // We are inside the command line.
-                        {
-                            upmid.coor = offset_to_screen(line, offup);
-                            dnmid.coor = offset_to_screen(line, offdn);
-                        }
-                        else // We are inside the output or prompt.
-                        {
-                            auto head = batch.begin();
-                            auto tail = batch.end();
-                            auto iter = curit;
-                            upmid.link = batch.front().index;
-                            while (head != iter)
-                            {
-                                auto& curln = *--iter;
-                                auto found = curln.empty() ? (curln.link() & 0xFF) != group : !curln.each(check);
-                                if (found)
-                                {
-                                    upmid.link = curln.index + 1;
-                                    break;
-                                }
-                            }
-                            if (!dn_rc)
-                            {
-                                auto& backln = batch.back();
-                                dnmid.link = backln.index;
-                                iter = curit;
-                                while (tail != ++iter)
-                                {
-                                    auto& curln = *iter;
-                                    auto found = curln.empty() ? (curln.link() & 0xFF) != group : !curln.each(check);
-                                    if (found)
-                                    {
-                                        dnmid.link = curln.index - 1;
-                                        break;
-                                    }
-                                }
-                            }
-                            auto& upline = batch.item_by_id(upmid.link);
-                            auto& dnline = batch.item_by_id(dnmid.link);
-                            upmid.coor = offset_to_screen(upline, 0);
-                            dnmid.coor = offset_to_screen(dnline, dn_rc ? offdn : (dnline.empty() ? 0 : dnline.length() - 1));
-                        }
-                        uptop.role = dntop.role = grip::idle;
-                        upend.role = dnend.role = grip::idle;
-                    }
-                }
-                else // Inside the bottom margin.
-                {
-                    place = part::end;
-                    upmid.role = dnmid.role = grip::idle;
-                    uptop.role = dntop.role = grip::idle;
-                    upend.role = grip::base;
-                    upend.coor = { 0, 0 };
-                    dnend.coor = { panel.x - 1, (panel.y - 1) - y_end };
-                }
-                selection_locked(faux);
-                selection_selbox(faux);
-                selection_update(faux);
-            }
             // scroll_buf: Return the indexes and a grips copy.
             auto selection_get_it() const
             {
@@ -7801,15 +7702,6 @@ namespace netxs::ui
                 dst.plot(fragment, cell::shaders::full);
             }
         }
-        // term: Set semantic marker (OSC 133).
-        void osc_marker(view data)
-        {
-            auto type = data.size() ? data.front() : 0;
-            auto& console = *target;
-            auto new_id = type | (console.brush.link() & ~0xFF);
-            console.brush.link(new_id);
-            if (io_log) log("\tOSC %% semantic marker: %type%", ansi::osc_semantic_fx, type);
-        }
         // term: Terminal notification (OSC 9).
         void osc_notify(view data)
         {
@@ -8518,8 +8410,7 @@ namespace netxs::ui
         {
             selection_drag_cancel();
             if (gear.clicked == 3) target->selection_byline(gear.coord);
-            else if (gear.clicked == 4) target->selection_bymark(gear.coord);
-            else if (gear.clicked == 5) target->selection_selall();
+            else if (gear.clicked >= 4) target->selection_selall();
             gear.dismiss();
             base::deface();
         }

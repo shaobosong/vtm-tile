@@ -2160,7 +2160,9 @@ namespace netxs
         // cell: Return dry empty cell.
         cell dry() const
         {
-            return cell{ '\0' }.clr(*this);
+            auto blank = cell{ '\0' }.clr(*this);
+            blank.link(id);
+            return blank;
         }
         friend auto& operator << (std::ostream& s, cell const& c)
         {

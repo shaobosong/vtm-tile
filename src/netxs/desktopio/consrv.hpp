@@ -1223,7 +1223,7 @@ struct impl : consrv
             auto mode = !!(server.inpmod & nt::console::inmode::insert);
             auto buff = text{};
             //auto nums = utfx{};
-            auto line = para{ 'C', cooked.ustr }; // Set semantic marker OSC 133;C.
+            auto line = para{ cooked.ustr };
             auto done = faux;
             auto crlf = 0;
             auto burn = [&]
@@ -2268,6 +2268,13 @@ struct impl : consrv
             .inv(!!(attr & COMMON_LVB_REVERSE_VIDEO  ))
             .und(!!(attr & COMMON_LVB_UNDERSCORE     ))
             .ovr(!!(attr & COMMON_LVB_GRID_HORIZONTAL));
+        return c;
+    }
+    template<class Console>
+    auto attr_to_brush(ui16 attr, Console const& scrollback)
+    {
+        auto c = attr_to_brush(attr);
+        c.link(scrollback.brush.link());
         return c;
     }
     auto brush_to_attr(cell const& brush)
@@ -3497,7 +3504,7 @@ struct impl : consrv
             input;
         };
         auto& packet = payload::cast(upload);
-        if (!direct(packet.target, [&](auto& scrollback){ scrollback.brush = attr_to_brush(packet.input.color); return faux; }))
+        if (!direct(packet.target, [&](auto& scrollback){ scrollback.brush = attr_to_brush(packet.input.color, scrollback); return faux; }))
         {
             log("\tdirect()", os::unexpected);
         }
@@ -4249,7 +4256,7 @@ struct impl : consrv
                                                { std::max(0, packet.input.clipR - packet.input.clipL + 1),
                                                  std::max(0, packet.input.clipB - packet.input.clipT + 1) }};
         auto dest = twod{ packet.input.destx, packet.input.desty };
-        auto mark = attr_to_brush(packet.input.color).txt(utf::to_utf(packet.input.wchar));
+        auto mark = attr_to_brush(packet.input.color).link(window_inst.brush.link()).txt(utf::to_utf(packet.input.wchar));
         log("\tinput.scrl.rect: ", scrl,
             "\n\tinput.clip.rect: ", clip,
             "\n\tinput.dest.coor: ", dest,
