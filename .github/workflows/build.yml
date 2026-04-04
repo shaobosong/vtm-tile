@@ -2,10 +2,6 @@ name: Build binaries
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ "tile-standalone" ]
-  pull_request:
-    branches: [ "tile-standalone" ]
 
 jobs:
   build:
