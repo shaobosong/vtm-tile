@@ -10,109 +10,108 @@
                        : parser.intro[ansi::ctrl::eol] = V{ p->hard_lf(q.pop_all(ansi::ctrl::eol));       };
                 #undef V
             }
+            // bufferbase: Register buffer-level VT command handlers (p->method()).
             template<class T>
-            static void parser_config(T& vt)
+            static void register_buffer_ops(T& vt)
             {
                 using namespace netxs::ansi;
                 #define V []([[maybe_unused]] auto& q, [[maybe_unused]] auto& p)
-                vt.csier.table_space[csi_spc_src] = V{ p->na("CSI n SP A  Shift right n columns(s)"); }; // CSI n SP A  Shift right n columns(s).
-                vt.csier.table_space[csi_spc_slc] = V{ p->na("CSI n SP @  Shift left  n columns(s)"); }; // CSI n SP @  Shift left n columns(s).
-                vt.csier.table_space[csi_spc_cst] = V{ p->owner.caret.decscusr(q(1)); }; // CSI n SP q  Set cursor style (DECSCUSR).
-                vt.csier.table_hash [csi_hsh_scp] = V{ p->na("CSI n # P  Push current palette colors onto stack, n default is 0"); }; // CSI n # P  Push current palette colors onto stack. n default is 0.
-                vt.csier.table_hash [csi_hsh_rcp] = V{ p->na("CSI n # Q  Pop  current palette colors onto stack, n default is 0"); }; // CSI n # Q  Pop  current palette colors onto stack. n default is 0.
-                vt.csier.table_hash [csi_hsh_psh] = V{ p->pushsgr(); }; // CSI # {  Push current SGR attributes onto stack.
-                vt.csier.table_hash [csi_hsh_pop] = V{ p->popsgr();  }; // CSI # }  Pop  current SGR attributes from stack.
-                vt.csier.table_excl [csi_exl_rst] = V{ p->owner.decstr( ); }; // CSI ! p  Soft terminal reset (DECSTR).
-
-                vt.csier.table_dollarsn[csi_dlr_fra] = V{ p->fra(q); }; // CSI Char ; Top ; Left ; Bottom ; Right $ x  — Fill rectangular area (DECFRA).
-                vt.csier.table_dollarsn[csi_dlr_cra] = V{ p->owner.deccra(q); }; // CSI srcTop ; srcLeft ; srcBottom ; srcRight ; srcBuffIndex ; dstTop ; dstLeft ; dstBuffIndex $ v  — Copy rectangular area (DECCRA). BuffIndex: 1..6, 1 is default index. All coords are 1-based.
-
-                vt.csier.sgr_palette_color = [](bufferbase*& p, byte index) -> argb
-                {
-                    return p->owner.ctrack.color[index];
-                };
+                vt.csier.table_space[csi_spc_src] = V{ p->na("CSI n SP A  Shift right n columns(s)"); }; // CSI n SP A
+                vt.csier.table_space[csi_spc_slc] = V{ p->na("CSI n SP @  Shift left  n columns(s)"); }; // CSI n SP @
+                vt.csier.table_hash [csi_hsh_scp] = V{ p->na("CSI n # P  Push current palette colors onto stack, n default is 0"); };
+                vt.csier.table_hash [csi_hsh_rcp] = V{ p->na("CSI n # Q  Pop  current palette colors onto stack, n default is 0"); };
+                vt.csier.table_hash [csi_hsh_psh] = V{ p->pushsgr(); }; // CSI # {
+                vt.csier.table_hash [csi_hsh_pop] = V{ p->popsgr();  }; // CSI # }
+                vt.csier.table_dollarsn[csi_dlr_fra] = V{ p->fra(q); }; // CSI Char ; Top ; Left ; Bottom ; Right $ x  (DECFRA).
                 vt.csier.sgr_unsupported = [](si32 code, bufferbase*&)
                 {
                     log("%%SGR %val% attribute is not supported", prompt::term, code);
                 };
-
-                vt.csier.table[csi_cuu] = V{ p-> up(q(1)); }; // CSI n A  (CUU)
-                vt.csier.table[csi_cud] = V{ p-> dn(q(1)); }; // CSI n B  (CUD)
-                vt.csier.table[csi_cuf] = V{ p->cuf(q(1)); }; // CSI n C  (CUF)  Negative values can wrap to the prev line.
-                vt.csier.table[csi_cub] = V{ p->cub(q(1)); }; // CSI n D  (CUB)  Negative values can wrap to the next line.
-
-                vt.csier.table[csi_cht]           = V{ p->tab( q(1)); }; // CSI n I  Cursor forward  n tabs, default n=1.
-                vt.csier.table[csi_cbt]           = V{ p->tab(-q(1)); }; // CSI n Z  Cursor backward n tabs, default n=1.
-                vt.csier.table[csi_tbc]           = V{ p->tbc( q(0)); }; // CSI n g  Clear tabstops, default n=0.
-                vt.csier.table[csi_rep]           = V{ p->rep( q(1)); }; // CSI n b  Repeat the preceding character n times, default n=1.
-                vt.csier.table_quest[csi_qst_rtb] = V{ p->rtb(     ); }; // CSI ? W  Reset tabstops to the 8 column defaults.
-                vt.intro[ctrl::esc][esc_hts]      = V{ p->stb(     ); }; // ESC H    Place tabstop at the current column.
-
-                vt.csier.table[csi_cud2]= V{ p->dn ( q(1)); }; // CSI n e  Vertical position relative. Move cursor down (VPR).
-
-                vt.csier.table[csi_cnl] = V{ p->cr(); p->dn(q(1)); }; // CSI n E  Move n lines down and to the leftmost column.
-                vt.csier.table[csi_cpl] = V{ p->cr(); p->up(q(1)); }; // CSI n F  Move n lines up   and to the leftmost column.
-                vt.csier.table[csi_chx] = V{ p->chx( q(1)); }; // CSI n G  Move cursor hz absolute.
-                vt.csier.table[csi_chy] = V{ p->chy( q(1)); }; // CSI n d  Move cursor vt absolute.
-                vt.csier.table[csi_cup] = V{ p->cup( q   ); }; // CSI y ; x H (1-based)
-                vt.csier.table[csi_hvp] = V{ p->cup( q   ); }; // CSI y ; x f (1-based)
-
-                vt.csier.table[csi_dch] = V{ p->dch( q(1)); };  // CSI n P  Delete n chars (DCH).
-                vt.csier.table[csi_ech] = V{ p->ech( q(1)); };  // CSI n X  Erase n chars (ECH).
-                vt.csier.table[csi_ich] = V{ p->ins( q(1)); };  // CSI n @  Insert n chars (ICH).
-
+                vt.csier.table[csi_cuu]  = V{ p-> up(q(1)); }; // CSI n A  (CUU)
+                vt.csier.table[csi_cud]  = V{ p-> dn(q(1)); }; // CSI n B  (CUD)
+                vt.csier.table[csi_cuf]  = V{ p->cuf(q(1)); }; // CSI n C  (CUF)
+                vt.csier.table[csi_cub]  = V{ p->cub(q(1)); }; // CSI n D  (CUB)
+                vt.csier.table[csi_cud2] = V{ p-> dn(q(1)); }; // CSI n e  (VPR)
+                vt.csier.table[csi_cnl]  = V{ p->cr(); p->dn(q(1)); }; // CSI n E
+                vt.csier.table[csi_cpl]  = V{ p->cr(); p->up(q(1)); }; // CSI n F
+                vt.csier.table[csi_chx]  = V{ p->chx( q(1)); }; // CSI n G
+                vt.csier.table[csi_chy]  = V{ p->chy( q(1)); }; // CSI n d
+                vt.csier.table[csi_cup]  = V{ p->cup( q   ); }; // CSI y ; x H
+                vt.csier.table[csi_hvp]  = V{ p->cup( q   ); }; // CSI y ; x f
+                vt.csier.table[csi_cht]           = V{ p->tab( q(1)); }; // CSI n I
+                vt.csier.table[csi_cbt]           = V{ p->tab(-q(1)); }; // CSI n Z
+                vt.csier.table[csi_tbc]           = V{ p->tbc( q(0)); }; // CSI n g
+                vt.csier.table[csi_rep]           = V{ p->rep( q(1)); }; // CSI n b
+                vt.csier.table_quest[csi_qst_rtb] = V{ p->rtb(     ); }; // CSI ? W
+                vt.intro[ctrl::esc][esc_hts]      = V{ p->stb(     ); }; // ESC H
+                vt.csier.table[csi_dch] = V{ p->dch( q(1)); };  // CSI n P  (DCH)
+                vt.csier.table[csi_ech] = V{ p->ech( q(1)); };  // CSI n X  (ECH)
+                vt.csier.table[csi_ich] = V{ p->ins( q(1)); };  // CSI n @  (ICH)
                 vt.csier.table[csi__ed] = V{ p-> ed( q(0)); }; // CSI n J
                 vt.csier.table[csi__el] = V{ p-> el( q(0)); }; // CSI n K
-                vt.csier.table[csi__il] = V{ p-> il( q(1)); }; // CSI n L  Insert n lines (IL).
-                vt.csier.table[csi__dl] = V{ p-> dl( q(1)); }; // CSI n M  Delete n lines (DL).
-                vt.csier.table[csi__sd] = V{ p->scl( q(1)); }; // CSI n T  Scroll down by n lines, scrolled out lines are lost.
-                vt.csier.table[csi__su] = V{ p->scl(-q(1)); }; // CSI n S  Scroll   up by n lines, scrolled out lines are pushed to the scrollback.
-                vt.csier.table[csi_scp] = V{ p->scp(     ); }; // CSI   s  Save cursor position.
-                vt.csier.table[csi_rcp] = V{ p->rcp(     ); }; // CSI   u  Restore cursor position.
-
-                vt.csier.table[decstbm] = V{ p->scr( q   ); }; // CSI r; b r  Set scrolling region (t/b: top+bottom).
-
-                vt.csier.table[csi_win] = V{ p->owner.wtrack.manage(q   ); }; // CSI n;m;k t  Terminal window options (XTWINOPS).
-                vt.csier.table[csi_dsr] = V{ p->owner.wtrack.report(q(6)); }; // CSI n n  Device status report (DSR).
-                vt.csier.table[csi_pda] = V{ p->owner.wtrack.device(q(0)); }; // CSI n c  Send device attributes (Primary DA).
-
-                // Do not use non-standard vt.
-                //vt.csier.table[csi_ccc][ccc_cup] = V{ p->cup0(q); }; // CCC_CUP
-                //vt.csier.table[csi_ccc][ccc_chx] = V{ p->chx0(q.subarg(0)); }; // CCC_CHX
-                //vt.csier.table[csi_ccc][ccc_chy] = V{ p->chy0(q.subarg(0)); }; // CCC_CHY
-                vt.csier.table[csi_ccc][ccc_sbs] = V{ p->owner.sbsize(q); }; // CCC_SBS: Set scrollback size.
-                vt.csier.table[csi_ccc][ccc_rst] = V{ p->owner.setdef();  }; // CCC_RST: Reset to defaults.
-                vt.csier.table[csi_ccc][ccc_sgr] = V{ p->owner.setsgr(q); }; // CCC_SGR: Set default SGR.
-                vt.csier.table[csi_ccc][ccc_lsr] = V{ p->owner.setlsr(q.subarg(1)); };           // CCC_LSR: Enable line style reporting.
-                vt.csier.table[csi_ccc][ccc_sel] = V{ p->owner.selection_selmod(q.subarg(0)); }; // CCC_SEL: Set selection mode.
-                vt.csier.table[csi_ccc][ccc_pad] = V{ p->setpad(q.subarg(-1)); };                // CCC_PAD: Set left/right padding for scrollback.
-
-                vt.intro[ctrl::esc][esc_ind   ] = V{ p->lf(1); };          // ESC D  Index. Cursor down and scroll if needed (IND).
-                vt.intro[ctrl::esc][esc_ir    ] = V{ p->ri();  };          // ESC M  Reverse index (RI).
-                vt.intro[ctrl::esc][esc_sc    ] = V{ p->scp(); };          // ESC 7  (same as CSI s) Save cursor position.
-                vt.intro[ctrl::esc][esc_rc    ] = V{ p->rcp(); };          // ESC 8  (same as CSI u) Restore cursor position.
-                vt.intro[ctrl::esc][esc_ris   ] = V{ p->owner.decstr(); }; // ESC c  Reset to initial state (same as DECSTR).
-                vt.intro[ctrl::esc][esc_nel   ] = V{ p->hard_lf(1, true); }; // ESC E  Next line (NEL): hard line break + move down.
-                vt.intro[ctrl::esc][esc_decdhl] = V{ p->dhl(q); };         // ESC # ...  ESC # 3, ESC # 4, ESC # 5, ESC # 6, ESC # 8
-
-                vt.intro[ctrl::esc][esc_apc   ] = V{ p->apc(q); };          // ESC _ ... ST  APC.
-                vt.intro[ctrl::esc][esc_dcs   ] = V{ p->msg(esc_dcs, q); }; // ESC P ... ST  DCS.
-                vt.intro[ctrl::esc][esc_sos   ] = V{ p->msg(esc_sos, q); }; // ESC X ... ST  SOS.
-                vt.intro[ctrl::esc][esc_pm    ] = V{ p->msg(esc_pm , q); }; // ESC ^ ... ST  PM.
-
+                vt.csier.table[csi__il] = V{ p-> il( q(1)); }; // CSI n L  (IL)
+                vt.csier.table[csi__dl] = V{ p-> dl( q(1)); }; // CSI n M  (DL)
+                vt.csier.table[csi__sd] = V{ p->scl( q(1)); }; // CSI n T
+                vt.csier.table[csi__su] = V{ p->scl(-q(1)); }; // CSI n S
+                vt.csier.table[csi_scp] = V{ p->scp(     ); }; // CSI   s
+                vt.csier.table[csi_rcp] = V{ p->rcp(     ); }; // CSI   u
+                vt.csier.table[decstbm] = V{ p->scr( q   ); }; // CSI r; b r  (DECSTBM)
+                vt.csier.table[csi_ccc][ccc_pad] = V{ p->setpad(q.subarg(-1)); }; // CCC_PAD
+                vt.intro[ctrl::esc][esc_ind   ] = V{ p->lf(1); };             // ESC D  (IND)
+                vt.intro[ctrl::esc][esc_ir    ] = V{ p->ri();  };             // ESC M  (RI)
+                vt.intro[ctrl::esc][esc_sc    ] = V{ p->scp(); };             // ESC 7
+                vt.intro[ctrl::esc][esc_rc    ] = V{ p->rcp(); };             // ESC 8
+                vt.intro[ctrl::esc][esc_nel   ] = V{ p->hard_lf(1, true); };  // ESC E  (NEL)
+                vt.intro[ctrl::esc][esc_decdhl] = V{ p->dhl(q); };            // ESC # ...
+                vt.intro[ctrl::esc][esc_apc   ] = V{ p->apc(q); };            // ESC _ ... ST  (APC)
+                vt.intro[ctrl::esc][esc_dcs   ] = V{ p->msg(esc_dcs, q); };   // ESC P ... ST  (DCS)
+                vt.intro[ctrl::esc][esc_sos   ] = V{ p->msg(esc_sos, q); };   // ESC X ... ST  (SOS)
+                vt.intro[ctrl::esc][esc_pm    ] = V{ p->msg(esc_pm , q); };   // ESC ^ ... ST  (PM)
                 vt.intro[ctrl::bs ] = V{ p->cub(q.pop_all(ctrl::bs )); };
-                vt.intro[ctrl::del] = V{ p->del(q.pop_all(ctrl::del)); }; // Move backward and delete character under cursor with wrapping.
+                vt.intro[ctrl::del] = V{ p->del(q.pop_all(ctrl::del)); };
                 vt.intro[ctrl::tab] = V{ p->tab(q.pop_all(ctrl::tab)); };
                 vt.intro[ctrl::eol] = V{ p->hard_lf(q.pop_all(ctrl::eol)); }; // LF
-                vt.intro[ctrl::vt ] = V{ p->hard_lf(q.pop_all(ctrl::vt )); }; // VT same as LF
-                vt.intro[ctrl::ff ] = V{ p->hard_lf(q.pop_all(ctrl::ff )); }; // FF same as LF
-                vt.intro[ctrl::cr ] = V{ p->cr();                         }; // CR
-
-                vt.csier.table_quest[dec_set] = V{ p->owner.decset(q); };
-                vt.csier.table_quest[dec_rst] = V{ p->owner.decrst(q); };
-                vt.csier.table[dec_set] = V{ p->owner.modset(q); }; // ESC [ n h
-                vt.csier.table[dec_rst] = V{ p->owner.modrst(q); }; // ESC [ n l
-
+                vt.intro[ctrl::vt ] = V{ p->hard_lf(q.pop_all(ctrl::vt )); }; // VT
+                vt.intro[ctrl::ff ] = V{ p->hard_lf(q.pop_all(ctrl::ff )); }; // FF
+                vt.intro[ctrl::cr ] = V{ p->cr();                         };   // CR
+                #undef V
+            }
+            // bufferbase: Register term-level VT command handlers (p->owner.method()).
+            template<class T>
+            static void register_term_ops(T& vt)
+            {
+                using namespace netxs::ansi;
+                #define V []([[maybe_unused]] auto& q, [[maybe_unused]] auto& p)
+                vt.csier.table_excl [csi_exl_rst]    = V{ p->owner.decstr( ); };   // CSI ! p  (DECSTR)
+                vt.intro[ctrl::esc][esc_ris        ] = V{ p->owner.decstr(); };     // ESC c  (RIS)
+                vt.csier.table_dollarsn[csi_dlr_cra] = V{ p->owner.deccra(q); };    // CSI ... $ v  (DECCRA)
+                vt.csier.table_quest[dec_set] = V{ p->owner.decset(q); };           // CSI ? n h
+                vt.csier.table_quest[dec_rst] = V{ p->owner.decrst(q); };           // CSI ? n l
+                vt.csier.table[dec_set] = V{ p->owner.modset(q); };                 // CSI n h
+                vt.csier.table[dec_rst] = V{ p->owner.modrst(q); };                 // CSI n l
+                vt.csier.table[csi_ccc][ccc_sbs] = V{ p->owner.sbsize(q); };                      // CCC_SBS
+                vt.csier.table[csi_ccc][ccc_rst] = V{ p->owner.setdef();  };                      // CCC_RST
+                vt.csier.table[csi_ccc][ccc_sgr] = V{ p->owner.setsgr(q); };                      // CCC_SGR
+                vt.csier.table[csi_ccc][ccc_lsr] = V{ p->owner.setlsr(q.subarg(1)); };            // CCC_LSR
+                vt.csier.table[csi_ccc][ccc_sel] = V{ p->owner.selection_selmod(q.subarg(0)); };   // CCC_SEL
+                vt.oscer[osc_clipboard  ] = V{ p->owner.forward_clipboard(q); };
+                vt.oscer[osc_term_notify] = V{ p->owner.osc_notify(q);        };
+                #undef V
+            }
+            // bufferbase: Register tracker-level VT command handlers (p->owner.{wtrack,ctrack,caret}).
+            template<class T>
+            static void register_tracker_ops(T& vt)
+            {
+                using namespace netxs::ansi;
+                #define V []([[maybe_unused]] auto& q, [[maybe_unused]] auto& p)
+                vt.csier.table_space[csi_spc_cst] = V{ p->owner.caret.decscusr(q(1)); }; // CSI n SP q  (DECSCUSR)
+                vt.csier.sgr_palette_color = [](bufferbase*& p, byte index) -> argb
+                {
+                    return p->owner.ctrack.color[index];
+                };
+                vt.csier.table[csi_win] = V{ p->owner.wtrack.manage(q   ); }; // CSI n;m;k t  (XTWINOPS)
+                vt.csier.table[csi_dsr] = V{ p->owner.wtrack.report(q(6)); }; // CSI n n  (DSR)
+                vt.csier.table[csi_pda] = V{ p->owner.wtrack.device(q(0)); }; // CSI n c  (Primary DA)
                 vt.oscer[osc_label_title] = V{ p->owner.wtrack.set(osc_label_title, q); };
                 vt.oscer[osc_label      ] = V{ p->owner.wtrack.set(osc_label,       q); };
                 vt.oscer[osc_title      ] = V{ p->owner.wtrack.set(osc_title,       q); };
@@ -127,9 +126,15 @@
                 vt.oscer[osc_reset_fgclr] = V{ p->owner.ctrack.set(osc_reset_fgclr, q); };
                 vt.oscer[osc_reset_bgclr] = V{ p->owner.ctrack.set(osc_reset_bgclr, q); };
                 vt.oscer[osc_reset_crclr] = V{ p->owner.ctrack.set(osc_reset_crclr, q); };
-                vt.oscer[osc_clipboard  ] = V{ p->owner.forward_clipboard(q);           };
-                vt.oscer[osc_term_notify] = V{ p->owner.osc_notify(q);                  };
                 #undef V
+            }
+            // bufferbase: Register all VT command handlers and fill unimplemented slots with logging stubs.
+            template<class T>
+            static void parser_config(T& vt)
+            {
+                register_buffer_ops(vt);
+                register_term_ops(vt);
+                register_tracker_ops(vt);
 
                 // Log all unimplemented CSI commands.
                 for (auto i = 0; i < 0x100; ++i)
@@ -140,7 +145,7 @@
                         proc = [i](auto& q, auto& p){ p->not_implemented_CSI(i, q); };
                     }
                 }
-                auto& esc_lookup = vt.intro[ctrl::esc];
+                auto& esc_lookup = vt.intro[netxs::ansi::ctrl::esc];
                 // Log all unimplemented ESC+rest.
                 for (auto i = 0; i < 0x100; ++i)
                 {
