@@ -1330,6 +1330,7 @@
             switch (gear.payload)
             {
                 case keybd::type::keypress:
+                    if (gear.doinput()) selection_cancel();
                     if (defcfg.resetonkey && gear.doinput())
                     {
                         base::riseup(tier::release, e2::form::animate::reset, 0); // Reset scroll animation.
@@ -1342,6 +1343,7 @@
                     break;
                 case keybd::type::imeinput:
                 case keybd::type::keypaste:
+                    selection_cancel();
                     _paste(gear.cluster);
                     gear.dismiss();
                     break;
