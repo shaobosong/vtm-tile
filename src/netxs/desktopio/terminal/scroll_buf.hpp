@@ -1168,7 +1168,7 @@
                 }
                 while (n-- > 0)
                 {
-                    break_soft_wrap_before_hard_lf();
+                    // break_soft_wrap_before_hard_lf();
                     bufferbase::_lf(1);
                     sync_coord();
                 }
@@ -1675,11 +1675,9 @@
                 //todo revise - nul() or dry()
                 //auto blank = brush.dry();
                 auto blank = brush.spc(); // ok
-                if (coord.y >= y_top
-                 && coord.y <= y_end)
-                {
-                    isolate_current_visual_row();
-                }
+                // Note: isolate_current_visual_row() was removed here.
+                // For wrapped lines on non-last visual rows, splice is used
+                // instead of crop to avoid splitting the logical line.
                 if (auto ctx = get_context(coord))
                 {
                     auto  start = si32{};
@@ -1731,7 +1729,6 @@
                         else if (n == commands::erase::line::wraps)
                         {
                             curln.crop(start);
-                            curln.shrink(blank);
                             curln.reset_fill();
                             batch.recalc(curln);
                             index_rebuild();
@@ -1776,8 +1773,9 @@
                 {
                     auto& curln = batch.current();
                     curln.reset_fill();
+                    auto old_len = curln.length();
                     curln.cutoff(batch.caret, n, blank, panel.x);
-                    curln.shrink(blank);
+                    curln.shrink(blank, 0, std::max(0, old_len - n));
                     batch.recalc(curln);
                     index_rebuild();
                 }
@@ -1933,7 +1931,6 @@
                     if ((c == '\0' || c == ' ') && batch.caret + n >= curln.length())
                     {
                         curln.crop(batch.caret, blank);
-                        curln.shrink(blank);
                         batch.recalc(curln);
                         index_rebuild();
                     }
@@ -2488,7 +2485,6 @@
                     if (fresh)
                     {
                         curln.trimto(start, brush.spc());
-                        curln.shrink(brush.spc());
                     }
                     else
                     {
@@ -2498,13 +2494,11 @@
                             mapln.width = panel.x;
                             auto x = std::min(coor.x, panel.x); // Trim unwrapped lines by viewport.
                             curln.crop(start + x, blank);
-                            curln.shrink(blank);
                         }
                         else
                         {
                             mapln.width = coor.x;
                             curln.trimto(start + coor.x, brush.spc());
-                            curln.shrink(brush.spc());
                         }
                         assert(mapln.start == 0 || curln.wrapped());
                     }
@@ -2600,7 +2594,6 @@
 
                     auto& newln = *curit;
                     newln.splice(0, tmpln.substr(start), cell::shaders::full, brush.spc());
-                    newln.shrink(brush.spc());
                     newln.reset_fill();
                     batch.undock_base_back(tmpln);
                     batch.invite(newln);
@@ -2610,7 +2603,6 @@
                         auto& curln = *(curit - 1);
                         curln = std::move(tmpln);
                         curln.trimto(start, brush.spc());
-                        curln.shrink(brush.spc());
                         curln.reset_fill();
                         batch.invite(curln);
                     }
