@@ -3537,12 +3537,39 @@
                 vpos += 1 + dncur.coor.y;
                 return std::pair{ vpos, summ };
             }
-            // scroll_buf: Calc selection offset in cells.
+            // scroll_buf: Content width excluding trailing whitespace cells.
+            static auto selection_content_width(auto const& curln)
+            {
+                auto width = curln.length();
+                if (!width) return width;
+                auto head = curln.begin();
+                auto tail = head + width;
+                while (tail != head && (tail - 1)->isspc()) --tail;
+                return static_cast<si32>(tail - head);
+            }
+            // scroll_buf: Compute logical selection range [start, end) for a line.
+            //             is_head: this is the first selected line (start clamped by upcur).
+            //             is_tail: this is the last selected line  (end   clamped by dncur).
+            auto selection_line_range(auto& curln, bool is_head, bool is_tail, auto& upcur, auto& dncur)
+            {
+                auto cw = selection_content_width(curln);
+                auto start = si32{0};
+                auto end   = cw;
+                if (cw)
+                {
+                    if (is_head) start = selection_offset(curln, upcur.coor, 0);
+                    if (is_tail) end   = selection_offset(curln, dncur.coor, 1);
+                }
+                return std::pair{ start, end };
+            }
+            // scroll_buf: Calc selection offset in cells (clamped to content width).
             auto selection_offset(auto& curln, auto coor, auto close)
             {
                 auto align = curln.style.jet();
                 auto wraps = curln.style.wrp();
-                auto width = curln.length();
+                auto width = curln.length();   // Visual layout uses full length.
+                auto cwidth = selection_content_width(curln); // Selection boundary.
+                if (!cwidth) return 0;
                 if (wraps == wrap::on)
                 {
                     coor.x = std::clamp(coor.x, -close, -close + panel.x);
@@ -3564,7 +3591,7 @@
                         else      /* bias::center */ coor.x -= panel.x / 2 - width / 2;
                     }
                 }
-                return coor.x + coor.y * panel.x + close;
+                return std::clamp(coor.x + coor.y * panel.x + close, 0, cwidth);
             }
             // scroll_buf: Make a viewport screen copy.
             void do_viewport_copy(face& dest) override
@@ -3640,26 +3667,33 @@
                 {
                     auto field = rect{ dot_00, dot_01 };
                     auto accum = cell{};
+                    auto emit = [&](auto& curln, bool is_head, bool is_tail)
+                    {
+                        auto [start, end] = selection_line_range(curln, is_head, is_tail, upcur, dncur);
+                        field.coor.x = start;
+                        field.size.x = end - start;
+                    };
                     auto build = [&](auto print)
                     {
                         if (i_top == i_end)
                         {
                             auto& headln = *head++;
-                            field.coor.x = selection_offset(headln, upcur.coor, 0);
-                            field.size.x = selection_offset(headln, dncur.coor, 1);
-                            field.size.x = field.size.x - field.coor.x;
+                            emit(headln, true, true);
                             print(headln);
                         }
                         else
                         {
                             auto& headln = *head++;
-                            field.coor.x = selection_offset(headln, upcur.coor, 0);
-                            field.size.x = dot_mx.x;
+                            emit(headln, true, false);
                             print(headln);
-                            field.coor.x = 0;
-                            while (head != tail) print(*head++);
+                            while (head != tail)
+                            {
+                                auto& midln = *head++;
+                                emit(midln, false, false);
+                                print(midln);
+                            }
                             auto& lastln = *head++;
-                            field.size.x = selection_offset(lastln, dncur.coor, 1);
+                            emit(lastln, false, true);
                             print(lastln);
                         }
                         if (yield.length()) yield.pop_back(); // Pop last eol.
@@ -3670,6 +3704,7 @@
                     {
                         build([&](auto& curln)
                         {
+                            if (field.size.x <= 0) { yield.eol(); return; }
                             auto block = escx{};
                             block.s11n<faux, faux, faux>(curln, field, accum);
                             if (block.size() > 0) yield.add(block);
@@ -3681,6 +3716,7 @@
                         auto s = deco{};
                         build([&](auto& curln)
                         {
+                            if (field.size.x <= 0) { yield.eol(); return; }
                             if (s != curln.style)
                             {
                                 if (auto wrp = curln.style.wrp(); s.wrp() != wrp) yield.wrp(wrp);
@@ -3769,64 +3805,70 @@
                     }
                     else
                     {
-                        if (curtop.y >  curend.y
-                        || (curtop.y == curend.y && curtop.x > curend.x))
-                        {
-                            std::swap(curtop, curend);
-                        }
                         dest.vsize(batch.vsize + sctop + scend); // Include margins and bottom oversize.
                         auto coor = twod{ 0, batch.slide - batch.ancdy + y_top };
                         auto stop = batch.slide + arena + y_top;
                         auto head = batch.iter_by_id(batch.ancid);
                         auto tail = batch.end();
+                        // Reuse the same logical boundary computation as copy.
+                        auto tempvr2 = selection_get_it();
+                        auto i_top = std::get<0>(tempvr2);
+                        auto i_end = std::get<1>(tempvr2);
+                        if (i_top == -1) return;
+                        auto upcur = std::get<2>(tempvr2);
+                        auto dncur = std::get<3>(tempvr2);
+                        auto sel_top_id = (batch.begin() + i_top)->index;
+                        auto sel_end_id = (batch.begin() + i_end)->index;
                         auto work = [&](auto fill)
                         {
+                            auto cur_start   = si32{0}; // Logical selection start for current line.
+                            auto cur_end     = si32{0}; // Logical selection end for current line.
+                            auto cur_y0      = si32{0}; // Viewport y of current line start.
+                            auto cur_has_eol = faux;    // Whether this line has a trailing newline (every line except the last).
                             auto draw = [&](auto const& coord, auto const& subblock, auto /*isr_to_l*/)
                             {
-                                     if (coord.y < curtop.y) return;
-                                else if (coord.y > curend.y) coor.y = stop;
-                                else
-                                {
-                                    auto block = rect{ coord, { subblock.length(), 1 }};
-                                    if (coord.y == curtop.y)
-                                    {
-                                        auto width = curtop.y == curend.y ? curend.x - curtop.x + 1
-                                                                          : dot_mx.x;
-                                        auto bound = rect{ curtop, { width, 1 }}.normalize();
-                                        block.trimby(bound);
-                                    }
-                                    else if (coord.y == curend.y)
-                                    {
-                                        auto bound = rect{ curend, { -dot_mx.x, 1 }}.normalize();
-                                        bound.size.x += 1;
-                                        block.trimby(bound);
-                                    }
-                                    block.trimby(clip);
-                                    dest.fill(block, fill);
-                                }
+                                auto sub_len    = (si32)subblock.length();
+                                auto visual_row = coord.y - cur_y0;
+                                auto row_start  = visual_row * panel.x;
+                                auto row_end    = row_start + sub_len;
+                                // Extend by 1 cell for the eol indicator on the visual row where content ends.
+                                auto eol_extra  = (cur_has_eol && cur_end <= row_end) ? 1 : 0;
+                                auto sel_begin  = std::clamp(cur_start - row_start, 0, sub_len + eol_extra);
+                                auto sel_final  = std::clamp(cur_end + eol_extra - row_start, 0, sub_len + eol_extra);
+                                if (sel_begin >= sel_final) return;
+                                auto block = rect{ { coord.x + sel_begin, coord.y }, { sel_final - sel_begin, 1 }};
+                                block.trimby(clip);
+                                dest.fill(block, fill);
                             };
                             while (head != tail && coor.y < stop)
                             {
                                 auto& curln = *head;
-                                auto length = curln.length();
+                                auto  cur_i = batch.index_by_id(curln.index);
                                 auto height = curln.height(panel.x);
-                                if (length)
+                                if (cur_i >= i_top && cur_i <= i_end)
                                 {
-                                    dest.output_proxy(curln, coor, draw);
-                                }
-                                else
-                                {
-                                    auto align = curln.style.jet();
-                                    auto coord = coor;
-                                    switch (align)
+                                    auto is_head = (cur_i == i_top);
+                                    auto is_tail = (cur_i == i_end);
+                                    auto has_eol = !is_tail;
+                                    auto [start, end] = selection_line_range(curln, is_head, is_tail, upcur, dncur);
+                                    if (end > start)
                                     {
-                                        case bias::none:
-                                        case bias::left:   break;
-                                        case bias::right:  coord.x += panel.x - 1; break;
-                                        case bias::center: coord.x += panel.x / 2; break;
+                                        cur_start   = start;
+                                        cur_end     = end;
+                                        cur_y0      = coor.y;
+                                        cur_has_eol = has_eol;
+                                        dest.output_proxy(curln, coor, draw);
                                     }
-                                    struct { auto length() const { return 1; }} empty;
-                                    draw(coord, empty, faux);
+                                    else if (has_eol) // Empty line with an eol: highlight 1 cell at column 0.
+                                    {
+                                        auto eol_block = rect{ coor, dot_11 };
+                                        eol_block.trimby(clip);
+                                        dest.fill(eol_block, fill);
+                                    }
+                                }
+                                else if (cur_i > i_end)
+                                {
+                                    coor.y = stop; // Past selection, terminate.
                                 }
                                 coor.y += height;
                                 ++head;
@@ -4147,11 +4189,17 @@
                         auto find = [&](auto tail, auto proc)
                         {
                             auto accum = ahead ? curln.height(panel.x)
-                                               : si32{0};
+                                                : si32{0};
                             while (head != tail)
                             {
                                 auto& line = proc(head);
-                                from = ahead ? 0 : line.length();
+                                auto cw = selection_content_width(line);
+                                if (!cw) // Skip lines with no content.
+                                {
+                                    accum += line.height(panel.x);
+                                    continue;
+                                }
+                                from = ahead ? 0 : cw;
                                 if (resx(line))
                                 {
                                     delta.y += ahead ?-accum
