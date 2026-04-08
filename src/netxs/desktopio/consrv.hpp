@@ -2269,9 +2269,11 @@ struct impl : consrv
     auto attr_to_brush(ui16 attr)
     {
         auto& colors = uiterm.ctrack.color;
+        auto fg_idx = netxs::swap_bits<0, 2>(attr      & 0x000Fu);
+        auto bg_idx = netxs::swap_bits<0, 2>(attr >> 4 & 0x000Fu);
         auto c = cell{ whitespace }
-            .fgc(colors[netxs::swap_bits<0, 2>(attr      & 0x000Fu)]) // FOREGROUND_ . . .
-            .bgc(colors[netxs::swap_bits<0, 2>(attr >> 4 & 0x000Fu)]) // BACKGROUND_ . . .
+            .fgc(fg_idx == 7 ? uiterm.defclr.fgc() : colors[fg_idx]) // FOREGROUND_: Use configured default for Win32 default fg index.
+            .bgc(bg_idx == 0 ? uiterm.defclr.bgc() : colors[bg_idx]) // BACKGROUND_: Use configured default for Win32 default bg index.
             .inv(!!(attr & COMMON_LVB_REVERSE_VIDEO  ))
             .und(!!(attr & COMMON_LVB_UNDERSCORE     ))
             .ovr(!!(attr & COMMON_LVB_GRID_HORIZONTAL));
