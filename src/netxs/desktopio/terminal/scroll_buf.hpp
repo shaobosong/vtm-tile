@@ -1135,7 +1135,51 @@
             void   dl(si32  n) override { bufferbase::  dl(n); sync_coord(); }
             void   up(si32  n) override { bufferbase::  up(n); sync_coord(); }
             void   dn(si32  n) override { bufferbase::  dn(n); sync_coord(); }
-            void   lf(si32  n) override { bufferbase::  lf(n); sync_coord(); }
+            void   lf(si32  n) override
+            {
+                parser::flush_data();
+                trim_trailing_default_spaces();
+                bufferbase::_lf(n);
+                sync_coord();
+            }
+            // scroll_buf: Trim trailing whitespace cells that match the default brush
+            //             background from the current line. This removes padding spaces
+            //             injected by PowerShell's Format-Table engine (which pads each
+            //             line to Console.BufferWidth via WriteConsole).
+            void trim_trailing_default_spaces()
+            {
+                if (coord.y < y_top || coord.y > y_end) return;
+                auto row = coord.y - y_top;
+                if (row < 0 || row >= arena) return;
+                auto& curln = batch.current();
+                auto  len   = curln.length();
+                if (len <= 0) return;
+                auto  defbg = brush.spare.bgc().token;
+                auto  head  = curln.begin();
+                auto  pos   = len;
+                while (pos > 0)
+                {
+                    auto& c = *(head + pos - 1);
+                    if (!c.isspc())                  break;
+                    if (c.bgc().token != defbg)      break;
+                    if (c.inv() || c.und() || c.ovr()
+                     || c.stk() || c.blk())          break;
+                    --pos;
+                }
+                if (pos == len) return; // Nothing to trim.
+                curln.crop(pos);
+                curln.reset_fill(); // Clear any virtual tail fill.
+                batch.recalc(curln);
+                auto& mapln = index[row];
+                if (!curln.wrapped())
+                {
+                    mapln.width = curln.length();
+                }
+                else
+                {
+                    index_rebuild();
+                }
+            }
             void break_soft_wrap_before_hard_lf()
             {
                 if (coord.y < y_top || coord.y > y_end) return;
@@ -1159,6 +1203,7 @@
             void hard_lf(si32 n, bool with_cr = faux) override
             {
                 parser::flush_data();
+                trim_trailing_default_spaces();
                 if (with_cr) cr();
                 if (n <= 0)
                 {
