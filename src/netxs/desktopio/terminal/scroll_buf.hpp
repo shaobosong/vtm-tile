@@ -1728,10 +1728,25 @@
                         }
                         else if (n == commands::erase::line::wraps)
                         {
+                            auto curid = curln.index;
                             curln.crop(start);
                             curln.reset_fill();
                             batch.recalc(curln);
                             index_rebuild();
+                            // Fix stale coord after index_rebuild: find the visual row
+                            // in the rebuilt index that contains position `start`.
+                            for (auto i = 0; i < index.size; ++i)
+                            {
+                                if (index[i].index == curid)
+                                {
+                                    auto j = i;
+                                    while (j + 1 < index.size && index[j + 1].index == curid && index[j + 1].start <= start)
+                                        j++;
+                                    coord.y = j;
+                                    coord.x = start - index[j].start;
+                                    break;
+                                }
+                            }
                         }
                         else
                         {

@@ -1485,6 +1485,13 @@ struct impl : consrv
                         else if (size == line.caret) data.crop(size + 1, empty); // Avoid pending cursor.
                         term.move(-coor);
                         term.data(data);
+                        auto curpos = data.length(); // Distance from prompt start to cursor after data().
+                        if (size < last)
+                        {
+                            term.move(size - curpos);  // Move cursor to prompt_start + size.
+                            term.el(3);                // Crop terminal line at cursor, clearing ghost cells and autowrap.
+                            curpos = size;
+                        }
                         if (done && crlf && server.inpmod & nt::console::inmode::preprocess) // On PROCESSED_INPUT + ECHO_INPUT only.
                         {
                             term.cr();
@@ -1492,7 +1499,7 @@ struct impl : consrv
                         }
                         else
                         {
-                            term.move(line.caret - line.length());
+                            term.move(line.caret - curpos);
                         }
                         if (mode != !!(server.inpmod & nt::console::inmode::insert))
                         {
@@ -3942,6 +3949,36 @@ struct impl : consrv
         if (auto console_ptr = select_buffer(packet.target))
         {
             console_ptr->cup0(caretpos);
+            // Trim trailing blanks on autowrapped lines to clear ghost cells left by
+            // PSReadLine (which overwrites old content with spaces via Console.Write,
+            // then moves cursor back via SetConsoleCursorPosition).
+            if (console_ptr == &uiterm.normal)
+            {
+                auto& sb = uiterm.normal;
+                auto& curln = sb.batch.current();
+                if (curln.wrapped())
+                {
+                    auto caret  = sb.batch.caret;
+                    auto length = curln.length();
+                    if (caret < length)
+                    {
+                        auto trim = length;
+                        auto data = curln.begin();
+                        while (trim > caret && (data + trim - 1)->isspc())
+                        {
+                            trim--;
+                        }
+                        if (trim < length && trim <= sb.panel.x) // Trimming collapses autowrap into a single physical line.
+                        {
+                            curln.crop(trim);
+                            curln.reset_fill();
+                            sb.batch.recalc(curln);
+                            sb.index_rebuild();
+                            sb.cup0(caretpos); // Re-sync cursor after index rebuild.
+                        }
+                    }
+                }
+            }
         }
         unsync = true;
     }
