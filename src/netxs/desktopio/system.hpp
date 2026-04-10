@@ -5306,6 +5306,11 @@ namespace netxs::os
                             chords.reset(k);
                             auto state = !!r.Event.FocusEvent.bSetFocus;
                             focus(state);
+                            if (state)
+                            {
+                                w.winsize = dtvt::consize();
+                                winsz(w);
+                            }
                             if (!state)
                             {
                                 kbmod = {}; // To keep the modifiers from sticking.
@@ -6023,6 +6028,11 @@ namespace netxs::os
                             {
                                 auto state = s.back() == 'I';
                                 focus(state);
+                                if (state)
+                                {
+                                    w.winsize = dtvt::consize();
+                                    winsz(w);
+                                }
                             }
                             else if (t == type::style) // Line style report:  ESC [ std::to_string(ansi::ccc_stl) : n p
                             {
