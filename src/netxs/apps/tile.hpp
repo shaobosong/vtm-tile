@@ -819,7 +819,7 @@ namespace netxs::app::tile
                             }
                         };
                     };
-                    boss.LISTEN(tier::preview, e2::form::size::minimize, gear, -, (saved_ratio = 1, min_ratio = 1, min_state))
+                    boss.LISTEN(tier::preview, e2::form::size::minimize, gear, - /*, (saved_ratio = 1, min_ratio = 1, min_state)*/)
                     {
                         if (boss.count() > 2) // Restore if maximized.
                         {

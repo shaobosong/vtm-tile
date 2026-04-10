@@ -4420,6 +4420,7 @@ namespace netxs::os
             {
                 stdinput = std::thread{ [&, appcfg, initsize, connect_fx, receiver_fx, shutdown_fx]
                 {
+                    (void)connect_fx;
                     auto [s_pipe_r, m_pipe_w] = os::ipc::newpipe();
                     auto [m_pipe_r, s_pipe_w] = os::ipc::newpipe();
                     auto [m_pipe_e, s_pipe_e] = os::ipc::newpipe();
