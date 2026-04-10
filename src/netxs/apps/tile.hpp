@@ -1888,8 +1888,8 @@ namespace netxs::app::tile
                             {
                                 pro::focus::set(item_ptr, gear_id, solo::on);
                             });
-                            gear.set_handled();
                         }
+                        gear.set_handled();
                     };
                     boss.LISTEN(tier::preview, app::tile::events::ui::focus::prevgrip, gear)
                     {
