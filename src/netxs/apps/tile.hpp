@@ -2285,12 +2285,12 @@ namespace netxs::app::tile
                         // Note: async.run() passes thread ID as int parameter
                         submit([&, user, packet](auto session_id)
                         {
-                            auto id = utf::concat(*user);
-                            if constexpr (debugmode) log("%%Client connected %id%", prompt::user, id);
+                            auto client_id = utf::concat(*user);
+                            if constexpr (debugmode) log("%%Client connected %id%", prompt::user, client_id);
 
                             invite(user, packet, session_id);
 
-                            if constexpr (debugmode) log("%%Client disconnected %id%", prompt::user, id);
+                            if constexpr (debugmode) log("%%Client disconnected %id%", prompt::user, client_id);
                         });
                     }
                 }

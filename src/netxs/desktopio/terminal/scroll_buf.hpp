@@ -3877,8 +3877,6 @@
                         if (i_top == -1) return;
                         auto upcur = std::get<2>(tempvr2);
                         auto dncur = std::get<3>(tempvr2);
-                        auto sel_top_id = (batch.begin() + i_top)->index;
-                        auto sel_end_id = (batch.begin() + i_end)->index;
                         auto work = [&](auto fill)
                         {
                             auto cur_start   = si32{0}; // Logical selection start for current line.

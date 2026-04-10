@@ -1617,7 +1617,7 @@ struct impl : consrv
                 cooked.rest.remove_prefix(size);
                 packet.reply.ctrls = cooked.ctrl;
                 packet.reply.bytes = size;
-                answer.send_data<Complete>(server.condrv, data);
+                answer.template send_data<Complete>(server.condrv, data);
             }
             else
             {
@@ -1626,7 +1626,7 @@ struct impl : consrv
                 if (server.io_log) log("\t", ansi::hi(utf::debase<faux, faux>(i.decode_log(data))));
                 packet.reply.ctrls = cooked.ctrl;
                 packet.reply.bytes = size;
-                answer.send_data<Complete>(server.condrv, data);
+                answer.template send_data<Complete>(server.condrv, data);
             }
         }
         template<class Payload>
@@ -1840,13 +1840,13 @@ struct impl : consrv
             if (size == recbuf.size())
             {
                 if (server.io_log) logbuf(recbuf);
-                answer.send_data<Complete>(server.condrv, recbuf);
+                answer.template send_data<Complete>(server.condrv, recbuf);
                 recbuf.clear();
             }
             else
             {
                 if (server.io_log) logbuf(std::span{ recbuf.data(), size });
-                answer.send_data<Complete>(server.condrv, std::span{ recbuf.data(), size });
+                answer.template send_data<Complete>(server.condrv, std::span{ recbuf.data(), size });
                 if (peek) recbuf.clear();
                 else      recbuf.erase(recbuf.begin(), recbuf.begin() + size);
             }
@@ -3305,7 +3305,7 @@ struct impl : consrv
                     count = maxsz;
                     line.crop(maxsz);
                 }
-                scrollback._data<true>(count, line.pick(), cell::shaders::text);
+                scrollback.template _data<true>(count, line.pick(), cell::shaders::text);
                 return true;
             });
             if (!success)
