@@ -1578,7 +1578,10 @@ namespace netxs::app::tile
 
                     boss.LISTEN(tier::preview, app::tile::events::ui::any, gear)
                     {
+                        if (boss.bell::protos() == app::tile::events::ui::create.id) return;
                         if (boss.bell::protos() == app::tile::events::ui::zoom.id) return;
+                        if (boss.bell::protos() == app::tile::events::ui::selectapp.id) return;
+                        if (boss.bell::protos() == app::tile::events::ui::selected_app.id) return;
                         if (root_veer.count() > 2)
                         {
                             root_veer.base::riseup(tier::release, e2::form::proceed::attach); // Restore the window before any action if maximized.
