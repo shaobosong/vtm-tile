@@ -218,7 +218,7 @@ if [ "$FORCE_CONFIGURE" = "1" ] || [ ! -f "$BUILD_DIR/CMakeCache.txt" ]; then
         -DVCPKG_MANIFEST_DIR="$ROOT_DIR" \
         -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded \
         -DCMAKE_EXE_LINKER_FLAGS_RELEASE="/DEBUG /OPT:REF /OPT:ICF" \
-        -DCMAKE_CXX_FLAGS_RELEASE="/MT /O2 /DNDEBUG /Zi /Zc:preprocessor /W4 /EHsc /bigobj /utf-8 /Zc:preprocessor" \
+        -DCMAKE_CXX_FLAGS_RELEASE="/MT /O2 /DNDEBUG /Zi /Zc:preprocessor /W4 /EHsc /bigobj /utf-8" \
         -DVCPKG_APPLOCAL_DEPS=OFF
 fi
 

@@ -749,7 +749,7 @@ namespace netxs::app::tile
                     menu_block->alignment({ snap::head, snap::head })
                 ), slot_ptr, focus_history_ptr);
         };
-        auto node_veer = [](auto&& node_veer, auto min_state, auto grip_bindings_ptr, auto focus_history_ptr) -> netxs::sptr<ui::veer>
+        auto node_veer = [](auto&& node_veer, [[maybe_unused]] auto min_state, auto grip_bindings_ptr, auto focus_history_ptr) -> netxs::sptr<ui::veer>
         {
             auto slot_ptr = ui::veer::ctor()
                 ->plugin<pro::focus>()
