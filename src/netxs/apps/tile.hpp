@@ -749,7 +749,7 @@ namespace netxs::app::tile
                     menu_block->alignment({ snap::head, snap::head })
                 ), slot_ptr, focus_history_ptr);
         };
-        auto node_veer = [](auto&& node_veer, [[maybe_unused]] auto min_state, auto grip_bindings_ptr, auto focus_history_ptr) -> netxs::sptr<ui::veer>
+        auto node_veer = [](auto&& node_veer, [[maybe_unused]] auto min_state, auto grip_bindings_ptr, auto focus_history_ptr, auto confirm_block = netxs::sptr<bool>{}) -> netxs::sptr<ui::veer>
         {
             auto slot_ptr = ui::veer::ctor()
                 ->plugin<pro::focus>()
@@ -879,7 +879,7 @@ namespace netxs::app::tile
                             }
                         }
                     };
-                    boss.LISTEN(tier::release, app::tile::events::ui::split::any, gear, -, (grip_bindings_ptr, focus_history_ptr))
+                    boss.LISTEN(tier::release, app::tile::events::ui::split::any, gear, -, (grip_bindings_ptr, focus_history_ptr, confirm_block))
                     {
                         auto deed = boss.bell::protos();
                         auto depth = 0;
@@ -894,8 +894,8 @@ namespace netxs::app::tile
 
                         auto heading = deed == app::tile::events::ui::split::vt.id;
                         auto newnode = build_node(heading ? 'v':'h', 1, 1, heading ? 1 : 2, grip_bindings_ptr);
-                        auto empty_1 = node_veer(node_veer, ui::fork::min_ratio, grip_bindings_ptr, focus_history_ptr);
-                        auto empty_2 = node_veer(node_veer, ui::fork::max_ratio, grip_bindings_ptr, focus_history_ptr);
+                        auto empty_1 = node_veer(node_veer, ui::fork::min_ratio, grip_bindings_ptr, focus_history_ptr, confirm_block);
+                        auto empty_2 = node_veer(node_veer, ui::fork::max_ratio, grip_bindings_ptr, focus_history_ptr, confirm_block);
                         auto gear_id_list = pro::focus::cut(boss.back());
                         auto curitem = boss.pop_back();
                         if (boss.empty())
@@ -914,8 +914,9 @@ namespace netxs::app::tile
                         newnode->base::broadcast(tier::anycast, e2::form::upon::started);
                         slot_2->base::signal(tier::request, e2::form::proceed::createby, gear);
                     };
-                    boss.LISTEN(tier::anycast, e2::form::proceed::quit::any, fast)
+                    boss.LISTEN(tier::anycast, e2::form::proceed::quit::any, fast, -, (confirm_block))
                     {
+                        if (confirm_block && *confirm_block) return; // Blocked by pending close confirmation dialog.
                         boss.base::signal(tier::preview, e2::form::proceed::quit::one, fast);
                         boss.base::signal(tier::general, e2::shutdown, utf::concat(prompt::tile, "Shutdown on signal"));
                     };
@@ -1054,9 +1055,9 @@ namespace netxs::app::tile
             slot_ptr->attach(empty_slot(slot_ptr, focus_history_ptr));
             return slot_ptr;
         };
-        auto parse_data = [](auto&& parse_data, view& utf8, auto min_ratio, auto grip_bindings_ptr, auto focus_history_ptr) -> netxs::sptr<ui::veer>
+        auto parse_data = [](auto&& parse_data, view& utf8, auto min_ratio, auto grip_bindings_ptr, auto focus_history_ptr, auto confirm_block = netxs::sptr<bool>{}) -> netxs::sptr<ui::veer>
         {
-            auto slot_ptr = node_veer(node_veer, min_ratio, grip_bindings_ptr, focus_history_ptr);
+            auto slot_ptr = node_veer(node_veer, min_ratio, grip_bindings_ptr, focus_history_ptr, confirm_block);
             utf::trim_front(utf8, ", ");
             if (utf8.empty())
             {
@@ -1132,8 +1133,8 @@ namespace netxs::app::tile
                 if (utf8.empty() || utf8.front() != '(') return slot_ptr;
                 utf8.remove_prefix(1);
                 auto node = build_node(tag, s1, s2, w, grip_bindings_ptr);
-                auto slot1 = node->attach(slot::_1, parse_data(parse_data, utf8, ui::fork::min_ratio, grip_bindings_ptr, focus_history_ptr));
-                auto slot2 = node->attach(slot::_2, parse_data(parse_data, utf8, ui::fork::max_ratio, grip_bindings_ptr, focus_history_ptr));
+                auto slot1 = node->attach(slot::_1, parse_data(parse_data, utf8, ui::fork::min_ratio, grip_bindings_ptr, focus_history_ptr, confirm_block));
+                auto slot2 = node->attach(slot::_2, parse_data(parse_data, utf8, ui::fork::max_ratio, grip_bindings_ptr, focus_history_ptr, confirm_block));
                 slot_ptr->attach(node);
                 utf::trim_front(utf8, ") ");
             }
@@ -1258,7 +1259,10 @@ namespace netxs::app::tile
             //auto c2 = warning_color;
             //auto c1 = danger_color;
 
-            auto object = ui::fork::ctor(axis::Y)
+            // Wrap in a cake to support overlay dialogs (e.g., close confirmation).
+            auto wrapper = ui::cake::ctor()
+                ->plugin<pro::focus>();
+            auto object = wrapper->attach(ui::fork::ctor(axis::Y))
                 ->plugin<items>()
                 ->plugin<pro::focus>()
                 ->plugin<pro::keybd>();
@@ -1284,15 +1288,10 @@ namespace netxs::app::tile
             auto grip_bindings_ptr = ptr::shared(input::bindings::load(config, script_list));
             auto focus_history_ptr = ptr::shared(focus_history_t{});
             tile_context = config.settings::push_context("/config/tile/");
+            auto confirm_close = config.settings::take("confirm_close", faux);
+            auto confirm_block = ptr::shared(faux); // Shared flag: set to true while close-confirmation dialog is shown.
             auto [menu_block, cover, menu_data] = menu::load(config);
-            object->attach(slot::_1, menu_block)
-                ->invoke([](auto& boss)
-                {
-                    boss.LISTEN(tier::anycast, e2::form::proceed::quit::any, fast)
-                    {
-                        boss.base::riseup(tier::release, e2::form::proceed::quit::one, fast);
-                    };
-                });
+            object->attach(slot::_1, menu_block);
             menu_data->active()
                 ->shader(window_clr)
                 ->plugin<pro::acryl>();
@@ -1313,7 +1312,39 @@ namespace netxs::app::tile
                 if (err) log("%%Failed to change current directory to '%cwd%', error code: %error%", prompt::tile, appcfg.cwd, err.value());
                 else     log("%%Change current directory to '%cwd%'", prompt::tile, appcfg.cwd);
             }
-            auto root_veer_ptr = object->attach(slot::_2, parse_data(parse_data, param, ui::fork::min_ratio, grip_bindings_ptr, focus_history_ptr))
+            // Close-confirmation handler: intercept quit on the wrapper (cake)
+            // which is visited FIRST in the anycast broadcast (before root_veer
+            // and its child veers).  Set confirm_block to prevent all veers'
+            // quit::any handlers from triggering e2::shutdown while the dialog
+            // is shown.
+            if (confirm_close)
+            {
+                wrapper->invoke([&, confirm_block](auto& boss)
+                {
+                        boss.LISTEN(tier::anycast, e2::form::proceed::quit::one, fast, -, (confirm_block))
+                    {
+                        if (!fast && !*confirm_block)
+                        {
+                            *confirm_block = true;
+                            app::shared::show_close_confirmation(boss,
+                                [&boss, confirm_block] // on_confirm
+                                {
+                                    *confirm_block = faux;
+                                    // Re-signal with fast=true to reuse the original
+                                    // shutdown flow (quit::any → preview quit::one
+                                    // to clean up child processes → e2::shutdown).
+                                    // fast=true bypasses this confirm handler (!fast).
+                                    boss.base::signal(tier::anycast, e2::form::proceed::quit::one, true);
+                                },
+                                [confirm_block] // on_cancel
+                                {
+                                    *confirm_block = faux;
+                                });
+                        }
+                    };
+                });
+            }
+            auto root_veer_ptr = object->attach(slot::_2, parse_data(parse_data, param, ui::fork::min_ratio, grip_bindings_ptr, focus_history_ptr, confirm_block))
                 ->invoke([&](auto& boss)
                 {
                     boss.LISTEN(tier::release, e2::form::proceed::attach, fullscreen_item)
@@ -2195,7 +2226,22 @@ namespace netxs::app::tile
                         });
                     };
                 });
-            return object;
+            // Forward release: upon::started from wrapper (cake) to the object
+            // (fork registered as basename::tile), so that script handlers
+            // subscribed via source="tile" (e.g., SelectedApplication label)
+            // receive the event. builder() fires release: upon::started on the
+            // applet (wrapper), but scripts subscribe on the tile object (fork).
+            {
+                auto object_ptr = object->This();
+                wrapper->invoke([object_ptr](auto& boss)
+                {
+                    boss.LISTEN(tier::release, e2::form::upon::started, root_ptr, -, (object_ptr))
+                    {
+                        object_ptr->base::signal(tier::release, e2::form::upon::started, root_ptr);
+                    };
+                });
+            }
+            return wrapper;
         };
     }
 

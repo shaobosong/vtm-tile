@@ -17,15 +17,32 @@ namespace netxs::app::terminal
 
     namespace attr
     {
-        static constexpr auto cwdsync   = "/config/terminal/cwdsync";
-        static constexpr auto borders   = "/config/terminal/border";
+        static constexpr auto cwdsync       = "/config/terminal/cwdsync";
+        static constexpr auto borders       = "/config/terminal/border";
+        static constexpr auto confirmclose  = "/config/terminal/confirm_close";
     }
 
-    auto ui_term_events = [](ui::term& boss, eccc& appcfg)
+    auto ui_term_events = [](ui::term& boss, eccc& appcfg, bool confirm_close, std::weak_ptr<ui::base> confirm_target)
     {
-        boss.LISTEN(tier::anycast, e2::form::proceed::quit::any, fast)
+        boss.LISTEN(tier::anycast, e2::form::proceed::quit::any, fast, -, (confirm_close, confirm_target))
         {
-            boss.base::signal(tier::preview, e2::form::proceed::quit::one, fast);
+            if (confirm_close && !fast)
+            {
+                if (auto target = confirm_target.lock())
+                {
+                    app::shared::show_close_confirmation(*target, [confirm_target]
+                    {
+                        if (auto w = confirm_target.lock())
+                        {
+                            w->base::riseup(tier::release, e2::form::proceed::quit::one, true);
+                        }
+                    });
+                }
+            }
+            else
+            {
+                boss.base::signal(tier::preview, e2::form::proceed::quit::one, fast);
+            }
         };
         boss.LISTEN(tier::preview, e2::form::proceed::quit::one, fast)
         {
@@ -62,14 +79,15 @@ namespace netxs::app::terminal
             boss.base::signal(tier::release, e2::form::upon::started, root_ptr);
         };
     };
-    auto build_teletype = [](eccc appcfg, settings& /*config*/)
+    auto build_teletype = [](eccc appcfg, settings& config)
     {
+        auto confirm_close = config.settings::take(attr::confirmclose, faux);
         auto shadower = skin::color(tone::shadower);
         auto window = ui::cake::ctor()
             ->plugin<pro::focus>()
-            ->invoke([&](auto& boss)
+            ->invoke([&, confirm_close](auto& boss)
             {
-                app::shared::closing_on_quit(boss);
+                if (!confirm_close) app::shared::closing_on_quit(boss);
             });
         window//->plugin<pro::track>()
             //->plugin<pro::acryl>()
@@ -82,9 +100,9 @@ namespace netxs::app::terminal
         if (appcfg.cmd.empty()) appcfg.cmd = os::env::shell();//todo revise + " -i";
         auto term = scroll->attach(ui::term::ctor())
             ->plugin<pro::focus>(pro::focus::mode::focused)
-            ->invoke([&](auto& boss)
+            ->invoke([&, confirm_close, window_shadow = std::weak_ptr<ui::base>(window)](auto& boss)
             {
-                ui_term_events(boss, appcfg);
+                ui_term_events(boss, appcfg, confirm_close, window_shadow);
             });
         layers->attach(app::shared::scroll_bars(scroll));
         return window;
@@ -92,6 +110,7 @@ namespace netxs::app::terminal
     auto build_terminal = [](eccc appcfg, settings& config)
     {
         auto border = std::max(0, config.settings::take(attr::borders, 0));
+        auto confirm_close = config.settings::take(attr::confirmclose, faux);
         auto borders = dent{ border, border, 0, 0 };
         auto window = ui::cake::ctor();
         auto& window_clr = window->base::field(skin::color(tone::window_clr));
@@ -282,9 +301,9 @@ namespace netxs::app::terminal
                 parent_canvas.fill(full, [&](cell& c){ c.fgc(c.bgc()).bgc(bgc).txt(bar).link(bar); });
             };
         });
-        term->invoke([&](auto& boss)
+        term->invoke([&, confirm_close, window_shadow = std::weak_ptr<ui::base>(window)](auto& boss)
         {
-            ui_term_events(boss, appcfg);
+            ui_term_events(boss, appcfg, confirm_close, window_shadow);
         });
         return window;
     };

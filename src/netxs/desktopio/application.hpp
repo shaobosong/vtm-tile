@@ -49,6 +49,202 @@ namespace netxs::app::shared
             gear.dismiss();
         });
     };
+    // show_close_confirmation: Display a centered MessageBox dialog overlay
+    // asking the user to confirm window close. Attach the overlay to the
+    // specified cake parent. on_confirm is called when the user accepts.
+    static void show_close_confirmation(ui::base& parent, std::function<void()> on_confirm, std::function<void()> on_cancel = {})
+    {
+        // Guard: don't show multiple dialogs at once.
+        auto& dialog_active = parent.base::property("msgbox.active", faux);
+        if (dialog_active) return;
+        dialog_active = true;
+
+        // Create full-screen overlay (attaches to parent cake as topmost layer).
+        auto overlay_ptr = ui::cake::ctor()
+            ->alignment({ snap::both, snap::both });
+
+        auto overlay_shadow = ptr::shadow(overlay_ptr);
+        auto parent_shadow = ptr::shadow(parent.This());
+
+        // Shared hook controlling the keyboard interceptor subscription on the
+        // parent.  Resetting this hook unsubscribes the handler.
+        auto kbd_hook = ptr::shared<hook>();
+        // Shared flag: once set, the dialog visuals are dismissed but the
+        // keyboard interceptor remains active to swallow the trailing
+        // key-release event (esp. for Esc whose press+release pair is
+        // generated synchronously).
+        auto pending_unhook = ptr::shared(faux);
+
+        // dismiss_visual: Remove overlay and clear dialog_active flag, but
+        //                 keep the keyboard interceptor alive.
+        auto dismiss_visual = [overlay_shadow, parent_shadow, pending_unhook]
+        {
+            if (*pending_unhook) return; // Already dismissed visually.
+            *pending_unhook = true;
+            if (auto p = parent_shadow.lock())
+            {
+                p->base::property("msgbox.active", faux) = faux;
+            }
+            if (auto o = overlay_shadow.lock())
+            {
+                o->base::detach();
+            }
+        };
+        // dismiss_hook: Unsubscribe the keyboard interceptor from the parent.
+        auto dismiss_hook = [kbd_hook]
+        {
+            kbd_hook->reset();
+        };
+
+        // Keyboard interceptor – installed on the PARENT, not the overlay.
+        // On tier::preview the dispatch order is feed::rev (general-first):
+        //   keybd::any handlers fire BEFORE keybd::post (pro::focus routing).
+        // Setting gear.handled prevents pro::focus from delivering the key to
+        // the focused child (e.g. ui::term / shell).
+        parent.bell::submit(tier::preview, input::events::keybd::any, *kbd_hook)
+            = [dismiss_visual, dismiss_hook, on_confirm, on_cancel, pending_unhook](hids& gear) mutable
+        {
+            if (gear.payload != input::keybd::type::keypress
+                || gear.keystat == input::key::interrupted
+                || gear.keybd::handled)
+            {
+                return;
+            }
+            // After visual dismiss: swallow the trailing key-release then
+            // remove the interceptor entirely.
+            if (*pending_unhook)
+            {
+                gear.set_handled(faux);
+                if (gear.keystat == input::key::released)
+                {
+                    dismiss_hook();
+                }
+                return;
+            }
+            auto k = gear.keybd::generic();
+            auto& ch = gear.keybd::cluster;
+            if (k == input::key::Esc || ch == "n" || ch == "N")
+            {
+                dismiss_visual();
+                if (on_cancel) on_cancel();
+                gear.set_handled(faux);
+            }
+            else if (k == input::key::KeyEnter || ch == "y" || ch == "Y")
+            {
+                dismiss_visual();
+                dismiss_hook();
+                on_confirm();
+                gear.set_handled(faux);
+            }
+            else // Swallow all other keys while dialog is open.
+            {
+                gear.set_handled(faux);
+            }
+        };
+
+        // Layer 1: Dimming scrim (click outside → cancel).
+        overlay_ptr->attach(ui::mock::ctor())
+            ->active(argb{ 0x80808080 }, argb{ 0x801A1A1A })
+            ->invoke([dismiss_visual, dismiss_hook, on_cancel](auto& boss)
+            {
+                boss.on(tier::mouserelease, input::key::LeftClick, [&, dismiss_visual, dismiss_hook, on_cancel](hids& gear)
+                {
+                    dismiss_visual();
+                    dismiss_hook();
+                    if (on_cancel) on_cancel();
+                    gear.dismiss();
+                });
+            });
+
+        // Layer 2: Centered dialog card.
+        //
+        //  ┌───────────────────────────────────┐
+        //  │                                   │  row 0
+        //  │  Close this window?               │  row 1  message
+        //  │                                   │  row 2  gap
+        //  │  [     Yes     ][      No      ]  │  row 3  buttons
+        //  │                                   │  row 4
+        //  └───────────────────────────────────┘
+        //
+        //  Outer 36 × 5, setpad(l=2 r=2 t=1 b=1) → inner 32 × 3.
+        //  slot_1 (message) : 2 rows   slot_2 (buttons) : 1 row.
+        //
+        auto dialog = overlay_ptr->attach(ui::fork::ctor(axis::Y))
+            ->alignment({ snap::center, snap::center })
+            ->limits({ 36, 5 }, { 36, 5 })
+            ->colors(argb{ 0xFFFFFFFF }, argb{ 0xFF0F2B45 })
+            ->setpad({ 2, 2, 1, 1 });
+
+        // Message label — flexible keeps full slot width.
+        // No alignment() here: the Y-fork inform() bug yields zero-size
+        // regions for children; center alignment would shift the item
+        // off-screen.  Text is padded with spaces to visually center it
+        // within the 32-char inner width.
+        dialog->attach(slot::_1, ui::item::ctor(ansi::fgc(0xFFFFFFFF).add("Close this window?")))
+            ->flexible();
+
+        // Button bar (fixed 1 row).
+        auto buttons = dialog->attach(slot::_2, ui::fork::ctor(axis::X))
+            ->limits({ -1, 1 }, { -1, 1 });
+
+        // [ Yes ] button — forest-green background.
+        buttons->attach(slot::_1, ui::item::ctor(ansi::fgc(0xFFFFFFFF).add("       Yes        ")))
+            ->active(argb{ 0xFFFFFFFF }, argb{ 0xFF1B5E20 })
+            ->shader(cell::shaders::xlight, e2::form::state::hover)
+            ->invoke([dismiss_visual, dismiss_hook, on_confirm](auto& boss)
+            {
+                boss.on(tier::mouserelease, input::key::LeftClick, [&, dismiss_visual, dismiss_hook, on_confirm](hids& gear)
+                {
+                    dismiss_visual();
+                    dismiss_hook();
+                    on_confirm();
+                    gear.dismiss();
+                });
+            });
+
+        // [ No ] button — crimson-red background.
+        buttons->attach(slot::_2, ui::item::ctor(ansi::fgc(0xFFFFFFFF).add("        No        ")))
+            ->active(argb{ 0xFFFFFFFF }, argb{ 0xFF7B1A1A })
+            ->shader(cell::shaders::xlight, e2::form::state::hover)
+            ->invoke([dismiss_visual, dismiss_hook, on_cancel](auto& boss)
+            {
+                boss.on(tier::mouserelease, input::key::LeftClick, [&, dismiss_visual, dismiss_hook, on_cancel](hids& gear)
+                {
+                    dismiss_visual();
+                    dismiss_hook();
+                    if (on_cancel) on_cancel();
+                    gear.dismiss();
+                });
+            });
+
+        // Attach the overlay to the parent and trigger layout.
+        parent.attach(overlay_ptr);
+        parent.base::reflow();
+    }
+    // closing_on_quit_with_confirm: Like closing_on_quit but optionally shows
+    // a confirmation dialog before actually closing.
+    const auto closing_on_quit_with_confirm = [](auto& boss, bool confirm)
+    {
+        if (!confirm)
+        {
+            closing_on_quit(boss);
+            return;
+        }
+        boss.LISTEN(tier::anycast, e2::form::proceed::quit::any, fast)
+        {
+            if (fast) // Fast close (e.g. session disconnect) – skip confirmation.
+            {
+                boss.base::riseup(tier::release, e2::form::proceed::quit::one, fast);
+            }
+            else // User-initiated close – show confirmation dialog.
+            {
+                show_close_confirmation(boss, [&boss]
+                {
+                    boss.base::riseup(tier::release, e2::form::proceed::quit::one, true);
+                });
+            }
+        };
+    };
     const auto scroll_bars = [](auto master)
     {
         auto sb = ui::fork::ctor();
