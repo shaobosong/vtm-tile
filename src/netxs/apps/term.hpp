@@ -52,8 +52,7 @@ namespace netxs::app::terminal
         {
             if (root_ptr) // root_ptr is empty when d_n_d.
             {
-                auto self_start = root_ptr == boss.This();
-                if (self_start && boss.base::size())
+                if (boss.base::size()) // Already laid out (reflow happened before startup broadcast).
                 {
                     boss.base::enqueue([&, appcfg, backup = boss.This()](ui::base& /*widget*/) mutable
                     {
@@ -61,13 +60,11 @@ namespace netxs::app::terminal
                         backup.reset(); // Backup should dtored under the lock.
                     });
                 }
-                else
-                {
+                else // Delay PTY startup until the first post-start layout pass,
+                {    // otherwise the shell sees the temporary bootstrap width.
                     auto& startup_hook = boss.base::field(hook{});
                     boss.LISTEN(tier::release, e2::area, new_area, startup_hook, (appcfg))
                     {
-                        // Delay PTY startup until the first post-start layout pass,
-                        // otherwise the shell sees the temporary bootstrap width.
                         boss.start_term(appcfg);
                         boss.base::unfield(startup_hook);
                     };
