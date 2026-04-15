@@ -21,6 +21,7 @@ int main(int argc, char* argv[])
     auto script = text{};
     auto rungui = true;
     auto system = faux;
+    auto monlog = faux;
     auto getopt = os::process::args{ argc, argv };
     if (getopt.starts("ssh"))
     {
@@ -80,6 +81,7 @@ int main(int argc, char* argv[])
         else if (getopt.match("-m", "--monitor"))
         {
             whoami = type::logmon;
+            monlog = true;
         }
         else if (getopt.match("-p", "--pin"))
         {
@@ -238,7 +240,7 @@ int main(int argc, char* argv[])
         utf::to_lower(shadow);
         if (shadow.starts_with(app::tile::id))
         {
-            whoami = type::client;
+            whoami = monlog ? type::logmon : type::client;
             if (vtpipe.empty())
             {
                 auto userid = os::env::user();
@@ -492,7 +494,52 @@ int main(int argc, char* argv[])
         if (prefix.ends_with("-tile"))
         {
             auto tile_session = app::tile::hall(server, { .cmd = params });
+            auto stdlog = std::thread{ [&]
+            {
+                while (auto monitor = srvlog->meet())
+                {
+                    tile_session.submit([&, monitor](auto /*task_id*/)
+                    {
+                        auto id = text{};
+                        auto active = faux;
+                        auto tokens = subs{};
+                        auto onecmd = eccc{};
+                        auto events = os::tty::binary::logger{ [&, init = 0](auto& events, auto& cmd) mutable
+                        {
+                            if (active)
+                            {
+                                onecmd.cmd = cmd;
+                                // No command dispatch for tile mode (no e2::command::run handler).
+                            }
+                            else
+                            {
+                                     if (init == 0) id = cmd;
+                                else if (init == 1) onecmd.env = cmd;
+                                else if (init == 2)
+                                {
+                                    active = true;
+                                    onecmd.cwd = cmd;
+                                    log("%%Monitor [%id%] connected", prompt::logs, id);
+                                }
+                                init++;
+                            }
+                            events.command.send(monitor, onecmd.cmd); // Output reply.
+                        }};
+                        auto writer = netxs::logger::attach([&](auto utf8)
+                        {
+                            events.logs.send(monitor, ui32{}, datetime::now(), text{ utf8 });
+                        });
+                        tile_session.applet->LISTEN(tier::general, e2::conio::quit, deal, tokens) { monitor->shut(); };
+                        os::ipc::monitors++;
+                        directvt::binary::stream::reading_loop(monitor, [&](view data){ events.s11n::sync(data); });
+                        os::ipc::monitors--;
+                        if (id.size()) log("%%Monitor [%id%] disconnected", prompt::logs, id);
+                    });
+                }
+            }};
             auto result = tile_session.run(server, userid, prefix);
+            srvlog->stop();
+            stdlog.join();
             tile_session.stop();  // Wait for all async tasks to complete
             return result;
         }
