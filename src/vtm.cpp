@@ -175,7 +175,7 @@ int main(int argc, char* argv[])
                 "\n    -q, --quiet          Disable logging."
                 "\n    -x, --script <cmds>  Specifies script commands."
                 "\n    -c, --config <file>  Specifies a settings file to load or plain xml-data to overlay."
-                "\n    -p, --pin <id>       Specifies the desktop id it will be pinned to."
+                "\n    -p, --pin <id>       Specifies the desktop/tile id it will be pinned to."
                 "\n    -s, --server         Run Desktop/Tile Server."
                 "\n    -d, --daemon         Run Desktop/Tile Server in background."
                 "\n    -m, --monitor        Run Log Monitor."
@@ -246,6 +246,10 @@ int main(int argc, char* argv[])
             {
                 auto userid = os::env::user();
                 vtpipe = utf::concat(os::path::ipc_prefix, os::process::elevated ? "!-" : "-", userid.second, "-tile");
+            }
+            else
+            {
+                vtpipe += "-tile";
             }
             auto coor = params.find(' ') + 1;
             params = params.substr(coor ? coor : params.size());
