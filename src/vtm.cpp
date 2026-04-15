@@ -541,6 +541,7 @@ int main(int argc, char* argv[])
             srvlog->stop();
             stdlog.join();
             tile_session.stop();  // Wait for all async tasks to complete
+            indexer.stop(); // Stop quartz timer and jobs agent (matches desktop mode's base::dequeue()).
             return result;
         }
 
