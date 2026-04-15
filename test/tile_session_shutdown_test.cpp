@@ -3,7 +3,7 @@
 
 #include "netxs/apps.hpp"
 #include "netxs/apps/desk.hpp"
-#include "vtm.hpp"
+#include "vtm-common.hpp"
 #include "netxs/apps/tile.hpp"
 
 using namespace netxs;

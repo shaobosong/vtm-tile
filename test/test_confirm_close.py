@@ -23,9 +23,13 @@ import fcntl
 import termios
 import subprocess
 
-VTM_BINARY = os.environ.get(
-    "VTM_BINARY",
-    os.path.join(os.path.dirname(__file__), "..", "build", "vtm"),
+VTM_DESK_BINARY = os.environ.get(
+    "VTM_DESK_BINARY",
+    os.path.join(os.path.dirname(__file__), "..", "build", "vtm-desk"),
+)
+VTM_TILE_BINARY = os.environ.get(
+    "VTM_TILE_BINARY",
+    os.path.join(os.path.dirname(__file__), "..", "build", "vtm-tile"),
 )
 
 # Terminal size for tests.
@@ -43,16 +47,23 @@ TILE_SETTLE_DELAY = 4.0
 
 
 def kill_all_vtm():
-    """Kill all vtm processes to clean up after tests."""
-    subprocess.run(["pkill", "-9", "-x", "vtm"], capture_output=True)
+    """Kill all vtm-desk and vtm-tile processes to clean up after tests."""
+    for name in ("vtm-desk", "vtm-tile"):
+        subprocess.run(["pkill", "-9", "-x", name], capture_output=True)
     # Wait until all vtm processes are actually gone.
     for _ in range(20):
         time.sleep(0.3)
-        result = subprocess.run(["pgrep", "-x", "vtm"], capture_output=True)
-        if result.returncode != 0:
+        gone = True
+        for name in ("vtm-desk", "vtm-tile"):
+            result = subprocess.run(["pgrep", "-x", name], capture_output=True)
+            if result.returncode == 0:
+                gone = False
+                break
+        if gone:
             return
     # If still running after 6s, try again.
-    subprocess.run(["pkill", "-9", "-x", "vtm"], capture_output=True)
+    for name in ("vtm-desk", "vtm-tile"):
+        subprocess.run(["pkill", "-9", "-x", name], capture_output=True)
     time.sleep(0.5)
 
 
@@ -100,9 +111,10 @@ def sgr_mouse_move(col, row):
 
 
 class VtmTestSession:
-    """Manage a vtm process running in a pty for testing."""
+    """Manage a vtm-desk or vtm-tile process running in a pty for testing."""
 
-    def __init__(self, args, settle_delay=SETTLE_DELAY):
+    def __init__(self, binary, args, settle_delay=SETTLE_DELAY):
+        self.binary = binary
         self.args = args
         self.settle_delay = settle_delay
         self.master_fd = None
@@ -123,7 +135,7 @@ class VtmTestSession:
             os.dup2(slave_fd, 2)
             if slave_fd > 2:
                 os.close(slave_fd)
-            os.execvp(VTM_BINARY, [VTM_BINARY] + self.args)
+            os.execvp(self.binary, [self.binary] + self.args)
             sys.exit(1)
         else:
             os.close(slave_fd)
@@ -243,9 +255,9 @@ def verify_cancel_via_reconfirm(session):
 # ---------------------------------------------------------------------------
 
 def test_term_close_button_shows_dialog():
-    """Clicking x in term with confirm_close=true keeps vtm alive (dialog shown)."""
+    """Clicking x in term with confirm_close=true keeps vtm-desk alive (dialog shown)."""
     print("TEST: term - close button shows dialog ... ", end="", flush=True)
-    with VtmTestSession(["-r", "term"]) as s:
+    with VtmTestSession(VTM_DESK_BINARY, ["-r", "term"]) as s:
         if not open_dialog_and_verify(s):
             print("FAIL - vtm exited immediately")
             return False
@@ -256,7 +268,7 @@ def test_term_close_button_shows_dialog():
 def test_term_confirm_y():
     """Pressing Y while dialog is open confirms close."""
     print("TEST: term - confirm by Y ... ", end="", flush=True)
-    with VtmTestSession(["-r", "term"]) as s:
+    with VtmTestSession(VTM_DESK_BINARY, ["-r", "term"]) as s:
         if not open_dialog_and_verify(s):
             print("FAIL - vtm exited before dialog")
             return False
@@ -271,7 +283,7 @@ def test_term_confirm_y():
 def test_term_confirm_enter():
     """Pressing Enter while dialog is open confirms close."""
     print("TEST: term - confirm by Enter ... ", end="", flush=True)
-    with VtmTestSession(["-r", "term"]) as s:
+    with VtmTestSession(VTM_DESK_BINARY, ["-r", "term"]) as s:
         if not open_dialog_and_verify(s):
             print("FAIL - vtm exited before dialog")
             return False
@@ -286,7 +298,7 @@ def test_term_confirm_enter():
 def test_term_cancel_esc():
     """Pressing Esc while dialog is open cancels the close."""
     print("TEST: term - cancel by Esc ... ", end="", flush=True)
-    with VtmTestSession(["-r", "term"]) as s:
+    with VtmTestSession(VTM_DESK_BINARY, ["-r", "term"]) as s:
         if not open_dialog_and_verify(s):
             print("FAIL - vtm exited before dialog")
             return False
@@ -306,7 +318,7 @@ def test_term_cancel_esc():
 def test_term_cancel_n():
     """Pressing N while dialog is open cancels the close."""
     print("TEST: term - cancel by N ... ", end="", flush=True)
-    with VtmTestSession(["-r", "term"]) as s:
+    with VtmTestSession(VTM_DESK_BINARY, ["-r", "term"]) as s:
         if not open_dialog_and_verify(s):
             print("FAIL - vtm exited before dialog")
             return False
@@ -325,7 +337,7 @@ def test_term_cancel_n():
 def test_term_cancel_click_outside():
     """Clicking outside the dialog cancels the close."""
     print("TEST: term - cancel by click outside ... ", end="", flush=True)
-    with VtmTestSession(["-r", "term"]) as s:
+    with VtmTestSession(VTM_DESK_BINARY, ["-r", "term"]) as s:
         if not open_dialog_and_verify(s):
             print("FAIL - vtm exited before dialog")
             return False
@@ -345,7 +357,7 @@ def test_term_cancel_click_outside():
 def test_term_click_yes_button():
     """Clicking the Yes button in the dialog confirms close."""
     print("TEST: term - click Yes button ... ", end="", flush=True)
-    with VtmTestSession(["-r", "term"]) as s:
+    with VtmTestSession(VTM_DESK_BINARY, ["-r", "term"]) as s:
         if not open_dialog_and_verify(s):
             print("FAIL - vtm exited before dialog")
             return False
@@ -370,7 +382,7 @@ def test_term_click_yes_button():
 def test_term_click_no_button():
     """Clicking the No button in the dialog cancels close."""
     print("TEST: term - click No button ... ", end="", flush=True)
-    with VtmTestSession(["-r", "term"]) as s:
+    with VtmTestSession(VTM_DESK_BINARY, ["-r", "term"]) as s:
         if not open_dialog_and_verify(s):
             print("FAIL - vtm exited before dialog")
             return False
@@ -391,14 +403,13 @@ def test_term_click_no_button():
 
 
 # ---------------------------------------------------------------------------
-# Tests for `vtm -r tile`
+# Tests for `vtm-tile`
 # ---------------------------------------------------------------------------
 
 def test_tile_close_button_shows_dialog():
-    """Clicking x in tile with confirm_close=true keeps vtm alive."""
+    """Clicking x in tile with confirm_close=true keeps vtm-tile alive."""
     print("TEST: tile - close button shows dialog ... ", end="", flush=True)
-    # -c must come before -r because -r consumes all remaining args via rest().
-    with VtmTestSession(["-c", "<config><tile><confirm_close=true/></tile></config>", "-r", "tile"], settle_delay=TILE_SETTLE_DELAY) as s:
+    with VtmTestSession(VTM_TILE_BINARY, ["-c", "<config><tile><confirm_close=true/></tile></config>"], settle_delay=TILE_SETTLE_DELAY) as s:
         if not open_dialog_and_verify(s):
             print("FAIL - vtm exited immediately")
             return False
@@ -409,8 +420,7 @@ def test_tile_close_button_shows_dialog():
 def test_tile_confirm_y():
     """Pressing Y while tile dialog is open confirms close."""
     print("TEST: tile - confirm by Y ... ", end="", flush=True)
-    # -c must come before -r because -r consumes all remaining args via rest().
-    with VtmTestSession(["-c", "<config><tile><confirm_close=true/></tile></config>", "-r", "tile"], settle_delay=TILE_SETTLE_DELAY) as s:
+    with VtmTestSession(VTM_TILE_BINARY, ["-c", "<config><tile><confirm_close=true/></tile></config>"], settle_delay=TILE_SETTLE_DELAY) as s:
         if not open_dialog_and_verify(s):
             print("FAIL - vtm exited before dialog")
             return False
@@ -425,8 +435,7 @@ def test_tile_confirm_y():
 def test_tile_cancel_esc():
     """Pressing Esc while tile dialog is open cancels the close."""
     print("TEST: tile - cancel by Esc ... ", end="", flush=True)
-    # -c must come before -r because -r consumes all remaining args via rest().
-    with VtmTestSession(["-c", "<config><tile><confirm_close=true/></tile></config>", "-r", "tile"], settle_delay=TILE_SETTLE_DELAY) as s:
+    with VtmTestSession(VTM_TILE_BINARY, ["-c", "<config><tile><confirm_close=true/></tile></config>"], settle_delay=TILE_SETTLE_DELAY) as s:
         if not open_dialog_and_verify(s):
             print("FAIL - vtm exited before dialog")
             return False
@@ -443,13 +452,13 @@ def test_tile_cancel_esc():
 
 
 # ---------------------------------------------------------------------------
-# Tests for `vtm -r tile` after split (Bug 1 & Bug 2 regression tests)
+# Tests for `vtm-tile` after split (Bug 1 & Bug 2 regression tests)
 # ---------------------------------------------------------------------------
 
 # The empty_slot mini menu has autohide=true. Using the keyboard shortcut
 # Alt+Shift+| (sent as ESC |) for splitting is more reliable than clicking.
 
-TILE_ARGS = ["-c", "<config><tile><confirm_close=true/></tile></config>", "-r", "tile"]
+TILE_ARGS = ["-c", "<config><tile><confirm_close=true/></tile></config>"]
 
 # Keyboard shortcut for horizontal split in tile: Alt+Shift+| = ESC |
 SPLIT_HZ_KEY = b"\x1b|"
@@ -464,26 +473,31 @@ def do_split(session, count=1):
 
 
 def check_all_vtm_exited(timeout=8.0):
-    """Wait for all vtm processes to exit.  Return True if all gone.
+    """Wait for all vtm-desk/vtm-tile processes to exit.  Return True if all gone.
     Ignores zombie (defunct) processes — they are already dead but not yet
     reaped by their parent.
     """
     deadline = time.time() + timeout
     while time.time() < deadline:
-        # Check for non-zombie vtm processes.
-        result = subprocess.run(
-            ["ps", "-C", "vtm", "-o", "pid=,stat="],
-            capture_output=True, text=True,
-        )
-        if result.returncode != 0:
-            return True  # No vtm processes at all.
-        # Filter out zombies (stat starts with 'Z').
-        alive = [
-            line.strip()
-            for line in result.stdout.strip().splitlines()
-            if line.split() and not line.split()[1].startswith("Z")
-        ]
-        if not alive:
+        all_gone = True
+        for name in ("vtm-desk", "vtm-tile"):
+            # Check for non-zombie processes.
+            result = subprocess.run(
+                ["ps", "-C", name, "-o", "pid=,stat="],
+                capture_output=True, text=True,
+            )
+            if result.returncode != 0:
+                continue  # No processes with this name.
+            # Filter out zombies (stat starts with 'Z').
+            alive = [
+                line.strip()
+                for line in result.stdout.strip().splitlines()
+                if line.split() and not line.split()[1].startswith("Z")
+            ]
+            if alive:
+                all_gone = False
+                break
+        if all_gone:
             return True
         time.sleep(0.3)
     return False
@@ -492,7 +506,7 @@ def check_all_vtm_exited(timeout=8.0):
 def test_tile_split_then_close_confirm():
     """Bug 2 regression: split once, confirm close — all processes must exit."""
     print("TEST: tile - split + confirm close cleans up ... ", end="", flush=True)
-    with VtmTestSession(TILE_ARGS, settle_delay=TILE_SETTLE_DELAY) as s:
+    with VtmTestSession(VTM_TILE_BINARY, TILE_ARGS, settle_delay=TILE_SETTLE_DELAY) as s:
         # Split the pane.
         do_split(s)
         if not s.is_alive():
@@ -512,15 +526,15 @@ def test_tile_split_then_close_confirm():
             print("PASS")
             return True
         # Debug: show remaining processes.
-        result = subprocess.run(["pgrep", "-ax", "vtm"], capture_output=True, text=True)
-        print(f"FAIL - vtm processes still running: {result.stdout.strip()}")
+        result = subprocess.run(["pgrep", "-ax", "vtm-tile"], capture_output=True, text=True)
+        print(f"FAIL - vtm-tile processes still running: {result.stdout.strip()}")
         return False
 
 
 def test_tile_split_twice_then_close_confirm():
     """Bug 2 regression: split twice, confirm close — all processes must exit."""
     print("TEST: tile - split x2 + confirm close cleans up ... ", end="", flush=True)
-    with VtmTestSession(TILE_ARGS, settle_delay=TILE_SETTLE_DELAY) as s:
+    with VtmTestSession(VTM_TILE_BINARY, TILE_ARGS, settle_delay=TILE_SETTLE_DELAY) as s:
         # Two splits.
         do_split(s, count=2)
         if not s.is_alive():
@@ -539,15 +553,15 @@ def test_tile_split_twice_then_close_confirm():
         if check_all_vtm_exited(timeout=8.0):
             print("PASS")
             return True
-        result = subprocess.run(["pgrep", "-ax", "vtm"], capture_output=True, text=True)
-        print(f"FAIL - vtm processes still running: {result.stdout.strip()}")
+        result = subprocess.run(["pgrep", "-ax", "vtm-tile"], capture_output=True, text=True)
+        print(f"FAIL - vtm-tile processes still running: {result.stdout.strip()}")
         return False
 
 
 def test_tile_split_then_close_intercept():
     """Bug 1 regression: split once, close button must be intercepted (not bypass)."""
     print("TEST: tile - split + close intercepted ... ", end="", flush=True)
-    with VtmTestSession(TILE_ARGS, settle_delay=TILE_SETTLE_DELAY) as s:
+    with VtmTestSession(VTM_TILE_BINARY, TILE_ARGS, settle_delay=TILE_SETTLE_DELAY) as s:
         # Split the pane.
         do_split(s)
         if not s.is_alive():
@@ -579,10 +593,11 @@ def test_tile_split_then_close_intercept():
 # ---------------------------------------------------------------------------
 
 def main():
-    if not os.path.isfile(VTM_BINARY):
-        print(f"ERROR: vtm binary not found at {VTM_BINARY}")
-        print("Set VTM_BINARY env var or build vtm first.")
-        return 1
+    for label, path in [("vtm-desk", VTM_DESK_BINARY), ("vtm-tile", VTM_TILE_BINARY)]:
+        if not os.path.isfile(path):
+            print(f"ERROR: {label} binary not found at {path}")
+            print(f"Set {label.upper().replace('-', '_')}_BINARY env var or build {label} first.")
+            return 1
 
     kill_all_vtm()
 

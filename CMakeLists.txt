@@ -17,7 +17,8 @@ if(NOT WIN32 AND "$ENV{LINUX_CXX_FLAGS}" STREQUAL "") # If CMakeSettings.json is
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O0 -g3 -pthread")
 endif()
 
-add_executable(vtm "src/vtm.cpp" $ENV{WIN32_RESOURCES})
+add_executable(vtm-desk "src/vtm-desk.cpp" $ENV{WIN32_RESOURCES})
+add_executable(vtm-tile "src/vtm-tile.cpp" $ENV{WIN32_RESOURCES})
 # add_executable(term "src/netxs/apps/term.cpp")
 # add_executable(calc "src/netxs/apps/calc.cpp")
 
@@ -28,11 +29,15 @@ find_package(Lua 5.4  REQUIRED)
 add_library(Lua::Lua INTERFACE IMPORTED)
 set_target_properties(Lua::Lua PROPERTIES INTERFACE_LINK_LIBRARIES "${LUA_LIBRARIES}")
 
-target_include_directories(vtm PRIVATE ${FREETYPE_INCLUDE_DIRS}
-                                       ${HARFBUZZ_INCLUDE_DIRS}
-                                       ${LUA_INCLUDE_DIR})
+target_include_directories(vtm-desk PRIVATE ${FREETYPE_INCLUDE_DIRS}
+                                            ${HARFBUZZ_INCLUDE_DIRS}
+                                            ${LUA_INCLUDE_DIR})
+target_include_directories(vtm-tile PRIVATE ${FREETYPE_INCLUDE_DIRS}
+                                            ${HARFBUZZ_INCLUDE_DIRS}
+                                            ${LUA_INCLUDE_DIR})
 
-target_link_libraries(vtm PRIVATE Lua::Lua Freetype::Freetype harfbuzz::harfbuzz)
+target_link_libraries(vtm-desk PRIVATE Lua::Lua Freetype::Freetype harfbuzz::harfbuzz)
+target_link_libraries(vtm-tile PRIVATE Lua::Lua Freetype::Freetype harfbuzz::harfbuzz)
 # target_link_libraries(term PRIVATE Lua::Lua Freetype::Freetype harfbuzz::harfbuzz)
 # target_link_libraries(calc PRIVATE Lua::Lua Freetype::Freetype harfbuzz::harfbuzz)
 
@@ -43,5 +48,5 @@ if(VTM_BUILD_TESTS)
 endif()
 
 if(NOT WIN32)
-    install(TARGETS vtm DESTINATION bin)
+    install(TARGETS vtm-desk vtm-tile DESTINATION bin)
 endif()
