@@ -14,6 +14,7 @@ enum class code { noaccess, noserver, nodaemon, nosrvlog, interfer, errormsg };
 int main(int argc, char* argv[])
 {
     auto whoami = type::client;
+    auto priormode = type::client; // Track mode set before -r overrides it (for -s/-d -r tile).
     auto params = text{};
     auto cliopt = text{};
     auto errmsg = text{};
@@ -58,6 +59,7 @@ int main(int argc, char* argv[])
         }
         else if (getopt.match("-r", "--", "--run"))
         {
+            priormode = whoami; // Preserve -s/-d mode for tile server support.
             whoami = type::runapp;
             params = getopt.rest();
         }
@@ -140,6 +142,7 @@ int main(int argc, char* argv[])
                 "\n  Command-line options syntax:"
                 "\n"
                 "\n    vtm [ -c <file> ][ -q ][ -p <id> ][ -s | -d | -m ][ -x <cmds> ]"
+                "\n    vtm [ -c <file> ][ -q ][ -p <id> ][ -s | -d ][ -r tile ][ <args...> ]"
                 "\n    vtm [ -c <file> ][ -q ][ -t | -g ][ -r [ <type> ]][ <args...> ]"
                 "\n    vtm [ -c <file> ]  -l"
                 #if defined(__linux__) && !defined(__ANDROID__)
@@ -173,8 +176,8 @@ int main(int argc, char* argv[])
                 "\n    -x, --script <cmds>  Specifies script commands."
                 "\n    -c, --config <file>  Specifies a settings file to load or plain xml-data to overlay."
                 "\n    -p, --pin <id>       Specifies the desktop id it will be pinned to."
-                "\n    -s, --server         Run Desktop Server."
-                "\n    -d, --daemon         Run Desktop Server in background."
+                "\n    -s, --server         Run Desktop/Tile Server."
+                "\n    -d, --daemon         Run Desktop/Tile Server in background."
                 "\n    -m, --monitor        Run Log Monitor."
                 "\n    -r, --, --run        Run desktop applet standalone."
                 "\n    <type>               Desktop applet to run."
@@ -193,6 +196,12 @@ int main(int argc, char* argv[])
                 "\n"
                 "\n      'vtm -r vtty <cui_app...>' can be shortened to 'vtm <cui_app...>'."
                 "\n      'vtm -r dtty ssh <user@host dtvt_app...>' can be shortened to 'vtm ssh <user@host dtvt_app...>'."
+                "\n"
+                "\n    Tile Server:"
+                "\n"
+                "\n      When -s or -d is combined with -r tile, a Tile Server is started"
+                "\n      instead of a Desktop Server. Running 'vtm -r tile' without -s/-d"
+                "\n      connects to an existing Tile Server (auto-starting one if needed)."
                 "\n"
                 "\n    Plain xml-data can be specified in place of <file> in the '--config <file>' option,"
                 "\n    as well as in the $VTM_CONFIG environment variable:"
@@ -229,7 +238,10 @@ int main(int argc, char* argv[])
         utf::to_lower(shadow);
         if (shadow.starts_with(app::tile::id))
         {
-            whoami = monlog ? type::logmon : type::client;
+            whoami = priormode == type::server ? type::server
+                   : priormode == type::daemon ? type::daemon
+                   : monlog                    ? type::logmon
+                                               : type::client;
             if (vtpipe.empty())
             {
                 auto userid = os::env::user();
@@ -408,7 +420,7 @@ int main(int argc, char* argv[])
         else if (whoami != type::client && client) return failed(code::interfer);
         else if (whoami == type::client && !client)
         {
-            log("%%New desktop session for [%userid%]", prompt::main, userid.first);
+            log("%%New %sesstype% session for [%userid%]", prompt::main, prefix.ends_with("-tile") ? "tile" : "desktop", userid.first);
             auto [success, successor] = os::process::fork(system, prefix, config.settings::utf8());
             if (successor)
             {
