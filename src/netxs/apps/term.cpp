@@ -9,7 +9,6 @@ int main(int argc, char* argv[])
 {
     auto banner = []{ log(app::terminal::name, ' ', app::shared::version); };
     auto cfonly = faux;
-    auto rungui = true;
     auto cliopt = text{};
     auto errmsg = text{};
     auto getopt = os::process::args{ argc, argv };
@@ -48,7 +47,7 @@ int main(int argc, char* argv[])
             break;
         }
     }
-    os::dtvt::initialize(rungui, true);
+    os::dtvt::initialize(true);
     auto params = getopt.rest();
     auto syslog = os::tty::logger();
     banner();

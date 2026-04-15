@@ -3868,9 +3868,8 @@ namespace netxs::os
             }
             return std::max(dot_11, winsz);
         }
-        auto initialize(bool rungui = faux, bool check_vtm = faux, bool interactive = faux)
+        auto initialize(bool check_vtm = faux, [[maybe_unused]] bool interactive = faux)
         {
-            rungui &= interactive;
             auto term = text{};
 
             #if defined(_WIN32)
@@ -3983,34 +3982,6 @@ namespace netxs::os
             else
             {
                 dtvt::gridsz = dtvt::consize();
-                if (rungui)
-                {
-                    #if defined(_WIN32)
-                    if (nt::session()) // There is no gui mode in Session0.
-                    {
-                        dtvt::vtmode |= ui::console::gui;
-                        auto processpid = DWORD{};
-                        auto proc_count = ::GetConsoleProcessList(&processpid, 1);
-                        if (1 == proc_count) // Run gui console. Close parent console when we are alone.
-                        {
-                            os::stdin_fd  = os::invalid_fd;
-                            os::stdout_fd = os::invalid_fd;
-                            os::stderr_fd = os::invalid_fd;
-                            //if constexpr (!debugmode) ::FreeConsole();
-                            ::FreeConsole();
-                        }
-                    }
-                    #else
-                    if (!haspty) //todo this never happens, see ui::console::redirio above
-                    {
-                        dtvt::vtmode |= ui::console::gui;
-                    }
-                    #endif
-                    if (dtvt::vtmode & ui::console::gui)
-                    {
-                        term = "Native GUI console";
-                    }
-                }
             }
             if (!dtvt::active && !(dtvt::vtmode & ui::console::redirio) && os::stdin_fd  != os::invalid_fd
                                                                         && os::stdout_fd != os::invalid_fd)

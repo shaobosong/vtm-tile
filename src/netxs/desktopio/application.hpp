@@ -11,7 +11,6 @@
 #include "console.hpp"
 #include "system.hpp"
 #include "terminal.hpp"
-#include "gui.hpp"
 
 namespace netxs::app
 {
@@ -1056,37 +1055,6 @@ namespace netxs::app::shared
             map[app_typename] = builder;
         }
     };
-    struct gui_config_t
-    {
-        si32 winstate{};
-        bool aliasing{};
-        span blinking{};
-        twod wincoord{};
-        twod gridsize{};
-        si32 cellsize{};
-        std::list<text> fontlist;
-    };
-
-    static auto get_gui_config(settings& config)
-    {
-        os::dtvt::wheelrate = config.settings::take("/config/timings/wheelrate", 3);
-        auto gui_config = gui_config_t{ .winstate = config.settings::take("/config/gui/winstate", winstate::normal, app::shared::win::options),
-                                        .aliasing = config.settings::take("/config/gui/antialiasing", faux),
-                                        .blinking = config.settings::take("/config/gui/blinkrate", span{ 400ms }),
-                                        .wincoord = config.settings::take("/config/gui/wincoor", dot_mx),
-                                        .gridsize = config.settings::take("/config/gui/gridsize", dot_mx),
-                                        .cellsize = std::clamp(config.settings::take("/config/gui/cellheight", si32{ 20 }), 0, 256) };
-        if (gui_config.cellsize == 0) gui_config.cellsize = 20;
-        if (gui_config.gridsize.x == 0 || gui_config.gridsize.y == 0) gui_config.gridsize = dot_mx;
-        auto fonts_context = config.settings::push_context("/config/gui/fonts/");
-        auto font_list = config.settings::take_ptr_list_for_name("font");
-        for (auto& font_ptr : font_list)
-        {
-            //todo implement 'fonts/font/file' - font file path/url
-            gui_config.fontlist.push_back(config.settings::take_value(font_ptr));
-        }
-        return gui_config;
-    }
     static auto get_tui_config(settings& config, ui::skin& g)
     {
         using namespace std::chrono;
@@ -1209,36 +1177,11 @@ namespace netxs::app::shared
         g.NsMaximizeWindow_tooltip        = config.settings::take("/Ns/MaximizeWindow/tooltip"         , ""s);
         g.NsCloseWindow_tooltip           = config.settings::take("/Ns/CloseWindow/tooltip"            , ""s);
     }
-    static void splice(xipc client, gui_config_t& gc)
+    static void splice(xipc client)
     {
-        if (os::dtvt::active || !(os::dtvt::vtmode & ui::console::gui))
-        {
-            os::dtvt::flagsz = true;
-            os::dtvt::flagsz.notify_all();
-            os::tty::splice(client);
-        }
-        else
-        {
-            os::dtvt::client = client;
-            auto connect = [&]
-            {
-                //todo sync settings with tui_domain (auth::config)
-                auto gui_event_domain = netxs::events::auth{};
-                auto window = gui_event_domain.create<gui::window>(gui_event_domain, gc.fontlist, gc.cellsize, gc.aliasing, gc.blinking, dot_21);
-                window->connect(gc.winstate, gc.wincoord, gc.gridsize);
-            };
-            if (os::stdout_fd != os::invalid_fd)
-            {
-                auto runcmd = directvt::binary::command{};
-                auto readln = os::tty::readline([&](auto line){ runcmd.send(client, line); }, [&]{ if (client) client->shut(); });
-                connect();
-                readln.stop();
-            }
-            else
-            {
-                connect();
-            }
-        }
+        os::dtvt::flagsz = true;
+        os::dtvt::flagsz.notify_all();
+        os::tty::splice(client);
     }
     static void start(text cmd, text aclass)
     {
@@ -1247,16 +1190,11 @@ namespace netxs::app::shared
         auto& indexer = ui::tui_domain();
         auto& config = indexer.config;
         auto ui_lock = indexer.unique_lock();
-        auto gui_config = app::shared::get_gui_config(config);
         app::shared::get_tui_config(config, ui::skin::globals());
         auto thread = std::thread{ [&, &client = client] //todo clang 15.0.0 still disallows capturing structured bindings (wait for clang 16.0.0)
         {
-            app::shared::splice(client, gui_config);
+            app::shared::splice(client);
         }};
-        if (os::dtvt::vtmode & ui::console::gui)
-        {
-            os::dtvt::flagsz.wait(faux); // Sync with gui window. Waiting for os::dtvt::gridsz update.
-        }
         auto gate_ptr = ui::gate::ctor(server, os::dtvt::vtmode);
         auto& gate = *gate_ptr;
         gate.base::resize(os::dtvt::gridsz);

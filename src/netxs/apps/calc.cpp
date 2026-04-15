@@ -9,7 +9,6 @@ int main(int argc, char* argv[])
 {
     auto banner = []{ log(app::calc::name, ' ', app::shared::version); };
     auto cfonly = faux;
-    auto rungui = true;
     auto cliopt = text{};
     auto errmsg = text{};
     auto getopt = os::process::args{ argc, argv };

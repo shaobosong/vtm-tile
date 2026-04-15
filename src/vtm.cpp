@@ -19,7 +19,6 @@ int main(int argc, char* argv[])
     auto errmsg = text{};
     auto vtpipe = text{};
     auto script = text{};
-    auto rungui = true;
     auto system = faux;
     auto monlog = faux;
     auto getopt = os::process::args{ argc, argv };
@@ -56,14 +55,6 @@ int main(int argc, char* argv[])
         else if (getopt.match("-0", "--session0"))
         {
             system = true;
-        }
-        else if (getopt.match("-t", "--tui"))
-        {
-            rungui = faux;
-        }
-        else if (getopt.match("-g", "--gui"))
-        {
-            rungui = true;
         }
         else if (getopt.match("-r", "--", "--run"))
         {
@@ -166,8 +157,6 @@ int main(int argc, char* argv[])
                 "\n    -h, -?, --help       Print command-line options."
                 "\n    -v, --version        Print version."
                 "\n    -l, --listconfig     Print configuration."
-                "\n    -t, --tui            Force TUI mode."
-                "\n    -g, --gui            Force GUI mode."
                 "\n    -i, --install        Perform system-wide installation."
                 #if defined(_WIN32)
                 " Allow Desktop Server to run in Session 0."
@@ -252,7 +241,7 @@ int main(int argc, char* argv[])
     }
 
     auto interactive = whoami == type::runapp || whoami == type::client;
-    os::dtvt::initialize(rungui, true, interactive);
+    os::dtvt::initialize(true, interactive);
 
     if (os::dtvt::vtmode & ui::console::redirio && (whoami == type::runapp || whoami == type::client))
     {
@@ -443,10 +432,9 @@ int main(int argc, char* argv[])
                 auto cwd = os::env::cwd();
                 auto cmd = script;
                 auto win = os::dtvt::gridsz;
-                auto gui = app::shared::get_gui_config(config);
                 userinit.send(client, userid.first, os::dtvt::vtmode, env, cwd, cmd, win);
                 ui::tui_domain().config.swap(config);
-                app::shared::splice(client, gui);
+                app::shared::splice(client);
                 return 0;
             }
             else return failed(denied ? code::noaccess : code::noserver);
