@@ -143,9 +143,18 @@ namespace netxs::app::shared
 
         // Layer 1: Dimming scrim (click outside → cancel).
         overlay_ptr->attach(ui::mock::ctor())
-            ->active(argb{ 0x80808080 }, argb{ 0x801A1A1A })
             ->invoke([dismiss_visual, dismiss_hook, on_cancel](auto& boss)
             {
+                auto myid = boss.bell::id;
+                boss.LISTEN(tier::release, e2::render::background::any, parent_canvas, -, (myid))
+                {
+                    parent_canvas.fill([myid](cell& c)
+                    {
+                        c.bgc().faint();
+                        c.fgc().faint();
+                        c.link(myid);
+                    });
+                };
                 boss.on(tier::mouserelease, input::key::LeftClick, [&, dismiss_visual, dismiss_hook, on_cancel](hids& gear)
                 {
                     dismiss_visual();
