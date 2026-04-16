@@ -296,6 +296,7 @@
                     altbuf.resize_viewport(target->panel); // Reset viewport to the basis.
                     target = &altbuf;
                     follow[axis::Y] = true;
+                    ipccon.winsz_renotify(); // Inject WINDOW_BUFFER_SIZE_EVENT after buffer switch (matching conhost behavior).
                     break;
                 case 2004: // Set bracketed paste mode.
                     bpmode = true;
@@ -403,6 +404,7 @@
                 case 1049: // Use normal screen buffer and restore cursor. Use the old normal buffer brush.
                     if (target != &normal && target != &altbuf) break; // Suppress mode change for additional screen buffers (windows console).
                     reset_to_normal(*target);
+                    ipccon.winsz_renotify(); // Inject WINDOW_BUFFER_SIZE_EVENT after buffer switch (matching conhost behavior).
                     break;
                 case 2004: // Disable bracketed paste mode.
                     bpmode = faux;

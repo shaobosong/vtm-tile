@@ -545,6 +545,7 @@ struct impl : consrv
         mbtn  dclick; // evnt: Mouse double-click tracker.
         si32  mstate; // evnt: Mouse button last state.
         bool  paster; // evnt: Pending carriage return in paste.
+        twod  pendsz; // evnt: Pending window resize not yet delivered via ReadConsoleInput.
 
         evnt(impl& serv)
             :  server{ serv },
@@ -554,7 +555,8 @@ struct impl : consrv
                ctrl_c{ faux },
                fstate{ true },
                mstate{      },
-               paster{ faux }
+               paster{ faux },
+               pendsz{      }
         { }
 
         auto& ref_history(text& exe)
@@ -1083,6 +1085,12 @@ struct impl : consrv
         void winsz(twod winsize)
         {
             auto lock = std::lock_guard{ locker };
+            winsz_nolock(winsize);
+        }
+        // evnt: Inject WINDOW_BUFFER_SIZE_EVENT without acquiring locker (caller must hold it).
+        void winsz_nolock(twod winsize)
+        {
+            pendsz = winsize; // Track pending resize for re-injection if consumed by readline/readchar.
             stream.emplace_back(INPUT_RECORD // Ignore ENABLE_WINDOW_INPUT - we only signal a viewport change.
             {
                 .EventType = WINDOW_BUFFER_SIZE_EVENT,
@@ -1835,6 +1843,7 @@ struct impl : consrv
             if (!peek)
             {
                 stream.erase(stream.begin(), head);
+                pendsz = {}; // Clear pending resize — events delivered via ReadConsoleInput.
                 if (stream.empty()) ondata.flush();
             }
             if (size == recbuf.size())
@@ -1855,6 +1864,34 @@ struct impl : consrv
         auto take(Payload& packet)
         {
             auto lock = std::lock_guard{ locker };
+            // Re-inject WINDOW_BUFFER_SIZE_EVENT if it was consumed by readline/readchar.
+            if (pendsz != twod{})
+            {
+                auto has_winsz = faux;
+                for (auto& r : stream)
+                {
+                    if (r.EventType == WINDOW_BUFFER_SIZE_EVENT) { has_winsz = true; break; }
+                }
+                if (!has_winsz)
+                {
+                    stream.emplace_back(INPUT_RECORD
+                    {
+                        .EventType = WINDOW_BUFFER_SIZE_EVENT,
+                        .Event =
+                        {
+                            .WindowBufferSizeEvent =
+                            {
+                                .dwSize =
+                                {
+                                    .X = (si16)std::min<si32>(pendsz.x, si16max),
+                                    .Y = (si16)std::min<si32>(pendsz.y, si16max),
+                                }
+                            }
+                        }
+                    });
+                }
+                pendsz = {};
+            }
             if (stream.empty())
             {
                 if (server.io_log) log("\tevents buffer is empty");
@@ -3931,6 +3968,11 @@ struct impl : consrv
                 auto& console = *window_ptr;
                 uiterm.reset_to_altbuf(console);
             }
+            // Notify the client app about the current viewport size after buffer switch.
+            // This ensures apps like tcell/lazygit get a resize event when resuming
+            // from a suspended state (e.g., after closing an editor launched from lazygit),
+            // especially if the pane size changed while suspended.
+            events.winsz_nolock(uiterm.target->panel);
         }
         unsync = true;
     }

@@ -4569,6 +4569,19 @@ namespace netxs::os
                     }
                 }
             }
+            // vtty: Unconditionally re-inject WINDOW_BUFFER_SIZE_EVENT with the current
+            //       terminal size. Used after VT alt-screen buffer switches (DECSET/DECRST
+            //       1047/1049) to ensure the client application knows the current size,
+            //       matching conhost behavior which injects a size event on every buffer
+            //       switch. This is critical when FlushConsoleInputBuffer discards a pending
+            //       resize event during suspend/resume (e.g. tcell's tty.Start()).
+            void winsz_renotify()
+            {
+                if (attached)
+                {
+                    termlink->winsz(termsize);
+                }
+            }
             void reset()
             {
                 if (termlink) termlink->reset();
