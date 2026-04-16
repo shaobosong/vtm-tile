@@ -18,6 +18,7 @@
         cell       defclr; // term: Default/current colors (SGR49/39).
         twod       origin; // term: Viewport position.
         twod       follow; // term: Viewport follows cursor (bool: X, Y).
+        twod       deferred_resize; // term: Deferred viewport size for the normal buffer (set when resize occurs while alt is active, matching conhost's _deferredPtyResize).
         bool       insmod; // term: Insert/replace mode.
         bool       decckm; // term: Cursor keys Application(true)/ANSI(faux) mode.
         bool       bpmode; // term: Bracketed paste mode.
@@ -290,6 +291,7 @@
                 case 1047: // Use alternate screen buffer.
                 case 1049: // Save cursor pos and use alternate screen buffer, clearing it first.  This control combines the effects of the 1047 and 1048  modes.
                     if (target != &normal && target != &altbuf) break; // Suppress mode change for additional screen buffers (windows console).
+                    _handle_deferred_resize(); // Apply deferred resize to normal buffer before creating alt (conhost: _handleDeferredResize in UseAlternateScreenBuffer).
                     altbuf.style = target->style; // Inherit the normal buffer brush.
                     altbuf.brush = target->brush; //
                     altbuf.clear_all();
@@ -317,11 +319,23 @@
             target->flush();
             while (auto next = q(0)) _decset(next);
         }
+        // term: Apply any deferred resize to the normal buffer (matching conhost's _handleDeferredResize).
+        //       Called before buffer switches to ensure the normal buffer reflects
+        //       any viewport changes that occurred while the alt buffer was active.
+        void _handle_deferred_resize()
+        {
+            if (deferred_resize != twod{})
+            {
+                normal.resize_viewport(deferred_resize);
+                deferred_resize = {};
+            }
+        }
         // term: Switch buffer to normal and reset viewport to the basis.
         template<class T>
         void reset_to_normal(T& a)
         {
-            normal.resize_viewport(a.panel);
+            auto new_size = deferred_resize != twod{} ? std::exchange(deferred_resize, {}) : a.panel;
+            normal.resize_viewport(new_size);
             target = &normal;
             follow[axis::Y] = true;
         }
@@ -329,6 +343,7 @@
         template<class T>
         void reset_to_altbuf(T& altbuf)
         {
+            _handle_deferred_resize(); // Apply deferred resize to normal buffer first (matching conhost).
             altbuf.resize_viewport(target->panel);
             target = &altbuf;
         }
@@ -1392,6 +1407,11 @@
             scroll(origin);
             base::anchor += scroll_coor - origin;
             ipccon.resize(new_area.size);
+            // Defer the resize for the normal buffer when alt is active (matching conhost's
+            // _deferredPtyResize). The deferred resize is applied when switching back to normal
+            // or before creating a new alt buffer.
+            if (target != &normal) deferred_resize = new_area.size;
+            else                   deferred_resize = {};
             new_area.size.y += console.get_basis();
             new_area -= base::intpad;
         }
