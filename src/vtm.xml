@@ -245,6 +245,7 @@ R"==(
             <item label="  >|<  " tooltip=/Ns/Tile/EqualizeSplitRatio/tooltip script=OnLeftClick|TileEqualizeSplitRatio/>
             <item label="  <->  " tooltip=/Ns/Tile/SwapPanes/tooltip          script=OnLeftClick|TileSwapPanes/>
             <item label="  -/-  " tooltip=/Ns/Tile/SplitOrientation/tooltip   script=OnLeftClick|TileSplitOrientation/>
+            <item label="  [0]  " tooltip=" Show pane index overlay for quick pane switching " script=OnLeftClick|TileShowPaneIndex/>
             <item label="  =D-  " tooltip=" Disconnect "                      script=OnLeftClick|TileDisconnect>
                 <hover fgc="0xFFFFFFFF" bgc="0xFFFF8700"/>
             </item>
@@ -1189,6 +1190,7 @@ R"==(
     <TileFocusRightPane    ="vtm.tile.FocusRightPane();"/>         <!-- Focus the nearest pane to the right. -->
     <TileFocusUpPane       ="vtm.tile.FocusUpPane();"/>            <!-- Focus the nearest pane above. -->
     <TileFocusDownPane     ="vtm.tile.FocusDownPane();"/>          <!-- Focus the nearest pane below. -->
+    <TileShowPaneIndex     ="vtm.tile.ShowPaneIndex();"/>          <!-- Show pane index overlay (ASCII 0x30~0x7E) for quick pane switching. Press the displayed character to focus a pane, or Esc to cancel. -->
     <TileRunApplication    ="vtm.tile.RunApplication();"/>         <!-- Launch application instances in active empty slots. The app to run can be set by RightClick on the taskbar. -->
     <TileSelectAllPanes    ="vtm.tile.SelectAllPanes();"/>         <!-- Select all panes. -->
     <TileSelectApplication ="vtm.tile.SelectApplication( 1);"/>      <!-- Select default application type for new panes. -->

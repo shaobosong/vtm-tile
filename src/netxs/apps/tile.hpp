@@ -54,6 +54,7 @@ namespace netxs::events::userland
                     EVENT_XS( rightpane, input::hids ),
                     EVENT_XS( uppane   , input::hids ),
                     EVENT_XS( downpane , input::hids ),
+                    EVENT_XS( paneindex, input::hids ),
                 };
                 SUBSET_XS( split )
                 {
@@ -291,6 +292,7 @@ namespace netxs::app::tile
         X(ZoomPane           ) \
         X(ClosePane          ) \
         X(SetMenuColor       ) \
+        X(ShowPaneIndex      ) \
         X(Disconnect         ) \
         X(Shutdown           ) \
 
@@ -1290,6 +1292,7 @@ namespace netxs::app::tile
             tile_context = config.settings::push_context("/config/tile/");
             auto confirm_close = config.settings::take("confirm_close", faux);
             auto confirm_block = ptr::shared(faux); // Shared flag: set to true while close-confirmation dialog is shown.
+            auto pane_index_active = ptr::shared(faux); // Shared flag: set to true while pane-index overlay is shown.
             auto [menu_block, cover, menu_data] = menu::load(config);
             object->attach(slot::_1, menu_block);
             menu_data->active()
@@ -1590,6 +1593,13 @@ namespace netxs::app::tile
                                                                 menu_data->active()->shader(window_clr);
                                                                 boss.base::deface();
                                                             }
+                                                        }},
+                        { methods::ShowPaneIndex,        [&]
+                                                        {
+                                                            luafx.run_with_gear([&](auto& gear)
+                                                            {
+                                                                boss.base::signal(tier::preview, app::tile::events::ui::focus::paneindex, gear);
+                                                            });
                                                         }},
                         { methods::Disconnect,          [&]
                                                         {
@@ -2008,6 +2018,164 @@ namespace netxs::app::tile
                     boss.LISTEN(tier::preview, app::tile::events::ui::focus::downpane, gear, boss.sensors, (navigate))
                     {
                         navigate(gear, twod{ 0, 1 });
+                    };
+                    boss.LISTEN(tier::preview, app::tile::events::ui::focus::paneindex, gear, -, (pane_index_active, wrapper_shadow = ptr::shadow(wrapper)))
+                    {
+                        if (*pane_index_active) { gear.set_handled(); return; }
+                        auto wrapper_ptr = wrapper_shadow.lock();
+                        if (!wrapper_ptr) return;
+                        if (nothing_to_iterate()) return;
+
+                        // Collect all panes and assign index labels (ASCII 0x30~0x7E: '0'..'~', up to 79 panes).
+                        struct pane_info_t { text label; sptr slot; };
+                        auto pane_list = ptr::shared(std::vector<pane_info_t>{});
+                        auto pane_count = si32{};
+                        foreach(id_t{}, [&](auto& item_ptr, si32 item_type, auto node_veer_ptr)
+                        {
+                            if (item_type != item_type::grip && pane_count < 0x7E - 0x30 + 1)
+                            {
+                                auto c = char(0x30 + pane_count);
+                                pane_list->push_back({ text(1, c), sptr(node_veer_ptr) });
+                                pane_count++;
+                            }
+                        });
+                        if (pane_list->empty()) return;
+
+                        *pane_index_active = true;
+
+                        // Helper: compute an item's rect relative to the wrapper (overlay coordinate space).
+                        auto wrapper_raw = wrapper_ptr.get();
+                        auto get_rect_in = [wrapper_raw](sptr const& item_ptr) -> rect
+                        {
+                            auto r = item_ptr->base::area();
+                            auto p = item_ptr->base::parent();
+                            while (p && p.get() != wrapper_raw)
+                            {
+                                r.coor += p->base::area().coor;
+                                p = p->base::parent();
+                            }
+                            return r;
+                        };
+
+                        // Build overlay.
+                        auto overlay_ptr = ui::mock::ctor();
+                        overlay_ptr->invoke([&](auto& ovl)
+                        {
+                            auto ovl_id = ovl.bell::id;
+                            ovl.LISTEN(tier::release, e2::render::any, parent_canvas, -, (pane_list, get_rect_in, ovl_id))
+                            {
+                                // Dim the entire tile area by halving RGB, preserving original hue.
+                                // Set link to overlay id to capture mouse events.
+                                parent_canvas.fill([ovl_id](cell& c)
+                                {
+                                    c.bgc().faint();
+                                    c.fgc().faint();
+                                    c.link(ovl_id);
+                                });
+                                // Draw index label centered on each pane.
+                                for (auto& pane : *pane_list)
+                                {
+                                    auto r = get_rect_in(pane.slot);
+                                    if (r.size.x < 1 || r.size.y < 1) continue;
+                                    auto cx = r.coor.x + r.size.x / 2;
+                                    auto cy = r.coor.y + r.size.y / 2;
+                                    // Background box (up to 5x3, clamped to pane size).
+                                    auto bw = std::min(r.size.x, si32{ 5 });
+                                    auto bh = std::min(r.size.y, si32{ 3 });
+                                    auto lx = cx - bw / 2;
+                                    auto ly = cy - bh / 2;
+                                    parent_canvas.fill(rect{{ lx, ly }, { bw, bh }}, [ovl_id](cell& c)
+                                    {
+                                        c.bgc(0xFF0055CC).fgc(0xFFFFFFFF).txt(whitespace).link(ovl_id);
+                                    });
+                                    // Index character at center.
+                                    parent_canvas.fill(rect{{ cx, cy }, { 1, 1 }}, [&pane, ovl_id](cell& c)
+                                    {
+                                        c.txt(pane.label).link(ovl_id);
+                                    });
+                                }
+                            };
+                        });
+                        wrapper_ptr->attach(overlay_ptr);
+                        wrapper_ptr->base::reflow();
+                        wrapper_ptr->base::deface();
+
+                        // Keyboard interceptor: jump to pane on index key, dismiss on Esc or any other key.
+                        auto kbd_hook = ptr::shared<hook>();
+                        auto overlay_shadow = ptr::shadow(overlay_ptr);
+                        auto pending_unhook = ptr::shared(faux);
+                        auto dismiss_visual = [overlay_shadow, pane_index_active, pending_unhook]
+                        {
+                            *pending_unhook = true;
+                            *pane_index_active = faux;
+                            if (auto p = overlay_shadow.lock()) p->base::detach();
+                        };
+                        auto dismiss_hook = [kbd_hook]{ kbd_hook->reset(); };
+
+                        wrapper_ptr->bell::submit(tier::preview, input::events::keybd::any, *kbd_hook)
+                            = [pane_list, dismiss_visual, dismiss_hook, pending_unhook](hids& gear) mutable
+                        {
+                            if (gear.payload != input::keybd::type::keypress) return;
+                            if (gear.keystat == input::key::interrupted) return;
+                            if (gear.keybd::handled) return;
+
+                            // After visual dismiss, swallow trailing events until key release.
+                            if (*pending_unhook)
+                            {
+                                if (gear.keystat == input::key::released)
+                                {
+                                    dismiss_hook();
+                                }
+                                gear.set_handled(faux);
+                                return;
+                            }
+
+                            // Swallow key-release events (e.g. from the trigger key).
+                            if (gear.keystat == input::key::released)
+                            {
+                                gear.set_handled(faux);
+                                return;
+                            }
+
+                            // Esc — dismiss without jumping.
+                            if (gear.keybd::generic() == input::key::Esc)
+                            {
+                                dismiss_visual();
+                                gear.set_handled(faux);
+                                return;
+                            }
+
+                            // Ignore modifier-only presses (empty cluster).
+                            auto& ch = gear.keybd::cluster;
+                            if (ch.empty())
+                            {
+                                gear.set_handled(faux);
+                                return;
+                            }
+
+                            // Match index key (ASCII 0x30~0x7E).
+                            if (ch.size() == 1)
+                            {
+                                auto c = ch[0];
+                                for (auto& pane : *pane_list)
+                                {
+                                    if (pane.label[0] == c)
+                                    {
+                                        if (auto focus_target = get_slot_focus_target(pane.slot))
+                                        {
+                                            pro::focus::set(focus_target, gear.id, solo::on);
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
+
+                            // Dismiss overlay after any recognized key.
+                            dismiss_visual();
+                            gear.set_handled(faux);
+                        };
+
+                        gear.set_handled();
                     };
                     boss.LISTEN(tier::preview, app::tile::events::ui::swap, gear, -, (focus_history_ptr))
                     {
