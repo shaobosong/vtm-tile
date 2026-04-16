@@ -2030,7 +2030,7 @@ namespace netxs::app::tile
                         struct pane_info_t { text label; sptr slot; };
                         auto pane_list = ptr::shared(std::vector<pane_info_t>{});
                         auto pane_count = si32{};
-                        foreach(id_t{}, [&](auto& item_ptr, si32 item_type, auto node_veer_ptr)
+                        foreach(id_t{}, [&](auto& /*item_ptr*/, si32 item_type, auto node_veer_ptr)
                         {
                             if (item_type != item_type::grip && pane_count < 0x7E - 0x30 + 1)
                             {
