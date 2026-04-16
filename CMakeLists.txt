@@ -22,24 +22,18 @@ add_executable(vtm-tile "src/vtm-tile.cpp" $ENV{WIN32_RESOURCES})
 # add_executable(term "src/netxs/apps/term.cpp")
 # add_executable(calc "src/netxs/apps/calc.cpp")
 
-find_package(Freetype REQUIRED)
-find_package(harfbuzz REQUIRED)
 find_package(Lua 5.4  REQUIRED)
 
 add_library(Lua::Lua INTERFACE IMPORTED)
 set_target_properties(Lua::Lua PROPERTIES INTERFACE_LINK_LIBRARIES "${LUA_LIBRARIES}")
 
-target_include_directories(vtm-desk PRIVATE ${FREETYPE_INCLUDE_DIRS}
-                                            ${HARFBUZZ_INCLUDE_DIRS}
-                                            ${LUA_INCLUDE_DIR})
-target_include_directories(vtm-tile PRIVATE ${FREETYPE_INCLUDE_DIRS}
-                                            ${HARFBUZZ_INCLUDE_DIRS}
-                                            ${LUA_INCLUDE_DIR})
+target_include_directories(vtm-desk PRIVATE ${LUA_INCLUDE_DIR})
+target_include_directories(vtm-tile PRIVATE ${LUA_INCLUDE_DIR})
 
-target_link_libraries(vtm-desk PRIVATE Lua::Lua Freetype::Freetype harfbuzz::harfbuzz)
-target_link_libraries(vtm-tile PRIVATE Lua::Lua Freetype::Freetype harfbuzz::harfbuzz)
-# target_link_libraries(term PRIVATE Lua::Lua Freetype::Freetype harfbuzz::harfbuzz)
-# target_link_libraries(calc PRIVATE Lua::Lua Freetype::Freetype harfbuzz::harfbuzz)
+target_link_libraries(vtm-desk PRIVATE Lua::Lua)
+target_link_libraries(vtm-tile PRIVATE Lua::Lua)
+# target_link_libraries(term PRIVATE Lua::Lua)
+# target_link_libraries(calc PRIVATE Lua::Lua)
 
 option(VTM_BUILD_TESTS "Build vtm regression tests" OFF)
 if(VTM_BUILD_TESTS)
