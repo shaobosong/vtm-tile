@@ -245,7 +245,6 @@ R"==(
             <item label="  >|<  " tooltip=/Ns/Tile/EqualizeSplitRatio/tooltip script=OnLeftClick|TileEqualizeSplitRatio/>
             <item label="  <->  " tooltip=/Ns/Tile/SwapPanes/tooltip          script=OnLeftClick|TileSwapPanes/>
             <item label="  -/-  " tooltip=/Ns/Tile/SplitOrientation/tooltip   script=OnLeftClick|TileSplitOrientation/>
-            <item label="  [0]  " tooltip=" Show pane index overlay for quick pane switching " script=OnLeftClick|TileShowPaneIndex/>
             <item label="  =D-  " tooltip=" Disconnect "                      script=OnLeftClick|TileDisconnect>
                 <hover fgc="0xFFFFFFFF" bgc="0xFFFF8700"/>
             </item>
@@ -1205,6 +1204,18 @@ R"==(
     <TileClosePane         ="vtm.tile.ClosePane();"/>              <!-- Close active application. -->
     <TileDisconnect        ="vtm.tile.Disconnect();"/>             <!-- Disconnect tile manager. -->
     <TileShutdown          ="vtm.tile.Shutdown();"/>               <!-- Shutdown tile manager. -->
+    <TileCreateWorkspace   ="vtm.tile.CreateWorkspace();"/>        <!-- Create a new workspace and switch to it. -->
+    <TileDestroyWorkspace  ="vtm.tile.DestroyWorkspace();"/>       <!-- Destroy the current workspace. -->
+    <TileSwitchWorkspace0  ="vtm.tile.SwitchWorkspace(0);"/>       <!-- Switch to workspace 0 -->
+    <TileSwitchWorkspace1  ="vtm.tile.SwitchWorkspace(1);"/>       <!-- Switch to workspace 1 -->
+    <TileSwitchWorkspace2  ="vtm.tile.SwitchWorkspace(2);"/>       <!-- Switch to workspace 2 -->
+    <TileSwitchWorkspace3  ="vtm.tile.SwitchWorkspace(3);"/>       <!-- Switch to workspace 3 -->
+    <TileSwitchWorkspace4  ="vtm.tile.SwitchWorkspace(4);"/>       <!-- Switch to workspace 4 -->
+    <TileSwitchWorkspace5  ="vtm.tile.SwitchWorkspace(5);"/>       <!-- Switch to workspace 5 -->
+    <TileSwitchWorkspace6  ="vtm.tile.SwitchWorkspace(6);"/>       <!-- Switch to workspace 6 -->
+    <TileSwitchWorkspace7  ="vtm.tile.SwitchWorkspace(7);"/>       <!-- Switch to workspace 7 -->
+    <TileSwitchWorkspace8  ="vtm.tile.SwitchWorkspace(8);"/>       <!-- Switch to workspace 8 -->
+    <TileSwitchWorkspace9  ="vtm.tile.SwitchWorkspace(9);"/>       <!-- Switch to workspace 9 -->
     <TileMoveGripLeft      ="vtm.grip.MoveGrip(-1, 0);"/>          <!-- Move the split grip to the left. -->
     <TileMoveGripRight     ="vtm.grip.MoveGrip( 1, 0);"/>          <!-- Move the split grip to the right. -->
     <TileMoveGripUp        ="vtm.grip.MoveGrip( 0,-1);"/>          <!-- Move the split grip up. -->

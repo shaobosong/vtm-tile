@@ -295,6 +295,9 @@ namespace netxs::app::tile
         X(ShowPaneIndex      ) \
         X(Disconnect         ) \
         X(Shutdown           ) \
+        X(CreateWorkspace    ) \
+        X(DestroyWorkspace   ) \
+        X(SwitchWorkspace    ) \
 
     struct methods
     {
@@ -1347,8 +1350,24 @@ namespace netxs::app::tile
                     };
                 });
             }
-            auto root_veer_ptr = object->attach(slot::_2, parse_data(parse_data, param, ui::fork::min_ratio, grip_bindings_ptr, focus_history_ptr, confirm_block))
-                ->invoke([&](auto& boss)
+            // Workspace management.
+            // Structure: object (fork Y) slot::_2 -> inner_fork (fork Y):
+            //   slot::_1: workspace_host (veer) - hosts the current workspace's root veer.
+            //   slot::_2: status_bar (mock)      - renders workspace index buttons (fixed 1-row height).
+            // The `workspaces` vector owns all workspaces. Only the current one is attached to workspace_host.
+            static constexpr auto ws_min_index = char{ 0x30 };
+            static constexpr auto ws_max_index = char{ 0x7E };
+            static constexpr auto ws_max_count = size_t(ws_max_index - ws_min_index + 1);
+            static constexpr auto ws_btn_w     = si32{ 3 };
+            auto workspaces_ptr        = ptr::shared(std::vector<netxs::sptr<ui::veer>>{});
+            auto current_ws_index_ptr  = ptr::shared(size_t{ 0 });
+            auto refresh_status_bar_fn = ptr::shared(std::function<void()>{[]{}});
+
+            // Factory: build a workspace root veer (parse_data result) with the root-fullscreen-attach listener.
+            auto make_workspace_veer = [grip_bindings_ptr, focus_history_ptr, confirm_block](view param_view) -> netxs::sptr<ui::veer>
+            {
+                auto veer = parse_data(parse_data, param_view, ui::fork::min_ratio, grip_bindings_ptr, focus_history_ptr, confirm_block);
+                veer->invoke([](auto& boss)
                 {
                     boss.LISTEN(tier::release, e2::form::proceed::attach, fullscreen_item)
                     {
@@ -1366,18 +1385,268 @@ namespace netxs::app::tile
                             pro::focus::set(fullscreen_item, gear_id_list, solo::on);
                         }
                     };
+                    // When this workspace's last content is swapped away (both fork
+                    // slots become empty), the standard node_veer swap handler sets
+                    // item_ptr = boss.This() and stops.  Propagate it upward as a
+                    // tier::request swap so that workspace_host can intercept it and
+                    // trigger workspace destruction.
+                    boss.LISTEN(tier::release, e2::form::proceed::swap, item_ptr)
+                    {
+                        if (item_ptr && item_ptr.get() == &boss) // Workspace root veer identified itself as "empty".
+                        {
+                            auto self = boss.This();
+                            boss.base::riseup(tier::request, e2::form::proceed::swap, self);
+                        }
+                    };
                 });
+                return veer;
+            };
+
+            // Inner fork: slot::_1 = workspace host (flexible), slot::_2 = status bar (fixed 1 row).
+            auto inner_fork_ptr = object->attach(slot::_2, ui::fork::ctor(axis::Y, 0, 1, 0));
+            auto workspace_host_ptr = inner_fork_ptr->attach(slot::_1, ui::veer::ctor()
+                ->plugin<pro::focus>());
+            auto status_bar_ptr = inner_fork_ptr->attach(slot::_2, ui::mock::ctor()
+                ->limits({ -1, 1 }, { -1, 1 })
+                ->active());
+
+            // Build initial workspace 0 (from appcfg.cmd param).
+            auto workspace_0 = make_workspace_veer(view{ param });
+            workspaces_ptr->push_back(workspace_0);
+            workspace_host_ptr->attach(workspace_0);
+            auto root_veer_ptr = workspace_0; // Kept for compatibility with downstream code.
+
+            // Accessor for the currently active workspace veer.
+            auto current_ws = [workspaces_ptr, current_ws_index_ptr]() -> netxs::sptr<ui::veer>
+            {
+                if (workspaces_ptr->empty()) return {};
+                auto idx = std::min(*current_ws_index_ptr, workspaces_ptr->size() - 1);
+                return (*workspaces_ptr)[idx];
+            };
+
+            // Switch active workspace to the given index.
+            auto switch_workspace = [workspaces_ptr, current_ws_index_ptr, workspace_host_ptr, refresh_status_bar_fn](size_t idx) -> bool
+            {
+                if (idx >= workspaces_ptr->size()) return faux;
+                if (idx == *current_ws_index_ptr && workspace_host_ptr->count() > 0) return faux;
+                auto gear_id_list = decltype(pro::focus::cut(std::declval<sptr>())){};
+                auto has_gears = faux;
+                if (workspace_host_ptr->count() > 0)
+                {
+                    auto cur = workspace_host_ptr->back();
+                    gear_id_list = pro::focus::cut(cur);
+                    has_gears = true;
+                    cur->base::detach();
+                }
+                *current_ws_index_ptr = idx;
+                auto target = (*workspaces_ptr)[idx];
+                workspace_host_ptr->attach(target);
+                target->base::broadcast(tier::anycast, e2::form::upon::started);
+                if (has_gears) pro::focus::set(target, gear_id_list, solo::on);
+                else           pro::focus::set(target, id_t{}, solo::on);
+                workspace_host_ptr->base::reflow();
+                (*refresh_status_bar_fn)();
+                return true;
+            };
+
+            // Create a new empty workspace and switch to it. Returns the new index, or max() on failure.
+            auto create_workspace = [workspaces_ptr, make_workspace_veer, switch_workspace]() -> size_t
+            {
+                if (workspaces_ptr->size() >= ws_max_count) return std::numeric_limits<size_t>::max();
+                auto new_ws = make_workspace_veer(view{});
+                workspaces_ptr->push_back(new_ws);
+                auto new_idx = workspaces_ptr->size() - 1;
+                switch_workspace(new_idx);
+                return new_idx;
+            };
+
+            // Destroy workspace by index. When the last workspace is destroyed, shutdown the tile.
+            auto destroy_workspace = [workspaces_ptr, current_ws_index_ptr, workspace_host_ptr, refresh_status_bar_fn](size_t idx) -> bool
+            {
+                if (idx >= workspaces_ptr->size()) return faux;
+                if (workspaces_ptr->size() == 1)
+                {
+                    close_tile_session(*workspace_host_ptr, "Shutdown on last workspace destroyed");
+                    return true;
+                }
+                auto is_current = (idx == *current_ws_index_ptr);
+                auto victim = (*workspaces_ptr)[idx];
+                auto gear_id_list = decltype(pro::focus::cut(std::declval<sptr>())){};
+                auto has_gears = faux;
+                if (is_current && workspace_host_ptr->count() > 0)
+                {
+                    gear_id_list = pro::focus::cut(workspace_host_ptr->back());
+                    has_gears = true;
+                    workspace_host_ptr->pop_back();
+                }
+                workspaces_ptr->erase(workspaces_ptr->begin() + idx);
+                if (*current_ws_index_ptr >= workspaces_ptr->size())
+                {
+                    *current_ws_index_ptr = workspaces_ptr->size() - 1;
+                }
+                else if (*current_ws_index_ptr > idx)
+                {
+                    *current_ws_index_ptr -= 1;
+                }
+                if (is_current)
+                {
+                    auto target = (*workspaces_ptr)[*current_ws_index_ptr];
+                    workspace_host_ptr->attach(target);
+                    target->base::broadcast(tier::anycast, e2::form::upon::started);
+                    if (has_gears) pro::focus::set(target, gear_id_list, solo::on);
+                    else           pro::focus::set(target, id_t{}, solo::on);
+                    workspace_host_ptr->base::reflow();
+                }
+                (*refresh_status_bar_fn)();
+                // Destroy victim asynchronously outside the auth lock.
+                // The keyboard event handler holds the auth lock (recursive_mutex),
+                // and ~vtty()::payoff() calls stdinput.join() which can deadlock or
+                // cause process exit if done under the lock. Using enqueue<faux>
+                // defers destruction to the jobs worker thread with the lock released,
+                // matching the pattern used by term::close() and dtvt::stop().
+                workspace_host_ptr->base::enqueue<faux>([victim_to_destroy = std::move(victim)](auto& /*boss*/) mutable
+                {
+                    victim_to_destroy.reset();
+                });
+                return true;
+            };
+
+            // Status bar: render workspace index buttons with hover-aware styling.
+            // Visual design: Tokyo Night color palette with underline accent on the active tab,
+            // dotted underline hint on hover, and bold active label for clear visual hierarchy.
+            auto hovered_tab = ptr::shared(si32{ -1 }); // Index of the tab under the mouse cursor (-1 = none).
+            *refresh_status_bar_fn = [status_bar_ptr]
+            {
+                status_bar_ptr->base::deface();
+            };
+            status_bar_ptr->invoke([&, workspaces_ptr, current_ws_index_ptr, switch_workspace, hovered_tab, refresh_status_bar_fn](auto& boss)
+            {
+                auto boss_id = boss.bell::id;
+                // Render: draw workspace tab buttons with active/hover/inactive states.
+                boss.LISTEN(tier::release, e2::render::any, parent_canvas, -, (workspaces_ptr, current_ws_index_ptr, boss_id, hovered_tab))
+                {
+                    // Color palette.
+                    static constexpr auto bar_bg  = (argb)0xff16161e; // Deep dark background.
+                    static constexpr auto act_bg  = (argb)0xff292e42; // Active tab: raised surface.
+                    static constexpr auto act_fg  = (argb)0xffc0caf5; // Active tab: bright text.
+                    static constexpr auto act_ul  = (argb)0xff7aa2f7; // Active tab: blue underline accent.
+                    static constexpr auto dim_fg  = (argb)0xff565f89; // Inactive tab: muted text.
+                    static constexpr auto hov_bg  = (argb)0xff1f2335; // Hovered tab: subtle lift.
+                    static constexpr auto hov_fg  = (argb)0xff9aa5ce; // Hovered tab: brighter text.
+                    static constexpr auto hov_ul  = (argb)0xff3b4261; // Hovered tab: subtle underline hint.
+                    // Clear entire bar.
+                    parent_canvas.fill([boss_id](cell& c)
+                    {
+                        c.bgc(bar_bg).fgc(bar_bg).txt(whitespace).link(boss_id).bld(faux).und(0).ovr(faux);
+                    });
+                    // Draw each workspace tab.
+                    auto bar_w = boss.base::area().size.x;
+                    auto count = workspaces_ptr->size();
+                    auto hover = *hovered_tab;
+                    for (auto i = size_t{}; i < count && (si32)i * ws_btn_w < bar_w; i++)
+                    {
+                        auto is_active = (i == *current_ws_index_ptr);
+                        auto is_hover  = ((si32)i == hover && !is_active);
+                        auto bg    = is_active ? act_bg : is_hover ? hov_bg : bar_bg;
+                        auto fg    = is_active ? act_fg : is_hover ? hov_fg : dim_fg;
+                        auto bold  = is_active;
+                        auto uline = is_active ? unln::line : is_hover ? unln::dotted : unln::none;
+                        auto ucl   = is_active ? act_ul     : hov_ul;
+                        auto x0    = (si32)i * ws_btn_w;
+                        // Button background (all cells get uniform style including underline).
+                        parent_canvas.fill(rect{{ x0, 0 }, { ws_btn_w, 1 }}, [=](cell& c)
+                        {
+                            c.bgc(bg).fgc(fg).txt(whitespace).link(boss_id).bld(bold).und(uline).unc(ucl);
+                        });
+                        // Center label (workspace index character).
+                        auto label = text(1, char(ws_min_index + i));
+                        parent_canvas.fill(rect{{ x0 + 1, 0 }, { 1, 1 }}, [=](cell& c)
+                        {
+                            c.bgc(bg).fgc(fg).txt(label).link(boss_id).bld(bold).und(uline).unc(ucl);
+                        });
+                    }
+                };
+                // Track mouse position for per-tab hover feedback.
+                boss.on(tier::mouserelease, input::key::MouseMove, [hovered_tab, workspaces_ptr, refresh_status_bar_fn](hids& gear)
+                {
+                    auto x = gear.coord.x;
+                    auto new_tab = x < 0 ? si32{ -1 } : si32(x / ws_btn_w);
+                    if (new_tab < 0 || (size_t)new_tab >= workspaces_ptr->size()) new_tab = -1;
+                    if (new_tab != *hovered_tab)
+                    {
+                        *hovered_tab = new_tab;
+                        (*refresh_status_bar_fn)();
+                    }
+                });
+                // Clear hover when mouse leaves the status bar.
+                boss.on(tier::mouserelease, input::key::MouseLeave, [hovered_tab, refresh_status_bar_fn](hids& /*gear*/)
+                {
+                    if (*hovered_tab != -1)
+                    {
+                        *hovered_tab = -1;
+                        (*refresh_status_bar_fn)();
+                    }
+                });
+                // Switch workspace on click.
+                boss.on(tier::mouserelease, input::key::LeftClick, [switch_workspace, workspaces_ptr](hids& gear)
+                {
+                    auto x = gear.coord.x;
+                    if (x < 0) { gear.dismiss(); return; }
+                    auto idx = size_t(x / ws_btn_w);
+                    if (idx < workspaces_ptr->size())
+                    {
+                        switch_workspace(idx);
+                    }
+                    gear.dismiss();
+                });
+            });
+
+            // Handle a workspace's root-veer final-empty-slot close request:
+            // destroy the workspace; if it was the last one, shutdown the tile.
+            workspace_host_ptr->LISTEN(tier::request, e2::form::proceed::swap, item_ptr, -, (workspaces_ptr, destroy_workspace, workspace_host_ptr))
+            {
+                if (!item_ptr) return;
+                // Find and destroy the workspace that matches item_ptr.
+                // Capture the sptr (not the index) to avoid stale-index bugs
+                // if multiple destroys are enqueued in the same event cycle.
+                auto victim = item_ptr;
+                workspace_host_ptr->base::enqueue([victim, destroy_workspace, workspaces_ptr](auto& /*boss*/) mutable
+                {
+                    for (auto i = size_t{}; i < workspaces_ptr->size(); i++)
+                    {
+                        if ((*workspaces_ptr)[i] == victim)
+                        {
+                            destroy_workspace(i);
+                            return;
+                        }
+                    }
+                });
+                // Leave item_ptr unchanged so the originating root_veer does not riseup a further swap.
+            };
+
+            // Initial status bar paint.
+            (*refresh_status_bar_fn)();
             object->invoke([&](auto& boss)
                 {
-                    auto& root_veer = *root_veer_ptr;
+                    auto& root_veer = boss.base::field(std::function<ui::veer&()>(
+                        [wp = workspaces_ptr, ip = current_ws_index_ptr, dead = netxs::sptr<ui::veer>{}]() mutable -> ui::veer&
+                        {
+                            if (wp->empty()) // Guard: between last destroy and shutdown teardown.
+                            {
+                                if (!dead) dead = ui::veer::ctor();
+                                return *dead;
+                            }
+                            auto idx = std::min(*ip, wp->size() - 1);
+                            return *(*wp)[idx];
+                        }));
                     auto& foreach = boss.base::field([&](id_t gear_id, auto proc)
                     {
-                        auto root_veer_ptr = root_veer.base::This();
+                        auto root_veer_ptr = root_veer().base::This();
                         _foreach(_foreach, root_veer_ptr, gear_id, proc);
                     });
                     auto& nothing_to_iterate = boss.base::field([&]
                     {
-                        return root_veer.back()->root();
+                        return root_veer().back()->root();
                     });
                     auto& oneshot = boss.base::field(hook{});
                     boss.LISTEN(tier::anycast, e2::form::upon::created, gear, oneshot)
@@ -1408,9 +1677,9 @@ namespace netxs::app::tile
                             {
                                 // Standalone mode: Set focus to the first focusable child element
                                 // This ensures keyboard input works correctly in standalone tile mode
-                                if (root_veer.count() > 0)
+                                if (root_veer().count() > 0)
                                 {
-                                    pro::focus::set(root_veer.back(), id_t{}, solo::on);
+                                    pro::focus::set(root_veer().back(), id_t{}, solo::on);
                                 }
                             }
                         }
@@ -1427,10 +1696,9 @@ namespace netxs::app::tile
                     {
                         boss.base::signal(tier::anycast, e2::form::prop::cwd, path);
                     };
-                    boss.LISTEN(tier::request, e2::form::proceed::swap, item_ptr) // Close the tile window manager if we receive a `swap-request` from the top-level `empty-slot`.
-                    {
-                        close_tile_session(boss, "Shutdown on last empty slot closed");
-                    };
+                    // Note: the `e2::form::proceed::swap` request from a workspace's top-level
+                    // `empty-slot` is intercepted at `workspace_host` and converted into a
+                    // destroy_workspace() call; shutdown happens when the last workspace is destroyed.
                     auto& luafx = boss.bell::indexer.luafx;
                     tile_context = config.settings::push_context("/config/events/tile/");
                     auto script_list = config.settings::take_ptr_list_for_name("script");
@@ -1615,6 +1883,22 @@ namespace netxs::app::tile
                                                                 gear.owner.base::signal(tier::general, e2::shutdown, utf::concat(prompt::tile, "Shutdown on signal"));
                                                             });
                                                         }},
+                        { methods::CreateWorkspace,     [&, create_workspace]
+                                                        {
+                                                            auto new_idx = create_workspace();
+                                                            luafx.set_return((si32)new_idx);
+                                                        }},
+                        { methods::DestroyWorkspace,    [&, destroy_workspace, current_ws_index_ptr]
+                                                        {
+                                                            auto idx = luafx.get_args_or(1, si32{ -1 });
+                                                            if (idx < 0) idx = (si32)*current_ws_index_ptr;
+                                                            destroy_workspace((size_t)idx);
+                                                        }},
+                        { methods::SwitchWorkspace,     [&, switch_workspace]
+                                                        {
+                                                            auto idx = luafx.get_args_or(1, si32{ 0 });
+                                                            switch_workspace((size_t)idx);
+                                                        }},
                     });
 
                     boss.LISTEN(tier::preview, app::tile::events::ui::any, gear)
@@ -1623,9 +1907,9 @@ namespace netxs::app::tile
                         if (boss.bell::protos() == app::tile::events::ui::zoom.id) return;
                         if (boss.bell::protos() == app::tile::events::ui::selectapp.id) return;
                         if (boss.bell::protos() == app::tile::events::ui::selected_app.id) return;
-                        if (root_veer.count() > 2)
+                        if (root_veer().count() > 2)
                         {
-                            root_veer.base::riseup(tier::release, e2::form::proceed::attach); // Restore the window before any action if maximized.
+                            root_veer().base::riseup(tier::release, e2::form::proceed::attach); // Restore the window before any action if maximized.
                         }
                     };
                     auto& switch_counter = boss.base::field(std::unordered_map<id_t, feed>{});
@@ -2424,7 +2708,7 @@ namespace netxs::app::tile
                             auto new_selected_id = data.ids[index];
                             auto new_label = data.labels[index];
                             boss.base::property("tile.selected") = new_selected_id;
-                            root_veer.base::property("tile.selected") = new_selected_id;
+                            root_veer().base::property("tile.selected") = new_selected_id;
                             boss.base::broadcast(tier::release, e2::form::prop::any, new_label);
                         }
                         gear.set_handled();
@@ -2449,10 +2733,10 @@ namespace netxs::app::tile
                     };
                     boss.LISTEN(tier::preview, app::tile::events::ui::split::any, gear)
                     {
-                        if (root_veer.count() > 2)
+                        if (root_veer().count() > 2)
                         {
-                            root_veer.base::riseup(tier::release, e2::form::proceed::attach);
-                            if (root_veer.count() > 2)
+                            root_veer().base::riseup(tier::release, e2::form::proceed::attach);
+                            if (root_veer().count() > 2)
                             {
                                 gear.set_handled();
                                 return;
@@ -2499,9 +2783,9 @@ namespace netxs::app::tile
                     };
                     boss.LISTEN(tier::preview, app::tile::events::ui::zoom, gear)
                     {
-                        if (root_veer.count() > 2)
+                        if (root_veer().count() > 2)
                         {
-                            root_veer.base::riseup(tier::release, e2::form::proceed::attach);
+                            root_veer().base::riseup(tier::release, e2::form::proceed::attach);
                             gear.set_handled();
                         }
                         else

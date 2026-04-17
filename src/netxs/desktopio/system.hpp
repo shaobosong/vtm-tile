@@ -4192,6 +4192,7 @@ namespace netxs::os
             std::condition_variable writesyn{};
 
             operator bool () { return attached; }
+            ~vtty() { payoff(); } // Ensure I/O threads are joined before member destruction.
 
             void abort() // Hard terminate the connection.
             {
@@ -4432,7 +4433,7 @@ namespace netxs::os
                         directvt::binary::stream::reading_loop(termlink, receiver_fx);
                         if constexpr (debugmode) log(prompt::dtvt, "Reading thread ended", ' ', utf::to_hex_0x(std::this_thread::get_id()));
 
-                        attached.exchange(faux);
+                        auto was_attached = attached.exchange(faux);
                         //todo revise writing thread sync (sometimes thread::join causes deadlock)
                         writesyn.notify_one(); // Interrupt writing thread.
                         if constexpr (debugmode) log(prompt::dtvt, "Writing thread joining", ' ', utf::to_hex_0x(stdinput.get_id()));
@@ -4440,7 +4441,10 @@ namespace netxs::os
                         io::abort(stderror); // Interrupt io::recv.
                         stderror.join();
                         log("%%Process '%cmd%' disconnected", prompt::dtvt, ansi::hi(utf::debase437(cmd)));
-                        shutdown_fx();
+                        if (was_attached)
+                        {
+                            shutdown_fx();
+                        }
                     }
                 }};
             }
