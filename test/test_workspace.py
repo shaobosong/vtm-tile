@@ -211,13 +211,23 @@ class VtmTileSession:
         """Send Alt+<index> to switch directly to workspace <index> (0-9)."""
         self.write(f"\x1b{index}".encode())
 
+    def select_application(self):
+        """Send Alt+Shift+A to cycle to the next application type."""
+        self.write(b"\x1bA")
+
 
 # Complete tile configuration: confirm_close enabled, workspace and split key
 # bindings with their scripting definitions.  This makes the tests fully
 # self-contained and independent of vtm.xml built-in defaults.
 TILE_CONFIG = (
     "<config>"
-        "<tile><confirm_close=1/></tile>"
+        "<tile>"
+            "<confirm_close=1/>"
+            '<app selected="term">'
+                '<item id="term" label="term" type="dtvt" cmd="$0 -r term"/>'
+                '<item id="calc" label="calc" type="calc" cmd=""/>'
+            "</app>"
+        "</tile>"
         "<events><tile>"
             '<script=TileCreateWorkspace   on="Alt+Shift+C"/>'
             '<script=TileDestroyWorkspace  on="Alt+Shift+D"/>'
@@ -228,6 +238,7 @@ TILE_CONFIG = (
             '<script=TileSwitchWorkspace1  on="Alt+1"/>'
             '<script=TileSwitchWorkspace2  on="Alt+2"/>'
             """<script=TileSplitHorizontally on="Alt+Shift+'|'"/>"""
+            '<script=TileSelectApp         on="Alt+Shift+A"/>'
         "</tile></events>"
     "</config>"
     "<Scripting>"
@@ -240,6 +251,7 @@ TILE_CONFIG = (
         '<TileSwitchWorkspace1="vtm.tile.SwitchWorkspace(1);"/>'
         '<TileSwitchWorkspace2="vtm.tile.SwitchWorkspace(2);"/>'
         '<TileSplitHorizontally="vtm.tile.SplitPane(0);"/>'
+        '<TileSelectApp="vtm.tile.SelectApplication(1);"/>'
     "</Scripting>"
 )
 TILE_ARGS = ["-c", TILE_CONFIG]
@@ -728,6 +740,123 @@ def test_switch_workspace_out_of_range():
         return True
 
 
+def test_create_workspace_uses_selected_app():
+    """New workspace should use the currently selected app, not the config default."""
+    print("TEST: workspace - create workspace uses selected app ... ", end="", flush=True)
+    with VtmTileSession(TILE_ARGS) as s:
+        if not s.is_alive():
+            print("FAIL - vtm-tile did not start")
+            return False
+        # Cycle to the next application (from default "term" to "calc").
+        s.select_application()
+        time.sleep(0.5)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed after SelectApplication")
+            return False
+        # Create a new workspace; it should launch the "calc" app, not "term".
+        s.create_workspace()
+        time.sleep(1.5)
+        s.read(timeout=0.5)
+        if not s.is_alive():
+            print("FAIL - crashed after creating workspace with selected app")
+            return False
+        # Switch back to workspace 0 to confirm stability.
+        s.click_workspace_button(0)
+        time.sleep(1.0)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed switching back to workspace 0")
+            return False
+        # Switch back to workspace 1 (created with selected app).
+        s.click_workspace_button(1)
+        time.sleep(1.0)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed switching back to workspace 1 (selected app)")
+            return False
+        print("PASS")
+        return True
+
+
+def test_select_app_then_create_multiple_workspaces():
+    """Changing selected app and creating multiple workspaces should all succeed."""
+    print("TEST: workspace - select app + create multiple workspaces ... ", end="", flush=True)
+    with VtmTileSession(TILE_ARGS) as s:
+        if not s.is_alive():
+            print("FAIL - vtm-tile did not start")
+            return False
+        # Select "calc" app.
+        s.select_application()
+        time.sleep(0.5)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed after first SelectApplication")
+            return False
+        # Create workspace 1 with "calc".
+        s.create_workspace()
+        time.sleep(1.5)
+        s.read(timeout=0.5)
+        if not s.is_alive():
+            print("FAIL - crashed creating workspace 1 with calc")
+            return False
+        # Cycle back to "term" (wraps around with 2 items).
+        s.select_application()
+        time.sleep(0.5)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed after second SelectApplication")
+            return False
+        # Create workspace 2 with "term".
+        s.create_workspace()
+        time.sleep(1.5)
+        s.read(timeout=0.5)
+        if not s.is_alive():
+            print("FAIL - crashed creating workspace 2 with term")
+            return False
+        # Cycle through all 3 workspaces to verify stability.
+        for idx in [0, 1, 2]:
+            s.click_workspace_button(idx)
+            time.sleep(1.0)
+            s.read(timeout=0.3)
+            if not s.is_alive():
+                print(f"FAIL - crashed switching to workspace {idx}")
+                return False
+        print("PASS")
+        return True
+
+
+def test_create_workspace_default_app_without_selection():
+    """Without changing selection, new workspace should use the config default app."""
+    print("TEST: workspace - create workspace with default app ... ", end="", flush=True)
+    with VtmTileSession(TILE_ARGS) as s:
+        if not s.is_alive():
+            print("FAIL - vtm-tile did not start")
+            return False
+        # Create workspace without changing selection; should use default "term".
+        s.create_workspace()
+        time.sleep(1.5)
+        s.read(timeout=0.5)
+        if not s.is_alive():
+            print("FAIL - crashed creating workspace with default app")
+            return False
+        # Switch between workspaces.
+        s.click_workspace_button(0)
+        time.sleep(1.0)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed switching to workspace 0")
+            return False
+        s.click_workspace_button(1)
+        time.sleep(1.0)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed switching to workspace 1")
+            return False
+        print("PASS")
+        return True
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -756,6 +885,9 @@ def main():
         test_next_prev_after_destroy,
         test_switch_workspace_by_index,
         test_switch_workspace_out_of_range,
+        test_create_workspace_uses_selected_app,
+        test_select_app_then_create_multiple_workspaces,
+        test_create_workspace_default_app_without_selection,
     ]
 
     passed = 0

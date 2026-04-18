@@ -1063,7 +1063,7 @@ namespace netxs::app::tile
             slot_ptr->attach(empty_slot(slot_ptr, focus_history_ptr));
             return slot_ptr;
         };
-        auto parse_data = [](auto&& parse_data, view& utf8, auto min_ratio, auto grip_bindings_ptr, auto focus_history_ptr, auto confirm_block = netxs::sptr<bool>{}) -> netxs::sptr<ui::veer>
+        auto parse_data = [](auto&& parse_data, view& utf8, auto min_ratio, auto grip_bindings_ptr, auto focus_history_ptr, auto confirm_block = netxs::sptr<bool>{}, text selected_id_override = {}) -> netxs::sptr<ui::veer>
         {
             auto slot_ptr = node_veer(node_veer, min_ratio, grip_bindings_ptr, focus_history_ptr, confirm_block);
             utf::trim_front(utf8, ", ");
@@ -1072,7 +1072,8 @@ namespace netxs::app::tile
                 auto& indexer = ui::tui_domain();
                 auto& config = indexer.config;
                 auto tile_app_context = config.settings::push_context("/config/tile/app");
-                auto selected_id = config.settings::take("/config/tile/app/selected", "term"s);
+                auto selected_id = selected_id_override.empty() ? config.settings::take("/config/tile/app/selected", "term"s)
+                                                                : selected_id_override;
                 auto item_list = config.settings::take_ptr_list_for_name("item");
                 text app_type;
                 text cmd;
@@ -1141,8 +1142,8 @@ namespace netxs::app::tile
                 if (utf8.empty() || utf8.front() != '(') return slot_ptr;
                 utf8.remove_prefix(1);
                 auto node = build_node(tag, s1, s2, w, grip_bindings_ptr);
-                auto slot1 = node->attach(slot::_1, parse_data(parse_data, utf8, ui::fork::min_ratio, grip_bindings_ptr, focus_history_ptr, confirm_block));
-                auto slot2 = node->attach(slot::_2, parse_data(parse_data, utf8, ui::fork::max_ratio, grip_bindings_ptr, focus_history_ptr, confirm_block));
+                auto slot1 = node->attach(slot::_1, parse_data(parse_data, utf8, ui::fork::min_ratio, grip_bindings_ptr, focus_history_ptr, confirm_block, selected_id_override));
+                auto slot2 = node->attach(slot::_2, parse_data(parse_data, utf8, ui::fork::max_ratio, grip_bindings_ptr, focus_history_ptr, confirm_block, selected_id_override));
                 slot_ptr->attach(node);
                 utf::trim_front(utf8, ") ");
             }
@@ -1368,9 +1369,9 @@ namespace netxs::app::tile
             auto refresh_status_bar_fn = ptr::shared(std::function<void()>{[]{}});
 
             // Factory: build a workspace root veer (parse_data result) with the root-fullscreen-attach listener.
-            auto make_workspace_veer = [grip_bindings_ptr, focus_history_ptr, confirm_block](view param_view) -> netxs::sptr<ui::veer>
+            auto make_workspace_veer = [grip_bindings_ptr, focus_history_ptr, confirm_block](view param_view, text selected_id_override = {}) -> netxs::sptr<ui::veer>
             {
-                auto veer = parse_data(parse_data, param_view, ui::fork::min_ratio, grip_bindings_ptr, focus_history_ptr, confirm_block);
+                auto veer = parse_data(parse_data, param_view, ui::fork::min_ratio, grip_bindings_ptr, focus_history_ptr, confirm_block, selected_id_override);
                 veer->invoke([](auto& boss)
                 {
                     boss.LISTEN(tier::release, e2::form::proceed::attach, fullscreen_item)
@@ -1455,10 +1456,14 @@ namespace netxs::app::tile
             };
 
             // Create a new empty workspace and switch to it. Returns the new index, or max() on failure.
-            auto create_workspace = [workspaces_ptr, make_workspace_veer, switch_workspace]() -> size_t
+            auto create_workspace = [workspaces_ptr, make_workspace_veer, switch_workspace](text selected_id_override = {}) -> size_t
             {
                 if (workspaces_ptr->size() >= ws_max_count) return std::numeric_limits<size_t>::max();
-                auto new_ws = make_workspace_veer(view{});
+                auto new_ws = make_workspace_veer(view{}, selected_id_override);
+                if (!selected_id_override.empty())
+                {
+                    new_ws->base::property("tile.selected") = selected_id_override;
+                }
                 workspaces_ptr->push_back(new_ws);
                 auto new_idx = workspaces_ptr->size() - 1;
                 switch_workspace(new_idx);
@@ -1916,7 +1921,8 @@ namespace netxs::app::tile
                                                         }},
                         { methods::CreateWorkspace,     [&, create_workspace]
                                                         {
-                                                            auto new_idx = create_workspace();
+                                                            auto selected_override = text{ boss.base::property("tile.selected") };
+                                                            auto new_idx = create_workspace(selected_override);
                                                             luafx.set_return((si32)new_idx);
                                                         }},
                         { methods::DestroyWorkspace,    [&, destroy_workspace, current_ws_index_ptr]
