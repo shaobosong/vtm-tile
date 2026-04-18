@@ -195,9 +195,54 @@ class VtmTileSession:
         """Send Alt+Shift+D to destroy the current workspace."""
         self.write(b"\x1bD")
 
+    def next_workspace(self):
+        """Send Alt+Shift+F to switch to the next workspace (wrapping)."""
+        self.write(b"\x1bF")
 
-# Tile config with confirm_close enabled (matches existing tests).
-TILE_ARGS = ["-c", "<config><tile><confirm_close=true/></tile></config>"]
+    def prev_workspace(self):
+        """Send Alt+Shift+B to switch to the previous workspace (wrapping)."""
+        self.write(b"\x1bB")
+
+    def last_workspace(self):
+        """Send Alt+Shift+L to switch to the last visited workspace."""
+        self.write(b"\x1bL")
+
+    def switch_workspace_by_key(self, index):
+        """Send Alt+<index> to switch directly to workspace <index> (0-9)."""
+        self.write(f"\x1b{index}".encode())
+
+
+# Complete tile configuration: confirm_close enabled, workspace and split key
+# bindings with their scripting definitions.  This makes the tests fully
+# self-contained and independent of vtm.xml built-in defaults.
+TILE_CONFIG = (
+    "<config>"
+        "<tile><confirm_close=1/></tile>"
+        "<events><tile>"
+            '<script=TileCreateWorkspace   on="Alt+Shift+C"/>'
+            '<script=TileDestroyWorkspace  on="Alt+Shift+D"/>'
+            '<script=TileNextWorkspace     on="Alt+Shift+F"/>'
+            '<script=TilePrevWorkspace     on="Alt+Shift+B"/>'
+            '<script=TileLastWorkspace     on="Alt+Shift+L"/>'
+            '<script=TileSwitchWorkspace0  on="Alt+0"/>'
+            '<script=TileSwitchWorkspace1  on="Alt+1"/>'
+            '<script=TileSwitchWorkspace2  on="Alt+2"/>'
+            """<script=TileSplitHorizontally on="Alt+Shift+'|'"/>"""
+        "</tile></events>"
+    "</config>"
+    "<Scripting>"
+        '<TileCreateWorkspace="vtm.tile.CreateWorkspace();"/>'
+        '<TileDestroyWorkspace="vtm.tile.DestroyWorkspace();"/>'
+        '<TileNextWorkspace="vtm.tile.NextWorkspace();"/>'
+        '<TilePrevWorkspace="vtm.tile.PrevWorkspace();"/>'
+        '<TileLastWorkspace="vtm.tile.LastWorkspace();"/>'
+        '<TileSwitchWorkspace0="vtm.tile.SwitchWorkspace(0);"/>'
+        '<TileSwitchWorkspace1="vtm.tile.SwitchWorkspace(1);"/>'
+        '<TileSwitchWorkspace2="vtm.tile.SwitchWorkspace(2);"/>'
+        '<TileSplitHorizontally="vtm.tile.SplitPane(0);"/>'
+    "</Scripting>"
+)
+TILE_ARGS = ["-c", TILE_CONFIG]
 
 
 # ---------------------------------------------------------------------------
@@ -415,6 +460,274 @@ def test_split_in_workspace():
         return True
 
 
+def test_next_workspace():
+    """NextWorkspace cycles through workspaces, wrapping from last to first."""
+    print("TEST: workspace - next workspace wrapping ... ", end="", flush=True)
+    with VtmTileSession(TILE_ARGS) as s:
+        if not s.is_alive():
+            print("FAIL - vtm-tile did not start")
+            return False
+        # Create workspaces 1 and 2 (auto-switches to each).
+        for i in range(2):
+            s.create_workspace()
+            time.sleep(1.5)
+            s.read(timeout=0.5)
+            if not s.is_alive():
+                print(f"FAIL - crashed creating workspace {i + 1}")
+                return False
+        # Now on workspace 2. Next should wrap to workspace 0.
+        s.next_workspace()
+        time.sleep(1.0)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed after NextWorkspace (wrap 2->0)")
+            return False
+        # Next again: workspace 0 -> 1.
+        s.next_workspace()
+        time.sleep(1.0)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed after NextWorkspace (0->1)")
+            return False
+        # Next again: workspace 1 -> 2.
+        s.next_workspace()
+        time.sleep(1.0)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed after NextWorkspace (1->2)")
+            return False
+        print("PASS")
+        return True
+
+
+def test_prev_workspace():
+    """PrevWorkspace cycles through workspaces, wrapping from first to last."""
+    print("TEST: workspace - prev workspace wrapping ... ", end="", flush=True)
+    with VtmTileSession(TILE_ARGS) as s:
+        if not s.is_alive():
+            print("FAIL - vtm-tile did not start")
+            return False
+        # Create workspaces 1 and 2.
+        for i in range(2):
+            s.create_workspace()
+            time.sleep(1.5)
+            s.read(timeout=0.5)
+            if not s.is_alive():
+                print(f"FAIL - crashed creating workspace {i + 1}")
+                return False
+        # Switch to workspace 0.
+        s.click_workspace_button(0)
+        time.sleep(1.0)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed switching to workspace 0")
+            return False
+        # Prev should wrap to workspace 2.
+        s.prev_workspace()
+        time.sleep(1.0)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed after PrevWorkspace (wrap 0->2)")
+            return False
+        # Prev again: workspace 2 -> 1.
+        s.prev_workspace()
+        time.sleep(1.0)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed after PrevWorkspace (2->1)")
+            return False
+        # Prev again: workspace 1 -> 0.
+        s.prev_workspace()
+        time.sleep(1.0)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed after PrevWorkspace (1->0)")
+            return False
+        print("PASS")
+        return True
+
+
+def test_last_workspace():
+    """LastWorkspace toggles between the current and last-visited workspace."""
+    print("TEST: workspace - last workspace toggle ... ", end="", flush=True)
+    with VtmTileSession(TILE_ARGS) as s:
+        if not s.is_alive():
+            print("FAIL - vtm-tile did not start")
+            return False
+        # Create workspace 1 (auto-switches from 0 to 1).
+        s.create_workspace()
+        time.sleep(1.5)
+        s.read(timeout=0.5)
+        if not s.is_alive():
+            print("FAIL - crashed creating workspace 1")
+            return False
+        # Now on workspace 1, last-visited is workspace 0.
+        # LastWorkspace should switch to workspace 0.
+        s.last_workspace()
+        time.sleep(1.0)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed after LastWorkspace (1->0)")
+            return False
+        # LastWorkspace again should toggle back to workspace 1.
+        s.last_workspace()
+        time.sleep(1.0)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed after LastWorkspace (0->1)")
+            return False
+        # One more toggle back to 0.
+        s.last_workspace()
+        time.sleep(1.0)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed after LastWorkspace (1->0 again)")
+            return False
+        print("PASS")
+        return True
+
+
+def test_next_prev_single_workspace():
+    """NextWorkspace and PrevWorkspace are no-ops with only one workspace."""
+    print("TEST: workspace - next/prev with single workspace ... ", end="", flush=True)
+    with VtmTileSession(TILE_ARGS) as s:
+        if not s.is_alive():
+            print("FAIL - vtm-tile did not start")
+            return False
+        # With only workspace 0, next and prev should be no-ops.
+        s.next_workspace()
+        time.sleep(0.5)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed after NextWorkspace on single workspace")
+            return False
+        s.prev_workspace()
+        time.sleep(0.5)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed after PrevWorkspace on single workspace")
+            return False
+        s.last_workspace()
+        time.sleep(0.5)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed after LastWorkspace on single workspace")
+            return False
+        print("PASS")
+        return True
+
+
+def test_next_prev_after_destroy():
+    """NextWorkspace and PrevWorkspace work correctly after a workspace is destroyed."""
+    print("TEST: workspace - next/prev after destroy ... ", end="", flush=True)
+    with VtmTileSession(TILE_ARGS) as s:
+        if not s.is_alive():
+            print("FAIL - vtm-tile did not start")
+            return False
+        # Create workspaces 1 and 2.
+        for i in range(2):
+            s.create_workspace()
+            time.sleep(1.5)
+            s.read(timeout=0.5)
+            if not s.is_alive():
+                print(f"FAIL - crashed creating workspace {i + 1}")
+                return False
+        # Now on workspace 2. Destroy it.
+        s.destroy_workspace()
+        time.sleep(1.5)
+        s.read(timeout=0.5)
+        if not s.is_alive():
+            print("FAIL - crashed after destroying workspace 2")
+            return False
+        # Now 2 workspaces remain (0, 1). Cycle with next.
+        s.next_workspace()
+        time.sleep(1.0)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed after NextWorkspace post-destroy")
+            return False
+        # And prev.
+        s.prev_workspace()
+        time.sleep(1.0)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed after PrevWorkspace post-destroy")
+            return False
+        print("PASS")
+        return True
+
+
+def test_switch_workspace_by_index():
+    """SwitchWorkspace(N) jumps directly to workspace N by index."""
+    print("TEST: workspace - switch workspace by index ... ", end="", flush=True)
+    with VtmTileSession(TILE_ARGS) as s:
+        if not s.is_alive():
+            print("FAIL - vtm-tile did not start")
+            return False
+        # Create workspaces 1 and 2 (auto-switches to each).
+        for i in range(2):
+            s.create_workspace()
+            time.sleep(1.5)
+            s.read(timeout=0.5)
+            if not s.is_alive():
+                print(f"FAIL - crashed creating workspace {i + 1}")
+                return False
+        # Now on workspace 2. Switch directly to workspace 0 by key.
+        s.switch_workspace_by_key(0)
+        time.sleep(1.0)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed after SwitchWorkspace(0)")
+            return False
+        # Switch directly to workspace 2 by key.
+        s.switch_workspace_by_key(2)
+        time.sleep(1.0)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed after SwitchWorkspace(2)")
+            return False
+        # Switch directly to workspace 1 by key.
+        s.switch_workspace_by_key(1)
+        time.sleep(1.0)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed after SwitchWorkspace(1)")
+            return False
+        # Switching to the current workspace should be a no-op.
+        s.switch_workspace_by_key(1)
+        time.sleep(0.5)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed after SwitchWorkspace to current")
+            return False
+        print("PASS")
+        return True
+
+
+def test_switch_workspace_out_of_range():
+    """SwitchWorkspace(N) to a non-existent index should be a no-op."""
+    print("TEST: workspace - switch to non-existent index ... ", end="", flush=True)
+    with VtmTileSession(TILE_ARGS) as s:
+        if not s.is_alive():
+            print("FAIL - vtm-tile did not start")
+            return False
+        # Only workspace 0 exists. Try switching to workspace 1 and 2.
+        s.switch_workspace_by_key(1)
+        time.sleep(0.5)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed after SwitchWorkspace(1) out of range")
+            return False
+        s.switch_workspace_by_key(2)
+        time.sleep(0.5)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed after SwitchWorkspace(2) out of range")
+            return False
+        print("PASS")
+        return True
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -436,6 +749,13 @@ def main():
         test_workspace_close_button_still_works,
         test_create_multiple_workspaces,
         test_split_in_workspace,
+        test_next_workspace,
+        test_prev_workspace,
+        test_last_workspace,
+        test_next_prev_single_workspace,
+        test_next_prev_after_destroy,
+        test_switch_workspace_by_index,
+        test_switch_workspace_out_of_range,
     ]
 
     passed = 0
