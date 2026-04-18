@@ -215,6 +215,18 @@ class VtmTileSession:
         """Send Alt+Shift+A to cycle to the next application type."""
         self.write(b"\x1bA")
 
+    def last_pane(self):
+        """Send Alt+Shift+P to focus the previously focused pane (LastPane)."""
+        self.write(b"\x1bP")
+
+    def focus_next_pane(self):
+        """Send Alt+Shift+N to focus the next pane (FocusNextPane)."""
+        self.write(b"\x1bN")
+
+    def split_horizontal(self):
+        """Send Alt+Shift+| to split the current pane horizontally."""
+        self.write(b"\x1b|")
+
 
 # Complete tile configuration: confirm_close enabled, workspace and split key
 # bindings with their scripting definitions.  This makes the tests fully
@@ -239,6 +251,8 @@ TILE_CONFIG = (
             '<script=TileSwitchWorkspace2  on="Alt+2"/>'
             """<script=TileSplitHorizontally on="Alt+Shift+'|'"/>"""
             '<script=TileSelectApp         on="Alt+Shift+A"/>'
+            '<script=TileLastPane          on="Alt+Shift+P"/>'
+            '<script=TileFocusNextPane     on="Alt+Shift+N"/>'
         "</tile></events>"
     "</config>"
     "<Scripting>"
@@ -252,6 +266,8 @@ TILE_CONFIG = (
         '<TileSwitchWorkspace2="vtm.tile.SwitchWorkspace(2);"/>'
         '<TileSplitHorizontally="vtm.tile.SplitPane(0);"/>'
         '<TileSelectApp="vtm.tile.SelectApplication(1);"/>'
+        '<TileLastPane="vtm.tile.LastPane();"/>'
+        '<TileFocusNextPane="vtm.tile.FocusNextPane();"/>'
     "</Scripting>"
 )
 TILE_ARGS = ["-c", TILE_CONFIG]
@@ -857,6 +873,325 @@ def test_create_workspace_default_app_without_selection():
         return True
 
 
+def test_lastpane_within_single_workspace():
+    """LastPane works within a single workspace with split panes."""
+    print("TEST: workspace - LastPane within single workspace ... ", end="", flush=True)
+    with VtmTileSession(TILE_ARGS) as s:
+        if not s.is_alive():
+            print("FAIL - vtm-tile did not start")
+            return False
+        # Split workspace 0 to create two panes.
+        s.split_horizontal()
+        time.sleep(1.5)
+        s.read(timeout=0.5)
+        if not s.is_alive():
+            print("FAIL - crashed after split")
+            return False
+        # Focus next pane to build focus history within this workspace.
+        s.focus_next_pane()
+        time.sleep(0.5)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed after FocusNextPane")
+            return False
+        # LastPane should switch back to previous pane within workspace 0.
+        s.last_pane()
+        time.sleep(0.5)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed after LastPane")
+            return False
+        # Do it again (round-trip): LastPane back.
+        s.last_pane()
+        time.sleep(0.5)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed after second LastPane")
+            return False
+        print("PASS")
+        return True
+
+
+def test_lastpane_isolated_across_workspaces():
+    """LastPane only switches between panes within the current workspace,
+    not across workspace boundaries. This is the core isolation test."""
+    print("TEST: workspace - LastPane isolated across workspaces ... ", end="", flush=True)
+    with VtmTileSession(TILE_ARGS) as s:
+        if not s.is_alive():
+            print("FAIL - vtm-tile did not start")
+            return False
+        # --- Build focus history in workspace 0 ---
+        # Split workspace 0 to create two panes.
+        s.split_horizontal()
+        time.sleep(1.5)
+        s.read(timeout=0.5)
+        if not s.is_alive():
+            print("FAIL - crashed after split in workspace 0")
+            return False
+        # Focus between panes in workspace 0 to record history.
+        s.focus_next_pane()
+        time.sleep(0.5)
+        s.read(timeout=0.3)
+        s.focus_next_pane()
+        time.sleep(0.5)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed during focus navigation in workspace 0")
+            return False
+
+        # --- Create workspace 1 with its own split ---
+        s.create_workspace()
+        time.sleep(1.5)
+        s.read(timeout=0.5)
+        if not s.is_alive():
+            print("FAIL - crashed after creating workspace 1")
+            return False
+        s.split_horizontal()
+        time.sleep(1.5)
+        s.read(timeout=0.5)
+        if not s.is_alive():
+            print("FAIL - crashed after split in workspace 1")
+            return False
+        # Focus between panes in workspace 1 to record history.
+        s.focus_next_pane()
+        time.sleep(0.5)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed during focus navigation in workspace 1")
+            return False
+
+        # --- LastPane in workspace 1 should stay in workspace 1 ---
+        s.last_pane()
+        time.sleep(0.5)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed after LastPane in workspace 1 (isolation failure)")
+            return False
+
+        # --- Switch back to workspace 0, LastPane should stay in workspace 0 ---
+        s.click_workspace_button(0)
+        time.sleep(1.0)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed switching back to workspace 0")
+            return False
+        s.last_pane()
+        time.sleep(0.5)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed after LastPane in workspace 0 (isolation failure)")
+            return False
+        # Do it one more time to verify stability.
+        s.last_pane()
+        time.sleep(0.5)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed after second LastPane in workspace 0")
+            return False
+        print("PASS")
+        return True
+
+
+def test_lastpane_after_workspace_destroy():
+    """LastPane works correctly after destroying a workspace that had focus history."""
+    print("TEST: workspace - LastPane after workspace destroy ... ", end="", flush=True)
+    with VtmTileSession(TILE_ARGS) as s:
+        if not s.is_alive():
+            print("FAIL - vtm-tile did not start")
+            return False
+        # Split workspace 0.
+        s.split_horizontal()
+        time.sleep(1.5)
+        s.read(timeout=0.5)
+        if not s.is_alive():
+            print("FAIL - crashed after split in workspace 0")
+            return False
+        # Navigate panes to build focus history.
+        s.focus_next_pane()
+        time.sleep(0.5)
+        s.read(timeout=0.3)
+
+        # Create workspace 1.
+        s.create_workspace()
+        time.sleep(1.5)
+        s.read(timeout=0.5)
+        if not s.is_alive():
+            print("FAIL - crashed after creating workspace 1")
+            return False
+        # Split and navigate in workspace 1.
+        s.split_horizontal()
+        time.sleep(1.5)
+        s.read(timeout=0.5)
+        s.focus_next_pane()
+        time.sleep(0.5)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed during workspace 1 setup")
+            return False
+
+        # Destroy workspace 1 — should switch back to workspace 0.
+        s.destroy_workspace()
+        time.sleep(1.5)
+        s.read(timeout=0.5)
+        if not s.is_alive():
+            print("FAIL - crashed after destroying workspace 1")
+            return False
+
+        # LastPane in workspace 0 should work using workspace 0's own history.
+        s.last_pane()
+        time.sleep(0.5)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed after LastPane in workspace 0 post-destroy")
+            return False
+        s.last_pane()
+        time.sleep(0.5)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed after second LastPane in workspace 0 post-destroy")
+            return False
+        print("PASS")
+        return True
+
+
+def test_lastpane_no_history_in_new_workspace():
+    """LastPane in a brand new workspace (no focus history) should not crash
+    and should not jump to a pane in another workspace."""
+    print("TEST: workspace - LastPane no history in new workspace ... ", end="", flush=True)
+    with VtmTileSession(TILE_ARGS) as s:
+        if not s.is_alive():
+            print("FAIL - vtm-tile did not start")
+            return False
+        # Build focus history in workspace 0.
+        s.split_horizontal()
+        time.sleep(1.5)
+        s.read(timeout=0.5)
+        s.focus_next_pane()
+        time.sleep(0.5)
+        s.read(timeout=0.3)
+        s.focus_next_pane()
+        time.sleep(0.5)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed building focus history in workspace 0")
+            return False
+
+        # Create workspace 1 (fresh, no focus history).
+        s.create_workspace()
+        time.sleep(1.5)
+        s.read(timeout=0.5)
+        if not s.is_alive():
+            print("FAIL - crashed creating workspace 1")
+            return False
+
+        # LastPane in workspace 1 with no prior history should be a no-op, not crash.
+        s.last_pane()
+        time.sleep(0.5)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed after LastPane in empty workspace 1")
+            return False
+        # Repeat to make sure it's stable.
+        s.last_pane()
+        time.sleep(0.5)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed after second LastPane in empty workspace 1")
+            return False
+        print("PASS")
+        return True
+
+
+def test_lastpane_three_workspaces():
+    """LastPane stays isolated when cycling through three workspaces."""
+    print("TEST: workspace - LastPane with three workspaces ... ", end="", flush=True)
+    with VtmTileSession(TILE_ARGS) as s:
+        if not s.is_alive():
+            print("FAIL - vtm-tile did not start")
+            return False
+        # Setup workspace 0: split + navigate.
+        s.split_horizontal()
+        time.sleep(1.5)
+        s.read(timeout=0.5)
+        s.focus_next_pane()
+        time.sleep(0.5)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed setting up workspace 0")
+            return False
+
+        # Create workspace 1: split + navigate.
+        s.create_workspace()
+        time.sleep(1.5)
+        s.read(timeout=0.5)
+        s.split_horizontal()
+        time.sleep(1.5)
+        s.read(timeout=0.5)
+        s.focus_next_pane()
+        time.sleep(0.5)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed setting up workspace 1")
+            return False
+
+        # Create workspace 2: split + navigate.
+        s.create_workspace()
+        time.sleep(1.5)
+        s.read(timeout=0.5)
+        s.split_horizontal()
+        time.sleep(1.5)
+        s.read(timeout=0.5)
+        s.focus_next_pane()
+        time.sleep(0.5)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed setting up workspace 2")
+            return False
+
+        # LastPane in workspace 2 (current).
+        s.last_pane()
+        time.sleep(0.5)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed after LastPane in workspace 2")
+            return False
+
+        # Switch to workspace 0, LastPane there.
+        s.switch_workspace_by_key(0)
+        time.sleep(1.0)
+        s.read(timeout=0.3)
+        s.last_pane()
+        time.sleep(0.5)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed after LastPane in workspace 0")
+            return False
+
+        # Switch to workspace 1, LastPane there.
+        s.switch_workspace_by_key(1)
+        time.sleep(1.0)
+        s.read(timeout=0.3)
+        s.last_pane()
+        time.sleep(0.5)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed after LastPane in workspace 1")
+            return False
+
+        # Back to workspace 2, one more LastPane.
+        s.switch_workspace_by_key(2)
+        time.sleep(1.0)
+        s.read(timeout=0.3)
+        s.last_pane()
+        time.sleep(0.5)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed after final LastPane in workspace 2")
+            return False
+        print("PASS")
+        return True
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -888,6 +1223,11 @@ def main():
         test_create_workspace_uses_selected_app,
         test_select_app_then_create_multiple_workspaces,
         test_create_workspace_default_app_without_selection,
+        test_lastpane_within_single_workspace,
+        test_lastpane_isolated_across_workspaces,
+        test_lastpane_after_workspace_destroy,
+        test_lastpane_no_history_in_new_workspace,
+        test_lastpane_three_workspaces,
     ]
 
     passed = 0

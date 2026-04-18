@@ -1295,7 +1295,7 @@ namespace netxs::app::tile
             auto tile_context = config.settings::push_context("/config/events/tile/grip/");
             auto script_list = config.settings::take_ptr_list_for_name("script");
             auto grip_bindings_ptr = ptr::shared(input::bindings::load(config, script_list));
-            auto focus_history_ptr = ptr::shared(focus_history_t{});
+            auto focus_histories_ptr = ptr::shared(std::vector<netxs::sptr<focus_history_t>>{});
             tile_context = config.settings::push_context("/config/tile/");
             auto confirm_close = config.settings::take("confirm_close", faux);
             auto confirm_block = ptr::shared(faux); // Shared flag: set to true while close-confirmation dialog is shown.
@@ -1369,8 +1369,10 @@ namespace netxs::app::tile
             auto refresh_status_bar_fn = ptr::shared(std::function<void()>{[]{}});
 
             // Factory: build a workspace root veer (parse_data result) with the root-fullscreen-attach listener.
-            auto make_workspace_veer = [grip_bindings_ptr, focus_history_ptr, confirm_block](view param_view, text selected_id_override = {}) -> netxs::sptr<ui::veer>
+            auto make_workspace_veer = [grip_bindings_ptr, focus_histories_ptr, confirm_block](view param_view, text selected_id_override = {}) -> netxs::sptr<ui::veer>
             {
+                auto focus_history_ptr = ptr::shared(focus_history_t{});
+                focus_histories_ptr->push_back(focus_history_ptr);
                 auto veer = parse_data(parse_data, param_view, ui::fork::min_ratio, grip_bindings_ptr, focus_history_ptr, confirm_block, selected_id_override);
                 veer->invoke([](auto& boss)
                 {
@@ -1429,6 +1431,14 @@ namespace netxs::app::tile
                 return (*workspaces_ptr)[idx];
             };
 
+            // Accessor for the currently active workspace's focus history.
+            auto current_focus_history = [focus_histories_ptr, current_ws_index_ptr]() -> netxs::sptr<focus_history_t>
+            {
+                if (focus_histories_ptr->empty()) return {};
+                auto idx = std::min(*current_ws_index_ptr, focus_histories_ptr->size() - 1);
+                return (*focus_histories_ptr)[idx];
+            };
+
             // Switch active workspace to the given index.
             auto switch_workspace = [workspaces_ptr, current_ws_index_ptr, previous_ws_index_ptr, workspace_host_ptr, refresh_status_bar_fn](size_t idx) -> bool
             {
@@ -1471,7 +1481,7 @@ namespace netxs::app::tile
             };
 
             // Destroy workspace by index. When the last workspace is destroyed, shutdown the tile.
-            auto destroy_workspace = [workspaces_ptr, current_ws_index_ptr, workspace_host_ptr, refresh_status_bar_fn](size_t idx) -> bool
+            auto destroy_workspace = [workspaces_ptr, current_ws_index_ptr, workspace_host_ptr, refresh_status_bar_fn, focus_histories_ptr](size_t idx) -> bool
             {
                 if (idx >= workspaces_ptr->size()) return faux;
                 if (workspaces_ptr->size() == 1)
@@ -1490,6 +1500,7 @@ namespace netxs::app::tile
                     workspace_host_ptr->pop_back();
                 }
                 workspaces_ptr->erase(workspaces_ptr->begin() + idx);
+                focus_histories_ptr->erase(focus_histories_ptr->begin() + idx);
                 if (*current_ws_index_ptr >= workspaces_ptr->size())
                 {
                     *current_ws_index_ptr = workspaces_ptr->size() - 1;
@@ -2255,8 +2266,9 @@ namespace netxs::app::tile
                             }
                         }
                     };
-                    boss.LISTEN(tier::preview, app::tile::events::ui::focus::lastpane, gear, -, (focus_history_ptr))
+                    boss.LISTEN(tier::preview, app::tile::events::ui::focus::lastpane, gear, -, (current_focus_history))
                     {
+                        auto focus_history_ptr = current_focus_history();
                         if (!focus_history_ptr) return;
                         if (auto slot_ptr = focus_history_ptr->last(gear.id))
                         if (auto item_ptr = get_slot_focus_target(slot_ptr))
@@ -2645,8 +2657,9 @@ namespace netxs::app::tile
 
                         gear.set_handled();
                     };
-                    boss.LISTEN(tier::preview, app::tile::events::ui::swap, gear, -, (focus_history_ptr))
+                    boss.LISTEN(tier::preview, app::tile::events::ui::swap, gear, -, (current_focus_history))
                     {
+                        auto focus_history_ptr = current_focus_history();
                         if (nothing_to_iterate()) return;
                         auto node_veer_list = std::vector<netxs::sptr<ui::veer>>{};
                         auto node_grip_list = std::vector<netxs::sptr<ui::veer>>{};
