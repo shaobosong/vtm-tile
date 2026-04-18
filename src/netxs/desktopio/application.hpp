@@ -164,40 +164,42 @@ namespace netxs::app::shared
                 });
             });
 
-        // Layer 2: Centered dialog card.
+        // Layer 2: Centered dialog card (Tokyo Night palette).
         //
-        //  ┌───────────────────────────────────┐
-        //  │                                   │  row 0
-        //  │  Close this window?               │  row 1  message
-        //  │                                   │  row 2  gap
-        //  │  [     Yes     ][      No      ]  │  row 3  buttons
-        //  │                                   │  row 4
-        //  └───────────────────────────────────┘
+        //  ┌────────────────────────────────────────────┐
+        //  │                                            │  row 1
+        //  │                                            │  row 2
+        //  │   Do you want to close this window?        │  row 3  message
+        //  │                                            │  row 4
+        //  │                                            │  row 5
+        //  │   [    Confirm     ]  [     Cancel     ]   │  row 6  buttons
+        //  │                                            │  row 7
+        //  └────────────────────────────────────────────┘
         //
-        //  Outer 36 × 5, setpad(l=2 r=2 t=1 b=1) → inner 32 × 3.
-        //  slot_1 (message) : 2 rows   slot_2 (buttons) : 1 row.
+        //  Outer 42 × 7, setpad(l=3 r=3 t=2 b=1) → inner 36 × 4.
+        //  slot_1 (message) : 3 rows   slot_2 (buttons) : 1 row.
         //
         auto dialog = overlay_ptr->attach(ui::fork::ctor(axis::Y))
             ->alignment({ snap::center, snap::center })
-            ->limits({ 36, 5 }, { 36, 5 })
-            ->colors(argb{ 0xFFFFFFFF }, argb{ 0xFF0F2B45 })
-            ->setpad({ 2, 2, 1, 1 });
+            ->limits({ 42, 7 }, { 42, 7 }) /* This a suggested, not forceable value (42) in cross-axis. */
+            ->colors(argb{ 0xffc0caf5 }, argb{ 0xff1a1b26 })
+            ->setpad({ 3, 3, 2, 1 });
 
         // Message label — flexible keeps full slot width.
         // No alignment() here: the Y-fork inform() bug yields zero-size
         // regions for children; center alignment would shift the item
-        // off-screen.  Text is padded with spaces to visually center it
-        // within the 32-char inner width.
-        dialog->attach(slot::_1, ui::item::ctor(ansi::fgc(0xFFFFFFFF).add("Close this window?")))
+        // off-screen.  Blue accent (0xff7aa2f7) for the question text.
+        dialog->attach(slot::_1, ui::item::ctor(ansi::fgc(0xff7aa2f7).add("Do you want to close this window?")))
             ->flexible();
 
         // Button bar (fixed 1 row).
-        auto buttons = dialog->attach(slot::_2, ui::fork::ctor(axis::X))
+        auto buttons = dialog->attach(slot::_2, ui::fork::ctor(axis::X, 2))
             ->limits({ -1, 1 }, { -1, 1 });
 
-        // [ Yes ] button — forest-green background.
-        buttons->attach(slot::_1, ui::item::ctor(ansi::fgc(0xFFFFFFFF).add("       Yes        ")))
-            ->active(argb{ 0xFFFFFFFF }, argb{ 0xFF1B5E20 })
+        // [ Confirm ] button — muted Tokyo Night dark green; xlight brightens on hover
+        //                      because luma(73,132,55) ≈ 107 < 140.
+        buttons->attach(slot::_1, ui::item::ctor(ansi::fgc(0xff1a1b26).add("     Confirm      ")))
+            ->active(argb{ 0xffc0caf5 }, argb{ 0xff498437 })
             ->shader(cell::shaders::xlight, e2::form::state::hover)
             ->invoke([dismiss_visual, dismiss_hook, on_confirm](auto& boss)
             {
@@ -210,9 +212,9 @@ namespace netxs::app::shared
                 });
             });
 
-        // [ No ] button — crimson-red background.
-        buttons->attach(slot::_2, ui::item::ctor(ansi::fgc(0xFFFFFFFF).add("        No        ")))
-            ->active(argb{ 0xFFFFFFFF }, argb{ 0xFF7B1A1A })
+        // [ Cancel ] button — muted Tokyo Night storm surface (0xff414868).
+        buttons->attach(slot::_2, ui::item::ctor(ansi::fgc(0xffa9b1d6).add("      Cancel      ")))
+            ->active(argb{ 0xffa9b1d6 }, argb{ 0xff414868 })
             ->shader(cell::shaders::xlight, e2::form::state::hover)
             ->invoke([dismiss_visual, dismiss_hook, on_cancel](auto& boss)
             {
