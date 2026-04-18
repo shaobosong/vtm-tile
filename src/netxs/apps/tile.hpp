@@ -298,6 +298,9 @@ namespace netxs::app::tile
         X(CreateWorkspace    ) \
         X(DestroyWorkspace   ) \
         X(SwitchWorkspace    ) \
+        X(NextWorkspace      ) \
+        X(PrevWorkspace      ) \
+        X(LastWorkspace      ) \
 
     struct methods
     {
@@ -1361,6 +1364,7 @@ namespace netxs::app::tile
             static constexpr auto ws_btn_w     = si32{ 3 };
             auto workspaces_ptr        = ptr::shared(std::vector<netxs::sptr<ui::veer>>{});
             auto current_ws_index_ptr  = ptr::shared(size_t{ 0 });
+            auto previous_ws_index_ptr = ptr::shared(size_t{ 0 });
             auto refresh_status_bar_fn = ptr::shared(std::function<void()>{[]{}});
 
             // Factory: build a workspace root veer (parse_data result) with the root-fullscreen-attach listener.
@@ -1425,7 +1429,7 @@ namespace netxs::app::tile
             };
 
             // Switch active workspace to the given index.
-            auto switch_workspace = [workspaces_ptr, current_ws_index_ptr, workspace_host_ptr, refresh_status_bar_fn](size_t idx) -> bool
+            auto switch_workspace = [workspaces_ptr, current_ws_index_ptr, previous_ws_index_ptr, workspace_host_ptr, refresh_status_bar_fn](size_t idx) -> bool
             {
                 if (idx >= workspaces_ptr->size()) return faux;
                 if (idx == *current_ws_index_ptr && workspace_host_ptr->count() > 0) return faux;
@@ -1438,6 +1442,7 @@ namespace netxs::app::tile
                     has_gears = true;
                     cur->base::detach();
                 }
+                *previous_ws_index_ptr = *current_ws_index_ptr;
                 *current_ws_index_ptr = idx;
                 auto target = (*workspaces_ptr)[idx];
                 workspace_host_ptr->attach(target);
@@ -1509,6 +1514,32 @@ namespace netxs::app::tile
                     victim_to_destroy.reset();
                 });
                 return true;
+            };
+
+            // Switch to the next workspace (wrapping around to 0 at the end).
+            auto next_workspace = [workspaces_ptr, current_ws_index_ptr, switch_workspace]() -> bool
+            {
+                if (workspaces_ptr->size() <= 1) return faux;
+                auto next_idx = (*current_ws_index_ptr + 1) % workspaces_ptr->size();
+                return switch_workspace(next_idx);
+            };
+
+            // Switch to the previous workspace (wrapping around to the last at the beginning).
+            auto prev_workspace = [workspaces_ptr, current_ws_index_ptr, switch_workspace]() -> bool
+            {
+                if (workspaces_ptr->size() <= 1) return faux;
+                auto prev_idx = (*current_ws_index_ptr == 0) ? workspaces_ptr->size() - 1
+                                                             : *current_ws_index_ptr - 1;
+                return switch_workspace(prev_idx);
+            };
+
+            // Switch to the last visited workspace.
+            auto last_workspace = [workspaces_ptr, previous_ws_index_ptr, switch_workspace]() -> bool
+            {
+                if (workspaces_ptr->size() <= 1) return faux;
+                auto prev_idx = *previous_ws_index_ptr;
+                if (prev_idx >= workspaces_ptr->size()) prev_idx = workspaces_ptr->size() - 1;
+                return switch_workspace(prev_idx);
             };
 
             // Status bar: render workspace index buttons with hover-aware styling.
@@ -1898,6 +1929,18 @@ namespace netxs::app::tile
                                                         {
                                                             auto idx = luafx.get_args_or(1, si32{ 0 });
                                                             switch_workspace((size_t)idx);
+                                                        }},
+                        { methods::NextWorkspace,       [&, next_workspace]
+                                                        {
+                                                            next_workspace();
+                                                        }},
+                        { methods::PrevWorkspace,       [&, prev_workspace]
+                                                        {
+                                                            prev_workspace();
+                                                        }},
+                        { methods::LastWorkspace,       [&, last_workspace]
+                                                        {
+                                                            last_workspace();
                                                         }},
                     });
 
