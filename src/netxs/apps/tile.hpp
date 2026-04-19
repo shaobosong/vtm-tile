@@ -1612,13 +1612,35 @@ namespace netxs::app::tile
                             c.bgc(bg).fgc(fg).txt(label).link(boss_id).bld(bold).und(uline).unc(ucl);
                         });
                     }
+                    // Draw the "+" button after the last workspace tab for creating a new workspace.
+                    if (count < ws_max_count)
+                    {
+                        auto x0 = (si32)count * ws_btn_w;
+                        if (x0 + ws_btn_w <= bar_w)
+                        {
+                            auto is_hover = ((si32)count == hover);
+                            auto bg    = is_hover ? hov_bg : bar_bg;
+                            auto fg    = is_hover ? hov_fg : dim_fg;
+                            auto uline = is_hover ? unln::dotted : unln::none;
+                            parent_canvas.fill(rect{{ x0, 0 }, { ws_btn_w, 1 }}, [=](cell& c)
+                            {
+                                c.bgc(bg).fgc(fg).txt(whitespace).link(boss_id).bld(faux).und(uline).unc(hov_ul);
+                            });
+                            parent_canvas.fill(rect{{ x0 + 1, 0 }, { 1, 1 }}, [=](cell& c)
+                            {
+                                c.bgc(bg).fgc(fg).txt(text("+")).link(boss_id).bld(faux).und(uline).unc(hov_ul);
+                            });
+                        }
+                    }
                 };
-                // Track mouse position for per-tab hover feedback.
+                // Track mouse position for per-tab hover feedback (includes the "+" button at index == count).
                 boss.on(tier::mouserelease, input::key::MouseMove, [hovered_tab, workspaces_ptr, refresh_status_bar_fn](hids& gear)
                 {
                     auto x = gear.coord.x;
                     auto new_tab = x < 0 ? si32{ -1 } : si32(x / ws_btn_w);
-                    if (new_tab < 0 || (size_t)new_tab >= workspaces_ptr->size()) new_tab = -1;
+                    // Allow hover on workspace tabs [0..count-1] and the "+" button at index count.
+                    auto limit = (si32)workspaces_ptr->size() + (workspaces_ptr->size() < ws_max_count ? 1 : 0);
+                    if (new_tab < 0 || new_tab >= limit) new_tab = -1;
                     if (new_tab != *hovered_tab)
                     {
                         *hovered_tab = new_tab;
@@ -1634,8 +1656,8 @@ namespace netxs::app::tile
                         (*refresh_status_bar_fn)();
                     }
                 });
-                // Switch workspace on click.
-                boss.on(tier::mouserelease, input::key::LeftClick, [switch_workspace, workspaces_ptr](hids& gear)
+                // Switch workspace on click, or create a new workspace when the "+" button is clicked.
+                boss.on(tier::mouserelease, input::key::LeftClick, [switch_workspace, create_workspace, workspaces_ptr](hids& gear)
                 {
                     auto x = gear.coord.x;
                     if (x < 0) { gear.dismiss(); return; }
@@ -1643,6 +1665,10 @@ namespace netxs::app::tile
                     if (idx < workspaces_ptr->size())
                     {
                         switch_workspace(idx);
+                    }
+                    else if (idx == workspaces_ptr->size() && workspaces_ptr->size() < ws_max_count)
+                    {
+                        create_workspace();
                     }
                     gear.dismiss();
                 });

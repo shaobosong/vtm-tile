@@ -187,6 +187,13 @@ class VtmTileSession:
         row = ROWS                   # Status bar is the bottom row.
         self.click(col, row)
 
+    def click_plus_button(self, workspace_count):
+        """Click the '+' button on the status bar. It sits right after the last workspace tab.
+        `workspace_count` is the current number of workspaces (determines the button position)."""
+        col = workspace_count * WS_BTN_W + 2  # Center of the '+' button, 1-indexed.
+        row = ROWS                              # Status bar is the bottom row.
+        self.click(col, row)
+
     def create_workspace(self):
         """Send Alt+Shift+C to create a new workspace."""
         self.write(b"\x1bC")
@@ -1192,6 +1199,118 @@ def test_lastpane_three_workspaces():
         return True
 
 
+def test_plus_button_creates_workspace():
+    """Clicking the '+' button on the status bar creates a new workspace."""
+    print("TEST: workspace - plus button creates workspace ... ", end="", flush=True)
+    with VtmTileSession(TILE_ARGS) as s:
+        if not s.is_alive():
+            print("FAIL - vtm-tile did not start")
+            return False
+        # With 1 workspace, the '+' button is at index 1.
+        s.click_plus_button(workspace_count=1)
+        time.sleep(1.5)
+        s.read(timeout=0.5)
+        if not s.is_alive():
+            print("FAIL - crashed after clicking '+' button")
+            return False
+        # Now on workspace 1. Switch back to workspace 0 to verify both exist.
+        s.click_workspace_button(0)
+        time.sleep(1.0)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed switching back to workspace 0")
+            return False
+        # Switch to workspace 1 again.
+        s.click_workspace_button(1)
+        time.sleep(1.0)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed switching to workspace 1")
+            return False
+        print("PASS")
+        return True
+
+
+def test_plus_button_creates_multiple_workspaces():
+    """Clicking the '+' button repeatedly creates multiple workspaces."""
+    print("TEST: workspace - plus button creates multiple workspaces ... ", end="", flush=True)
+    with VtmTileSession(TILE_ARGS) as s:
+        if not s.is_alive():
+            print("FAIL - vtm-tile did not start")
+            return False
+        # Create workspace 1 via '+' button (current count = 1).
+        s.click_plus_button(workspace_count=1)
+        time.sleep(1.5)
+        s.read(timeout=0.5)
+        if not s.is_alive():
+            print("FAIL - crashed after first '+' click")
+            return False
+        # Create workspace 2 via '+' button (current count = 2).
+        s.click_plus_button(workspace_count=2)
+        time.sleep(1.5)
+        s.read(timeout=0.5)
+        if not s.is_alive():
+            print("FAIL - crashed after second '+' click")
+            return False
+        # Now we have workspaces 0, 1, 2. Cycle through all to verify.
+        for idx in [0, 1, 2]:
+            s.click_workspace_button(idx)
+            time.sleep(1.0)
+            s.read(timeout=0.3)
+            if not s.is_alive():
+                print(f"FAIL - crashed switching to workspace {idx}")
+                return False
+        print("PASS")
+        return True
+
+
+def test_plus_button_after_workspace_destroy():
+    """The '+' button position adjusts correctly after a workspace is destroyed."""
+    print("TEST: workspace - plus button after workspace destroy ... ", end="", flush=True)
+    with VtmTileSession(TILE_ARGS) as s:
+        if not s.is_alive():
+            print("FAIL - vtm-tile did not start")
+            return False
+        # Create workspaces 1 and 2 via '+' button.
+        s.click_plus_button(workspace_count=1)
+        time.sleep(1.5)
+        s.read(timeout=0.5)
+        if not s.is_alive():
+            print("FAIL - crashed creating workspace 1 via '+'")
+            return False
+        s.click_plus_button(workspace_count=2)
+        time.sleep(1.5)
+        s.read(timeout=0.5)
+        if not s.is_alive():
+            print("FAIL - crashed creating workspace 2 via '+'")
+            return False
+        # Now on workspace 2. Destroy it.
+        s.destroy_workspace()
+        time.sleep(1.5)
+        s.read(timeout=0.5)
+        if not s.is_alive():
+            print("FAIL - crashed after destroying workspace 2")
+            return False
+        # 2 workspaces remain (0, 1). The '+' button should now be at index 2.
+        # Click it to create a new workspace.
+        s.click_plus_button(workspace_count=2)
+        time.sleep(1.5)
+        s.read(timeout=0.5)
+        if not s.is_alive():
+            print("FAIL - crashed after clicking '+' post-destroy")
+            return False
+        # Verify all 3 workspaces (0, 1, 2) are accessible.
+        for idx in [0, 1, 2]:
+            s.click_workspace_button(idx)
+            time.sleep(1.0)
+            s.read(timeout=0.3)
+            if not s.is_alive():
+                print(f"FAIL - crashed switching to workspace {idx}")
+                return False
+        print("PASS")
+        return True
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -1228,6 +1347,9 @@ def main():
         test_lastpane_after_workspace_destroy,
         test_lastpane_no_history_in_new_workspace,
         test_lastpane_three_workspaces,
+        test_plus_button_creates_workspace,
+        test_plus_button_creates_multiple_workspaces,
+        test_plus_button_after_workspace_destroy,
     ]
 
     passed = 0
