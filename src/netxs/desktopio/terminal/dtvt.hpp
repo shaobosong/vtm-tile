@@ -338,10 +338,27 @@
             nodata = {};
             stream.syswinsz.freeze().thing.winsize = {};
             active.exchange(true);
-            auto receiver_fx = [&](view utf8)
+            auto spawn_size = base::size();
+            auto check_once = std::make_shared<bool>(true);
+            auto receiver_fx = [&, spawn_size, check_once](view utf8)
             {
                 if (active)
                 {
+                    if (*check_once) // First data from subprocess: check if the widget was resized while the subprocess was starting (race between e2::area and ipccon.attached).
+                    {
+                        *check_once = faux;
+                        base::enqueue([&, spawn_size](auto& /*boss*/)
+                        {
+                            if (ipccon)
+                            {
+                                auto cur_size = base::size();
+                                if (cur_size != spawn_size)
+                                {
+                                    stream.syswinsz.send(*this, 0, cur_size, faux);
+                                }
+                            }
+                        });
+                    }
                     stream.sync(utf8);
                     stream.request_jgc(*this);
                 }
@@ -357,7 +374,7 @@
                     }
                 });
             };
-            ipccon.run_dtvt_app(appcfg, base::size(), connect_fx, receiver_fx, shutdown_fx);
+            ipccon.run_dtvt_app(appcfg, spawn_size, connect_fx, receiver_fx, shutdown_fx);
             sync_window_state();
         }
         // dtvt: Return true if application has never sent its canvas.
