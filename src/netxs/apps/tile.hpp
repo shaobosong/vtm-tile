@@ -1558,89 +1558,221 @@ namespace netxs::app::tile
                 return switch_workspace(prev_idx);
             };
 
-            // Status bar: render workspace index buttons with hover-aware styling.
-            // Visual design: Tokyo Night color palette with underline accent on the active tab,
-            // dotted underline hint on hover, and bold active label for clear visual hierarchy.
-            auto hovered_tab = ptr::shared(si32{ -1 }); // Index of the tab under the mouse cursor (-1 = none).
+            // Status bar: display only the current workspace index with inactive styling.
+            // Click opens the workspace preview popup (Win+Tab style).
+            auto hovered_tab = ptr::shared(si32{ -1 }); // Hover state for the single button (-1 = none, 0 = hovered).
+            auto ws_popup_active = ptr::shared(faux);    // Whether the workspace preview popup is currently open.
             *refresh_status_bar_fn = [status_bar_ptr]
             {
                 status_bar_ptr->base::deface();
             };
-            status_bar_ptr->invoke([&, workspaces_ptr, current_ws_index_ptr, switch_workspace, hovered_tab, refresh_status_bar_fn](auto& boss)
+
+            // Helper: recursively collect pane layout from a workspace veer tree into a flat list with computed rects.
+            struct ws_thumb_pane_t
+            {
+                rect area;        // Position within thumbnail coordinate space.
+                text label;       // Pane label (e.g., app title).
+                si32 color_idx;   // Color index (0-3) for adjacency-aware coloring.
+                sptr slot_veer;   // Pointer to the node_veer for click handling.
+            };
+            auto collect_ws_panes_fn = [](auto& self, sptr veer_ptr, rect area, std::vector<ws_thumb_pane_t>& panes, si32 h_par = 0, si32 v_par = 0) -> void
+            {
+                auto veer = std::dynamic_pointer_cast<ui::veer>(veer_ptr);
+                if (!veer || veer->count() == 0) return;
+                auto item = veer->back();
+                if (!item) return;
+                auto cidx = h_par * 2 + v_par;
+
+                if (veer->count() == 1) // Only empty slot.
+                {
+                    panes.push_back({ area, "~"s, cidx, veer_ptr });
+                    return;
+                }
+                if (item->root()) // App window or empty slot placeholder.
+                {
+                    auto lbl = text{};
+                    if (item->kind() != base::placeholder)
+                    {
+                        lbl = item->base::signal(tier::request, e2::form::prop::ui::header);
+                    }
+                    if (lbl.empty()) lbl = "~";
+                    panes.push_back({ area, lbl, cidx, veer_ptr });
+                    return;
+                }
+                // Node (split): recurse into children using actual split ratio.
+                auto fork_ptr = std::static_pointer_cast<ui::fork>(item);
+                auto [orientation, griparea_unused, fraction] = fork_ptr->get_config();
+                auto child1 = fork_ptr->get(slot::_1);
+                auto child2 = fork_ptr->get(slot::_2);
+                static constexpr auto max_ratio = si32{ 0xFFFF };
+                if (orientation == axis::X) // Horizontal: children side by side.
+                {
+                    auto s1 = std::clamp(area.size.x * fraction / max_ratio, 1, area.size.x - 1);
+                    auto s2 = area.size.x - s1;
+                    auto a1 = rect{ area.coor, { s1, area.size.y } };
+                    auto a2 = rect{ { area.coor.x + s1, area.coor.y }, { s2, area.size.y } };
+                    self(self, child1, a1, panes, h_par, v_par);
+                    self(self, child2, a2, panes, h_par, v_par ^ 1); // Flip v for right child.
+                }
+                else // Vertical: children stacked.
+                {
+                    auto s1 = std::clamp(area.size.y * fraction / max_ratio, 1, area.size.y - 1);
+                    auto s2 = area.size.y - s1;
+                    auto a1 = rect{ area.coor, { area.size.x, s1 } };
+                    auto a2 = rect{ { area.coor.x, area.coor.y + s1 }, { area.size.x, s2 } };
+                    self(self, child1, a1, panes, h_par, v_par);
+                    self(self, child2, a2, panes, h_par ^ 1, v_par); // Flip h for bottom child.
+                }
+            };
+
+            // Popup layout constants.
+            static constexpr auto popup_ws_thumb_ratio_w = si32{ 5 };   // Thumbnail aspect ratio width.
+            static constexpr auto popup_ws_thumb_ratio_h = si32{ 2 };   // Thumbnail aspect ratio height.
+            static constexpr auto popup_ws_thumb_gap  = si32{ 2 };  // Gap between thumbnails.
+             static constexpr auto popup_bottom_pad_y = si32{ 1 };   // Top padding in bottom bar.
+             static constexpr auto popup_scrollbar_h  = si32{ 1 };   // Scrollbar row height (always reserved).
+            // Popup color palette (Tokyo Night).
+            static constexpr auto popup_bar_bg    = (argb)0xff16161e;
+            static constexpr auto popup_dim_fg    = (argb)0xff565f89;
+            static constexpr auto popup_hov_bg    = (argb)0xff1f2335;
+            static constexpr auto popup_hov_fg    = (argb)0xff9aa5ce;
+            static constexpr auto popup_hov_ul    = (argb)0xff3b4261;
+            static constexpr auto popup_act_bg    = (argb)0xff292e42;
+            static constexpr auto popup_act_fg    = (argb)0xffc0caf5;
+            static constexpr auto popup_act_ul    = (argb)0xff7aa2f7;
+            static constexpr auto popup_thumb_bg  = (argb)0xff1a1b26;  // Thumbnail background.
+            static constexpr auto popup_thumb_brd = (argb)0xff3b4261;  // Thumbnail border.
+            // Pane fill colors (4-color palette for adjacency-aware coloring).
+            static constexpr argb popup_pane_colors[] = {
+                // (argb)0xff292e42,  // [0] h=0,v=0 - medium blue-gray.
+                // (argb)0xff1a1b26,  // [1] h=0,v=1 - darkest.
+                // (argb)0xff2f354b,  // [2] h=1,v=0 - lighter blue-gray.
+                // (argb)0xff1f2335,  // [3] h=1,v=1 - dark indigo.
+                (argb)0xff1d1f2a,  // [0] h=0,v=0 - medium blue-gray.
+                (argb)0xff14151d,  // [1] h=0,v=1 - darkest.
+                (argb)0xff232532,  // [2] h=1,v=0 - lighter blue-gray.
+                (argb)0xff181a23,  // [3] h=1,v=1 - dark indigo.
+            };
+            static constexpr auto popup_pane_fg   = (argb)0xff565f89;  // Pane label text.
+            static constexpr auto popup_sel_brd   = (argb)0xff7aa2f7;  // Selected/hovered workspace border.
+            // Scrollbar color palette (three states: normal, hover, drag).
+            static constexpr auto popup_sb_normal = (argb)0xff3b4261;  // Scrollbar normal fg (subtle).
+            static constexpr auto popup_sb_hover  = (argb)0xff565f89;  // Scrollbar hover fg (brighter).
+            static constexpr auto popup_sb_drag   = (argb)0xff7aa2f7;  // Scrollbar drag fg (accent blue).
+            // Unicode box-drawing border characters (configurable).
+            static constexpr auto box_tl = "╭"; // Top-left corner.
+            static constexpr auto box_tr = "╮"; // Top-right corner.
+            static constexpr auto box_bl = "╰"; // Bottom-left corner.
+            static constexpr auto box_br = "╯"; // Bottom-right corner.
+            static constexpr auto box_hz = "─"; // Horizontal bar.
+            static constexpr auto box_vt = "│"; // Vertical bar.
+            // Horizontal scrollbar characters.
+            static constexpr auto sb_arrow_l = "◀"; // Left arrow.
+            static constexpr auto sb_arrow_r = "▶"; // Right arrow.
+            static constexpr auto sb_thumb   = "▬"; // Scrollbar thumb (black rectangle).
+
+            // Helper: draw a Unicode line-frame box and return the interior rect.
+            auto draw_popup_box = [](auto& canvas, rect box, argb brd, argb bg, argb fg, auto link) -> rect
+            {
+                if (box.size.x < 2 || box.size.y < 2)
+                {
+                    canvas.fill(box, [=](cell& c)
+                    {
+                        c.bgc(bg).fgc(fg).txt(whitespace).link(link);
+                    });
+                    return box;
+                }
+                auto inner = rect{{ box.coor.x + 1, box.coor.y + 1 },
+                                   { box.size.x - 2, box.size.y - 2 }};
+                if (inner.size.x > 0 && inner.size.y > 0)
+                {
+                    canvas.fill(inner, [=](cell& c)
+                    {
+                        c.bgc(bg).fgc(fg).txt(whitespace).link(link);
+                    });
+                }
+                // Top row: ╭───╮
+                canvas.fill(rect{{ box.coor.x, box.coor.y }, { 1, 1 }}, [=](cell& c)
+                {
+                    c.bgc(bg).fgc(brd).txt(text(box_tl)).link(link);
+                });
+                if (box.size.x > 2)
+                {
+                    canvas.fill(rect{{ box.coor.x + 1, box.coor.y }, { box.size.x - 2, 1 }}, [=](cell& c)
+                    {
+                        c.bgc(bg).fgc(brd).txt(text(box_hz)).link(link);
+                    });
+                }
+                canvas.fill(rect{{ box.coor.x + box.size.x - 1, box.coor.y }, { 1, 1 }}, [=](cell& c)
+                {
+                    c.bgc(bg).fgc(brd).txt(text(box_tr)).link(link);
+                });
+                // Bottom row: ╰───╯
+                canvas.fill(rect{{ box.coor.x, box.coor.y + box.size.y - 1 }, { 1, 1 }}, [=](cell& c)
+                {
+                    c.bgc(bg).fgc(brd).txt(text(box_bl)).link(link);
+                });
+                if (box.size.x > 2)
+                {
+                    canvas.fill(rect{{ box.coor.x + 1, box.coor.y + box.size.y - 1 }, { box.size.x - 2, 1 }}, [=](cell& c)
+                    {
+                        c.bgc(bg).fgc(brd).txt(text(box_hz)).link(link);
+                    });
+                }
+                canvas.fill(rect{{ box.coor.x + box.size.x - 1, box.coor.y + box.size.y - 1 }, { 1, 1 }}, [=](cell& c)
+                {
+                    c.bgc(bg).fgc(brd).txt(text(box_br)).link(link);
+                });
+                // Left and right vertical bars.
+                if (box.size.y > 2)
+                {
+                    canvas.fill(rect{{ box.coor.x, box.coor.y + 1 }, { 1, box.size.y - 2 }}, [=](cell& c)
+                    {
+                        c.bgc(bg).fgc(brd).txt(text(box_vt)).link(link);
+                    });
+                    canvas.fill(rect{{ box.coor.x + box.size.x - 1, box.coor.y + 1 }, { 1, box.size.y - 2 }}, [=](cell& c)
+                    {
+                        c.bgc(bg).fgc(brd).txt(text(box_vt)).link(link);
+                    });
+                }
+                return inner;
+            };
+
+            status_bar_ptr->invoke([&, workspaces_ptr, current_ws_index_ptr, switch_workspace, create_workspace,
+                                      hovered_tab, refresh_status_bar_fn, ws_popup_active,
+                                      collect_ws_panes_fn,
+                                      wrapper_shadow = ptr::shadow(wrapper)](auto& boss)
             {
                 auto boss_id = boss.bell::id;
-                // Render: draw workspace tab buttons with active/hover/inactive states.
+                // Render: draw only the current workspace index button with inactive styling.
                 boss.LISTEN(tier::release, e2::render::any, parent_canvas, -, (workspaces_ptr, current_ws_index_ptr, boss_id, hovered_tab))
                 {
-                    // Color palette.
-                    static constexpr auto bar_bg  = (argb)0xff16161e; // Deep dark background.
-                    static constexpr auto act_bg  = (argb)0xff292e42; // Active tab: raised surface.
-                    static constexpr auto act_fg  = (argb)0xffc0caf5; // Active tab: bright text.
-                    static constexpr auto act_ul  = (argb)0xff7aa2f7; // Active tab: blue underline accent.
-                    static constexpr auto dim_fg  = (argb)0xff565f89; // Inactive tab: muted text.
-                    static constexpr auto hov_bg  = (argb)0xff1f2335; // Hovered tab: subtle lift.
-                    static constexpr auto hov_fg  = (argb)0xff9aa5ce; // Hovered tab: brighter text.
-                    static constexpr auto hov_ul  = (argb)0xff3b4261; // Hovered tab: subtle underline hint.
                     // Clear entire bar.
                     parent_canvas.fill([boss_id](cell& c)
                     {
-                        c.bgc(bar_bg).fgc(bar_bg).txt(whitespace).link(boss_id).bld(faux).und(0).ovr(faux);
+                        c.bgc(popup_bar_bg).fgc(popup_bar_bg).txt(whitespace).link(boss_id).bld(faux).und(0).ovr(faux);
                     });
-                    // Draw each workspace tab.
-                    auto bar_w = boss.base::area().size.x;
-                    auto count = workspaces_ptr->size();
+                    // Draw current workspace index button with inactive styling.
                     auto hover = *hovered_tab;
-                    for (auto i = size_t{}; i < count && (si32)i * ws_btn_w < bar_w; i++)
+                    auto is_hover = (hover == 0);
+                    auto bg    = is_hover ? popup_hov_bg : popup_bar_bg;
+                    auto fg    = is_hover ? popup_hov_fg : popup_dim_fg;
+                    auto uline = is_hover ? unln::dotted : unln::none;
+                    auto label = text(1, char(ws_min_index + *current_ws_index_ptr));
+                    parent_canvas.fill(rect{{ 0, 0 }, { ws_btn_w, 1 }}, [=](cell& c)
                     {
-                        auto is_active = (i == *current_ws_index_ptr);
-                        auto is_hover  = ((si32)i == hover && !is_active);
-                        auto bg    = is_active ? act_bg : is_hover ? hov_bg : bar_bg;
-                        auto fg    = is_active ? act_fg : is_hover ? hov_fg : dim_fg;
-                        auto bold  = is_active;
-                        auto uline = is_active ? unln::line : is_hover ? unln::dotted : unln::none;
-                        auto ucl   = is_active ? act_ul     : hov_ul;
-                        auto x0    = (si32)i * ws_btn_w;
-                        // Button background (all cells get uniform style including underline).
-                        parent_canvas.fill(rect{{ x0, 0 }, { ws_btn_w, 1 }}, [=](cell& c)
-                        {
-                            c.bgc(bg).fgc(fg).txt(whitespace).link(boss_id).bld(bold).und(uline).unc(ucl);
-                        });
-                        // Center label (workspace index character).
-                        auto label = text(1, char(ws_min_index + i));
-                        parent_canvas.fill(rect{{ x0 + 1, 0 }, { 1, 1 }}, [=](cell& c)
-                        {
-                            c.bgc(bg).fgc(fg).txt(label).link(boss_id).bld(bold).und(uline).unc(ucl);
-                        });
-                    }
-                    // Draw the "+" button after the last workspace tab for creating a new workspace.
-                    if (count < ws_max_count)
+                        c.bgc(bg).fgc(fg).txt(whitespace).link(boss_id).bld(faux).und(uline).unc(popup_hov_ul);
+                    });
+                    parent_canvas.fill(rect{{ 1, 0 }, { 1, 1 }}, [=](cell& c)
                     {
-                        auto x0 = (si32)count * ws_btn_w;
-                        if (x0 + ws_btn_w <= bar_w)
-                        {
-                            auto is_hover = ((si32)count == hover);
-                            auto bg    = is_hover ? hov_bg : bar_bg;
-                            auto fg    = is_hover ? hov_fg : dim_fg;
-                            auto uline = is_hover ? unln::dotted : unln::none;
-                            parent_canvas.fill(rect{{ x0, 0 }, { ws_btn_w, 1 }}, [=](cell& c)
-                            {
-                                c.bgc(bg).fgc(fg).txt(whitespace).link(boss_id).bld(faux).und(uline).unc(hov_ul);
-                            });
-                            parent_canvas.fill(rect{{ x0 + 1, 0 }, { 1, 1 }}, [=](cell& c)
-                            {
-                                c.bgc(bg).fgc(fg).txt(text("+")).link(boss_id).bld(faux).und(uline).unc(hov_ul);
-                            });
-                        }
-                    }
+                        c.bgc(bg).fgc(fg).txt(label).link(boss_id).bld(faux).und(uline).unc(popup_hov_ul);
+                    });
                 };
-                // Track mouse position for per-tab hover feedback (includes the "+" button at index == count).
-                boss.on(tier::mouserelease, input::key::MouseMove, [hovered_tab, workspaces_ptr, refresh_status_bar_fn](hids& gear)
+                // Track mouse hover on the single workspace button.
+                boss.on(tier::mouserelease, input::key::MouseMove, [hovered_tab, refresh_status_bar_fn](hids& gear)
                 {
                     auto x = gear.coord.x;
-                    auto new_tab = x < 0 ? si32{ -1 } : si32(x / ws_btn_w);
-                    // Allow hover on workspace tabs [0..count-1] and the "+" button at index count.
-                    auto limit = (si32)workspaces_ptr->size() + (workspaces_ptr->size() < ws_max_count ? 1 : 0);
-                    if (new_tab < 0 || new_tab >= limit) new_tab = -1;
+                    auto new_tab = (x >= 0 && x < ws_btn_w) ? si32{ 0 } : si32{ -1 };
                     if (new_tab != *hovered_tab)
                     {
                         *hovered_tab = new_tab;
@@ -1656,20 +1788,786 @@ namespace netxs::app::tile
                         (*refresh_status_bar_fn)();
                     }
                 });
-                // Switch workspace on click, or create a new workspace when the "+" button is clicked.
-                boss.on(tier::mouserelease, input::key::LeftClick, [switch_workspace, create_workspace, workspaces_ptr](hids& gear)
+                // Click on the workspace button: open the workspace preview popup.
+                boss.on(tier::mouserelease, input::key::LeftClick,
+                    [workspaces_ptr, current_ws_index_ptr, switch_workspace, create_workspace,
+                     ws_popup_active, wrapper_shadow, refresh_status_bar_fn, collect_ws_panes_fn, draw_popup_box](hids& gear)
                 {
                     auto x = gear.coord.x;
-                    if (x < 0) { gear.dismiss(); return; }
-                    auto idx = size_t(x / ws_btn_w);
-                    if (idx < workspaces_ptr->size())
+                    if (x < 0 || x >= ws_btn_w) { gear.dismiss(); return; }
+                    if (*ws_popup_active) { gear.dismiss(); return; }
+                    auto wrapper_ptr = wrapper_shadow.lock();
+                    if (!wrapper_ptr) { gear.dismiss(); return; }
+
+                    *ws_popup_active = true;
+
+                    // Popup shared state.
+                    auto preview_idx_ptr  = ptr::shared(*current_ws_index_ptr); // Which workspace is previewed.
+                    auto scroll_off_ptr   = ptr::shared(si32{ -1 });            // Horizontal scroll offset (pixels); -1 = auto-center on first render.
+                    auto hover_ws_ptr     = ptr::shared(si32{ -1 });            // Hovered workspace in bottom bar (-1 = none).
+                    auto hover_pane_ptr   = ptr::shared(si32{ -1 });            // Hovered pane in top section (-1 = none).
+                    auto hover_sb_ptr     = ptr::shared(faux);                  // Mouse hovering over scrollbar row.
+                    auto dragging_sb_ptr  = ptr::shared(faux);                  // Currently dragging scrollbar thumb.
+                    auto drag_sb_grab_ptr = ptr::shared(si32{ 0 });             // Grab offset: mouse x - thumb left edge at drag start.
+
+                    // Build the overlay (attached to the wrapper cake).
+                    auto overlay_ptr = ui::mock::ctor();
+                    auto overlay_shadow = ptr::shadow(overlay_ptr);
+                    auto kbd_hook = ptr::shared<hook>();
+                    auto pending_unhook = ptr::shared(faux);
+
+                    auto dismiss_visual = [overlay_shadow, ws_popup_active, pending_unhook]
                     {
-                        switch_workspace(idx);
-                    }
-                    else if (idx == workspaces_ptr->size() && workspaces_ptr->size() < ws_max_count)
+                        if (*pending_unhook) return;
+                        *pending_unhook = true;
+                        *ws_popup_active = faux;
+                        if (auto p = overlay_shadow.lock()) p->base::detach();
+                    };
+                    auto dismiss_hook = [kbd_hook]{ kbd_hook->reset(); };
+
+                    overlay_ptr->invoke([&](auto& ovl)
                     {
-                        create_workspace();
-                    }
+                        auto ovl_id = ovl.bell::id;
+
+                        // Render callback: draws the full workspace preview popup.
+                        ovl.LISTEN(tier::release, e2::render::any, parent_canvas, -,
+                            (workspaces_ptr, current_ws_index_ptr, preview_idx_ptr, scroll_off_ptr,
+                             hover_ws_ptr, hover_pane_ptr, hover_sb_ptr, dragging_sb_ptr,
+                             ovl_id, collect_ws_panes_fn, draw_popup_box))
+                        {
+                            auto canvas_area = parent_canvas.area();
+                            auto full_w = canvas_area.size.x;
+                            auto full_h = canvas_area.size.y;
+                            if (full_w < 4 || full_h < 4) return;
+
+                            // --- Dim the entire tile area (faint overlay). ---
+                            parent_canvas.fill([ovl_id](cell& c)
+                            {
+                                c.bgc().faint();
+                                c.fgc().faint();
+                                c.cur(text_cursor::none); // Suppress any terminal cursor bleeding through.
+                                c.link(ovl_id);
+                            });
+
+                            // --- Layout: bottom bar and top section (3:1 ratio). ---
+                            auto bot_h = std::max(4, full_h / 4) | 1; // Ensure odd so thumb_h (bot_h - 2) is also odd.
+                            auto top_h = full_h - bot_h;
+                            auto bot_y = full_h - bot_h;
+
+                            // --- Bottom section: workspace switcher. ---
+                            // Background fill for bottom bar.
+                            parent_canvas.fill(rect{{ 0, bot_y }, { full_w, bot_h }}, [ovl_id](cell& c)
+                            {
+                                c.bgc(popup_bar_bg).fgc(popup_bar_bg).txt(whitespace).link(ovl_id);
+                            });
+
+                             auto thumb_h = bot_h - popup_bottom_pad_y - popup_scrollbar_h;
+                             if (thumb_h < 3) thumb_h = 3;
+                             auto thumb_w = std::max(5, thumb_h * popup_ws_thumb_ratio_w / popup_ws_thumb_ratio_h) | 1; // Ensure odd width for centered cross.
+                             auto plus_w  = thumb_w;
+                             auto ws_count = (si32)workspaces_ptr->size();
+                             auto thumb_stride = thumb_w + popup_ws_thumb_gap;
+                             // Total width of all workspace thumbs + "+" button.
+                             auto has_plus = (workspaces_ptr->size() < ws_max_count);
+                             auto total_content_w = ws_count * thumb_stride + (has_plus ? plus_w + popup_ws_thumb_gap : 0);
+                             // Auto-center on the current workspace thumbnail on first render.
+                            if (*scroll_off_ptr < 0 && total_content_w > full_w)
+                            {
+                                auto cur_idx = (si32)*current_ws_index_ptr;
+                                auto thumb_center = cur_idx * thumb_stride + thumb_w / 2;
+                                auto max_scroll = std::max(0, total_content_w - full_w);
+                                *scroll_off_ptr = std::clamp(thumb_center - full_w / 2, 0, max_scroll);
+                            }
+                            else if (*scroll_off_ptr < 0)
+                            {
+                                *scroll_off_ptr = 0;
+                            }
+                            // Center the thumbnails if they fit; otherwise allow scrolling.
+                            auto scroll = *scroll_off_ptr;
+                            auto base_x = (total_content_w <= full_w) ? (full_w - total_content_w) / 2
+                                                                      : -scroll;
+                            auto thumb_y = bot_y + popup_bottom_pad_y;
+                            auto scrollbar_y = thumb_y + thumb_h; // Row reserved for horizontal scrollbar.
+
+                            auto hover_ws = *hover_ws_ptr;
+                            auto current_idx = *current_ws_index_ptr;
+                            auto preview_idx = *preview_idx_ptr;
+
+                            // Draw each workspace thumbnail.
+                            for (auto i = si32{}; i < ws_count; i++)
+                            {
+                                auto tx = base_x + i * thumb_stride;
+                                if (tx + thumb_w < 0 || tx >= full_w) continue; // Off-screen.
+
+                                auto is_current = ((size_t)i == current_idx);
+                                auto is_preview = ((size_t)i == preview_idx);
+                                auto is_hover   = (i == hover_ws);
+                                auto brd = is_preview ? popup_sel_brd : is_hover ? popup_hov_ul : popup_thumb_brd;
+                                auto tbg = is_current ? popup_act_bg : popup_thumb_bg;
+
+                                // Thumbnail with line-frame border.
+                                auto tr = rect{{ tx, thumb_y }, { thumb_w, thumb_h }};
+                                auto inner = draw_popup_box(parent_canvas, tr, brd, tbg, popup_pane_fg, ovl_id);
+                                if (inner.size.x < 1 || inner.size.y < 1) continue;
+
+                                // Render workspace layout within the inner area (color blocks only, no labels).
+                                auto ws_veer = (*workspaces_ptr)[i];
+                                auto panes = std::vector<ws_thumb_pane_t>{};
+                                collect_ws_panes_fn(collect_ws_panes_fn, std::static_pointer_cast<ui::base>(ws_veer), inner, panes);
+                                for (auto& pane : panes)
+                                {
+                                    auto pr = pane.area;
+                                    auto pbg = popup_pane_colors[pane.color_idx & 3];
+                                    parent_canvas.fill(pr, [=](cell& c)
+                                    {
+                                        c.bgc(pbg).fgc(popup_pane_fg).txt(whitespace).link(ovl_id);
+                                    });
+                                }
+
+                                // Workspace index label at bottom of thumbnail.
+                                auto idx_label = text(1, char(ws_min_index + i));
+                                auto lx = tx + thumb_w / 2;
+                                auto ly = thumb_y + thumb_h - 1;
+                                auto lfg = is_current ? popup_act_fg : popup_dim_fg;
+                                parent_canvas.fill(rect{{ lx, ly }, { 1, 1 }}, [=](cell& c)
+                                {
+                                    c.bgc(tbg).fgc(lfg).txt(idx_label).link(ovl_id).bld(is_current);
+                                });
+                            }
+
+                            // Draw "+" button after the last workspace thumbnail.
+                            if (has_plus)
+                            {
+                                auto px = base_x + ws_count * thumb_stride;
+                                if (px < full_w && px + plus_w > 0)
+                                {
+                                    auto is_hover = (hover_ws == ws_count);
+                                    auto pbrd = is_hover ? popup_hov_ul : popup_thumb_brd;
+                                    auto pfg  = is_hover ? popup_hov_fg : popup_dim_fg;
+                                    auto pr = rect{{ px, thumb_y }, { plus_w, thumb_h }};
+                                    auto pin = draw_popup_box(parent_canvas, pr, pbrd, popup_thumb_bg, pfg, ovl_id);
+                                    if (pin.size.x >= 1 && pin.size.y >= 1)
+                                    {
+                                        // Draw a cross using box-drawing characters, occupying half the tab height.
+                                        auto cross_h = std::max(si32{1}, pin.size.y / 2);
+                                        auto arm_v   = std::max(si32{1}, (cross_h - 1) / 2); // virtical arm at least 1.
+                                        auto arm_h   = std::max(si32{1}, arm_v * 2);         // Double horizontal arm to compensate cell aspect ratio ~2:1; at least 1.
+                                        auto cy = pin.coor.y + pin.size.y / 2;
+                                        auto cx = pin.coor.x + pin.size.x / 2;
+                                        // Vertical segments (┃).
+                                        for (auto dy = -arm_v; dy <= arm_v; dy++)
+                                        {
+                                            if (dy == 0) continue;
+                                            auto py = cy + dy;
+                                            if (py >= pin.coor.y && py < pin.coor.y + pin.size.y)
+                                            {
+                                                parent_canvas.fill(rect{{ cx, py }, { 1, 1 }}, [=](cell& c)
+                                                {
+                                                    c.bgc(popup_thumb_bg).fgc(pfg).txt("┃").link(ovl_id);
+                                                });
+                                            }
+                                        }
+                                        // Horizontal segments (━).
+                                        for (auto dx = -arm_h; dx <= arm_h; dx++)
+                                        {
+                                            if (dx == 0) continue;
+                                            auto px2 = cx + dx;
+                                            if (px2 >= pin.coor.x && px2 < pin.coor.x + pin.size.x)
+                                            {
+                                                parent_canvas.fill(rect{{ px2, cy }, { 1, 1 }}, [=](cell& c)
+                                                {
+                                                    c.bgc(popup_thumb_bg).fgc(pfg).txt("━").link(ovl_id);
+                                                });
+                                            }
+                                        }
+                                        // Center intersection (╋).
+                                        parent_canvas.fill(rect{{ cx, cy }, { 1, 1 }}, [=](cell& c)
+                                        {
+                                            c.bgc(popup_thumb_bg).fgc(pfg).txt("╋").link(ovl_id);
+                                        });
+                                    }
+                                }
+                            }
+
+                            // --- Horizontal scrollbar (rendered only when content overflows). ---
+                            if (total_content_w > full_w && full_w >= 3)
+                            {
+                                auto max_scroll = std::max(1, total_content_w - full_w);
+                                auto track_w = full_w - 2; // Between the two arrow cells.
+                                auto sb_w = std::max(1, track_w * full_w / total_content_w);
+                                auto sb_x = 1 + (scroll * (track_w - sb_w) / max_scroll);
+                                auto sb_fg = *dragging_sb_ptr ? popup_sb_drag
+                                           : *hover_sb_ptr    ? popup_sb_hover
+                                           :                     popup_sb_normal;
+                                // Left arrow.
+                                parent_canvas.fill(rect{{ 0, scrollbar_y }, { 1, 1 }}, [=](cell& c)
+                                {
+                                    c.bgc(popup_bar_bg).fgc(sb_fg).txt(text(sb_arrow_l)).link(ovl_id);
+                                });
+                                // Right arrow.
+                                parent_canvas.fill(rect{{ full_w - 1, scrollbar_y }, { 1, 1 }}, [=](cell& c)
+                                {
+                                    c.bgc(popup_bar_bg).fgc(sb_fg).txt(text(sb_arrow_r)).link(ovl_id);
+                                });
+                                // Thumb (full block).
+                                for (auto sx = si32{}; sx < sb_w; sx++)
+                                {
+                                    parent_canvas.fill(rect{{ sb_x + sx, scrollbar_y }, { 1, 1 }}, [=](cell& c)
+                                    {
+                                        c.bgc(popup_bar_bg).fgc(sb_fg).txt(text(sb_thumb)).link(ovl_id);
+                                    });
+                                }
+                            }
+
+                            // --- Top section: pane thumbnails for the previewed workspace. ---
+                            auto prev_idx = *preview_idx_ptr;
+                            if (prev_idx < workspaces_ptr->size())
+                            {
+                                auto ws_veer = (*workspaces_ptr)[prev_idx];
+                                auto top_area = rect{{ 0, 0 }, { full_w, top_h }};
+                                if (top_area.size.x >= 1 && top_area.size.y >= 1)
+                                {
+                                    auto panes = std::vector<ws_thumb_pane_t>{};
+                                    collect_ws_panes_fn(collect_ws_panes_fn, std::static_pointer_cast<ui::base>(ws_veer), top_area, panes);
+                                    auto hp = *hover_pane_ptr;
+                                    auto pidx = si32{};
+                                    for (auto& pane : panes)
+                                    {
+                                        auto pr = pane.area;
+                                        auto is_hp = (pidx == hp);
+                                        auto pbg = is_hp ? popup_act_bg : popup_pane_colors[pane.color_idx & 3];
+                                        auto pfg = is_hp ? popup_act_fg : popup_pane_fg;
+                                        auto pbrd = is_hp ? popup_sel_brd : popup_thumb_brd;
+
+                                        // Line-frame border.
+                                        auto pin = draw_popup_box(parent_canvas, pr, pbrd, pbg, pfg, ovl_id);
+                                        // Pane label centered in the card.
+                                        if (pin.size.x >= 1 && pin.size.y >= 1)
+                                        {
+                                            auto max_lw = pin.size.x;
+                                            auto short_label = pane.label.substr(0, std::min((si32)pane.label.size(), max_lw));
+                                            auto lx = pin.coor.x + (pin.size.x - (si32)short_label.size()) / 2;
+                                            auto ly = pin.coor.y + pin.size.y / 2;
+                                            for (auto ci = si32{}; ci < (si32)short_label.size(); ci++)
+                                            {
+                                                parent_canvas.fill(rect{{ lx + ci, ly }, { 1, 1 }}, [=, ch = text(1, short_label[ci])](cell& c)
+                                                {
+                                                    c.bgc(pbg).fgc(pfg).txt(ch).link(ovl_id);
+                                                });
+                                            }
+                                        }
+                                        // Pane index badge in top-left corner.
+                                        auto badge = text(1, char(ws_min_index + pidx));
+                                        parent_canvas.fill(rect{{ pr.coor.x + 1, pr.coor.y }, { 1, 1 }}, [=](cell& c)
+                                        {
+                                            c.bgc(pbg).fgc(pfg).txt(badge).link(ovl_id);
+                                        });
+                                        pidx++;
+                                    }
+                                }
+                            }
+                        };
+
+                        // --- Mouse event handlers for the popup. ---
+                        // Compute hit areas and dispatch mouse actions.
+                        ovl.on(tier::mouserelease, input::key::MouseMove,
+                            [workspaces_ptr, current_ws_index_ptr, preview_idx_ptr, scroll_off_ptr,
+                             hover_ws_ptr, hover_pane_ptr, hover_sb_ptr, collect_ws_panes_fn, overlay_shadow](hids& gear)
+                        {
+                            auto ovl_ptr = overlay_shadow.lock();
+                            if (!ovl_ptr) return;
+                            auto full_area = ovl_ptr->base::area();
+                            auto full_w = full_area.size.x;
+                            auto full_h = full_area.size.y;
+                            auto mx = gear.coord.x;
+                            auto my = gear.coord.y;
+                            auto bot_h = std::max(4, full_h / 4) | 1; // Ensure odd so thumb_h (bot_h - 2) is also odd.
+                            auto top_h = full_h - bot_h;
+                            auto bot_y = full_h - bot_h;
+
+                            auto old_hover_ws = *hover_ws_ptr;
+                            auto old_hover_pane = *hover_pane_ptr;
+                            auto old_hover_sb = *hover_sb_ptr;
+                            auto new_hover_ws = si32{ -1 };
+                            auto new_hover_pane = si32{ -1 };
+                            auto new_hover_sb = faux;
+
+                            if (my >= bot_y) // In bottom bar.
+                            {
+                                auto ws_count = (si32)workspaces_ptr->size();
+                                auto has_plus = (workspaces_ptr->size() < ws_max_count);
+                                auto thumb_h = bot_h - popup_bottom_pad_y - popup_scrollbar_h;
+                                if (thumb_h < 3) thumb_h = 3;
+                                auto thumb_w = std::max(5, thumb_h * popup_ws_thumb_ratio_w / popup_ws_thumb_ratio_h) | 1; // Ensure odd width for centered cross.
+                                auto plus_w  = thumb_w;
+                                auto thumb_stride = thumb_w + popup_ws_thumb_gap;
+                                auto total_content_w = ws_count * thumb_stride + (has_plus ? plus_w + popup_ws_thumb_gap : 0);
+                                auto scroll = *scroll_off_ptr;
+                                auto base_x = (total_content_w <= full_w) ? (full_w - total_content_w) / 2 : -scroll;
+                                auto thumb_y = bot_y + popup_bottom_pad_y;
+                                auto scrollbar_y = thumb_y + thumb_h;
+
+                                if (my >= thumb_y && my < thumb_y + thumb_h)
+                                {
+                                    // Check workspace thumbnails.
+                                    for (auto i = si32{}; i < ws_count; i++)
+                                    {
+                                        auto tx = base_x + i * thumb_stride;
+                                        if (mx >= tx && mx < tx + thumb_w)
+                                        {
+                                            new_hover_ws = i;
+                                            break;
+                                        }
+                                    }
+                                    // Check "+" button.
+                                    if (new_hover_ws < 0 && has_plus)
+                                    {
+                                        auto px = base_x + ws_count * thumb_stride;
+                                        if (mx >= px && mx < px + plus_w)
+                                        {
+                                            new_hover_ws = ws_count; // "+" is at index == ws_count.
+                                        }
+                                    }
+                                }
+                                else if (my == scrollbar_y && total_content_w > full_w)
+                                {
+                                    new_hover_sb = true;
+                                }
+                            }
+                            else if (my < top_h && my >= 0) // In top section.
+                            {
+                                auto prev_idx = *preview_idx_ptr;
+                                if (prev_idx < workspaces_ptr->size())
+                                {
+                                    auto ws_veer = (*workspaces_ptr)[prev_idx];
+                                    auto top_area = rect{{ 0, 0 }, { full_w, top_h }};
+                                    auto panes = std::vector<ws_thumb_pane_t>{};
+                                    collect_ws_panes_fn(collect_ws_panes_fn, std::static_pointer_cast<ui::base>(ws_veer), top_area, panes);
+                                    auto pidx = si32{};
+                                    for (auto& pane : panes)
+                                    {
+                                        auto pr = pane.area;
+                                        if (mx >= pr.coor.x && mx < pr.coor.x + pr.size.x &&
+                                            my >= pr.coor.y && my < pr.coor.y + pr.size.y)
+                                        {
+                                            new_hover_pane = pidx;
+                                            break;
+                                        }
+                                        pidx++;
+                                    }
+                                }
+                            }
+
+                            *hover_ws_ptr = new_hover_ws;
+                            *hover_pane_ptr = new_hover_pane;
+                            *hover_sb_ptr = new_hover_sb;
+
+                            // Update preview workspace when hovering a different workspace thumbnail.
+                            if (new_hover_ws >= 0 && new_hover_ws < (si32)workspaces_ptr->size()
+                                && (size_t)new_hover_ws != *preview_idx_ptr)
+                            {
+                                *preview_idx_ptr = (size_t)new_hover_ws;
+                                *hover_pane_ptr = -1; // Reset pane hover on workspace change.
+                            }
+
+                            if (old_hover_ws != new_hover_ws || old_hover_pane != new_hover_pane || old_hover_sb != new_hover_sb)
+                            {
+                                if (auto p = overlay_shadow.lock()) p->base::deface();
+                            }
+                        });
+
+                        // Clear hover states when mouse leaves the overlay.
+                        ovl.on(tier::mouserelease, input::key::MouseLeave,
+                            [hover_ws_ptr, hover_pane_ptr, hover_sb_ptr, overlay_shadow](hids& /*gear*/)
+                        {
+                            auto changed = (*hover_ws_ptr != -1 || *hover_pane_ptr != -1 || *hover_sb_ptr);
+                            *hover_ws_ptr = -1;
+                            *hover_pane_ptr = -1;
+                            *hover_sb_ptr = faux;
+                            if (changed)
+                            {
+                                if (auto p = overlay_shadow.lock()) p->base::deface();
+                            }
+                        });
+
+                        // Mouse wheel: scroll the bottom workspace switcher.
+                        ovl.on(tier::mouserelease, input::key::MouseWheel,
+                            [workspaces_ptr, scroll_off_ptr, overlay_shadow](hids& gear)
+                        {
+                            auto ovl_ptr = overlay_shadow.lock();
+                            if (!ovl_ptr) return;
+                            auto full_w = ovl_ptr->base::area().size.x;
+                            auto full_h = ovl_ptr->base::area().size.y;
+                            auto bot_h = std::max(4, full_h / 4) | 1; // Ensure odd so thumb_h (bot_h - 2) is also odd.
+                            auto thumb_h = bot_h - popup_bottom_pad_y - popup_scrollbar_h;
+                            if (thumb_h < 3) thumb_h = 3;
+                            auto thumb_w = std::max(5, thumb_h * popup_ws_thumb_ratio_w / popup_ws_thumb_ratio_h) | 1; // Ensure odd width for centered cross.
+                            auto plus_w  = thumb_w;
+                            auto ws_count = (si32)workspaces_ptr->size();
+                            auto has_plus = (workspaces_ptr->size() < ws_max_count);
+                            auto thumb_stride = thumb_w + popup_ws_thumb_gap;
+                            auto total_content_w = ws_count * thumb_stride + (has_plus ? plus_w + popup_ws_thumb_gap : 0);
+                            auto max_scroll = std::max(0, total_content_w - full_w);
+                            auto delta = -gear.whlsi * 4; // Scroll step.
+                            *scroll_off_ptr = std::clamp(*scroll_off_ptr + delta, 0, max_scroll);
+                            ovl_ptr->base::deface();
+                            gear.dismiss();
+                        });
+
+                        // Left click: switch workspace, select pane, or create workspace.
+                        ovl.on(tier::mouserelease, input::key::LeftClick,
+                            [workspaces_ptr, current_ws_index_ptr, switch_workspace, create_workspace,
+                             preview_idx_ptr, scroll_off_ptr, hover_ws_ptr, hover_pane_ptr,
+                             dismiss_visual, dismiss_hook, refresh_status_bar_fn, collect_ws_panes_fn,
+                             overlay_shadow](hids& gear)
+                        {
+                            auto ovl_ptr = overlay_shadow.lock();
+                            if (!ovl_ptr) { gear.dismiss(); return; }
+                            auto full_area = ovl_ptr->base::area();
+                            auto full_w = full_area.size.x;
+                            auto full_h = full_area.size.y;
+                            auto mx = gear.coord.x;
+                            auto my = gear.coord.y;
+                            auto bot_h = std::max(4, full_h / 4) | 1; // Ensure odd so thumb_h (bot_h - 2) is also odd.
+                            auto top_h = full_h - bot_h;
+                            auto bot_y = full_h - bot_h;
+
+                            if (my >= bot_y) // Click in bottom bar.
+                            {
+                                auto ws_count = (si32)workspaces_ptr->size();
+                                auto has_plus = (workspaces_ptr->size() < ws_max_count);
+                                auto thumb_h = bot_h - popup_bottom_pad_y - popup_scrollbar_h;
+                                if (thumb_h < 3) thumb_h = 3;
+                                auto thumb_w = std::max(5, thumb_h * popup_ws_thumb_ratio_w / popup_ws_thumb_ratio_h) | 1; // Ensure odd width for centered cross.
+                                auto plus_w  = thumb_w;
+                                auto thumb_stride = thumb_w + popup_ws_thumb_gap;
+                                auto total_content_w = ws_count * thumb_stride + (has_plus ? plus_w + popup_ws_thumb_gap : 0);
+                                auto scroll = *scroll_off_ptr;
+                                auto base_x = (total_content_w <= full_w) ? (full_w - total_content_w) / 2 : -scroll;
+                                auto thumb_y = bot_y + popup_bottom_pad_y;
+                                auto scrollbar_y = thumb_y + thumb_h;
+
+                                if (my >= thumb_y && my < thumb_y + thumb_h)
+                                {
+                                    for (auto i = si32{}; i < ws_count; i++)
+                                    {
+                                        auto tx = base_x + i * thumb_stride;
+                                        if (mx >= tx && mx < tx + thumb_w)
+                                        {
+                                            // Click on workspace thumbnail: switch to it and dismiss.
+                                            dismiss_visual();
+                                            dismiss_hook();
+                                            switch_workspace((size_t)i);
+                                            (*refresh_status_bar_fn)();
+                                            gear.dismiss();
+                                            return;
+                                        }
+                                    }
+                                    // Check "+" button.
+                                    if (has_plus)
+                                    {
+                                        auto px = base_x + ws_count * thumb_stride;
+                                        if (mx >= px && mx < px + plus_w)
+                                        {
+                                            dismiss_visual();
+                                            dismiss_hook();
+                                            create_workspace();
+                                            (*refresh_status_bar_fn)();
+                                            gear.dismiss();
+                                            return;
+                                        }
+                                    }
+                                }
+                                else if (my == scrollbar_y && total_content_w > full_w && full_w >= 3)
+                                {
+                                    // Click on scrollbar row: arrows or track.
+                                    auto max_scroll = std::max(1, total_content_w - full_w);
+                                    auto track_w = full_w - 2;
+                                    auto sb_w = std::max(1, track_w * full_w / total_content_w);
+                                    auto sb_x = 1 + (scroll * (track_w - sb_w) / max_scroll);
+
+                                    if (mx == 0) // Left arrow: scroll left by one thumbnail stride.
+                                    {
+                                        *scroll_off_ptr = std::max(0, *scroll_off_ptr - thumb_stride);
+                                    }
+                                    else if (mx == full_w - 1) // Right arrow: scroll right by one thumbnail stride.
+                                    {
+                                        *scroll_off_ptr = std::min(max_scroll, *scroll_off_ptr + thumb_stride);
+                                    }
+                                    else if (mx >= 1 && mx < full_w - 1) // Track area: snap thumb center to click.
+                                    {
+                                        auto new_sb_x = (si32)mx - sb_w / 2 - 1;
+                                        auto new_scroll = (track_w > sb_w) ? new_sb_x * max_scroll / (track_w - sb_w) : 0;
+                                        *scroll_off_ptr = std::clamp(new_scroll, 0, max_scroll);
+                                    }
+                                    if (auto p = overlay_shadow.lock()) p->base::deface();
+                                    gear.dismiss();
+                                    return;
+                                }
+                            }
+                            else if (my < top_h && my >= 0) // Click in top section.
+                            {
+                                auto prev_idx = *preview_idx_ptr;
+                                if (prev_idx < workspaces_ptr->size())
+                                {
+                                    auto ws_veer = (*workspaces_ptr)[prev_idx];
+                                    auto top_area = rect{{ 0, 0 }, { full_w, top_h }};
+                                    auto panes = std::vector<ws_thumb_pane_t>{};
+                                    collect_ws_panes_fn(collect_ws_panes_fn, std::static_pointer_cast<ui::base>(ws_veer), top_area, panes);
+                                    for (auto& pane : panes)
+                                    {
+                                        auto pr = pane.area;
+                                        if (mx >= pr.coor.x && mx < pr.coor.x + pr.size.x &&
+                                            my >= pr.coor.y && my < pr.coor.y + pr.size.y)
+                                        {
+                                            // Click on a pane: switch to workspace + focus this pane.
+                                            dismiss_visual();
+                                            dismiss_hook();
+                                            switch_workspace(prev_idx);
+                                            if (auto focus_target = get_slot_focus_target(pane.slot_veer))
+                                            {
+                                                pro::focus::set(focus_target, gear.id, solo::on);
+                                            }
+                                            (*refresh_status_bar_fn)();
+                                            gear.dismiss();
+                                            return;
+                                        }
+                                    }
+                                }
+                            }
+                            // Click on empty area: dismiss popup.
+                            dismiss_visual();
+                            dismiss_hook();
+                            gear.dismiss();
+                        });
+
+                        // Left drag start: initiate scrollbar thumb drag if click is on the scrollbar row.
+                        ovl.on(tier::mouserelease, input::key::LeftDragStart,
+                            [workspaces_ptr, scroll_off_ptr, dragging_sb_ptr, hover_sb_ptr,
+                             drag_sb_grab_ptr, overlay_shadow](hids& gear)
+                        {
+                            auto ovl_ptr = overlay_shadow.lock();
+                            if (!ovl_ptr) return;
+                            auto full_w = ovl_ptr->base::area().size.x;
+                            auto full_h = ovl_ptr->base::area().size.y;
+                            auto mx = (si32)gear.pressxy.x;
+                            auto my = (si32)gear.pressxy.y;
+                            auto bot_h = std::max(4, full_h / 4) | 1; // Ensure odd so thumb_h (bot_h - 2) is also odd.
+                            auto bot_y = full_h - bot_h;
+                            auto thumb_h = bot_h - popup_bottom_pad_y - popup_scrollbar_h;
+                            if (thumb_h < 3) thumb_h = 3;
+                            auto thumb_w = std::max(5, thumb_h * popup_ws_thumb_ratio_w / popup_ws_thumb_ratio_h) | 1; // Ensure odd width for centered cross.
+                            auto plus_w  = thumb_w;
+                            auto ws_count = (si32)workspaces_ptr->size();
+                            auto has_plus = (workspaces_ptr->size() < ws_max_count);
+                            auto thumb_stride = thumb_w + popup_ws_thumb_gap;
+                            auto total_content_w = ws_count * thumb_stride + (has_plus ? plus_w + popup_ws_thumb_gap : 0);
+                            auto thumb_y = bot_y + popup_bottom_pad_y;
+                            auto scrollbar_y = thumb_y + thumb_h;
+
+                            if (my == scrollbar_y && total_content_w > full_w && full_w >= 3)
+                            {
+                                auto max_scroll = std::max(1, total_content_w - full_w);
+                                auto track_w = full_w - 2;
+                                auto sb_w = std::max(1, track_w * full_w / total_content_w);
+                                auto scroll = *scroll_off_ptr;
+                                auto sb_x = 1 + (scroll * (track_w - sb_w) / max_scroll);
+
+                                if (mx >= sb_x && mx < sb_x + sb_w)
+                                {
+                                    // Click is on the thumb: record grab offset.
+                                    *drag_sb_grab_ptr = mx - sb_x;
+                                }
+                                else
+                                {
+                                    // Click is on the track but not on the thumb: snap thumb center to click.
+                                    *drag_sb_grab_ptr = sb_w / 2;
+                                    auto new_sb_x = mx - *drag_sb_grab_ptr - 1;
+                                    auto new_scroll = (track_w > sb_w) ? new_sb_x * max_scroll / (track_w - sb_w) : 0;
+                                    *scroll_off_ptr = std::clamp(new_scroll, 0, max_scroll);
+                                }
+                                *dragging_sb_ptr = true;
+                                *hover_sb_ptr = true;
+                                ovl_ptr->base::deface();
+                                gear.dismiss();
+                            }
+                        });
+
+                        // Left drag pull: update scroll offset while dragging the scrollbar thumb.
+                        ovl.on(tier::mouserelease, input::key::LeftDragPull,
+                            [workspaces_ptr, scroll_off_ptr, dragging_sb_ptr,
+                             drag_sb_grab_ptr, overlay_shadow](hids& gear)
+                        {
+                            if (!*dragging_sb_ptr) return;
+                            auto ovl_ptr = overlay_shadow.lock();
+                            if (!ovl_ptr) return;
+                            auto full_w = ovl_ptr->base::area().size.x;
+                            auto full_h = ovl_ptr->base::area().size.y;
+                            auto mx = (si32)gear.coord.x;
+                            auto bot_h = std::max(4, full_h / 4) | 1; // Ensure odd so thumb_h (bot_h - 2) is also odd.
+                            auto thumb_h = bot_h - popup_bottom_pad_y - popup_scrollbar_h;
+                            if (thumb_h < 3) thumb_h = 3;
+                            auto thumb_w = std::max(5, thumb_h * popup_ws_thumb_ratio_w / popup_ws_thumb_ratio_h) | 1; // Ensure odd width for centered cross.
+                            auto plus_w  = thumb_w;
+                            auto ws_count = (si32)workspaces_ptr->size();
+                            auto has_plus = (workspaces_ptr->size() < ws_max_count);
+                            auto thumb_stride = thumb_w + popup_ws_thumb_gap;
+                            auto total_content_w = ws_count * thumb_stride + (has_plus ? plus_w + popup_ws_thumb_gap : 0);
+                            auto max_scroll = std::max(1, total_content_w - full_w);
+                            auto track_w = full_w - 2;
+                            auto sb_w = std::max(1, track_w * full_w / total_content_w);
+
+                            auto new_sb_x = mx - *drag_sb_grab_ptr - 1;
+                            auto new_scroll = (track_w > sb_w) ? new_sb_x * max_scroll / (track_w - sb_w) : 0;
+                            *scroll_off_ptr = std::clamp(new_scroll, 0, max_scroll);
+                            ovl_ptr->base::deface();
+                            gear.dismiss();
+                        });
+
+                        // Left drag stop: end scrollbar drag.
+                        ovl.on(tier::mouserelease, input::key::LeftDragStop,
+                            [dragging_sb_ptr, hover_sb_ptr, overlay_shadow](hids& gear)
+                        {
+                            if (!*dragging_sb_ptr) return;
+                            *dragging_sb_ptr = faux;
+                            // Check if mouse is still on the scrollbar row to keep hover.
+                            if (auto ovl_ptr = overlay_shadow.lock())
+                            {
+                                auto full_h = ovl_ptr->base::area().size.y;
+                                auto my = (si32)gear.coord.y;
+                                auto bot_h = std::max(4, full_h / 4) | 1; // Ensure odd so thumb_h (bot_h - 2) is also odd.
+                                auto bot_y = full_h - bot_h;
+                                auto thumb_h = bot_h - popup_bottom_pad_y - popup_scrollbar_h;
+                                if (thumb_h < 3) thumb_h = 3;
+                                auto thumb_y = bot_y + popup_bottom_pad_y;
+                                auto scrollbar_y = thumb_y + thumb_h;
+                                *hover_sb_ptr = (my == scrollbar_y);
+                                ovl_ptr->base::deface();
+                            }
+                            gear.dismiss();
+                        });
+
+                        // Left drag cancel: clear scrollbar drag state.
+                        ovl.on(tier::mouserelease, input::key::LeftDragCancel,
+                            [dragging_sb_ptr, hover_sb_ptr, overlay_shadow](hids& gear)
+                        {
+                            if (!*dragging_sb_ptr) return;
+                            *dragging_sb_ptr = faux;
+                            *hover_sb_ptr = faux;
+                            if (auto p = overlay_shadow.lock()) p->base::deface();
+                            gear.dismiss();
+                        });
+                    });
+
+                    wrapper_ptr->attach(overlay_ptr);
+                    wrapper_ptr->base::reflow();
+                    wrapper_ptr->base::deface();
+
+                    // Keyboard interceptor: Esc, arrow keys, Enter, number keys.
+                    auto wrapper_shadow_inner = ptr::shadow(wrapper_ptr);
+                    wrapper_ptr->bell::submit(tier::preview, input::events::keybd::any, *kbd_hook)
+                        = [dismiss_visual, dismiss_hook, pending_unhook,
+                           workspaces_ptr, current_ws_index_ptr, preview_idx_ptr, scroll_off_ptr,
+                           switch_workspace, create_workspace, refresh_status_bar_fn,
+                           overlay_shadow](hids& gear) mutable
+                    {
+                        if (gear.payload != input::keybd::type::keypress
+                            || gear.keystat == input::key::interrupted
+                            || gear.keybd::handled)
+                        {
+                            return;
+                        }
+                        if (*pending_unhook)
+                        {
+                            gear.set_handled(faux);
+                            if (gear.keystat == input::key::released) dismiss_hook();
+                            return;
+                        }
+                        if (gear.keystat == input::key::released)
+                        {
+                            gear.set_handled(faux);
+                            return;
+                        }
+                        auto k = gear.keybd::generic();
+                        // Esc dismisses.
+                        if (k == input::key::Esc)
+                        {
+                            dismiss_visual();
+                            gear.set_handled(faux);
+                            return;
+                        }
+                        // Enter: switch to previewed workspace and dismiss.
+                        if (k == input::key::KeyEnter)
+                        {
+                            auto idx = *preview_idx_ptr;
+                            dismiss_visual();
+                            dismiss_hook();
+                            if (idx < workspaces_ptr->size())
+                            {
+                                switch_workspace(idx);
+                                (*refresh_status_bar_fn)();
+                            }
+                            gear.set_handled(faux);
+                            return;
+                        }
+                        // Left/Right arrows: browse workspaces.
+                        auto ws_count = (si32)workspaces_ptr->size();
+                        if (ws_count > 0 && (k == input::key::KeyLeftArrow || k == input::key::KeyRightArrow))
+                        {
+                            auto cur = (si32)*preview_idx_ptr;
+                            if (k == input::key::KeyLeftArrow)
+                                cur = (cur > 0) ? cur - 1 : ws_count - 1;
+                            else
+                                cur = (cur < ws_count - 1) ? cur + 1 : 0;
+                            *preview_idx_ptr = (size_t)cur;
+                            // Auto-scroll bottom bar to keep the previewed thumbnail visible.
+                            if (auto ovl_ptr = overlay_shadow.lock())
+                            {
+                                auto full_w = ovl_ptr->base::area().size.x;
+                                auto full_h = ovl_ptr->base::area().size.y;
+                                auto bot_h = std::max(4, full_h / 4) | 1; // Ensure odd so thumb_h (bot_h - 2) is also odd.
+                                auto thumb_h = bot_h - popup_bottom_pad_y - popup_scrollbar_h;
+                                if (thumb_h < 3) thumb_h = 3;
+                                auto thumb_w = std::max(5, thumb_h * popup_ws_thumb_ratio_w / popup_ws_thumb_ratio_h) | 1; // Ensure odd width for centered cross.
+                                auto has_plus = (workspaces_ptr->size() < ws_max_count);
+                                auto thumb_stride = thumb_w + popup_ws_thumb_gap;
+                                auto total_content_w = ws_count * thumb_stride + (has_plus ? thumb_w + popup_ws_thumb_gap : 0);
+                                auto max_scroll = std::max(0, total_content_w - full_w);
+                                if (max_scroll > 0)
+                                {
+                                    auto thumb_left = cur * thumb_stride;
+                                    auto thumb_right = thumb_left + thumb_w;
+                                    auto scroll = *scroll_off_ptr;
+                                    if (thumb_left < scroll)
+                                        scroll = thumb_left;
+                                    else if (thumb_right > scroll + full_w)
+                                        scroll = thumb_right - full_w;
+                                    *scroll_off_ptr = std::clamp(scroll, 0, max_scroll);
+                                }
+                                ovl_ptr->base::deface();
+                            }
+                            gear.set_handled(faux);
+                            return;
+                        }
+                        // Number keys '1'-'9': jump to workspace N and dismiss.
+                        auto& ch = gear.keybd::cluster;
+                        if (ch.size() == 1 && ch[0] >= '1' && ch[0] <= '9')
+                        {
+                            auto target = (size_t)(ch[0] - '1');
+                            if (target < workspaces_ptr->size())
+                            {
+                                dismiss_visual();
+                                dismiss_hook();
+                                switch_workspace(target);
+                                (*refresh_status_bar_fn)();
+                            }
+                            gear.set_handled(faux);
+                            return;
+                        }
+                        // Swallow all other keys.
+                        gear.set_handled(faux);
+                    };
+
                     gear.dismiss();
                 });
             });

@@ -181,18 +181,52 @@ class VtmTileSession:
             time.sleep(0.1)
         return False
 
-    def click_workspace_button(self, index):
-        """Click workspace button `index` (0-based) on the status bar (bottom row)."""
-        col = index * WS_BTN_W + 2  # Center of the button, 1-indexed.
-        row = ROWS                   # Status bar is the bottom row.
-        self.click(col, row)
+    # --- Popup layout constants (must match tile.hpp) ---
+    POPUP_WS_THUMB_RATIO_W = 5
+    POPUP_WS_THUMB_RATIO_H = 2
+    POPUP_WS_THUMB_GAP = 2
+    POPUP_BOTTOM_PAD_Y = 1
+    POPUP_SCROLLBAR_H = 1  # Row reserved for horizontal scrollbar.
 
-    def click_plus_button(self, workspace_count):
-        """Click the '+' button on the status bar. It sits right after the last workspace tab.
-        `workspace_count` is the current number of workspaces (determines the button position)."""
-        col = workspace_count * WS_BTN_W + 2  # Center of the '+' button, 1-indexed.
-        row = ROWS                              # Status bar is the bottom row.
-        self.click(col, row)
+    def _popup_layout(self, workspace_count):
+        """Compute popup thumbnail positions for a given workspace count."""
+        full_w = COLS
+        full_h = ROWS
+        bot_h = max(4, full_h // 4)
+        bot_y = full_h - bot_h
+        thumb_h = bot_h - self.POPUP_BOTTOM_PAD_Y - self.POPUP_SCROLLBAR_H
+        if thumb_h < 3:
+            thumb_h = 3
+        thumb_w = max(5, thumb_h * self.POPUP_WS_THUMB_RATIO_W // self.POPUP_WS_THUMB_RATIO_H)
+        plus_w = thumb_w
+        thumb_y = bot_y + self.POPUP_BOTTOM_PAD_Y
+        thumb_stride = thumb_w + self.POPUP_WS_THUMB_GAP
+        total_content_w = workspace_count * thumb_stride + (plus_w + self.POPUP_WS_THUMB_GAP)
+        base_x = (full_w - total_content_w) // 2 if total_content_w <= full_w else 0
+        return base_x, thumb_y, thumb_h, thumb_stride, thumb_w, plus_w
+
+    def open_workspace_popup(self):
+        """Click the status bar workspace button to open the preview popup."""
+        self.click(2, ROWS)  # Center of the 3-wide button, 1-indexed.
+
+    def popup_click_workspace(self, index, workspace_count):
+        """Click a workspace thumbnail in the popup (0-indexed workspace)."""
+        base_x, thumb_y, thumb_h, thumb_stride, thumb_w, plus_w = self._popup_layout(workspace_count)
+        cx = base_x + index * thumb_stride + thumb_w // 2
+        cy = thumb_y + thumb_h // 2
+        self.click(cx + 1, cy + 1)  # Convert to 1-indexed.
+
+    def popup_click_plus(self, workspace_count):
+        """Click the '+' button in the popup to create a workspace."""
+        base_x, thumb_y, thumb_h, thumb_stride, thumb_w, plus_w = self._popup_layout(workspace_count)
+        px = base_x + workspace_count * thumb_stride
+        cx = px + plus_w // 2
+        cy = thumb_y + thumb_h // 2
+        self.click(cx + 1, cy + 1)  # Convert to 1-indexed.
+
+    def popup_dismiss_click(self):
+        """Dismiss the popup by clicking an empty area (top-left corner)."""
+        self.click(1, 1)
 
     def create_workspace(self):
         """Send Alt+Shift+C to create a new workspace."""
@@ -291,12 +325,12 @@ def test_workspace_starts_with_one():
         if not s.is_alive():
             print("FAIL - vtm-tile did not start")
             return False
-        # Click on workspace 0 button (should be a no-op but not crash).
-        s.click_workspace_button(0)
+        # Switch to workspace 0 by key (should be a no-op but not crash).
+        s.switch_workspace_by_key(0)
         time.sleep(0.5)
         s.read(timeout=0.3)
         if not s.is_alive():
-            print("FAIL - crashed after clicking workspace 0")
+            print("FAIL - crashed after switching to workspace 0")
             return False
         print("PASS")
         return True
@@ -318,37 +352,6 @@ def test_create_workspace():
         print("PASS")
         return True
 
-
-def test_switch_workspace_via_statusbar():
-    """Create a second workspace, switch back to workspace 0 via status bar click."""
-    print("TEST: workspace - switch via status bar ... ", end="", flush=True)
-    with VtmTileSession(TILE_ARGS) as s:
-        if not s.is_alive():
-            print("FAIL - vtm-tile did not start")
-            return False
-        # Create workspace 1.
-        s.create_workspace()
-        time.sleep(1.5)
-        s.read(timeout=0.5)
-        if not s.is_alive():
-            print("FAIL - crashed after creating workspace 1")
-            return False
-        # Switch back to workspace 0.
-        s.click_workspace_button(0)
-        time.sleep(1.0)
-        s.read(timeout=0.3)
-        if not s.is_alive():
-            print("FAIL - crashed after switching to workspace 0")
-            return False
-        # Switch to workspace 1.
-        s.click_workspace_button(1)
-        time.sleep(1.0)
-        s.read(timeout=0.3)
-        if not s.is_alive():
-            print("FAIL - crashed after switching to workspace 1")
-            return False
-        print("PASS")
-        return True
 
 
 def test_destroy_workspace():
@@ -405,7 +408,7 @@ def test_workspace_close_button_still_works():
         s.create_workspace()
         time.sleep(1.5)
         s.read(timeout=0.5)
-        s.click_workspace_button(0)
+        s.switch_workspace_by_key(0)
         time.sleep(1.0)
         s.read(timeout=0.3)
         if not s.is_alive():
@@ -445,7 +448,7 @@ def test_create_multiple_workspaces():
         # Now we have workspaces 0, 1, 2. Current should be 2.
         # Switch to each.
         for idx in [0, 1, 2, 0]:
-            s.click_workspace_button(idx)
+            s.switch_workspace_by_key(idx)
             time.sleep(1.0)
             s.read(timeout=0.3)
             if not s.is_alive():
@@ -478,14 +481,14 @@ def test_split_in_workspace():
             print("FAIL - crashed after creating workspace 1")
             return False
         # Switch back to workspace 0 (which has a split).
-        s.click_workspace_button(0)
+        s.switch_workspace_by_key(0)
         time.sleep(1.0)
         s.read(timeout=0.3)
         if not s.is_alive():
             print("FAIL - crashed switching back to split workspace 0")
             return False
         # Switch to workspace 1 (no split).
-        s.click_workspace_button(1)
+        s.switch_workspace_by_key(1)
         time.sleep(1.0)
         s.read(timeout=0.3)
         if not s.is_alive():
@@ -551,7 +554,7 @@ def test_prev_workspace():
                 print(f"FAIL - crashed creating workspace {i + 1}")
                 return False
         # Switch to workspace 0.
-        s.click_workspace_button(0)
+        s.switch_workspace_by_key(0)
         time.sleep(1.0)
         s.read(timeout=0.3)
         if not s.is_alive():
@@ -785,14 +788,14 @@ def test_create_workspace_uses_selected_app():
             print("FAIL - crashed after creating workspace with selected app")
             return False
         # Switch back to workspace 0 to confirm stability.
-        s.click_workspace_button(0)
+        s.switch_workspace_by_key(0)
         time.sleep(1.0)
         s.read(timeout=0.3)
         if not s.is_alive():
             print("FAIL - crashed switching back to workspace 0")
             return False
         # Switch back to workspace 1 (created with selected app).
-        s.click_workspace_button(1)
+        s.switch_workspace_by_key(1)
         time.sleep(1.0)
         s.read(timeout=0.3)
         if not s.is_alive():
@@ -839,7 +842,7 @@ def test_select_app_then_create_multiple_workspaces():
             return False
         # Cycle through all 3 workspaces to verify stability.
         for idx in [0, 1, 2]:
-            s.click_workspace_button(idx)
+            s.switch_workspace_by_key(idx)
             time.sleep(1.0)
             s.read(timeout=0.3)
             if not s.is_alive():
@@ -864,13 +867,13 @@ def test_create_workspace_default_app_without_selection():
             print("FAIL - crashed creating workspace with default app")
             return False
         # Switch between workspaces.
-        s.click_workspace_button(0)
+        s.switch_workspace_by_key(0)
         time.sleep(1.0)
         s.read(timeout=0.3)
         if not s.is_alive():
             print("FAIL - crashed switching to workspace 0")
             return False
-        s.click_workspace_button(1)
+        s.switch_workspace_by_key(1)
         time.sleep(1.0)
         s.read(timeout=0.3)
         if not s.is_alive():
@@ -976,7 +979,7 @@ def test_lastpane_isolated_across_workspaces():
             return False
 
         # --- Switch back to workspace 0, LastPane should stay in workspace 0 ---
-        s.click_workspace_button(0)
+        s.switch_workspace_by_key(0)
         time.sleep(1.0)
         s.read(timeout=0.3)
         if not s.is_alive():
@@ -1199,29 +1202,106 @@ def test_lastpane_three_workspaces():
         return True
 
 
-def test_plus_button_creates_workspace():
-    """Clicking the '+' button on the status bar creates a new workspace."""
-    print("TEST: workspace - plus button creates workspace ... ", end="", flush=True)
+
+# ---------------------------------------------------------------------------
+# Popup tests
+# ---------------------------------------------------------------------------
+
+def test_popup_open_and_dismiss_click():
+    """Opening the workspace popup and dismissing it by clicking empty space."""
+    print("TEST: popup - open and dismiss via click ... ", end="", flush=True)
     with VtmTileSession(TILE_ARGS) as s:
         if not s.is_alive():
             print("FAIL - vtm-tile did not start")
             return False
-        # With 1 workspace, the '+' button is at index 1.
-        s.click_plus_button(workspace_count=1)
+        # Open the workspace preview popup.
+        s.open_workspace_popup()
+        time.sleep(0.8)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed after opening popup")
+            return False
+        # Dismiss by clicking empty area (top-left corner).
+        s.popup_dismiss_click()
+        time.sleep(0.5)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed after dismissing popup")
+            return False
+        # Verify tile is still responsive: create a workspace via keyboard.
+        s.create_workspace()
         time.sleep(1.5)
         s.read(timeout=0.5)
         if not s.is_alive():
-            print("FAIL - crashed after clicking '+' button")
+            print("FAIL - crashed after post-dismiss workspace creation")
             return False
-        # Now on workspace 1. Switch back to workspace 0 to verify both exist.
-        s.click_workspace_button(0)
+        print("PASS")
+        return True
+
+
+def test_popup_switch_workspace():
+    """Open popup and click a workspace thumbnail to switch workspaces."""
+    print("TEST: popup - switch workspace via popup ... ", end="", flush=True)
+    with VtmTileSession(TILE_ARGS) as s:
+        if not s.is_alive():
+            print("FAIL - vtm-tile did not start")
+            return False
+        # Create workspace 1.
+        s.create_workspace()
+        time.sleep(1.5)
+        s.read(timeout=0.5)
+        if not s.is_alive():
+            print("FAIL - crashed creating workspace 1")
+            return False
+        # Now on workspace 1. Open popup and click workspace 0 thumbnail.
+        s.open_workspace_popup()
+        time.sleep(0.8)
+        s.read(timeout=0.3)
+        s.popup_click_workspace(0, workspace_count=2)
         time.sleep(1.0)
         s.read(timeout=0.3)
         if not s.is_alive():
-            print("FAIL - crashed switching back to workspace 0")
+            print("FAIL - crashed switching to workspace 0 via popup")
             return False
-        # Switch to workspace 1 again.
-        s.click_workspace_button(1)
+        # Open popup again and click workspace 1 thumbnail.
+        s.open_workspace_popup()
+        time.sleep(0.8)
+        s.read(timeout=0.3)
+        s.popup_click_workspace(1, workspace_count=2)
+        time.sleep(1.0)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed switching to workspace 1 via popup")
+            return False
+        print("PASS")
+        return True
+
+
+def test_popup_create_workspace_via_plus():
+    """Open popup and click the '+' button to create a new workspace."""
+    print("TEST: popup - create workspace via popup '+' ... ", end="", flush=True)
+    with VtmTileSession(TILE_ARGS) as s:
+        if not s.is_alive():
+            print("FAIL - vtm-tile did not start")
+            return False
+        # Open popup and click "+" button (1 workspace currently).
+        s.open_workspace_popup()
+        time.sleep(0.8)
+        s.read(timeout=0.3)
+        s.popup_click_plus(workspace_count=1)
+        time.sleep(1.5)
+        s.read(timeout=0.5)
+        if not s.is_alive():
+            print("FAIL - crashed after creating workspace via popup '+'")
+            return False
+        # Verify we now have 2 workspaces by switching between them.
+        s.switch_workspace_by_key(0)
+        time.sleep(1.0)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed switching to workspace 0")
+            return False
+        s.switch_workspace_by_key(1)
         time.sleep(1.0)
         s.read(timeout=0.3)
         if not s.is_alive():
@@ -1231,82 +1311,90 @@ def test_plus_button_creates_workspace():
         return True
 
 
-def test_plus_button_creates_multiple_workspaces():
-    """Clicking the '+' button repeatedly creates multiple workspaces."""
-    print("TEST: workspace - plus button creates multiple workspaces ... ", end="", flush=True)
+def test_popup_reopen_after_dismiss():
+    """Popup can be opened again after being dismissed."""
+    print("TEST: popup - reopen after dismiss ... ", end="", flush=True)
     with VtmTileSession(TILE_ARGS) as s:
         if not s.is_alive():
             print("FAIL - vtm-tile did not start")
             return False
-        # Create workspace 1 via '+' button (current count = 1).
-        s.click_plus_button(workspace_count=1)
-        time.sleep(1.5)
-        s.read(timeout=0.5)
+        # Open popup.
+        s.open_workspace_popup()
+        time.sleep(0.8)
+        s.read(timeout=0.3)
         if not s.is_alive():
-            print("FAIL - crashed after first '+' click")
+            print("FAIL - crashed after opening popup")
             return False
-        # Create workspace 2 via '+' button (current count = 2).
-        s.click_plus_button(workspace_count=2)
-        time.sleep(1.5)
-        s.read(timeout=0.5)
+        # Dismiss via click on empty area.
+        s.popup_dismiss_click()
+        time.sleep(0.5)
+        s.read(timeout=0.3)
         if not s.is_alive():
-            print("FAIL - crashed after second '+' click")
+            print("FAIL - crashed after dismissing popup")
             return False
-        # Now we have workspaces 0, 1, 2. Cycle through all to verify.
-        for idx in [0, 1, 2]:
-            s.click_workspace_button(idx)
-            time.sleep(1.0)
-            s.read(timeout=0.3)
-            if not s.is_alive():
-                print(f"FAIL - crashed switching to workspace {idx}")
-                return False
+        # Open popup again (should work since popup was dismissed).
+        s.open_workspace_popup()
+        time.sleep(0.8)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed after re-opening popup")
+            return False
+        # Dismiss again.
+        s.popup_dismiss_click()
+        time.sleep(0.5)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed after second dismiss")
+            return False
         print("PASS")
         return True
 
 
-def test_plus_button_after_workspace_destroy():
-    """The '+' button position adjusts correctly after a workspace is destroyed."""
-    print("TEST: workspace - plus button after workspace destroy ... ", end="", flush=True)
+def test_popup_switch_then_operations():
+    """After switching workspace via popup, normal operations still work."""
+    print("TEST: popup - switch then normal operations ... ", end="", flush=True)
     with VtmTileSession(TILE_ARGS) as s:
         if not s.is_alive():
             print("FAIL - vtm-tile did not start")
             return False
-        # Create workspaces 1 and 2 via '+' button.
-        s.click_plus_button(workspace_count=1)
+        # Create workspace 1.
+        s.create_workspace()
         time.sleep(1.5)
         s.read(timeout=0.5)
         if not s.is_alive():
-            print("FAIL - crashed creating workspace 1 via '+'")
+            print("FAIL - crashed creating workspace 1")
             return False
-        s.click_plus_button(workspace_count=2)
+        # Switch to workspace 0 via popup.
+        s.open_workspace_popup()
+        time.sleep(0.8)
+        s.read(timeout=0.3)
+        s.popup_click_workspace(0, workspace_count=2)
+        time.sleep(1.0)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed switching to workspace 0 via popup")
+            return False
+        # Split pane in workspace 0 (normal operation after popup).
+        s.split_horizontal()
         time.sleep(1.5)
         s.read(timeout=0.5)
         if not s.is_alive():
-            print("FAIL - crashed creating workspace 2 via '+'")
+            print("FAIL - crashed after split in workspace 0")
             return False
-        # Now on workspace 2. Destroy it.
-        s.destroy_workspace()
-        time.sleep(1.5)
-        s.read(timeout=0.5)
+        # Navigate panes.
+        s.focus_next_pane()
+        time.sleep(0.5)
+        s.read(timeout=0.3)
         if not s.is_alive():
-            print("FAIL - crashed after destroying workspace 2")
+            print("FAIL - crashed after focus next pane")
             return False
-        # 2 workspaces remain (0, 1). The '+' button should now be at index 2.
-        # Click it to create a new workspace.
-        s.click_plus_button(workspace_count=2)
-        time.sleep(1.5)
-        s.read(timeout=0.5)
+        # Switch workspaces via keyboard.
+        s.next_workspace()
+        time.sleep(1.0)
+        s.read(timeout=0.3)
         if not s.is_alive():
-            print("FAIL - crashed after clicking '+' post-destroy")
+            print("FAIL - crashed after next workspace")
             return False
-        # Verify all 3 workspaces (0, 1, 2) are accessible.
-        for idx in [0, 1, 2]:
-            s.click_workspace_button(idx)
-            time.sleep(1.0)
-            s.read(timeout=0.3)
-            if not s.is_alive():
-                print(f"FAIL - crashed switching to workspace {idx}")
-                return False
         print("PASS")
         return True
 
@@ -1326,7 +1414,6 @@ def main():
     tests = [
         test_workspace_starts_with_one,
         test_create_workspace,
-        test_switch_workspace_via_statusbar,
         test_destroy_workspace,
         test_destroy_last_workspace_exits,
         test_workspace_close_button_still_works,
@@ -1347,9 +1434,11 @@ def main():
         test_lastpane_after_workspace_destroy,
         test_lastpane_no_history_in_new_workspace,
         test_lastpane_three_workspaces,
-        test_plus_button_creates_workspace,
-        test_plus_button_creates_multiple_workspaces,
-        test_plus_button_after_workspace_destroy,
+        test_popup_open_and_dismiss_click,
+        test_popup_switch_workspace,
+        test_popup_create_workspace_via_plus,
+        test_popup_reopen_after_dismiss,
+        test_popup_switch_then_operations,
     ]
 
     passed = 0
