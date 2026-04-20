@@ -269,6 +269,14 @@ namespace netxs::app::tile
     using ui::sptr;
     using ui::wptr;
 
+    struct ws_thumb_pane_t
+    {
+        rect area;        // Position within thumbnail coordinate space.
+        text label;       // Pane label (e.g., app title).
+        si32 color_idx;   // Color index (0-3) for adjacency-aware coloring.
+        sptr slot_veer;   // Pointer to the node_veer for click handling.
+    };
+
     #define proc_list \
         X(FocusNextPaneOrGrip) \
         X(FocusNextPane      ) \
@@ -1568,13 +1576,6 @@ namespace netxs::app::tile
             };
 
             // Helper: recursively collect pane layout from a workspace veer tree into a flat list with computed rects.
-            struct ws_thumb_pane_t
-            {
-                rect area;        // Position within thumbnail coordinate space.
-                text label;       // Pane label (e.g., app title).
-                si32 color_idx;   // Color index (0-3) for adjacency-aware coloring.
-                sptr slot_veer;   // Pointer to the node_veer for click handling.
-            };
             auto collect_ws_panes_fn = [](auto& self, sptr veer_ptr, rect area, std::vector<ws_thumb_pane_t>& panes, si32 h_par = 0, si32 v_par = 0) -> void
             {
                 auto veer = std::dynamic_pointer_cast<ui::veer>(veer_ptr);
@@ -2284,7 +2285,6 @@ namespace netxs::app::tile
                                     auto max_scroll = std::max(1, total_content_w - full_w);
                                     auto track_w = full_w - 2;
                                     auto sb_w = std::max(1, track_w * full_w / total_content_w);
-                                    auto sb_x = 1 + (scroll * (track_w - sb_w) / max_scroll);
 
                                     if (mx == 0) // Left arrow: scroll left by one thumbnail stride.
                                     {
