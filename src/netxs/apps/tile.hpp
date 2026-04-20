@@ -949,6 +949,7 @@ namespace netxs::app::tile
                                 boss.base::signal(tier::release, e2::form::proceed::quit::one, fast);
                             });
                         }
+                        boss.bell::expire(); // Stop riseup: quit has been handled by this node_veer.
                     };
                     boss.LISTEN(tier::release, e2::form::proceed::quit::any, fast)
                     {
@@ -960,6 +961,7 @@ namespace netxs::app::tile
                             if (boss.count() <= 2 || boss.back() != item_ptr)
                             {
                                 item_ptr->base::signal(tier::release, e2::form::proceed::quit::one, fast);
+                                boss.bell::expire(); // Stop riseup: quit has been re-dispatched after maximize restore.
                                 return;
                             }
                         }
@@ -983,6 +985,7 @@ namespace netxs::app::tile
                             boss.base::deface();
                             boss.base::reflow();
                         }
+                        boss.bell::expire(); // Stop riseup: quit has been handled by this node_veer.
                     };
                     boss.LISTEN(tier::request, e2::form::proceed::createby, gear, -, (focus_history_ptr))
                     {
@@ -1402,17 +1405,11 @@ namespace netxs::app::tile
                     };
                     // When this workspace's last content is swapped away (both fork
                     // slots become empty), the standard node_veer swap handler sets
-                    // item_ptr = boss.This() and stops.  Propagate it upward as a
-                    // tier::request swap so that workspace_host can intercept it and
-                    // trigger workspace destruction.
-                    boss.LISTEN(tier::release, e2::form::proceed::swap, item_ptr)
-                    {
-                        if (item_ptr && item_ptr.get() == &boss) // Workspace root veer identified itself as "empty".
-                        {
-                            auto self = boss.This();
-                            boss.base::riseup(tier::request, e2::form::proceed::swap, self);
-                        }
-                    };
+                    // item_ptr = boss.This() and stops.  This is normal: the workspace
+                    // still has one empty slot remaining and should stay alive.
+                    // Workspace destruction is handled by the quit::any release handler
+                    // when the user explicitly closes the last empty slot (count == 1),
+                    // which fires a tier::request swap to workspace_host.
                 });
                 return veer;
             };
@@ -2572,8 +2569,10 @@ namespace netxs::app::tile
                 });
             });
 
-            // Handle a workspace's root-veer final-empty-slot close request:
-            // destroy the workspace; if it was the last one, shutdown the tile.
+            // Handle a workspace's root-veer last-empty-slot close request:
+            // the quit::any release handler on the root node_veer fires a
+            // tier::request swap when its last empty slot is closed (count == 1).
+            // Destroy the workspace; if it was the last one, shutdown the tile.
             workspace_host_ptr->LISTEN(tier::request, e2::form::proceed::swap, item_ptr, -, (workspaces_ptr, destroy_workspace, workspace_host_ptr))
             {
                 if (!item_ptr) return;
@@ -2667,9 +2666,10 @@ namespace netxs::app::tile
                     {
                         boss.base::signal(tier::anycast, e2::form::prop::cwd, path);
                     };
-                    // Note: the `e2::form::proceed::swap` request from a workspace's top-level
-                    // `empty-slot` is intercepted at `workspace_host` and converted into a
-                    // destroy_workspace() call; shutdown happens when the last workspace is destroyed.
+                    // Note: the `e2::form::proceed::swap` request from a workspace's
+                    // root node_veer (when its last empty slot is closed) is intercepted
+                    // at `workspace_host` and converted into a destroy_workspace() call;
+                    // shutdown happens when the last workspace is destroyed.
                     auto& luafx = boss.bell::indexer.luafx;
                     tile_context = config.settings::push_context("/config/events/tile/");
                     auto script_list = config.settings::take_ptr_list_for_name("script");
