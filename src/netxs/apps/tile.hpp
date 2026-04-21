@@ -3361,6 +3361,7 @@ namespace netxs::app::tile
                                 {
                                     c.bgc().faint();
                                     c.fgc().faint();
+                                    c.cur(text_cursor::none); // Suppress any terminal cursor bleeding through.
                                     c.link(ovl_id);
                                 });
                                 // Draw index label centered on each pane.

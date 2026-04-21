@@ -152,6 +152,7 @@ namespace netxs::app::shared
                     {
                         c.bgc().faint();
                         c.fgc().faint();
+                        c.cur(text_cursor::none); // Suppress any terminal cursor bleeding through.
                         c.link(myid);
                     });
                 };
