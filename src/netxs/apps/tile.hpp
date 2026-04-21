@@ -95,6 +95,79 @@ namespace netxs::app::tile
         };
     }
 
+    // Directional 2D pane-navigation scoring (shared by the in-tile `navigate`
+    // lambda and the workspace-popup `pane_navigate` lambda).
+    //
+    // Given a source rectangle `src` and a candidate rectangle `dst`, decide whether
+    // `dst` lies in the requested direction `dir` (a unit vector along one axis) and
+    // produce a score tuple ordered so that `operator<` selects the visually best
+    // neighbour. Returns std::nullopt when `dst` is not a valid target.
+    //
+    // Score tuple (lower is better):
+    //   1. gap_dist    - gap along the primary axis; nearest pane wins first.
+    //                    Prevents a far pane with full perpendicular span from
+    //                    shadowing a near pane with only partial span (e.g. moving
+    //                    right out of a tall pane past a stack of shorter panes
+    //                    onto a full-height pane further away).
+    //   2. center_dist - perpendicular centerline distance; picks the pane best
+    //                    visually aligned with the source when several equidistant
+    //                    candidates share a border with it.
+    //   3. -overlap    - larger perpendicular overlap breaks any remaining ties.
+    //
+    // Candidates with no perpendicular overlap (corner-only / diagonal neighbours)
+    // are excluded: directional navigation should never cross a diagonal gap.
+    static auto score_pane_direction(rect src, rect dst, twod dir)
+        -> std::optional<std::tuple<si64, si64, si64>>
+    {
+        auto overlap_1d = [](si64 a1, si64 a2, si64 b1, si64 b2) -> si64
+        {
+            return std::max<si64>(0, std::min(a2, b2) - std::max(a1, b1));
+        };
+        auto horizontal = (dir.x != 0);
+        auto primary_dir = (si64)(horizontal ? dir.x : dir.y);
+        auto gap_dist = si64{};
+        auto overlap = si64{};
+        auto src_perp_center = si64{}; // Doubled centers (sum of edges) to avoid
+        auto dst_perp_center = si64{}; // integer-halving bias.
+        if (horizontal)
+        {
+            auto src_left = (si64)src.coor.x;
+            auto src_right = src_left + src.size.x;
+            auto dst_left = (si64)dst.coor.x;
+            auto dst_right = dst_left + dst.size.x;
+            if (primary_dir < 0 && dst_right <= src_left)      gap_dist = src_left - dst_right;
+            else if (primary_dir > 0 && dst_left >= src_right) gap_dist = dst_left - src_right;
+            else return std::nullopt;
+            auto src_top = (si64)src.coor.y;
+            auto src_bottom = src_top + src.size.y;
+            auto dst_top = (si64)dst.coor.y;
+            auto dst_bottom = dst_top + dst.size.y;
+            overlap = overlap_1d(src_top, src_bottom, dst_top, dst_bottom);
+            src_perp_center = src_top + src_bottom;
+            dst_perp_center = dst_top + dst_bottom;
+        }
+        else
+        {
+            auto src_top = (si64)src.coor.y;
+            auto src_bottom = src_top + src.size.y;
+            auto dst_top = (si64)dst.coor.y;
+            auto dst_bottom = dst_top + dst.size.y;
+            if (primary_dir < 0 && dst_bottom <= src_top)      gap_dist = src_top - dst_bottom;
+            else if (primary_dir > 0 && dst_top >= src_bottom) gap_dist = dst_top - src_bottom;
+            else return std::nullopt;
+            auto src_left = (si64)src.coor.x;
+            auto src_right = src_left + src.size.x;
+            auto dst_left = (si64)dst.coor.x;
+            auto dst_right = dst_left + dst.size.x;
+            overlap = overlap_1d(src_left, src_right, dst_left, dst_right);
+            src_perp_center = src_left + src_right;
+            dst_perp_center = dst_left + dst_right;
+        }
+        if (overlap <= 0) return std::nullopt;
+        auto center_dist = std::abs(src_perp_center - dst_perp_center);
+        return std::make_tuple(gap_dist, center_dist, -overlap);
+    }
+
     struct focus_history_t
     {
         std::unordered_map<id_t, ui::wptr> current;
@@ -2585,81 +2658,25 @@ namespace netxs::app::tile
                             collect_ws_panes_fn(collect_ws_panes_fn, std::static_pointer_cast<ui::base>(ws_veer), top_area, panes);
                             return panes;
                         };
-                        // 2D nearest-neighbour pane navigation mirroring the behaviour of the `navigate`
-                        // lambda at tile.hpp:2950: pick the pane in the requested direction with the
-                        // largest perpendicular-axis overlap, breaking ties by the smaller gap distance.
+                        // 2D nearest-neighbour pane navigation. Delegates the per-candidate
+                        // scoring to the shared `score_pane_direction` helper, ensuring the popup
+                        // mirrors the in-tile `navigate` lambda behaviour.
                         auto pane_navigate = [&](si32 cur_idx, twod dir) -> si32
                         {
                             auto panes = gather_top_panes();
                             if (panes.empty()) return -1;
                             if (cur_idx < 0 || cur_idx >= (si32)panes.size()) return 0;
                             auto src = panes[cur_idx].area;
-                            auto overlap_1d = [](si64 a1, si64 a2, si64 b1, si64 b2) -> si64
-                            {
-                                return std::max<si64>(0, std::min(a2, b2) - std::max(a1, b1));
-                            };
-                            auto horizontal = (dir.x != 0);
-                            auto primary_dir = (si64)(horizontal ? dir.x : dir.y);
                             auto best_idx = si32{ -1 };
-                            auto best_overlap = si64min;
-                            auto best_dist = si64max;
+                            auto best_score = std::tuple<si64, si64, si64>{ si64max, si64max, si64max };
                             for (auto i = si32{}; i < (si32)panes.size(); i++)
                             {
                                 if (i == cur_idx) continue;
-                                auto dst = panes[i].area;
-                                auto in_direction = faux;
-                                auto dist = si64{};
-                                auto overlap = si64{};
-                                if (horizontal)
+                                auto score = score_pane_direction(src, panes[i].area, dir);
+                                if (score && *score < best_score)
                                 {
-                                    auto src_left = (si64)src.coor.x;
-                                    auto src_right = src_left + src.size.x;
-                                    auto dst_left = (si64)dst.coor.x;
-                                    auto dst_right = dst_left + dst.size.x;
-                                    if (primary_dir < 0 && dst_right <= src_left)
-                                    {
-                                        in_direction = true;
-                                        dist = src_left - dst_right;
-                                        overlap = overlap_1d(src.coor.y, src.coor.y + src.size.y,
-                                                             dst.coor.y, dst.coor.y + dst.size.y);
-                                    }
-                                    else if (primary_dir > 0 && dst_left >= src_right)
-                                    {
-                                        in_direction = true;
-                                        dist = dst_left - src_right;
-                                        overlap = overlap_1d(src.coor.y, src.coor.y + src.size.y,
-                                                             dst.coor.y, dst.coor.y + dst.size.y);
-                                    }
-                                }
-                                else
-                                {
-                                    auto src_top = (si64)src.coor.y;
-                                    auto src_bottom = src_top + src.size.y;
-                                    auto dst_top = (si64)dst.coor.y;
-                                    auto dst_bottom = dst_top + dst.size.y;
-                                    if (primary_dir < 0 && dst_bottom <= src_top)
-                                    {
-                                        in_direction = true;
-                                        dist = src_top - dst_bottom;
-                                        overlap = overlap_1d(src.coor.x, src.coor.x + src.size.x,
-                                                             dst.coor.x, dst.coor.x + dst.size.x);
-                                    }
-                                    else if (primary_dir > 0 && dst_top >= src_bottom)
-                                    {
-                                        in_direction = true;
-                                        dist = dst_top - src_bottom;
-                                        overlap = overlap_1d(src.coor.x, src.coor.x + src.size.x,
-                                                             dst.coor.x, dst.coor.x + dst.size.x);
-                                    }
-                                }
-                                if (in_direction)
-                                {
-                                    if (overlap > best_overlap || (overlap == best_overlap && dist < best_dist))
-                                    {
-                                        best_overlap = overlap;
-                                        best_dist = dist;
-                                        best_idx = i;
-                                    }
+                                    best_score = *score;
+                                    best_idx = i;
                                 }
                             }
                             return best_idx;
@@ -3220,6 +3237,9 @@ namespace netxs::app::tile
                         }
                         return r;
                     };
+                    // Directional 2D pane navigation. See `score_pane_direction` (free function
+                    // above) for the scoring rationale and the specific visual-logic regressions
+                    // it addresses.
                     auto navigate = [get_global_rect, foreach, nothing_to_iterate](auto& gear, twod dir) mutable
                     {
                         if (nothing_to_iterate()) return;
@@ -3239,88 +3259,17 @@ namespace netxs::app::tile
 
                         if (!src_pane) return;
 
-                        // Helper: calculate 1D interval overlap
-                        auto overlap_1d = [](si64 a1, si64 a2, si64 b1, si64 b2) -> si64
-                        {
-                            return std::max<si64>(0, std::min(a2, b2) - std::max(a1, b1));
-                        };
-
-                        // Determine primary axis and direction
-                        bool horizontal = (dir.x != 0);
-                        si64 primary_dir = horizontal ? dir.x : dir.y;
-
                         auto best_pane = sptr{};
-                        auto best_overlap = si64min;
-                        auto best_dist = si64max;
+                        auto best_score = std::tuple<si64, si64, si64>{ si64max, si64max, si64max };
 
                         foreach(id_t{}, [&](auto& item_ptr, si32 item_type, auto)
                         {
-                            if (item_type != item_type::grip && item_ptr != src_pane)
+                            if (item_type == item_type::grip || item_ptr == src_pane) return;
+                            auto score = score_pane_direction(src_rect, get_global_rect(item_ptr), dir);
+                            if (score && *score < best_score)
                             {
-                                auto dst = get_global_rect(item_ptr);
-                                auto src = src_rect;
-
-                                // Check if dst is in the target direction
-                                bool in_direction = false;
-                                si64 dist = 0;
-                                si64 overlap = 0;
-
-                                if (horizontal)
-                                {
-                                    // Left/Right navigation
-                                    auto src_left = (si64)src.coor.x;
-                                    auto src_right = src_left + src.size.x;
-                                    auto dst_left = (si64)dst.coor.x;
-                                    auto dst_right = dst_left + dst.size.x;
-
-                                    if (primary_dir < 0 && dst_right <= src_left) // Left
-                                    {
-                                        in_direction = true;
-                                        dist = src_left - dst_right;
-                                        overlap = overlap_1d(src.coor.y, src.coor.y + src.size.y,
-                                                           dst.coor.y, dst.coor.y + dst.size.y);
-                                    }
-                                    else if (primary_dir > 0 && dst_left >= src_right) // Right
-                                    {
-                                        in_direction = true;
-                                        dist = dst_left - src_right;
-                                        overlap = overlap_1d(src.coor.y, src.coor.y + src.size.y,
-                                                           dst.coor.y, dst.coor.y + dst.size.y);
-                                    }
-                                }
-                                else
-                                {
-                                    // Up/Down navigation
-                                    auto src_top = (si64)src.coor.y;
-                                    auto src_bottom = src_top + src.size.y;
-                                    auto dst_top = (si64)dst.coor.y;
-                                    auto dst_bottom = dst_top + dst.size.y;
-
-                                    if (primary_dir < 0 && dst_bottom <= src_top) // Up
-                                    {
-                                        in_direction = true;
-                                        dist = src_top - dst_bottom;
-                                        overlap = overlap_1d(src.coor.x, src.coor.x + src.size.x,
-                                                           dst.coor.x, dst.coor.x + dst.size.x);
-                                    }
-                                    else if (primary_dir > 0 && dst_top >= src_bottom) // Down
-                                    {
-                                        in_direction = true;
-                                        dist = dst_top - src_bottom;
-                                        overlap = overlap_1d(src.coor.x, src.coor.x + src.size.x,
-                                                           dst.coor.x, dst.coor.x + dst.size.x);
-                                    }
-                                }
-
-                                if (in_direction)
-                                {
-                                    if (overlap > best_overlap || (overlap == best_overlap && dist < best_dist))
-                                    {
-                                        best_overlap = overlap;
-                                        best_dist = dist;
-                                        best_pane = item_ptr;
-                                    }
-                                }
+                                best_score = *score;
+                                best_pane = item_ptr;
                             }
                         });
 
