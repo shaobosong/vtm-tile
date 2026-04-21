@@ -1219,6 +1219,7 @@ R"==(
     <TileNextWorkspace     ="vtm.tile.NextWorkspace();"/>          <!-- Switch to the next workspace (wrapping). -->
     <TilePrevWorkspace     ="vtm.tile.PrevWorkspace();"/>          <!-- Switch to the previous workspace (wrapping). -->
     <TileLastWorkspace     ="vtm.tile.LastWorkspace();"/>          <!-- Switch to the last visited workspace. -->
+    <TileOpenWorkspacePopup="vtm.tile.OpenWorkspacePopup();"/>      <!-- Open the workspace preview popup (Win+Tab style). -->
     <TileMoveGripLeft      ="vtm.grip.MoveGrip(-1, 0);"/>          <!-- Move the split grip to the left. -->
     <TileMoveGripRight     ="vtm.grip.MoveGrip( 1, 0);"/>          <!-- Move the split grip to the right. -->
     <TileMoveGripUp        ="vtm.grip.MoveGrip( 0,-1);"/>          <!-- Move the split grip up. -->

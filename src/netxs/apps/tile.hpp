@@ -309,6 +309,7 @@ namespace netxs::app::tile
         X(NextWorkspace      ) \
         X(PrevWorkspace      ) \
         X(LastWorkspace      ) \
+        X(OpenWorkspacePopup ) \
 
     struct methods
     {
@@ -1378,6 +1379,7 @@ namespace netxs::app::tile
             auto current_ws_index_ptr  = ptr::shared(size_t{ 0 });
             auto previous_ws_index_ptr = ptr::shared(size_t{ 0 });
             auto refresh_status_bar_fn = ptr::shared(std::function<void()>{[]{}});
+            auto open_workspace_popup_fn = ptr::shared(std::function<void()>{[]{}}); // Opens the workspace preview popup (Win+Tab style); set when the status bar is built.
 
             // Factory: build a workspace root veer (parse_data result) with the root-fullscreen-attach listener.
             auto make_workspace_veer = [grip_bindings_ptr, focus_histories_ptr, confirm_block](view param_view, text selected_id_override = {}) -> netxs::sptr<ui::veer>
@@ -1738,7 +1740,7 @@ namespace netxs::app::tile
 
             status_bar_ptr->invoke([&, workspaces_ptr, current_ws_index_ptr, switch_workspace, create_workspace,
                                       hovered_tab, refresh_status_bar_fn, ws_popup_active,
-                                      collect_ws_panes_fn,
+                                      collect_ws_panes_fn, open_workspace_popup_fn,
                                       wrapper_shadow = ptr::shadow(wrapper)](auto& boss)
             {
                 auto boss_id = boss.bell::id;
@@ -1786,16 +1788,15 @@ namespace netxs::app::tile
                         (*refresh_status_bar_fn)();
                     }
                 });
-                // Click on the workspace button: open the workspace preview popup.
-                boss.on(tier::mouserelease, input::key::LeftClick,
+                // Opens the workspace preview popup (Win+Tab style). Invoked by the status bar click
+                // and by the `vtm.tile.OpenWorkspacePopup()` Lua method.
+                *open_workspace_popup_fn =
                     [workspaces_ptr, current_ws_index_ptr, switch_workspace, create_workspace,
-                     ws_popup_active, wrapper_shadow, refresh_status_bar_fn, collect_ws_panes_fn, draw_popup_box](hids& gear)
+                     ws_popup_active, wrapper_shadow, refresh_status_bar_fn, collect_ws_panes_fn, draw_popup_box]
                 {
-                    auto x = gear.coord.x;
-                    if (x < 0 || x >= ws_btn_w) { gear.dismiss(); return; }
-                    if (*ws_popup_active) { gear.dismiss(); return; }
+                    if (*ws_popup_active) return;
                     auto wrapper_ptr = wrapper_shadow.lock();
-                    if (!wrapper_ptr) { gear.dismiss(); return; }
+                    if (!wrapper_ptr) return;
 
                     *ws_popup_active = true;
 
@@ -2586,7 +2587,15 @@ namespace netxs::app::tile
                         // Swallow all other keys.
                         gear.set_handled(faux);
                     };
+                };
 
+                // Click on the workspace button: open the workspace preview popup.
+                boss.on(tier::mouserelease, input::key::LeftClick,
+                    [open_workspace_popup_fn](hids& gear)
+                {
+                    auto x = gear.coord.x;
+                    if (x < 0 || x >= ws_btn_w) { gear.dismiss(); return; }
+                    (*open_workspace_popup_fn)();
                     gear.dismiss();
                 });
             });
@@ -2904,6 +2913,10 @@ namespace netxs::app::tile
                         { methods::LastWorkspace,       [&, last_workspace]
                                                         {
                                                             last_workspace();
+                                                        }},
+                        { methods::OpenWorkspacePopup,  [&, open_workspace_popup_fn]
+                                                        {
+                                                            (*open_workspace_popup_fn)();
                                                         }},
                     });
 
