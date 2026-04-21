@@ -136,14 +136,14 @@ namespace
     //
     struct two_empty_slots_fixture
     {
-        sptr<ui::veer> workspace_host;
-        sptr<ui::veer> root_veer;
-        sptr<ui::fork> fork_node;
-        sptr<ui::veer> slot_1_veer;
-        sptr<ui::veer> slot_2_veer;
-        sptr<ui::cake> empty_slot_0;  // root_veer's own empty slot
-        sptr<ui::cake> empty_slot_1;
-        sptr<ui::cake> empty_slot_2;
+        netxs::sptr<ui::veer> workspace_host;
+        netxs::sptr<ui::veer> root_veer;
+        netxs::sptr<ui::fork> fork_node;
+        netxs::sptr<ui::veer> slot_1_veer;
+        netxs::sptr<ui::veer> slot_2_veer;
+        netxs::sptr<ui::cake> empty_slot_0;  // root_veer's own empty slot
+        netxs::sptr<ui::cake> empty_slot_1;
+        netxs::sptr<ui::cake> empty_slot_2;
         bool           shutdown_seen = false;
 
         two_empty_slots_fixture()
