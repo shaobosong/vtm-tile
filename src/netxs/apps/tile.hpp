@@ -2056,7 +2056,7 @@ namespace netxs::app::tile
                                         auto arm_h   = std::max(si32{1}, arm_v * 2);         // Double horizontal arm to compensate cell aspect ratio ~2:1; at least 1.
                                         auto cy = pin.coor.y + pin.size.y / 2;
                                         auto cx = pin.coor.x + pin.size.x / 2;
-                                        // Vertical segments (┃).
+                                        // Vertical segments (│).
                                         for (auto dy = -arm_v; dy <= arm_v; dy++)
                                         {
                                             if (dy == 0) continue;
@@ -2065,11 +2065,11 @@ namespace netxs::app::tile
                                             {
                                                 parent_canvas.fill(rect{{ cx, py }, { 1, 1 }}, [=](cell& c)
                                                 {
-                                                    c.bgc(popup_thumb_bg).fgc(pfg).txt("┃").link(ovl_id);
+                                                    c.bgc(popup_thumb_bg).fgc(pfg).txt("│").link(ovl_id);
                                                 });
                                             }
                                         }
-                                        // Horizontal segments (━).
+                                        // Horizontal segments (─).
                                         for (auto dx = -arm_h; dx <= arm_h; dx++)
                                         {
                                             if (dx == 0) continue;
@@ -2078,14 +2078,14 @@ namespace netxs::app::tile
                                             {
                                                 parent_canvas.fill(rect{{ px2, cy }, { 1, 1 }}, [=](cell& c)
                                                 {
-                                                    c.bgc(popup_thumb_bg).fgc(pfg).txt("━").link(ovl_id);
+                                                    c.bgc(popup_thumb_bg).fgc(pfg).txt("─").link(ovl_id);
                                                 });
                                             }
                                         }
-                                        // Center intersection (╋).
+                                        // Center intersection (┼).
                                         parent_canvas.fill(rect{{ cx, cy }, { 1, 1 }}, [=](cell& c)
                                         {
-                                            c.bgc(popup_thumb_bg).fgc(pfg).txt("╋").link(ovl_id);
+                                            c.bgc(popup_thumb_bg).fgc(pfg).txt("┼").link(ovl_id);
                                         });
                                     }
                                 }
