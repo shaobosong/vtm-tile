@@ -380,17 +380,20 @@ def test_term_click_yes_button():
         if not open_dialog_and_verify(s):
             print("FAIL - vtm exited before dialog")
             return False
-        # The dialog is 36 wide, centered in 80 cols.
-        # Dialog left edge = (80-36)/2 + 1 = 23 (1-indexed).
-        # Dialog top = (24-5)/2 + 1 = 10 (1-indexed).
-        # Layout: row 10=top_pad, 11-12=message(slot_1), 13=buttons(slot_2), 14=bot_pad.
-        # "Yes" button is slot::_1 (left half of 36 cols = 18 cols).
-        # Center of Yes button: col 23 + 9 = 32.
-        dialog_left = (COLS - 36) // 2 + 1
-        dialog_top = (ROWS - 5) // 2 + 1
-        button_row = dialog_top + 3  # top_pad(1) + message(2) = offset 3
-        yes_center = dialog_left + 9
-        s.click(yes_center, button_row)
+        # Dialog is 42 × 7, centered, with setpad(l=3, r=3, t=2, b=1) → inner 36 × 4.
+        # Layout: slot_1 (message) 3 rows, slot_2 (buttons) 1 row.
+        # Button row (X-fork, gap=2): slot_1 = Confirm (17 cols), gap 2, slot_2 = Cancel (17 cols).
+        #   dialog_left = (80-42)//2 + 1 = 20   (1-indexed)
+        #   dialog_top  = (24-7)//2 + 1  = 9
+        #   inner_left  = 20 + 3 = 23
+        #   button_row  = 9 + 2 + 3     = 14   (outer_top + t_pad + 3 message rows)
+        #   confirm_x   = 23 + 17//2    = 31
+        dialog_left = (COLS - 42) // 2 + 1
+        dialog_top = (ROWS - 7) // 2 + 1
+        inner_left = dialog_left + 3           # setpad l=3
+        button_row = dialog_top + 2 + 3        # t_pad(2) + message rows(3)
+        confirm_center = inner_left + 17 // 2  # center of slot_1 (~17 cols wide)
+        s.click(confirm_center, button_row)
         if s.wait_for_exit(timeout=5.0):
             print("PASS")
             return True
@@ -405,11 +408,14 @@ def test_term_click_no_button():
         if not open_dialog_and_verify(s):
             print("FAIL - vtm exited before dialog")
             return False
-        dialog_left = (COLS - 36) // 2 + 1
-        dialog_top = (ROWS - 5) // 2 + 1
-        button_row = dialog_top + 3  # top_pad(1) + message(2) = offset 3
-        no_center = dialog_left + 27  # right half of 36 cols
-        s.click(no_center, button_row)
+        # See test_term_click_yes_button for layout derivation.
+        #   cancel_x = inner_left + 17 + 2 + 17//2
+        dialog_left = (COLS - 42) // 2 + 1
+        dialog_top = (ROWS - 7) // 2 + 1
+        inner_left = dialog_left + 3
+        button_row = dialog_top + 2 + 3
+        cancel_center = inner_left + 17 + 2 + 17 // 2  # center of slot_2
+        s.click(cancel_center, button_row)
         time.sleep(0.5)
         if not s.is_alive():
             print("FAIL - vtm exited after clicking No")
