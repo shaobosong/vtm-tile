@@ -1655,6 +1655,7 @@ namespace netxs::app::tile
             };
             static constexpr auto popup_pane_fg   = (argb)0xff565f89;  // Pane label text.
             static constexpr auto popup_sel_brd   = (argb)0xff7aa2f7;  // Selected/hovered workspace border.
+            static constexpr auto popup_idle_brd  = (argb)0xffe0af68;  // "Unfocused but selected" border (yellow accent): used to hint nav state transition.
             // Scrollbar color palette (three states: normal, hover, drag).
             static constexpr auto popup_sb_normal = (argb)0xff3b4261;  // Scrollbar normal fg (subtle).
             static constexpr auto popup_sb_hover  = (argb)0xff565f89;  // Scrollbar hover fg (brighter).
@@ -1801,13 +1802,24 @@ namespace netxs::app::tile
                     *ws_popup_active = true;
 
                     // Popup shared state.
-                    auto preview_idx_ptr  = ptr::shared(*current_ws_index_ptr); // Which workspace is previewed.
+                    auto preview_idx_ptr  = ptr::shared(*current_ws_index_ptr); // Which workspace is previewed (also keyboard selection in bottom section).
                     auto scroll_off_ptr   = ptr::shared(si32{ -1 });            // Horizontal scroll offset (pixels); -1 = auto-center on first render.
                     auto hover_ws_ptr     = ptr::shared(si32{ -1 });            // Hovered workspace in bottom bar (-1 = none).
-                    auto hover_pane_ptr   = ptr::shared(si32{ -1 });            // Hovered pane in top section (-1 = none).
+                    auto hover_pane_ptr   = ptr::shared(si32{ -1 });            // Mouse-hovered pane in top section (-1 = none).
                     auto hover_sb_ptr     = ptr::shared(faux);                  // Mouse hovering over scrollbar row.
                     auto dragging_sb_ptr  = ptr::shared(faux);                  // Currently dragging scrollbar thumb.
                     auto drag_sb_grab_ptr = ptr::shared(si32{ 0 });             // Grab offset: mouse x - thumb left edge at drag start.
+                    // Keyboard navigation state.
+                    // focus_section: 0 = top section (pane thumbnails), 1 = bottom section (workspace switcher).
+                    // Tab toggles between sections; arrow keys then navigate within the focused section.
+                    auto focus_section_ptr = ptr::shared(si32{ 1 });            // Start focused on bottom (workspace switcher).
+                    auto kbd_pane_idx_ptr  = ptr::shared(si32{ -1 });           // Keyboard-selected pane in top section (-1 = none).
+                    // Keyboard/mouse priority lock: captured mouse coord at the moment of the
+                    // last keyboard action. While MouseMove reports the same coord, hover-derived
+                    // side effects (updating hover_*, swapping preview_idx) are suppressed so a
+                    // stationary cursor cannot override keyboard navigation. Initialized to an
+                    // out-of-range sentinel so the first real MouseMove is always honored.
+                    auto kbd_lock_coord_ptr = ptr::shared(twod{ -32768, -32768 });
 
                     // Build the overlay (attached to the wrapper cake).
                     auto overlay_ptr = ui::mock::ctor();
@@ -1832,6 +1844,7 @@ namespace netxs::app::tile
                         ovl.LISTEN(tier::release, e2::render::any, parent_canvas, -,
                             (workspaces_ptr, current_ws_index_ptr, preview_idx_ptr, scroll_off_ptr,
                              hover_ws_ptr, hover_pane_ptr, hover_sb_ptr, dragging_sb_ptr,
+                             focus_section_ptr, kbd_pane_idx_ptr,
                              ovl_id, collect_ws_panes_fn, draw_popup_box))
                         {
                             auto canvas_area = parent_canvas.area();
@@ -1901,7 +1914,17 @@ namespace netxs::app::tile
                                 auto is_current = ((size_t)i == current_idx);
                                 auto is_preview = ((size_t)i == preview_idx);
                                 auto is_hover   = (i == hover_ws);
-                                auto brd = is_preview ? popup_sel_brd : is_hover ? popup_hov_ul : popup_thumb_brd;
+                                // Border coloring rule:
+                                //  - previewed (keyboard selection) tab:
+                                //      * blue (popup_sel_brd) when the bottom section has keyboard focus,
+                                //      * yellow (popup_idle_brd) when focus moved to the top section (hint
+                                //        that the bottom selection is preserved but inactive).
+                                //  - plain mouse-hovered tab (not same as preview): faint underline.
+                                //  - otherwise: neutral thumbnail border.
+                                auto bot_focused = (*focus_section_ptr == 1);
+                                auto brd = is_preview ? (bot_focused ? popup_sel_brd : popup_idle_brd)
+                                         : (is_hover && !is_preview) ? popup_hov_ul
+                                         :                              popup_thumb_brd;
                                 auto tbg = is_current ? popup_act_bg : popup_thumb_bg;
 
                                 // Thumbnail with line-frame border.
@@ -2028,15 +2051,19 @@ namespace netxs::app::tile
                                 {
                                     auto panes = std::vector<ws_thumb_pane_t>{};
                                     collect_ws_panes_fn(collect_ws_panes_fn, std::static_pointer_cast<ui::base>(ws_veer), top_area, panes);
-                                    auto hp = *hover_pane_ptr;
+                                    auto kp = *kbd_pane_idx_ptr;
+                                    auto top_focused = (*focus_section_ptr == 0);
                                     auto pidx = si32{};
                                     for (auto& pane : panes)
                                     {
                                         auto pr = pane.area;
-                                        auto is_hp = (pidx == hp);
-                                        auto pbg = is_hp ? popup_act_bg : popup_pane_colors[pane.color_idx & 3];
-                                        auto pfg = is_hp ? popup_act_fg : popup_pane_fg;
-                                        auto pbrd = is_hp ? popup_sel_brd : popup_thumb_brd;
+                                        // Unified active-pane cursor: kbd_pane_idx drives the highlight.
+                                        // The mouse updates that same index from MouseMove, so both
+                                        // inputs share one indicator and the visuals never disagree.
+                                        auto is_active = top_focused && (pidx == kp);
+                                        auto pbg  = is_active ? popup_act_bg : popup_pane_colors[pane.color_idx & 3];
+                                        auto pfg  = is_active ? popup_act_fg : popup_pane_fg;
+                                        auto pbrd = is_active ? popup_sel_brd : popup_thumb_brd;
 
                                         // Line-frame border.
                                         auto pin = draw_popup_box(parent_canvas, pr, pbrd, pbg, pfg, ovl_id);
@@ -2071,7 +2098,9 @@ namespace netxs::app::tile
                         // Compute hit areas and dispatch mouse actions.
                         ovl.on(tier::mouserelease, input::key::MouseMove,
                             [workspaces_ptr, current_ws_index_ptr, preview_idx_ptr, scroll_off_ptr,
-                             hover_ws_ptr, hover_pane_ptr, hover_sb_ptr, collect_ws_panes_fn, overlay_shadow](hids& gear)
+                             hover_ws_ptr, hover_pane_ptr, hover_sb_ptr,
+                             kbd_pane_idx_ptr, kbd_lock_coord_ptr, focus_section_ptr,
+                             collect_ws_panes_fn, overlay_shadow](hids& gear)
                         {
                             auto ovl_ptr = overlay_shadow.lock();
                             if (!ovl_ptr) return;
@@ -2080,6 +2109,12 @@ namespace netxs::app::tile
                             auto full_h = full_area.size.y;
                             auto mx = gear.coord.x;
                             auto my = gear.coord.y;
+                            // Keyboard priority: while the mouse cursor remains at the exact cell
+                            // it occupied when the last keyboard action fired, treat this MouseMove
+                            // as noise and skip all hover-derived updates. As soon as the cursor
+                            // lands on a different cell we drop the lock and process normally.
+                            if (gear.coord == *kbd_lock_coord_ptr) return;
+                            *kbd_lock_coord_ptr = twod{ -32768, -32768 };
                             auto bot_h = std::max(4, full_h / 4) | 1; // Ensure odd so thumb_h (bot_h - 2) is also odd.
                             auto top_h = full_h - bot_h;
                             auto bot_y = full_h - bot_h;
@@ -2161,12 +2196,27 @@ namespace netxs::app::tile
                             *hover_pane_ptr = new_hover_pane;
                             *hover_sb_ptr = new_hover_sb;
 
-                            // Update preview workspace when hovering a different workspace thumbnail.
+                            // Top-section: mouse and keyboard share a single "active pane" cursor.
+                            // When the mouse lands on a pane it takes over that cursor (and pulls focus
+                            // to the top section). The next arrow key will therefore resume from the
+                            // pane the mouse last pointed at. When the mouse moves off all panes we
+                            // deliberately leave the cursor where it was so it remains stable.
+                            if (new_hover_pane >= 0)
+                            {
+                                *kbd_pane_idx_ptr = new_hover_pane;
+                                *focus_section_ptr = 0;
+                            }
+
+                            // Update preview workspace when the mouse genuinely moves to a different
+                            // workspace thumbnail. (The kbd-lock guard at the top of this handler
+                            // ensures stationary cursors cannot trigger this path.)
                             if (new_hover_ws >= 0 && new_hover_ws < (si32)workspaces_ptr->size()
                                 && (size_t)new_hover_ws != *preview_idx_ptr)
                             {
                                 *preview_idx_ptr = (size_t)new_hover_ws;
                                 *hover_pane_ptr = -1; // Reset pane hover on workspace change.
+                                *kbd_pane_idx_ptr = -1; // Reset top keyboard selection since the previewed workspace changed.
+                                *focus_section_ptr = 1; // Pull focus to the bottom (workspace switcher).
                             }
 
                             if (old_hover_ws != new_hover_ws || old_hover_pane != new_hover_pane || old_hover_sb != new_hover_sb)
@@ -2479,13 +2529,14 @@ namespace netxs::app::tile
                     wrapper_ptr->base::reflow();
                     wrapper_ptr->base::deface();
 
-                    // Keyboard interceptor: Esc, arrow keys, Enter, number keys.
+                    // Keyboard interceptor: Esc, Tab, arrow keys, Enter, number keys.
                     auto wrapper_shadow_inner = ptr::shadow(wrapper_ptr);
                     wrapper_ptr->bell::submit(tier::preview, input::events::keybd::any, *kbd_hook)
                         = [dismiss_visual, dismiss_hook, pending_unhook,
                            workspaces_ptr, current_ws_index_ptr, preview_idx_ptr, scroll_off_ptr,
+                           focus_section_ptr, kbd_pane_idx_ptr, kbd_lock_coord_ptr, hover_ws_ptr, hover_pane_ptr,
                            switch_workspace, create_workspace, refresh_status_bar_fn,
-                           overlay_shadow](hids& gear) mutable
+                           collect_ws_panes_fn, overlay_shadow](hids& gear) mutable
                     {
                         if (gear.payload != input::keybd::type::keypress
                             || gear.keystat == input::key::interrupted
@@ -2512,10 +2563,167 @@ namespace netxs::app::tile
                             gear.set_handled(faux);
                             return;
                         }
-                        // Enter: switch to previewed workspace and dismiss.
+
+                        // --- Helpers for top-section pane keyboard navigation. ---
+                        // Rebuild the pane list for the currently previewed workspace in the top-section
+                        // coordinate space so we can reason about pane geometry the same way the renderer does.
+                        auto gather_top_panes = [&]() -> std::vector<ws_thumb_pane_t>
+                        {
+                            auto panes = std::vector<ws_thumb_pane_t>{};
+                            auto ovl_ptr = overlay_shadow.lock();
+                            if (!ovl_ptr) return panes;
+                            auto full_area = ovl_ptr->base::area();
+                            auto full_w = full_area.size.x;
+                            auto full_h = full_area.size.y;
+                            auto bot_h = std::max(4, full_h / 4) | 1;
+                            auto top_h = full_h - bot_h;
+                            if (full_w < 1 || top_h < 1) return panes;
+                            auto prev_idx = *preview_idx_ptr;
+                            if (prev_idx >= workspaces_ptr->size()) return panes;
+                            auto ws_veer = (*workspaces_ptr)[prev_idx];
+                            auto top_area = rect{{ 0, 0 }, { full_w, top_h }};
+                            collect_ws_panes_fn(collect_ws_panes_fn, std::static_pointer_cast<ui::base>(ws_veer), top_area, panes);
+                            return panes;
+                        };
+                        // 2D nearest-neighbour pane navigation mirroring the behaviour of the `navigate`
+                        // lambda at tile.hpp:2950: pick the pane in the requested direction with the
+                        // largest perpendicular-axis overlap, breaking ties by the smaller gap distance.
+                        auto pane_navigate = [&](si32 cur_idx, twod dir) -> si32
+                        {
+                            auto panes = gather_top_panes();
+                            if (panes.empty()) return -1;
+                            if (cur_idx < 0 || cur_idx >= (si32)panes.size()) return 0;
+                            auto src = panes[cur_idx].area;
+                            auto overlap_1d = [](si64 a1, si64 a2, si64 b1, si64 b2) -> si64
+                            {
+                                return std::max<si64>(0, std::min(a2, b2) - std::max(a1, b1));
+                            };
+                            auto horizontal = (dir.x != 0);
+                            auto primary_dir = (si64)(horizontal ? dir.x : dir.y);
+                            auto best_idx = si32{ -1 };
+                            auto best_overlap = si64min;
+                            auto best_dist = si64max;
+                            for (auto i = si32{}; i < (si32)panes.size(); i++)
+                            {
+                                if (i == cur_idx) continue;
+                                auto dst = panes[i].area;
+                                auto in_direction = faux;
+                                auto dist = si64{};
+                                auto overlap = si64{};
+                                if (horizontal)
+                                {
+                                    auto src_left = (si64)src.coor.x;
+                                    auto src_right = src_left + src.size.x;
+                                    auto dst_left = (si64)dst.coor.x;
+                                    auto dst_right = dst_left + dst.size.x;
+                                    if (primary_dir < 0 && dst_right <= src_left)
+                                    {
+                                        in_direction = true;
+                                        dist = src_left - dst_right;
+                                        overlap = overlap_1d(src.coor.y, src.coor.y + src.size.y,
+                                                             dst.coor.y, dst.coor.y + dst.size.y);
+                                    }
+                                    else if (primary_dir > 0 && dst_left >= src_right)
+                                    {
+                                        in_direction = true;
+                                        dist = dst_left - src_right;
+                                        overlap = overlap_1d(src.coor.y, src.coor.y + src.size.y,
+                                                             dst.coor.y, dst.coor.y + dst.size.y);
+                                    }
+                                }
+                                else
+                                {
+                                    auto src_top = (si64)src.coor.y;
+                                    auto src_bottom = src_top + src.size.y;
+                                    auto dst_top = (si64)dst.coor.y;
+                                    auto dst_bottom = dst_top + dst.size.y;
+                                    if (primary_dir < 0 && dst_bottom <= src_top)
+                                    {
+                                        in_direction = true;
+                                        dist = src_top - dst_bottom;
+                                        overlap = overlap_1d(src.coor.x, src.coor.x + src.size.x,
+                                                             dst.coor.x, dst.coor.x + dst.size.x);
+                                    }
+                                    else if (primary_dir > 0 && dst_top >= src_bottom)
+                                    {
+                                        in_direction = true;
+                                        dist = dst_top - src_bottom;
+                                        overlap = overlap_1d(src.coor.x, src.coor.x + src.size.x,
+                                                             dst.coor.x, dst.coor.x + dst.size.x);
+                                    }
+                                }
+                                if (in_direction)
+                                {
+                                    if (overlap > best_overlap || (overlap == best_overlap && dist < best_dist))
+                                    {
+                                        best_overlap = overlap;
+                                        best_dist = dist;
+                                        best_idx = i;
+                                    }
+                                }
+                            }
+                            return best_idx;
+                        };
+
+                        // --- Tab: toggle keyboard focus between top (0) and bottom (1) sections. ---
+                        if (k == input::key::Tab)
+                        {
+                            if (*focus_section_ptr == 1)
+                            {
+                                // Bottom -> Top. Preserve the bottom's preview_idx border (drawn yellow
+                                // while focus is elsewhere). Seed the top keyboard selection at pane 0
+                                // if not already set.
+                                *focus_section_ptr = 0;
+                                auto panes = gather_top_panes();
+                                if (panes.empty()) *kbd_pane_idx_ptr = -1;
+                                else if (*kbd_pane_idx_ptr < 0 || *kbd_pane_idx_ptr >= (si32)panes.size())
+                                    *kbd_pane_idx_ptr = 0;
+                                // Clear mouse hover indicators to keep the single-focus invariant.
+                                *hover_ws_ptr = -1;
+                                *hover_pane_ptr = -1;
+                                *kbd_lock_coord_ptr = gear.coord; // Lock out echo MouseMove at this coord.
+                            }
+                            else
+                            {
+                                // Top -> Bottom. Drop the top keyboard selection entirely.
+                                *focus_section_ptr = 1;
+                                *kbd_pane_idx_ptr = -1;
+                                *hover_ws_ptr = -1;
+                                *hover_pane_ptr = -1;
+                                *kbd_lock_coord_ptr = gear.coord; // Lock out echo MouseMove at this coord.
+                            }
+                            if (auto p = overlay_shadow.lock()) p->base::deface();
+                            gear.set_handled(faux);
+                            return;
+                        }
+
+                        // Enter: commit the current selection depending on which section owns focus.
                         if (k == input::key::KeyEnter)
                         {
                             auto idx = *preview_idx_ptr;
+                            if (*focus_section_ptr == 0) // Top section: focus the keyboard-selected pane.
+                            {
+                                auto kp = *kbd_pane_idx_ptr;
+                                auto panes = gather_top_panes();
+                                if (kp >= 0 && kp < (si32)panes.size())
+                                {
+                                    auto slot_veer = panes[kp].slot_veer;
+                                    dismiss_visual();
+                                    dismiss_hook();
+                                    if (idx < workspaces_ptr->size())
+                                    {
+                                        switch_workspace(idx);
+                                        if (auto focus_target = get_slot_focus_target(slot_veer))
+                                        {
+                                            pro::focus::set(focus_target, gear.id, solo::on);
+                                        }
+                                        (*refresh_status_bar_fn)();
+                                    }
+                                    gear.set_handled(faux);
+                                    return;
+                                }
+                            }
+                            // Bottom section (or top section with no pane selected): switch to the previewed ws.
                             dismiss_visual();
                             dismiss_hook();
                             if (idx < workspaces_ptr->size())
@@ -2526,42 +2734,84 @@ namespace netxs::app::tile
                             gear.set_handled(faux);
                             return;
                         }
-                        // Left/Right arrows: browse workspaces.
+
+                        // Arrow keys: dispatch per section.
                         auto ws_count = (si32)workspaces_ptr->size();
-                        if (ws_count > 0 && (k == input::key::KeyLeftArrow || k == input::key::KeyRightArrow))
+                        auto is_arrow = (k == input::key::KeyLeftArrow || k == input::key::KeyRightArrow
+                                      || k == input::key::KeyUpArrow   || k == input::key::KeyDownArrow);
+                        if (is_arrow)
                         {
-                            auto cur = (si32)*preview_idx_ptr;
-                            if (k == input::key::KeyLeftArrow)
-                                cur = (cur > 0) ? cur - 1 : ws_count - 1;
-                            else
-                                cur = (cur < ws_count - 1) ? cur + 1 : 0;
-                            *preview_idx_ptr = (size_t)cur;
-                            // Auto-scroll bottom bar to keep the previewed thumbnail visible.
-                            if (auto ovl_ptr = overlay_shadow.lock())
+                            if (*focus_section_ptr == 0) // Top section: 2D pane navigation across all four directions.
                             {
-                                auto full_w = ovl_ptr->base::area().size.x;
-                                auto full_h = ovl_ptr->base::area().size.y;
-                                auto bot_h = std::max(4, full_h / 4) | 1; // Ensure odd so thumb_h (bot_h - 2) is also odd.
-                                auto thumb_h = bot_h - popup_bottom_pad_y - popup_scrollbar_h;
-                                if (thumb_h < 3) thumb_h = 3;
-                                auto thumb_w = std::max(5, thumb_h * popup_ws_thumb_ratio_w / popup_ws_thumb_ratio_h) | 1; // Ensure odd width for centered cross.
-                                auto has_plus = (workspaces_ptr->size() < ws_max_count);
-                                auto thumb_stride = thumb_w + popup_ws_thumb_gap;
-                                auto total_content_w = ws_count * thumb_stride + (has_plus ? thumb_w + popup_ws_thumb_gap : 0);
-                                auto max_scroll = std::max(0, total_content_w - full_w);
-                                if (max_scroll > 0)
+                                auto panes = gather_top_panes();
+                                if (panes.empty())
                                 {
-                                    auto thumb_left = cur * thumb_stride;
-                                    auto thumb_right = thumb_left + thumb_w;
-                                    auto scroll = *scroll_off_ptr;
-                                    if (thumb_left < scroll)
-                                        scroll = thumb_left;
-                                    else if (thumb_right > scroll + full_w)
-                                        scroll = thumb_right - full_w;
-                                    *scroll_off_ptr = std::clamp(scroll, 0, max_scroll);
+                                    gear.set_handled(faux);
+                                    return;
                                 }
-                                ovl_ptr->base::deface();
+                                auto cur = *kbd_pane_idx_ptr;
+                                if (cur < 0 || cur >= (si32)panes.size()) cur = 0;
+                                auto dir = twod{ 0, 0 };
+                                if (k == input::key::KeyLeftArrow)       dir = twod{ -1,  0 };
+                                else if (k == input::key::KeyRightArrow) dir = twod{  1,  0 };
+                                else if (k == input::key::KeyUpArrow)    dir = twod{  0, -1 };
+                                else                                      dir = twod{  0,  1 };
+                                auto next_idx = pane_navigate(cur, dir);
+                                if (next_idx >= 0) *kbd_pane_idx_ptr = next_idx;
+                                else               *kbd_pane_idx_ptr = cur; // Hit an edge: stay put.
+                                // Kbd nav clears mouse hover to keep exclusivity.
+                                *hover_pane_ptr = -1;
+                                *hover_ws_ptr = -1;
+                                *kbd_lock_coord_ptr = gear.coord; // Lock out echo MouseMove at this coord.
+                                if (auto p = overlay_shadow.lock()) p->base::deface();
+                                gear.set_handled(faux);
+                                return;
                             }
+                            // Bottom section: only left/right browse workspaces; up/down are swallowed.
+                            if (ws_count > 0 && (k == input::key::KeyLeftArrow || k == input::key::KeyRightArrow))
+                            {
+                                auto cur = (si32)*preview_idx_ptr;
+                                if (k == input::key::KeyLeftArrow)
+                                    cur = (cur > 0) ? cur - 1 : ws_count - 1;
+                                else
+                                    cur = (cur < ws_count - 1) ? cur + 1 : 0;
+                                *preview_idx_ptr = (size_t)cur;
+                                // Bottom selection changed: reset top keyboard selection (pane indices are
+                                // tied to a specific workspace) and clear mouse hover for exclusivity.
+                                *kbd_pane_idx_ptr = -1;
+                                *hover_ws_ptr = -1;
+                                *hover_pane_ptr = -1;
+                                *kbd_lock_coord_ptr = gear.coord; // Lock out echo MouseMove at this coord.
+                                // Auto-scroll bottom bar to keep the previewed thumbnail visible.
+                                if (auto ovl_ptr = overlay_shadow.lock())
+                                {
+                                    auto full_w = ovl_ptr->base::area().size.x;
+                                    auto full_h = ovl_ptr->base::area().size.y;
+                                    auto bot_h = std::max(4, full_h / 4) | 1; // Ensure odd so thumb_h (bot_h - 2) is also odd.
+                                    auto thumb_h = bot_h - popup_bottom_pad_y - popup_scrollbar_h;
+                                    if (thumb_h < 3) thumb_h = 3;
+                                    auto thumb_w = std::max(5, thumb_h * popup_ws_thumb_ratio_w / popup_ws_thumb_ratio_h) | 1; // Ensure odd width for centered cross.
+                                    auto has_plus = (workspaces_ptr->size() < ws_max_count);
+                                    auto thumb_stride = thumb_w + popup_ws_thumb_gap;
+                                    auto total_content_w = ws_count * thumb_stride + (has_plus ? thumb_w + popup_ws_thumb_gap : 0);
+                                    auto max_scroll = std::max(0, total_content_w - full_w);
+                                    if (max_scroll > 0)
+                                    {
+                                        auto thumb_left = cur * thumb_stride;
+                                        auto thumb_right = thumb_left + thumb_w;
+                                        auto scroll = *scroll_off_ptr;
+                                        if (thumb_left < scroll)
+                                            scroll = thumb_left;
+                                        else if (thumb_right > scroll + full_w)
+                                            scroll = thumb_right - full_w;
+                                        *scroll_off_ptr = std::clamp(scroll, 0, max_scroll);
+                                    }
+                                    ovl_ptr->base::deface();
+                                }
+                                gear.set_handled(faux);
+                                return;
+                            }
+                            // Bottom up/down: ignored (swallow so they don't reach the app under the popup).
                             gear.set_handled(faux);
                             return;
                         }

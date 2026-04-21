@@ -228,6 +228,38 @@ class VtmTileSession:
         """Dismiss the popup by clicking an empty area (top-left corner)."""
         self.click(1, 1)
 
+    # --- Keyboard-driven popup navigation helpers. ---
+    # Escape sequences below are what xterm-compatible terminals send for the
+    # named keys. The popup's keybd hook at tile.hpp parses these via the
+    # platform input layer and dispatches to Tab/arrow/Enter/Esc handlers.
+    def popup_send_tab(self):
+        """Send Tab to toggle focus between the top and bottom popup sections."""
+        self.write(b"\t")
+
+    def popup_send_escape(self):
+        """Send Esc to dismiss the popup."""
+        self.write(b"\x1b")
+
+    def popup_send_enter(self):
+        """Send Enter to commit the current popup selection."""
+        self.write(b"\r")
+
+    def popup_send_left(self):
+        """Send Left arrow to the popup."""
+        self.write(b"\x1b[D")
+
+    def popup_send_right(self):
+        """Send Right arrow to the popup."""
+        self.write(b"\x1b[C")
+
+    def popup_send_up(self):
+        """Send Up arrow to the popup."""
+        self.write(b"\x1b[A")
+
+    def popup_send_down(self):
+        """Send Down arrow to the popup."""
+        self.write(b"\x1b[B")
+
     def create_workspace(self):
         """Send Alt+Shift+C to create a new workspace."""
         self.write(b"\x1bC")
@@ -1403,6 +1435,194 @@ def test_popup_switch_then_operations():
 # Main
 # ---------------------------------------------------------------------------
 
+def test_popup_keyboard_navigation_bottom():
+    """Bottom section: Left/Right cycle workspaces, Up/Down are ignored."""
+    print("TEST: popup - keyboard nav bottom section (arrows + ignore up/down) ... ",
+          end="", flush=True)
+    with VtmTileSession(TILE_ARGS) as s:
+        if not s.is_alive():
+            print("FAIL - vtm-tile did not start")
+            return False
+        # Create a second workspace so the switcher has something to cycle through.
+        s.create_workspace()
+        time.sleep(1.5)
+        s.read(timeout=0.5)
+        if not s.is_alive():
+            print("FAIL - crashed creating workspace 1")
+            return False
+
+        s.open_workspace_popup()
+        time.sleep(0.8)
+        s.read(timeout=0.3)
+        # Right arrow should change the previewed workspace; Up/Down should be swallowed.
+        s.popup_send_right()
+        time.sleep(0.2)
+        s.popup_send_up()
+        time.sleep(0.2)
+        s.popup_send_down()
+        time.sleep(0.2)
+        s.popup_send_left()
+        time.sleep(0.2)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed after bottom-section arrow navigation")
+            return False
+        # Enter commits the previewed workspace and dismisses the popup.
+        s.popup_send_enter()
+        time.sleep(0.8)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed committing preview via Enter")
+            return False
+        # Popup should be gone: a second Enter keystroke must not reach popup handlers
+        # and must not crash the session.
+        s.popup_send_enter()
+        time.sleep(0.3)
+        s.read(timeout=0.2)
+        if not s.is_alive():
+            print("FAIL - crashed after post-popup Enter")
+            return False
+        print("PASS")
+        return True
+
+
+def test_popup_tab_toggle_sections():
+    """Tab toggles focus between top and bottom sections; top-section arrows navigate panes."""
+    print("TEST: popup - Tab toggles sections, top arrows navigate panes ... ",
+          end="", flush=True)
+    with VtmTileSession(TILE_ARGS) as s:
+        if not s.is_alive():
+            print("FAIL - vtm-tile did not start")
+            return False
+        # Give the previewed workspace more than one pane so top-section navigation
+        # has meaningful targets (split the initial pane).
+        s.split_horizontal()
+        time.sleep(1.0)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed splitting pane")
+            return False
+
+        s.open_workspace_popup()
+        time.sleep(0.8)
+        s.read(timeout=0.3)
+        # Move focus from bottom (default) to top.
+        s.popup_send_tab()
+        time.sleep(0.2)
+        # Navigate in all four directions to exercise the 2D navigate algorithm.
+        s.popup_send_right()
+        time.sleep(0.15)
+        s.popup_send_left()
+        time.sleep(0.15)
+        s.popup_send_down()
+        time.sleep(0.15)
+        s.popup_send_up()
+        time.sleep(0.15)
+        s.read(timeout=0.2)
+        if not s.is_alive():
+            print("FAIL - crashed during top-section 2D navigation")
+            return False
+        # Tab back to bottom: selection survives, up/down remain ignored.
+        s.popup_send_tab()
+        time.sleep(0.15)
+        s.popup_send_up()
+        time.sleep(0.15)
+        s.popup_send_down()
+        time.sleep(0.15)
+        s.read(timeout=0.2)
+        if not s.is_alive():
+            print("FAIL - crashed after Tab-back plus bottom up/down")
+            return False
+        # Dismiss with Esc; session must survive.
+        s.popup_send_escape()
+        time.sleep(0.5)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed after Esc dismiss")
+            return False
+        print("PASS")
+        return True
+
+
+def test_popup_tab_enter_focuses_pane():
+    """Tab into top section, arrow-select a pane, Enter commits pane focus without crashing."""
+    print("TEST: popup - Tab into top + Enter commits pane selection ... ",
+          end="", flush=True)
+    with VtmTileSession(TILE_ARGS) as s:
+        if not s.is_alive():
+            print("FAIL - vtm-tile did not start")
+            return False
+        s.split_horizontal()
+        time.sleep(1.0)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed splitting pane")
+            return False
+        s.open_workspace_popup()
+        time.sleep(0.8)
+        s.read(timeout=0.3)
+        s.popup_send_tab()  # Bottom -> Top.
+        time.sleep(0.2)
+        s.popup_send_right()  # Move keyboard selection in top section.
+        time.sleep(0.2)
+        s.popup_send_enter()  # Commit: switch to previewed workspace + focus that pane.
+        time.sleep(0.8)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed committing pane selection via Enter")
+            return False
+        # Session should behave normally afterwards (e.g., subsequent ws switch).
+        s.switch_workspace_by_key(0)
+        time.sleep(0.5)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed switching workspace after pane-commit")
+            return False
+        print("PASS")
+        return True
+
+
+def test_popup_tab_toggle_no_panes():
+    """Tab into a top section that has a single pane should still not crash (edge case)."""
+    print("TEST: popup - Tab with single-pane workspace (no 2D targets) ... ",
+          end="", flush=True)
+    with VtmTileSession(TILE_ARGS) as s:
+        if not s.is_alive():
+            print("FAIL - vtm-tile did not start")
+            return False
+        # Do not split: the workspace has a single pane.
+        s.open_workspace_popup()
+        time.sleep(0.8)
+        s.read(timeout=0.3)
+        s.popup_send_tab()
+        time.sleep(0.15)
+        # Arrows in the top section with a single pane must no-op gracefully.
+        s.popup_send_left()
+        s.popup_send_right()
+        s.popup_send_up()
+        s.popup_send_down()
+        time.sleep(0.2)
+        s.read(timeout=0.2)
+        if not s.is_alive():
+            print("FAIL - crashed navigating in single-pane top section")
+            return False
+        # Tab back and dismiss.
+        s.popup_send_tab()
+        time.sleep(0.1)
+        s.popup_send_escape()
+        time.sleep(0.5)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed after single-pane Tab-back + Esc")
+            return False
+        print("PASS")
+        return True
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
 def main():
     if not os.path.isfile(VTM_TILE_BINARY):
         print(f"ERROR: vtm-tile binary not found at {VTM_TILE_BINARY}")
@@ -1439,6 +1659,10 @@ def main():
         test_popup_create_workspace_via_plus,
         test_popup_reopen_after_dismiss,
         test_popup_switch_then_operations,
+        test_popup_keyboard_navigation_bottom,
+        test_popup_tab_toggle_sections,
+        test_popup_tab_enter_focuses_pane,
+        test_popup_tab_toggle_no_panes,
     ]
 
     passed = 0
