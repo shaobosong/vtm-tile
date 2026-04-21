@@ -2267,9 +2267,27 @@ namespace netxs::app::tile
                                         auto px = base_x + ws_count * thumb_stride;
                                         if (mx >= px && mx < px + plus_w)
                                         {
+                                            // Resolve the currently selected app, matching CreateWorkspace
+                                            // lua method behavior. The selectapp handler writes
+                                            // "tile.selected" on both the outer tile boss (object) and
+                                            // the active workspace veer. The overlay is attached to the
+                                            // wrapper (cake), so its parent chain does NOT reach `object`
+                                            // or the workspace veer; read the property directly from the
+                                            // currently active workspace veer instead.
+                                            auto selected_override = text{};
+                                            if (!workspaces_ptr->empty())
+                                            {
+                                                auto idx = std::min(*current_ws_index_ptr, workspaces_ptr->size() - 1);
+                                                auto& cur_ws = (*workspaces_ptr)[idx];
+                                                if (cur_ws)
+                                                {
+                                                    auto& prop = cur_ws->base::property("tile.selected");
+                                                    if (!prop.empty()) selected_override = prop;
+                                                }
+                                            }
                                             dismiss_visual();
                                             dismiss_hook();
-                                            create_workspace();
+                                            create_workspace(selected_override);
                                             (*refresh_status_bar_fn)();
                                             gear.dismiss();
                                             return;
