@@ -260,6 +260,13 @@ class VtmTileSession:
         """Send Down arrow to the popup."""
         self.write(b"\x1b[B")
 
+    def popup_send_label(self, ch):
+        """Send a single label character to the popup (used for index-based selection
+        in both the bottom workspace switcher and the top pane grid)."""
+        if isinstance(ch, int):
+            ch = chr(ch)
+        self.write(ch.encode())
+
     def create_workspace(self):
         """Send Alt+Shift+C to create a new workspace."""
         self.write(b"\x1bC")
@@ -1619,6 +1626,80 @@ def test_popup_tab_toggle_no_panes():
         return True
 
 
+def test_popup_top_section_label_key_selects_pane():
+    """In the top section, a label key (0x30..0x7E) should commit focus to the matching pane
+    and dismiss the popup. Bottom-section label keys must still switch workspaces."""
+    print("TEST: popup - top section label key selects pane ... ",
+          end="", flush=True)
+    with VtmTileSession(TILE_ARGS) as s:
+        if not s.is_alive():
+            print("FAIL - vtm-tile did not start")
+            return False
+        # Build a workspace with at least two panes so label '0' and '1' both resolve.
+        s.split_horizontal()
+        time.sleep(1.0)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed splitting pane")
+            return False
+        s.open_workspace_popup()
+        time.sleep(0.8)
+        s.read(timeout=0.3)
+        s.popup_send_tab()  # Bottom -> Top.
+        time.sleep(0.2)
+        # Press label '1' in the top section: should commit pane[1] and dismiss.
+        s.popup_send_label('1')
+        time.sleep(0.8)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed committing pane via label key in top section")
+            return False
+        # Popup should now be gone; normal operations must still work.
+        s.switch_workspace_by_key(0)
+        time.sleep(0.4)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed switching workspace after top-label commit")
+            return False
+        # Reopen popup and verify bottom-section label keys still switch workspaces.
+        s.create_workspace()
+        time.sleep(0.8)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed creating second workspace")
+            return False
+        s.open_workspace_popup()
+        time.sleep(0.8)
+        s.read(timeout=0.3)
+        # Focus starts in bottom section; label '0' should switch to ws[0] and dismiss.
+        s.popup_send_label('0')
+        time.sleep(0.6)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed using label key in bottom section after feature change")
+            return False
+        # Out-of-range label keys in the top section must be swallowed (no crash).
+        s.open_workspace_popup()
+        time.sleep(0.6)
+        s.popup_send_tab()
+        time.sleep(0.15)
+        s.popup_send_label('~')  # Very unlikely to map to a real pane index.
+        time.sleep(0.4)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed on out-of-range top-section label key")
+            return False
+        # Popup must still be dismissable after an out-of-range label.
+        s.popup_send_escape()
+        time.sleep(0.4)
+        s.read(timeout=0.3)
+        if not s.is_alive():
+            print("FAIL - crashed dismissing popup after out-of-range label")
+            return False
+        print("PASS")
+        return True
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -1663,6 +1744,7 @@ def main():
         test_popup_tab_toggle_sections,
         test_popup_tab_enter_focuses_pane,
         test_popup_tab_toggle_no_panes,
+        test_popup_top_section_label_key_selects_pane,
     ]
 
     passed = 0

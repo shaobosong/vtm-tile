@@ -2815,15 +2815,38 @@ namespace netxs::app::tile
                             gear.set_handled(faux);
                             return;
                         }
-                        // Label keys: jump to workspace whose displayed label matches the pressed key.
-                        // Labels are rendered as char(ws_min_index + i) across the full
-                        // [ws_min_index .. ws_max_index] range (0x30..0x7E: '0'-'9', ':;<=>?@',
-                        // 'A'-'Z', '[\]^_`', 'a'-'z', '{|}~'). The pressed character maps directly
-                        // to array index (ch[0] - ws_min_index).
+                        // Label keys: jump to workspace (bottom section) or pane (top section)
+                        // whose displayed badge matches the pressed key. Badges are rendered as
+                        // char(ws_min_index + i) across the full [ws_min_index .. ws_max_index]
+                        // range (0x30..0x7E: '0'-'9', ':;<=>?@', 'A'-'Z', '[\]^_`', 'a'-'z', '{|}~').
+                        // The pressed character maps directly to index (ch[0] - ws_min_index).
                         auto& ch = gear.keybd::cluster;
                         if (ch.size() == 1 && ch[0] >= ws_min_index && ch[0] <= ws_max_index)
                         {
                             auto target = (size_t)(ch[0] - ws_min_index);
+                            if (*focus_section_ptr == 0) // Top section: focus the matching pane in the previewed ws.
+                            {
+                                auto panes = gather_top_panes();
+                                if (target < panes.size())
+                                {
+                                    auto slot_veer = panes[target].slot_veer;
+                                    auto idx = *preview_idx_ptr;
+                                    dismiss_visual();
+                                    dismiss_hook();
+                                    if (idx < workspaces_ptr->size())
+                                    {
+                                        switch_workspace(idx);
+                                        if (auto focus_target = get_slot_focus_target(slot_veer))
+                                        {
+                                            pro::focus::set(focus_target, gear.id, solo::on);
+                                        }
+                                        (*refresh_status_bar_fn)();
+                                    }
+                                }
+                                gear.set_handled(faux);
+                                return;
+                            }
+                            // Bottom section: switch to the matching workspace.
                             if (target < workspaces_ptr->size())
                             {
                                 dismiss_visual();
