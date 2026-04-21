@@ -2546,11 +2546,15 @@ namespace netxs::app::tile
                             gear.set_handled(faux);
                             return;
                         }
-                        // Number keys '1'-'9': jump to workspace N and dismiss.
+                        // Label keys: jump to workspace whose displayed label matches the pressed key.
+                        // Labels are rendered as char(ws_min_index + i) across the full
+                        // [ws_min_index .. ws_max_index] range (0x30..0x7E: '0'-'9', ':;<=>?@',
+                        // 'A'-'Z', '[\]^_`', 'a'-'z', '{|}~'). The pressed character maps directly
+                        // to array index (ch[0] - ws_min_index).
                         auto& ch = gear.keybd::cluster;
-                        if (ch.size() == 1 && ch[0] >= '1' && ch[0] <= '9')
+                        if (ch.size() == 1 && ch[0] >= ws_min_index && ch[0] <= ws_max_index)
                         {
-                            auto target = (size_t)(ch[0] - '1');
+                            auto target = (size_t)(ch[0] - ws_min_index);
                             if (target < workspaces_ptr->size())
                             {
                                 dismiss_visual();
