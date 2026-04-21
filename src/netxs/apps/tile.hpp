@@ -1893,6 +1893,13 @@ namespace netxs::app::tile
                     // stationary cursor cannot override keyboard navigation. Initialized to an
                     // out-of-range sentinel so the first real MouseMove is always honored.
                     auto kbd_lock_coord_ptr = ptr::shared(twod{ -32768, -32768 });
+                    // Initialization gate: the very first MouseMove event after the popup opens is
+                    // silently discarded and its coord is saved into kbd_lock_coord_ptr. This
+                    // prevents a cursor that was already resting on a tab from immediately
+                    // highlighting it when the popup appears (e.g. after opening via keyboard
+                    // shortcut). Once any genuine mouse movement occurs, this gate is open and
+                    // normal hover processing resumes.
+                    auto popup_ready_ptr = ptr::shared(faux);
 
                     // Build the overlay (attached to the wrapper cake).
                     auto overlay_ptr = ui::mock::ctor();
@@ -2173,8 +2180,18 @@ namespace netxs::app::tile
                             [workspaces_ptr, current_ws_index_ptr, preview_idx_ptr, scroll_off_ptr,
                              hover_ws_ptr, hover_pane_ptr, hover_sb_ptr,
                              kbd_pane_idx_ptr, kbd_lock_coord_ptr, focus_section_ptr,
-                             collect_ws_panes_fn, overlay_shadow](hids& gear)
+                             collect_ws_panes_fn, overlay_shadow, popup_ready_ptr](hids& gear)
                         {
+                            // Initialization gate: discard the very first MouseMove (which reflects
+                            // the cursor position before the popup opened) so that a pre-resting
+                            // cursor never highlights a tab on popup entry. Lock kbd_lock_coord_ptr
+                            // to that coord so a stationary cursor also stays suppressed.
+                            if (!*popup_ready_ptr)
+                            {
+                                *popup_ready_ptr = true;
+                                *kbd_lock_coord_ptr = gear.coord;
+                                return;
+                            }
                             auto ovl_ptr = overlay_shadow.lock();
                             if (!ovl_ptr) return;
                             auto full_area = ovl_ptr->base::area();
