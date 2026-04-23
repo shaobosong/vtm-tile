@@ -657,4 +657,20 @@
                 bufferbase::uifwd = faux;
                 return bufferbase::selection_cancel();
             }
+            // alt_screen: Count total occurrences of `query` in the alt canvas.
+            si32 selection_count_matches(view query) override
+            {
+                if (query.empty()) return 0;
+                auto probe = line{ query };
+                auto mlen  = probe.length();
+                if (!mlen) return 0;
+                auto total = si32{ 0 };
+                auto offset = si32{ 0 };
+                while (canvas.find(probe, offset))
+                {
+                    ++total;
+                    offset += mlen;
+                }
+                return total;
+            }
         };

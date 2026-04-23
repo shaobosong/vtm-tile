@@ -33,6 +33,9 @@ namespace netxs::ui
             X(KeyEvent             ) /* */ \
             X(ExclusiveKeyboardMode) /* */ \
             X(FindNextMatch        ) /* */ \
+            X(FindText             ) /* Search for explicit text (used by the find-bar UI) */ \
+            X(ToggleFindBar        ) /* Show/hide/toggle the terminal find-bar overlay */ \
+            X(FindBarVisible       ) /* Query find-bar visibility state */ \
             X(ScrollViewportByPage ) /* */ \
             X(ScrollViewportByCell ) /* */ \
             X(ScrollViewportToTop  ) /* */ \

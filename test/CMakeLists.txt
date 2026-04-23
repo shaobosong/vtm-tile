@@ -27,4 +27,11 @@ if(Python3_FOUND)
         ENVIRONMENT "VTM_TILE_BINARY=$<TARGET_FILE:vtm-tile>"
         TIMEOUT 300
         LABELS "tui;workspace")
+
+    add_test(NAME find_bar_test
+             COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test_find_bar.py")
+    set_tests_properties(find_bar_test PROPERTIES
+        ENVIRONMENT "VTM_DESK_BINARY=$<TARGET_FILE:vtm-desk>"
+        TIMEOUT 300
+        LABELS "tui;find")
 endif()

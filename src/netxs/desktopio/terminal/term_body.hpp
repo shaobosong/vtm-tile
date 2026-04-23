@@ -45,6 +45,14 @@
         bool       rawkbd; // term: Exclusive keyboard access.
         bool       bottom_anchored; // term: Anchor scrollback content when resizing (default is anchor at bottom).
         ui32       event_sources; // term: vt-input-mode event reporting bit-field.
+        bool       find_bar_visible; // term: Find-bar overlay is currently shown.
+        text       last_find_query; // term: Last query string used by the find-bar
+                                    //       (kept so the backend can tell a new query
+                                    //       from a "next match" re-search on same query).
+        si32       last_find_index{ 0 }; // term: 1-based index of the currently selected
+                                         //       match within last_find_query, or 0 when
+                                         //       no match is active.
+        si32       last_find_total{ 0 }; // term: Cached total-match count for last_find_query.
         vtty       ipccon; // term: IPC connector. Should be destroyed first.
 
         // term: Place rectangle block to the scrollback buffer.
@@ -1046,6 +1054,82 @@
                 selection_moveto(delta);
             }
         }
+        // term: Search the scrollback for an explicit query string. Used by
+        //       the find-bar overlay UI (and by the FindText Lua method).
+        //       Empty query re-runs the previous match (forward/backward step).
+        //       Also maintains last_find_index / last_find_total so the UI
+        //       can render the "001/099" counter.
+        void selection_search_text(view query, feed dir)
+        {
+            auto& console = *target;
+            auto delta = dot_00;
+            auto fwd = dir == feed::fwd;
+            auto query_changed = query != last_find_query;
+            last_find_query.assign(query.begin(), query.end());
+            if (query.empty())
+            {
+                // Empty query from the find-bar means "no search is active".
+                // Drop any existing highlight and zero the counter so the UI
+                // doesn't keep showing a stale match underline / total.
+                selection_cancel();
+                console.match = {};
+                last_find_total = 0;
+                last_find_index = 0;
+            }
+            else if (query_changed || !console.selection_active())
+            {
+                // New (or changed) query: recount and seed a fresh match from
+                // the whole-buffer start edge (top for fwd, bottom for rev).
+                last_find_total = console.selection_count_matches(query);
+                delta = console.selection_search(dir, query);
+                // First hit after a new query: index is 1 (fwd) or total (rev).
+                last_find_index = last_find_total
+                                ? (fwd ? 1 : last_find_total)
+                                : 0;
+            }
+            else
+            {
+                // Same query as last time with an existing selection.
+                // Recount first so the counter reflects any buffer changes
+                // (e.g. new output) that happened since the previous step.
+                auto new_total = console.selection_count_matches(query);
+                // Clamp stale index if scrollback shrank since last navigation.
+                if (last_find_index > new_total) last_find_index = new_total;
+                if (last_find_index < 0)         last_find_index = 0;
+                // Detect wrap-around BEFORE advancing: if we're already at
+                // the boundary (last match forward / first match reverse),
+                // re-seed from the opposite edge of the whole scrollback.
+                auto at_boundary = new_total > 0
+                                && (fwd ? last_find_index >= new_total
+                                        : last_find_index <= 1);
+                last_find_total = new_total;
+                if (at_boundary)
+                {
+                    delta = console.selection_search(dir, query);
+                    last_find_index = fwd ? 1 : last_find_total;
+                }
+                else if (last_find_total > 0)
+                {
+                    delta = console.selection_search(dir);
+                    last_find_index += fwd ? 1 : -1;
+                    if (last_find_index > last_find_total) last_find_index = 1;
+                    if (last_find_index < 1)               last_find_index = last_find_total;
+                }
+                else
+                {
+                    delta = console.selection_search(dir);
+                    last_find_index = 0;
+                }
+            }
+            base::signal(tier::release, terminal::events::search::status, console.selection_button(delta));
+            if (target == &normal && delta)
+            {
+                selection_moveto(delta);
+            }
+            // Broadcast the updated counter to any listener (find-bar UI).
+            auto res = terminal::events::find_res{ last_find_query, last_find_total, last_find_index };
+            base::signal(tier::anycast, terminal::events::find::result, res);
+        }
         auto& get_color()
         {
             return defclr;
@@ -1449,7 +1533,8 @@
               ime_on{ faux },
               rawkbd{ faux },
               bottom_anchored{ true },
-              event_sources{}
+              event_sources{},
+              find_bar_visible{ faux }
         {
             set_fg_color(defcfg.def_fcolor);
             set_bg_color(defcfg.def_bcolor);
@@ -1524,6 +1609,27 @@
                                                             selection_search(gear, dir > 0 ? feed::fwd : feed::rev);
                                                             gear.set_handled();
                                                         });
+                                                    }},
+                { methods::FindText,                [&]
+                                                    {
+                                                        luafx.run_with_gear_wo_return([&](auto& gear){ gear.set_handled(); });
+                                                        auto query = luafx.get_args_or(1, ""s);
+                                                        auto dir   = luafx.get_args_or(2, si32{ 1 });
+                                                        selection_search_text(query, dir > 0 ? feed::fwd : feed::rev);
+                                                        luafx.set_return();
+                                                    }},
+                { methods::ToggleFindBar,           [&]
+                                                    {
+                                                        luafx.run_with_gear_wo_return([&](auto& gear){ gear.set_handled(); });
+                                                        auto state = luafx.get_args_or(1, si32{ -1 });
+                                                        base::signal(tier::anycast, terminal::events::find::toggle, state);
+                                                        luafx.set_return();
+                                                    }},
+                { methods::FindBarVisible,          [&]
+                                                    {
+                                                        luafx.run_with_gear_wo_return([&](auto& gear){ gear.set_handled(); });
+                                                        auto state = find_bar_visible ? si32{ 1 } : si32{ 0 };
+                                                        luafx.set_return(state);
                                                     }},
                 { methods::ScrollViewportByPage,    [&]
                                                     {
@@ -2040,6 +2146,27 @@
             LISTEN(tier::release, input::events::keybd::post, gear)
             {
                 key_event(gear);
+            };
+            // Find-bar integration: the backend answers "search" requests
+            // produced by the overlay UI and keeps a mirror of the bar's
+            // visibility so Lua callers can query it via FindBarVisible.
+            LISTEN(tier::anycast, terminal::events::find::request, req)
+            {
+                selection_search_text(req.query, req.dir > 0 ? feed::fwd : feed::rev);
+            };
+            // Find-bar was hidden (status=0): drop any match highlight so the
+            // scrollback doesn't keep showing a stale selection after close.
+            LISTEN(tier::anycast, terminal::events::find::status, state)
+            {
+                find_bar_visible = !!state;
+                if (!find_bar_visible)
+                {
+                    selection_cancel();
+                    target->match = {};
+                    last_find_query.clear();
+                    last_find_total = 0;
+                    last_find_index = 0;
+                }
             };
             LISTEN(tier::release, e2::render::any, parent_canvas)
             {

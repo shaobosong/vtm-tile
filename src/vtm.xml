@@ -199,6 +199,7 @@ R"==(
             <item=/Menu/Buttons/StdioLog/>
             <item=/Menu/Buttons/ClearScrollback/>
             <item=/Menu/Buttons/Restart/>
+            <item=/Menu/Buttons/FindBar/>
         </menu>
         <selection>
             <mode=/Terminal/selection/mode/>  <!-- Clipboard copy format: "text" | "ansi" | "rich" | "html" | "protected" | "none". -->
@@ -508,6 +509,7 @@ R"==(
         </StdioLog>
         <ClearScrollback=/Ns/ClearScrollback script=OnLeftClick|TerminalClearScrollback/>
         <Restart        =/Ns/Restart         script=OnLeftClick|TerminalRestart/>
+        <FindBar        =/Ns/FindBar         script=OnLeftClick|TerminalFindBarToggle/>
     </Buttons>
 </Menu>
 
@@ -598,6 +600,7 @@ R"==(
         </AlwaysOnTop>
         <ClearScrollback label="  Clear  "   tooltip=" Clear scrollback "/>
         <Restart         label="  Restart  " tooltip=" Restart current terminal session "/>
+        <FindBar         label="  Search  "  tooltip=" Toggle the terminal find-bar "/>
         <Taskbar>
             <taskbar_tooltip>
                 "\e[1m"" Desktop Taskbar                     ""\e[m\n"
@@ -1243,6 +1246,11 @@ R"==(
     <ExclusiveKeyboardMode             ="vtm.terminal.ExclusiveKeyboardMode(vtm.terminal.ExclusiveKeyboardMode()==1 and 0 or 1);"/>  <!-- Toggle exclusive keyboard mode by pressing and releasing Ctrl-Alt or Alt-Ctrl (reversed release order). -->
     <TerminalFindPrev                  ="vtm.terminal.FindNextMatch(-1);"/>            <!-- Highlight prev match of selected text fragment. Clipboard content is used if no active selection. -->
     <TerminalFindNext                  ="vtm.terminal.FindNextMatch( 1);"/>            <!-- Highlight next match of selected text fragment. Clipboard content is used if no active selection. -->
+    <TerminalFindBarToggle             ="vtm.terminal.ToggleFindBar();"/>              <!-- Toggle the terminal find-bar overlay visibility. -->
+    <TerminalFindBarShow               ="vtm.terminal.ToggleFindBar(1);"/>             <!-- Show the terminal find-bar overlay. -->
+    <TerminalFindBarHide               ="vtm.terminal.ToggleFindBar(0);"/>             <!-- Hide the terminal find-bar overlay. -->
+    <TerminalFindText                  ="vtm.terminal.FindText('text', 1);"/>          <!-- Search for the given text in the scrollback (dir=1 forward, -1 backward). -->
+    <TerminalFindBarVisible            ="return vtm.terminal.FindBarVisible();"/>      <!-- Return 1 if the terminal find-bar is visible, 0 otherwise. -->
     <TerminalScrollViewportOnePageUp   ="vtm.terminal.ScrollViewportByPage( 0, 1);"/>  <!-- Scroll viewport one page up. -->
     <TerminalScrollViewportOnePageDown ="vtm.terminal.ScrollViewportByPage( 0,-1);"/>  <!-- Scroll viewport one page down. -->
     <TerminalScrollViewportOnePageLeft ="vtm.terminal.ScrollViewportByPage( 1, 0);"/>  <!-- Scroll viewport one page to the left. -->

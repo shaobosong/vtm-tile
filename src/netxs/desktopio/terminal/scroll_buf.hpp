@@ -4332,12 +4332,17 @@
                         auto done = bufferbase::selection_search(upbox, from, direction, uptop.coor, dntop.coor);
                         if (!done && ahead)
                         {
-                            // Get first visible line.
-                            auto fromxy = twod{ 0, batch.ancdy };
-                            if (probe(batch.ancid, fromxy))
+                            // Fresh forward search: seed from the very top of
+                            // the whole scrollback (not just the visible viewport),
+                            // so the first match is globally the earliest one.
+                            auto start_id = batch.front().index;
+                            auto fromxy   = twod{ 0, 0 };
+                            if (probe(start_id, fromxy))
                             {
-                                auto center = fromxy - selection_viewport_center();
-                                delta -= center;
+                                // Bring the seed point to the viewport center,
+                                // matching the convention used at line 4320.
+                                auto center = selection_center(start_id, fromxy);
+                                delta += center;
                             }
                         }
                         else delta = dot_00;
@@ -4352,26 +4357,19 @@
                         auto done = bufferbase::selection_search(dnbox, from, direction, upend.coor, dnend.coor);
                         if (!done && !ahead)
                         {
-                            // Get last visible line.
-                            auto vpos =-batch.ancdy;
-                            auto head = batch.iter_by_id(batch.ancid);
-                            auto tail = batch.end();
-                            while (head != tail)
-                            {
-                                auto& curln = *head++;
-                                auto newpos = vpos + curln.height(panel.x);
-                                if (newpos >= arena) break;
-                                vpos = newpos;
-                            }
-                            auto& curln = *--head;
-                            auto coorxy = twod{ panel.x - owner.origin.x, arena - vpos };
-                            auto offset = screen_to_offset(curln, coorxy);
-                            auto fromxy = offset_to_screen(curln, offset);
+                            // Fresh reverse search: seed from the end of the
+                            // last line of the whole scrollback (not just the
+                            // last visible line), so the first hit is globally
+                            // the latest match.
+                            auto& curln  = batch.back();
+                            auto  coorxy = twod{ panel.x, curln.height(panel.x) - 1 };
+                            auto  offset = screen_to_offset(curln, coorxy);
+                            auto  fromxy = offset_to_screen(curln, offset);
                             if (probe(curln.index, fromxy))
                             {
-                                auto center = selection_viewport_center();
-                                delta.x -= panel.x / 2 - coorxy.x - fromxy.x;
-                                delta.y -= vpos - center.y;
+                                // Bring the seed point to the viewport center.
+                                auto center = selection_center(curln.index, fromxy);
+                                delta += center;
                             }
                         }
                         else delta = dot_00;
@@ -4387,6 +4385,44 @@
 
                 bufferbase::selection_update(faux);
                 return delta;
+            }
+            // scroll_buf: Count total occurrences of `query` across the whole
+            //             scrollback, including the upbox/dnbox margin canvases
+            //             when a scrolling region is set. Does not touch state.
+            si32 selection_count_matches(view query) override
+            {
+                if (query.empty()) return 0;
+                auto probe = line{ query };
+                auto mlen  = probe.length();
+                if (!mlen) return 0;
+                auto total = si32{ 0 };
+                // Count matches on every scrollback line.
+                auto head = batch.begin();
+                auto tail = batch.end();
+                while (head != tail)
+                {
+                    auto& curln = *head++;
+                    auto offset = si32{ 0 };
+                    while (curln.find(probe, offset))
+                    {
+                        ++total;
+                        offset += mlen;
+                    }
+                }
+                // Also scan the scrolling-region margins (upbox/dnbox) if present.
+                auto count_box = [&](auto const& block)
+                {
+                    if (!block.area()) return;
+                    auto offset = si32{ 0 };
+                    while (block.find(probe, offset))
+                    {
+                        ++total;
+                        offset += mlen;
+                    }
+                };
+                if (sctop) count_box(dnbox); // Note: bufferbase search on margins mirrors this mapping.
+                if (scend) count_box(upbox);
+                return total;
             }
             // scroll_buf: Return match navigation state.
             si32 selection_button(twod delta = {}) override

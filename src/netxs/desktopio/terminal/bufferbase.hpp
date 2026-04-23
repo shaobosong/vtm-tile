@@ -369,6 +369,12 @@
                 }
                 return delta;
             }
+            // bufferbase: Count total matches of `query` in the whole scrollback.
+            //   Default (no-op) is zero; each concrete buffer overrides this.
+            virtual si32 selection_count_matches(view /*query*/)
+            {
+                return 0;
+            }
             virtual void selection_setjet(bias /*align*/ = {})
             {
                 // Do nothing by default.
