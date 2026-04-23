@@ -5686,6 +5686,10 @@ namespace netxs::os
                 auto paste_data = [&](qiew cluster)
                 {
                     k.payload = input::keybd::type::keypaste;
+                    k.keystat = input::key::pressed; // Keypaste has no press/release duality; using "pressed" prevents
+                                                     // forward_release from bypassing gear.handled (which it always does
+                                                     // for keystat==released) so that the find bar can fully consume
+                                                     // bracketed-paste events without leaking them into the terminal.
                     k.cluster = cluster;
                     chords.reset(k);
                     keybd(k);
