@@ -820,6 +820,11 @@ namespace netxs::app::terminal
                         state_ptr->total = 0;
                         state_ptr->index = 0;
                         *pending_unhook = faux;
+                        if (!state_ptr->query.empty()) // Re-run search if there is a pending query.
+                        {
+                            auto req = ui::terminal::events::find_req{ state_ptr->query, state_ptr->dir };
+                            boss.base::signal(tier::anycast, ui::terminal::events::find::request, req);
+                        }
                         if (auto t = term_weak.lock(); t && !*kbd_hook)
                         {
                             t->bell::submit(tier::preview, input::events::keybd::any, *kbd_hook)
