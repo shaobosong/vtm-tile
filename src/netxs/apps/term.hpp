@@ -360,11 +360,12 @@ namespace netxs::app::terminal
             static constexpr auto col_caret  = argb{ 0xffe0af68 };
 
             // Hover zones.
-            static constexpr auto hov_none   = si32{ 0 };
-            static constexpr auto hov_input  = si32{ 1 };
-            static constexpr auto hov_btn_up = si32{ 2 };
-            static constexpr auto hov_btn_dn = si32{ 3 };
-            static constexpr auto hov_btn_x  = si32{ 4 };
+            static constexpr auto hov_none      = si32{ 0 };
+            static constexpr auto hov_input     = si32{ 1 };
+            static constexpr auto hov_btn_up    = si32{ 2 };
+            static constexpr auto hov_btn_dn    = si32{ 3 };
+            static constexpr auto hov_btn_x     = si32{ 4 };
+            static constexpr auto hov_btn_clear = si32{ 5 }; // clear-query button (inside input area)
 
             // Navigation direction. Values match terminal::find_req::dir:
             //   dir_up   = -1  (Enter moves backward, i.e. up/toward scrollback start)
@@ -417,7 +418,8 @@ namespace netxs::app::terminal
                 si32 count_text_x0; // first cell that holds the 9-char right-aligned counter text
                 si32 btn_up_x;      // column of "↑" glyph (center of 3-cell button)
                 si32 btn_dn_x;      // column of "↓" glyph
-                si32 btn_x_x;       // column of "×" glyph
+                si32 btn_x_x;       // column of "×" glyph (close button, right of bar)
+                si32 btn_clear_x;   // column of "×" glyph (clear-query button, inside input area)
             };
             auto layout_of = [](si32 outer_w) -> bar_layout
             {
@@ -446,6 +448,9 @@ namespace netxs::app::terminal
                 L.input_x1 = L.count_x0 - 1 - 1;                  // 21 (leave 1-cell right pad)
                 if (L.input_x1 < L.input_x0) L.input_x1 = L.input_x0;
                 L.input_w  = L.input_x1 - L.input_x0 + 1;
+                // Clear-query button: rightmost 3 cells of the input area.
+                // Center column = input_x1 - 1 (spans input_x1-2 .. input_x1).
+                L.btn_clear_x = L.input_x1 - 1;                    // 20
                 return L;
             };
 
@@ -587,6 +592,10 @@ namespace netxs::app::terminal
 
                 // Input underline area (row mid_y, cols [input_x0, input_x1]).
                 // First paint every input cell with an underscore in col_uline.
+                // When the query is non-empty the rightmost 3 cells are reserved
+                // for the clear-query button, so text rendering is capped to the
+                // remaining (input_w - btn_width) cells.
+                auto eff_input_w = st.query.empty() ? L.input_w : (L.input_w - btn_width);
                 auto input_bg = st.hover == hov_input ? col_hov_bg : col_bg;
                 canvas.fill(rect{{ x0 + L.input_x0, mid_y }, { L.input_w, 1 }},
                     [input_bg](cell& c){ c.bgc(input_bg).fgc(col_uline).txt(ch_uline).cur(text_cursor::none); });
@@ -597,24 +606,24 @@ namespace netxs::app::terminal
                 if (st.caret_cp > total)      st.caret_cp = total;
                 if (st.scroll_cp < 0)         st.scroll_cp = 0;
                 if (st.scroll_cp > st.caret_cp) st.scroll_cp = st.caret_cp;
-                if (st.caret_cp - st.scroll_cp >= L.input_w)
+                if (st.caret_cp - st.scroll_cp >= eff_input_w)
                 {
-                    st.scroll_cp = st.caret_cp - L.input_w + 1;
+                    st.scroll_cp = st.caret_cp - eff_input_w + 1;
                 }
                 // After inserting at end, keep caret at right edge but leave
                 // 1-cell space for the caret indicator.
-                if (st.caret_cp == total && total - st.scroll_cp >= L.input_w)
+                if (st.caret_cp == total && total - st.scroll_cp >= eff_input_w)
                 {
-                    st.scroll_cp = total - L.input_w + 1;
+                    st.scroll_cp = total - eff_input_w + 1;
                     if (st.scroll_cp < 0) st.scroll_cp = 0;
                 }
 
-                auto visible_text = slice_cp(st.query, st.scroll_cp, L.input_w);
+                auto visible_text = slice_cp(st.query, st.scroll_cp, eff_input_w);
                 // Overlay text glyphs on top of the underscores.
                 auto i_col = x0 + L.input_x0;
                 auto it   = visible_text.begin();
                 auto stop = visible_text.end();
-                while (it != stop && i_col <= x0 + L.input_x1)
+                while (it != stop && i_col <= x0 + L.input_x0 + eff_input_w - 1)
                 {
                     auto begin = it;
                     ++it;
@@ -627,7 +636,7 @@ namespace netxs::app::terminal
 
                 // Caret indicator (I-bar style, drawn as an inverted cell).
                 auto caret_col = x0 + L.input_x0 + (st.caret_cp - st.scroll_cp);
-                if (caret_col >= x0 + L.input_x0 && caret_col <= x0 + L.input_x1)
+                if (caret_col >= x0 + L.input_x0 && caret_col <= x0 + L.input_x0 + eff_input_w - 1)
                 {
                     canvas.fill(rect{{ caret_col, mid_y }, { 1, 1 }},
                         [](cell& c)
@@ -682,6 +691,10 @@ namespace netxs::app::terminal
                 draw_btn(L.btn_up_x, "↑", col_btn,   st.hover == hov_btn_up, st.dir == dir_up);
                 draw_btn(L.btn_dn_x, "↓", col_btn,   st.hover == hov_btn_dn, st.dir == dir_down);
                 draw_btn(L.btn_x_x,  "×", col_btn_x, st.hover == hov_btn_x,  faux);
+                if (!st.query.empty())
+                {
+                    draw_btn(L.btn_clear_x, "×", col_btn_x, st.hover == hov_btn_clear, faux);
+                }
             };
 
             // Mouse click handling on the bar: detect which button was hit.
@@ -737,6 +750,17 @@ namespace netxs::app::terminal
                             auto req = ui::terminal::events::find_req{ st.query, dir_down };
                             gear.owner.base::signal(tier::anycast, ui::terminal::events::find::request, req);
                         }
+                        else if (!st.query.empty() && mx >= L.btn_clear_x - 1 && mx <= L.btn_clear_x + 1)
+                        {
+                            // Clear-query button: wipe the query, reset caret/scroll,
+                            // notify the backend (empty query clears highlights).
+                            st.query.clear();
+                            st.caret_cp  = 0;
+                            st.scroll_cp = 0;
+                            if (auto b = bar_self.lock()) b->base::deface();
+                            auto req = ui::terminal::events::find_req{ st.query, st.dir };
+                            gear.owner.base::signal(tier::anycast, ui::terminal::events::find::request, req);
+                        }
                         else if (mx >= L.input_x0 && mx <= L.input_x1)
                         {
                             // Click positions the caret.
@@ -764,6 +788,9 @@ namespace netxs::app::terminal
                             if      (mx >= L.btn_x_x  - 1 && mx <= L.btn_x_x  + 1) new_hover = hov_btn_x;
                             else if (mx >= L.btn_dn_x - 1 && mx <= L.btn_dn_x + 1) new_hover = hov_btn_dn;
                             else if (mx >= L.btn_up_x - 1 && mx <= L.btn_up_x + 1) new_hover = hov_btn_up;
+                            else if (!st.query.empty()
+                                  && mx >= L.btn_clear_x - 1
+                                  && mx <= L.btn_clear_x + 1)                       new_hover = hov_btn_clear;
                             else if (mx >= L.input_x0     && mx <= L.input_x1)     new_hover = hov_input;
                         }
                         if (new_hover != st.hover)

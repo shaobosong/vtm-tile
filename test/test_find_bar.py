@@ -92,6 +92,14 @@ INPUT_W    = INPUT_X1 - INPUT_X0 + 1           # 20 cells
 COUNTER_COL0 = BAR_LEFT + 24
 COUNTER_W    = 9
 
+# Clear-query button (new feature — inside the input area).
+# btn_clear_x (local) = input_x1 - 1 = 21 - 1 = 20.  Spans local [19..21].
+# Mirrors btn_clear_x and btn_width from term.hpp.
+BTN_CLEAR_COL        = BAR_LEFT + 20     # global center column of the clear button
+BTN_WIDTH            = 3                  # button occupies 3 cells (center ± 1)
+EFF_INPUT_W          = INPUT_W - BTN_WIDTH  # 17: text area width when query non-empty
+BTN_CLEAR_GLYPH_UTF8 = b"\xc3\x97"       # UTF-8 encoding of × (U+00D7)
+
 
 # ---------------------------------------------------------------------------
 # Boilerplate copied from test_confirm_close.py (kept self-contained).
@@ -950,6 +958,152 @@ def test_format_counter_contract():
 
 
 # ---------------------------------------------------------------------------
+# Tests: clear-query button (hov_btn_clear / btn_clear_x feature).
+#
+# The clear button is rendered inside the input area (rightmost 3 cells) only
+# when st.query is non-empty.  Clicking it wipes the query, resets the caret
+# and scroll position, and fires a find-request with an empty query so the
+# backend drops all highlights.  The bar stays open.
+# ---------------------------------------------------------------------------
+
+def test_clear_button_column_is_inside_input():
+    """Geometry sanity: BTN_CLEAR_COL must lie within the input field
+    [INPUT_X0, INPUT_X1] and must not coincide with any navigation button."""
+    print("TEST: clear-button column is inside input field ... ", end="", flush=True)
+    if not (INPUT_X0 <= BTN_CLEAR_COL <= INPUT_X1):
+        print(f"FAIL - BTN_CLEAR_COL={BTN_CLEAR_COL} outside input [{INPUT_X0}, {INPUT_X1}]")
+        return False
+    if BTN_CLEAR_COL in (BTN_UP_COL, BTN_DN_COL, BTN_X_COL):
+        print(f"FAIL - BTN_CLEAR_COL={BTN_CLEAR_COL} collides with a nav button")
+        return False
+    print("PASS")
+    return True
+
+
+def test_clear_button_appears_when_typing():
+    """When the query is non-empty the clear-query '×' glyph must be rendered
+    inside the input area at BTN_CLEAR_COL.  We verify using _replay_screen so
+    that vtm's diff-rendering (only changed cells re-emitted) does not cause
+    false negatives."""
+    print("TEST: clear-query button appears when typing ... ", end="", flush=True)
+    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
+        s.write(F3)
+        s.snapshot(settle=0.8)
+        s.write(b"hello")
+        stream = s.snapshot(settle=1.0)
+        # BAR_INPUT_ROW+1 is the empirical on-screen row used by _screen_counter.
+        interactive_row = BAR_INPUT_ROW + 1
+        grid = _replay_screen(stream)
+        r = interactive_row - 1   # 0-indexed
+        c = BTN_CLEAR_COL - 1     # 0-indexed
+        cell = grid[r][c]
+        if cell != BTN_CLEAR_GLYPH_UTF8:
+            print(f"FAIL - expected × at col {BTN_CLEAR_COL} row {interactive_row}, got {cell!r}")
+            return False
+        if not s.is_alive():
+            print("FAIL - vtm died")
+            return False
+        print("PASS")
+        return True
+
+
+def test_clear_button_absent_with_empty_query():
+    """When the bar opens with an empty query, no '×' must appear at
+    BTN_CLEAR_COL inside the input area."""
+    print("TEST: clear-query button absent when query is empty ... ", end="", flush=True)
+    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
+        s.write(F3)
+        stream = s.snapshot(settle=1.0)
+        interactive_row = BAR_INPUT_ROW + 1
+        grid = _replay_screen(stream)
+        r = interactive_row - 1
+        c = BTN_CLEAR_COL - 1
+        cell = grid[r][c]
+        if cell == BTN_CLEAR_GLYPH_UTF8:
+            print(f"FAIL - × rendered at col {BTN_CLEAR_COL} with empty query")
+            return False
+        print("PASS")
+        return True
+
+
+def test_clear_button_click_clears_query():
+    """Clicking the clear-query button must wipe the query, reset the counter
+    to 000/000, and keep the find-bar open.
+
+    To reliably distinguish 'click worked' from 'click had no effect', we
+    first seed the scrollback with a unique token so the find counter is
+    non-zero.  After clicking the clear button the counter must return to
+    000/000 (empty query → 0 matches).  Counter cells change on every match
+    update, so _screen_counter (ANSI-replay) correctly tracks the transition."""
+    print("TEST: clear-query button click wipes query and keeps bar open ... ", end="", flush=True)
+    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
+        # Seed one visible occurrence of a unique token so the counter > 000.
+        s.snapshot(settle=0.4)
+        s.write(b"printf 'CLRTOK\\n'\r")
+        s.snapshot(settle=1.5)
+        # Open bar and type the token so we get a non-zero counter.
+        s.write(F3)
+        s.snapshot(settle=0.6)
+        s.write(b"CLRTOK")
+        stream = s.snapshot(settle=1.2)
+        counter_before = _screen_counter(stream)
+        if counter_before is None or counter_before == b"000/000":
+            print(f"FAIL - expected non-zero counter before clear, got {counter_before!r}")
+            return False
+        # Click the clear-query button.  The interactive row is one row below
+        # the bar's top border: SGR row = BAR_INPUT_ROW + 1 (empirically verified).
+        # Do NOT clear the buffer so _screen_counter can replay the full diff stream.
+        s.click(BTN_CLEAR_COL, BAR_INPUT_ROW + 1)
+        stream = s.snapshot(settle=1.2)
+        counter_after = _screen_counter(stream)
+        if counter_after != b"000/000":
+            print(f"FAIL - counter after clear: {counter_after!r}"
+                  f" (before: {counter_before!r}, expected 000/000)")
+            return False
+        # Bar must remain open.
+        try:
+            assert_bar_rendered(stream)
+        except AssertionError as e:
+            print(f"FAIL - bar closed after clear-click: {e}")
+            return False
+        if not s.is_alive():
+            print("FAIL - vtm died after clear-click")
+            return False
+        print("PASS")
+        return True
+
+
+def test_clear_button_disappears_after_backspace():
+    """After typing and then erasing all characters with Backspace, the
+    clear-query button must disappear (BTN_CLEAR_COL cell stops showing '×')."""
+    print("TEST: clear-query button disappears after erasing query ... ", end="", flush=True)
+    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
+        s.write(F3)
+        s.snapshot(settle=0.6)
+        s.write(b"abc")
+        s.snapshot(settle=0.6)
+        # Erase all three characters via Backspace.
+        s.write(b"\x7f\x7f\x7f")
+        stream = s.snapshot(settle=1.0)
+        interactive_row = BAR_INPUT_ROW + 1
+        grid = _replay_screen(stream)
+        r = interactive_row - 1
+        c = BTN_CLEAR_COL - 1
+        cell = grid[r][c]
+        if cell == BTN_CLEAR_GLYPH_UTF8:
+            print(f"FAIL - × still at col {BTN_CLEAR_COL} after erasing all chars")
+            return False
+        # Bar must still be open.
+        try:
+            assert_bar_rendered(stream)
+        except AssertionError as e:
+            print(f"FAIL - bar unexpectedly closed: {e}")
+            return False
+        print("PASS")
+        return True
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -979,6 +1133,12 @@ def main():
         test_arrow_keys_navigate_matches,
         test_format_counter_contract,
         test_counter_width_is_fixed_for_high_totals,
+        # clear-query button tests
+        test_clear_button_column_is_inside_input,
+        test_clear_button_appears_when_typing,
+        test_clear_button_absent_with_empty_query,
+        test_clear_button_click_clears_query,
+        test_clear_button_disappears_after_backspace,
     ]
     passed = 0
     failed = 0
