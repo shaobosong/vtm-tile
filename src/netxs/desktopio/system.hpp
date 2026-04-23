@@ -5452,12 +5452,12 @@ namespace netxs::os
                                 s = s.substr(0, len);
                             }
                         }
-                        else if (c == 'O') // SS3: ESC O byte  or  ESC O n ; m [PQRS]
+                        else if (c == 'O') // SS3: ESC O byte  or  ESC O n ; m final   (final byte is 0x40..0x7E, e.g. P Q R S for F1..F4, H/F for Home/End, A..D for arrows).
                         {
-                            while (head != tail) // Looking for P Q R or S.
+                            while (head != tail) // Looking for SS3 final byte.
                             {
                                 auto c3 = *head;
-                                if (c3 >= 'P' && c3 <= 'S') break;
+                                if (c3 >= 0x40 && c3 <= 0x7E) break;
                                 head++;
                             }
                             if (head == tail) incomplete = true;
@@ -5619,6 +5619,13 @@ namespace netxs::os
                         { "\033[A"    , { "",     key::KeyUpArrow                        }},
                         { "\033[C"    , { "",     key::KeyRightArrow                     }},
                         { "\033[B"    , { "",     key::KeyDownArrow                      }},
+                        // SS3 application-cursor-keys mode (DECCKM) variants.
+                        { "\033OF"    , { "",     key::KeyEnd                            }},
+                        { "\033OH"    , { "",     key::KeyHome                           }},
+                        { "\033OD"    , { "",     key::KeyLeftArrow                      }},
+                        { "\033OA"    , { "",     key::KeyUpArrow                        }},
+                        { "\033OC"    , { "",     key::KeyRightArrow                     }},
+                        { "\033OB"    , { "",     key::KeyDownArrow                      }},
                         { "\033[2~"   , { "",     key::KeyInsert                         }},
                         { "\033[3~"   , { "",     key::KeyDelete                         }},
                         { "\033OP"    , { "",     key::F1                                }},
