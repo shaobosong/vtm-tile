@@ -993,6 +993,15 @@ namespace netxs::os
                     if (pressed) modstate |= input::hids::RWin;
                     else         modstate &=~input::hids::RWin;
                 }
+                if (!(ms_ctrls & SHIFT_PRESSED))
+                {
+                    // Hosts such as Windows Terminal can intercept a Ctrl+Shift+*
+                    // shortcut, move focus to their own UI, and swallow the
+                    // trailing Shift key-up. Reconcile the remembered per-side
+                    // Shift state with the aggregate console modifier bits so
+                    // the next forwarded key doesn't inherit a stale Shift.
+                    modstate &= ~(input::hids::LShift | input::hids::RShift);
+                }
                 if (!(modstate & input::hids::anyShift) && ms_ctrls & SHIFT_PRESSED) // Restore Shift after refocusing.
                 {
                     modstate |= input::hids::LShift;
@@ -5134,10 +5143,10 @@ namespace netxs::os
                         if (r.EventType == KEY_EVENT)
                         {
                             auto modstat = os::nt::modstat(kbmod, r.Event.KeyEvent.dwControlKeyState, r.Event.KeyEvent.wVirtualScanCode, r.Event.KeyEvent.bKeyDown);
+                            k.ctlstat = kbmod;
                                  if (modstat.repeats) continue; // We don't repeat modifiers.
                             else if (modstat.changed)
                             {
-                                k.ctlstat = kbmod;
                                 if (m.enabled == input::hids::stat::ok)
                                 {
                                     m.ctlstat = kbmod;
@@ -5239,6 +5248,8 @@ namespace netxs::os
                         else if (r.EventType == MOUSE_EVENT)
                         {
                             auto changed = 0;
+                            os::nt::kbstate(kbmod, r.Event.MouseEvent.dwControlKeyState);
+                            k.ctlstat = kbmod;
                             check(changed, m.ctlstat, kbmod);
                             check(changed, m.hzwheel, !!(r.Event.MouseEvent.dwEventFlags & MOUSE_HWHEELED));
                             auto wheeldt = (si16)((0xFFFF0000 & r.Event.MouseEvent.dwButtonState) >> 16); // dwButtonState too large when mouse scrolls. Use si16 to preserve dt sign.
