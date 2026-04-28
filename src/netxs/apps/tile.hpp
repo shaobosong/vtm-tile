@@ -5200,7 +5200,7 @@ namespace netxs::app::tile
                         // Keyboard interceptor.
                         wrapper_ptr->bell::submit(tier::preview, input::events::keybd::any, *kbd_hook)
                             = [cmd_list, query_ptr, caret_cp_ptr, sel_idx_ptr,
-                               v_scroll_off_ptr, h_scroll_off_ptr,
+                               v_scroll_off_ptr, h_scroll_off_ptr, list_h_scroll_off_ptr,
                                kbd_lock_coord_ptr,
                                overlay_shadow, boss_shadow,
                                dismiss_visual, dismiss_hook, pending_unhook](hids& gear) mutable
@@ -5274,6 +5274,13 @@ namespace netxs::app::tile
                                 *v_scroll_off_ptr = std::clamp(*v_scroll_off_ptr, si32{ 0 }, max_vs);
                             };
 
+                            auto reset_result_scroll = [&]
+                            {
+                                *sel_idx_ptr = 0;
+                                *v_scroll_off_ptr = 0;
+                                *list_h_scroll_off_ptr = 0;
+                            };
+
                             auto refresh_query = [&]
                             {
                                 keep_selection_valid();
@@ -5290,6 +5297,7 @@ namespace netxs::app::tile
                                 auto pos = command_bar::byte_of_cp(q, *caret_cp_ptr);
                                 q.insert(pos, buf);
                                 *caret_cp_ptr += command_bar::cp_len(buf);
+                                reset_result_scroll();
                                 refresh_query();
                                 return true;
                             };
@@ -5366,6 +5374,7 @@ namespace netxs::app::tile
                                 q.erase(a, b - a);
                                 if (*caret_cp_ptr > to_cp)        *caret_cp_ptr -= to_cp - from_cp;
                                 else if (*caret_cp_ptr > from_cp) *caret_cp_ptr  = from_cp;
+                                reset_result_scroll();
                                 refresh_query();
                                 return true;
                             };
