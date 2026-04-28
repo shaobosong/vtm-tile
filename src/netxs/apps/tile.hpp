@@ -55,6 +55,7 @@ namespace netxs::events::userland
                     EVENT_XS( uppane   , input::hids ),
                     EVENT_XS( downpane , input::hids ),
                     EVENT_XS( paneindex, input::hids ),
+                    EVENT_XS( commandbar, input::hids ),
                 };
                 SUBSET_XS( split )
                 {
@@ -383,6 +384,7 @@ namespace netxs::app::tile
         X(PrevWorkspace      ) \
         X(LastWorkspace      ) \
         X(OpenWorkspacePopup ) \
+        X(OpenCommandBar     ) \
 
     struct methods
     {
@@ -392,6 +394,278 @@ namespace netxs::app::tile
     };
 
     #undef proc_list
+
+    namespace command_bar
+    {
+        struct item
+        {
+            text display;
+            text tooltip;
+            text script;
+        };
+
+        struct model
+        {
+            std::vector<si32> filtered;
+            si32              tooltip_col = 6; // 2-cell indicator prefix + 4-cell gap.
+            si32              max_tooltip = 0;
+        };
+
+        struct layout
+        {
+            bool ok = faux;
+
+            si32 full_w = 0;
+            si32 full_h = 0;
+            si32 dlg_w = 0;
+            si32 dlg_h = 0;
+            si32 dlg_x = 0;
+            si32 dlg_y = 0;
+            si32 inner_x = 0;
+            si32 vsb_x = 0;
+
+            si32 n_total = 0;
+            si32 n_visible = 0;
+            si32 list_rows = 0;
+            si32 entry_disp_w = 0;
+            si32 list_disp_w = 0;
+            si32 list_content_w = 0;
+
+            si32 max_vscroll = 0;
+            si32 max_hscroll = 0;
+            si32 max_list_hscroll = 0;
+
+            si32 v_scroll = 0;
+            si32 h_scroll = 0;
+            si32 list_h_scroll = 0;
+            bool has_hsb = faux;
+        };
+
+        static constexpr auto dlg_w_max = si32{ 60 };
+        static constexpr auto max_items = si32{ 10 };
+
+        static constexpr auto bg              = 0xFF1E1E2Eu;
+        static constexpr auto surface         = 0xFF313244u;
+        static constexpr auto border          = 0xFF45475Au;
+        static constexpr auto text_fg         = 0xFFCDD6F4u;
+        static constexpr auto subtext         = 0xFF6C7086u;
+        static constexpr auto sel_bg          = 0xFF89B4FAu;
+        static constexpr auto sel_fg          = 0xFF1E1E2Eu;
+        static constexpr auto prompt_fg       = 0xFF89DCEBu;
+        static constexpr auto scroll_track    = 0xFF2C3047u;
+        static constexpr auto scroll_thumb    = 0xFF3B4261u;
+        static constexpr auto scroll_hover    = 0xFF565F89u;
+        static constexpr auto scroll_drag     = 0xFF89B4FAu;
+        static constexpr auto match_fg        = 0xFFF9E2AFu;
+        static constexpr auto match_sel_fg    = 0xFFFFFFFFu;
+
+        static auto utf8_step(view utf8, size_t offset) -> size_t
+        {
+            auto uc = (unsigned char)utf8[offset];
+            auto len = uc < 0x80 ? size_t{ 1 }
+                     : (uc & 0xE0) == 0xC0 ? size_t{ 2 }
+                     : (uc & 0xF0) == 0xE0 ? size_t{ 3 }
+                     : size_t{ 4 };
+            return std::min(len, utf8.size() - offset);
+        }
+
+        static auto skip_codepoints(view utf8, si32 count) -> size_t
+        {
+            auto offset = size_t{};
+            auto skipped = si32{};
+            while (offset < utf8.size() && skipped < count)
+            {
+                offset += utf8_step(utf8, offset);
+                ++skipped;
+            }
+            return offset;
+        }
+
+        static auto byte_of_cp(view utf8, si32 cp) -> size_t
+        {
+            if (cp <= 0) return 0;
+            auto offset = size_t{};
+            auto n = si32{};
+            while (offset < utf8.size() && n < cp)
+            {
+                offset += utf8_step(utf8, offset);
+                ++n;
+            }
+            return offset;
+        }
+
+        static auto cp_len(view utf8) -> si32
+        {
+            auto n = si32{};
+            for (auto c : utf8)
+            {
+                n += ((unsigned char)c & 0xC0) != 0x80;
+            }
+            return n;
+        }
+
+        static auto filter_input_text(view utf8) -> text
+        {
+            auto buf = text{};
+            buf.reserve(utf8.size());
+            for (auto i = size_t{}; i < utf8.size();)
+            {
+                auto c = (unsigned char)utf8[i];
+                if (c < 0x20 || c == 0x7f)
+                {
+                    ++i;
+                    continue;
+                }
+                auto n = utf8_step(utf8, i);
+                buf.append(utf8.data() + i, n);
+                i += n;
+            }
+            return buf;
+        }
+
+        static auto fuzzy_match(view query, view target) -> bool
+        {
+            if (query.empty()) return true;
+            auto ti = size_t{};
+            for (auto qch : query)
+            {
+                auto lc = (char)std::tolower((unsigned char)qch);
+                while (ti < target.size() && (char)std::tolower((unsigned char)target[ti]) != lc) ++ti;
+                if (ti >= target.size()) return false;
+                ++ti;
+            }
+            return true;
+        }
+
+        static auto match_offsets(view query, view target) -> std::vector<size_t>
+        {
+            auto offsets = std::vector<size_t>{};
+            if (query.empty()) return offsets;
+            auto ti = size_t{};
+            for (auto qch : query)
+            {
+                auto lc = (char)std::tolower((unsigned char)qch);
+                while (ti < target.size() && (char)std::tolower((unsigned char)target[ti]) != lc) ++ti;
+                if (ti >= target.size()) break;
+                offsets.push_back(ti);
+                ++ti;
+            }
+            return offsets;
+        }
+
+        static auto load(auto& cfg) -> netxs::sptr<std::vector<item>>
+        {
+            auto commands = ptr::shared(std::vector<item>{});
+            auto bar_ctx = cfg.settings::push_context("/config/tile/commandbar");
+            auto group_ptr_list = cfg.settings::take_ptr_list_for_name("group");
+            for (auto& g_ptr : group_ptr_list)
+            {
+                auto group_label = cfg.settings::take_value_from(g_ptr, "label", ""s);
+                auto item_ptr_list = cfg.settings::take_ptr_list_of(g_ptr, "item");
+                for (auto& i_ptr : item_ptr_list)
+                {
+                    auto label   = cfg.settings::take_value_from(i_ptr, "label",   ""s);
+                    auto tooltip = cfg.settings::take_value_from(i_ptr, "tooltip", ""s);
+                    auto script  = cfg.settings::take_value_from(i_ptr, "script",  ""s);
+                    commands->push_back({ group_label + ": " + label, tooltip, script });
+                }
+            }
+            return commands;
+        }
+
+        static auto build_model(std::vector<item> const& commands, view query) -> model
+        {
+            auto result = model{};
+            for (auto i = si32{}; i < (si32)commands.size(); ++i)
+            {
+                if (!fuzzy_match(query, commands[i].display)) continue;
+                result.filtered.push_back(i);
+                result.tooltip_col = std::max(result.tooltip_col, (si32)utf::length(commands[i].display) + 6);
+                result.max_tooltip = std::max(result.max_tooltip, (si32)utf::length(commands[i].tooltip));
+            }
+            return result;
+        }
+
+        static auto layout_of(twod size, model const& data, si32 query_len,
+                              si32 v_scroll, si32 h_scroll, si32 list_h_scroll) -> layout
+        {
+            auto l = layout{};
+            l.full_w = size.x;
+            l.full_h = size.y;
+            if (l.full_w < 10 || l.full_h < 4) return l;
+
+            l.n_total = (si32)data.filtered.size();
+            l.n_visible = (si32)std::min(l.n_total, max_items);
+            l.dlg_w = std::min(dlg_w_max, l.full_w - 4);
+            if (l.dlg_w < 10) return l;
+
+            l.entry_disp_w = l.dlg_w - 4;
+            l.list_disp_w = l.dlg_w - 4;
+            l.list_content_w = (data.tooltip_col - 2) + data.max_tooltip;
+            l.max_list_hscroll = std::max(0, l.list_content_w - l.list_disp_w);
+            l.has_hsb = l.list_content_w > l.list_disp_w;
+
+            l.list_rows = data.filtered.empty() ? 1 : l.n_visible;
+            l.dlg_h = 2 + l.list_rows + 1;
+            l.dlg_x = (l.full_w - l.dlg_w) / 2;
+            l.dlg_y = std::max(0, (l.full_h - (2 + max_items + 1)) / 4);
+            l.inner_x = l.dlg_x + 1;
+            l.vsb_x = l.dlg_x + l.dlg_w - 1;
+
+            l.max_vscroll = std::max(0, l.n_total - max_items);
+            l.max_hscroll = std::max(0, query_len - l.entry_disp_w + 1);
+            l.v_scroll = std::clamp(v_scroll, 0, l.max_vscroll);
+            l.h_scroll = std::clamp(h_scroll, 0, l.max_hscroll);
+            l.list_h_scroll = std::clamp(list_h_scroll, 0, l.max_list_hscroll);
+            l.ok = true;
+            return l;
+        }
+
+        static auto put_text(auto& canvas, auto link, si32 x, si32 y,
+                             view utf8, ui32 fg, ui32 bgc, si32 max_cells,
+                             si32 skip = 0) -> void
+        {
+            auto i = skip_codepoints(utf8, skip);
+            auto xi = si32{};
+            while (i < utf8.size() && xi < max_cells)
+            {
+                auto seq_len = utf8_step(utf8, i);
+                auto ch = utf8.substr(i, seq_len);
+                canvas.fill(rect{{ x + xi, y }, { 1, 1 }}, [=](cell& c)
+                {
+                    c.bgc(bgc).fgc(fg).txt(ch).link(link);
+                });
+                i += seq_len;
+                ++xi;
+            }
+        }
+
+        static auto put_highlighted(auto& canvas, auto link, si32 x, si32 y,
+                                    view utf8, ui32 fg, ui32 match, ui32 bgc,
+                                    si32 max_cells, view query, si32 skip = 0) -> void
+        {
+            auto matches = match_offsets(query, utf8);
+            auto i = skip_codepoints(utf8, skip);
+            auto match_iter = matches.cbegin();
+            while (match_iter != matches.cend() && *match_iter < i) ++match_iter;
+
+            auto xi = si32{};
+            while (i < utf8.size() && xi < max_cells)
+            {
+                auto seq_len = utf8_step(utf8, i);
+                auto ch = utf8.substr(i, seq_len);
+                auto is_hit = match_iter != matches.cend() && *match_iter == i;
+                if (is_hit) ++match_iter;
+                auto cur_fg = is_hit ? match : fg;
+                canvas.fill(rect{{ x + xi, y }, { 1, 1 }}, [=](cell& c)
+                {
+                    c.bgc(bgc).fgc(cur_fg).txt(ch).link(link);
+                });
+                i += seq_len;
+                ++xi;
+            }
+        }
+    }
 
     // tile: Right-side item list.
     class items
@@ -1385,6 +1659,7 @@ namespace netxs::app::tile
             auto confirm_close = config.settings::take("confirm_close", faux);
             auto confirm_block = ptr::shared(faux); // Shared flag: set to true while close-confirmation dialog is shown.
             auto pane_index_active = ptr::shared(faux); // Shared flag: set to true while pane-index overlay is shown.
+            auto command_bar_active = ptr::shared(faux); // Shared flag: set to true while command-bar overlay is shown.
             auto [menu_block, cover, menu_data] = menu::load(config);
             object->attach(slot::_1, menu_block);
             menu_data->active()
@@ -3178,6 +3453,13 @@ namespace netxs::app::tile
                                                                 boss.base::signal(tier::preview, app::tile::events::ui::focus::paneindex, gear);
                                                             });
                                                         }},
+                        { methods::OpenCommandBar,       [&]
+                                                        {
+                                                            luafx.run_with_gear([&](auto& gear)
+                                                            {
+                                                                boss.base::signal(tier::preview, app::tile::events::ui::focus::commandbar, gear);
+                                                            });
+                                                        }},
                         { methods::Disconnect,          [&]
                                                         {
                                                             luafx.run_with_gear([&](auto& gear)
@@ -3851,6 +4133,1163 @@ namespace netxs::app::tile
 
                             // Dismiss overlay after any recognized key.
                             dismiss_visual();
+                            gear.set_handled(faux);
+                        };
+
+                        gear.set_handled();
+                    };
+                    boss.LISTEN(tier::preview, app::tile::events::ui::focus::commandbar, gear, -, (command_bar_active, wrapper_shadow = ptr::shadow(wrapper)))
+                    {
+                        if (*command_bar_active) { gear.set_handled(); return; }
+                        auto wrapper_ptr = wrapper_shadow.lock();
+                        if (!wrapper_ptr) return;
+
+                        auto cmd_list = command_bar::load(boss.bell::indexer.config);
+                        if (cmd_list->empty()) return;
+
+                        *command_bar_active = true;
+
+                        // Shared state.
+                        auto query_ptr             = ptr::shared(text{});
+                        auto caret_cp_ptr          = ptr::shared(si32{ 0 });
+                        auto sel_idx_ptr           = ptr::shared(si32{ 0 });
+                        auto v_scroll_off_ptr      = ptr::shared(si32{ 0 });
+                        auto h_scroll_off_ptr      = ptr::shared(si32{ 0 });
+                        auto list_h_scroll_off_ptr = ptr::shared(si32{ 0 }); // List horizontal scroll.
+                        auto hover_row_ptr     = ptr::shared(si32{ -1 });
+                        auto hover_vsb_ptr     = ptr::shared(faux);
+                        auto hover_hsb_ptr     = ptr::shared(faux);
+                        auto dragging_vsb_ptr  = ptr::shared(faux);
+                        auto drag_vsb_grab_ptr = ptr::shared(si32{ 0 });
+                        auto dragging_hsb_ptr  = ptr::shared(faux);
+                        auto drag_hsb_grab_ptr = ptr::shared(si32{ 0 });
+                        // Keyboard/mouse priority lock: coord captured at the moment of the last
+                        // keyboard action. While MouseMove reports the same coord, hover-derived
+                        // updates (including sel_idx) are suppressed so a stationary cursor cannot
+                        // override keyboard navigation. Initialized to an out-of-range sentinel so
+                        // the first real MouseMove is always honored.
+                        auto kbd_lock_coord_ptr = ptr::shared(twod{ -32768, -32768 });
+                        // Initialization gate: the very first MouseMove after the command bar opens
+                        // is silently discarded and its coord is saved into kbd_lock_coord_ptr.
+                        // This prevents a cursor that was already resting on an item from
+                        // immediately highlighting it on entry (e.g. opened via keyboard shortcut).
+                        auto popup_ready_ptr    = ptr::shared(faux);
+
+                        // Build overlay.
+                        auto overlay_ptr = ui::mock::ctor();
+                        auto overlay_shadow = ptr::shadow(overlay_ptr);
+                        auto kbd_hook = ptr::shared<hook>();
+                        auto pending_unhook = ptr::shared(faux);
+                        auto boss_shadow = ptr::shadow(boss.This());
+
+                        auto dismiss_visual = [overlay_shadow, command_bar_active, pending_unhook]
+                        {
+                            if (*pending_unhook) return;
+                            *pending_unhook     = true;
+                            *command_bar_active = faux;
+                            if (auto p = overlay_shadow.lock()) p->base::detach();
+                        };
+                        auto dismiss_hook = [kbd_hook]{ kbd_hook->reset(); };
+
+                        overlay_ptr->invoke([&](auto& ovl)
+                        {
+                            auto ovl_id = ovl.bell::id;
+
+                            // Render callback.
+                            ovl.LISTEN(tier::release, e2::render::any, parent_canvas, -,
+                                (cmd_list, query_ptr, caret_cp_ptr, sel_idx_ptr,
+                                 v_scroll_off_ptr, h_scroll_off_ptr,
+                                 hover_vsb_ptr, hover_hsb_ptr,
+                                 dragging_vsb_ptr, dragging_hsb_ptr,
+                                 list_h_scroll_off_ptr, ovl_id))
+                            {
+                                static constexpr auto cb_bg              = command_bar::bg;
+                                static constexpr auto cb_surface         = command_bar::surface;
+                                static constexpr auto cb_text            = command_bar::text_fg;
+                                static constexpr auto cb_subtext         = command_bar::subtext;
+                                static constexpr auto cb_prompt          = command_bar::prompt_fg;
+                                static constexpr auto cb_vsb_track       = command_bar::scroll_track;
+                                static constexpr auto cb_vsb_thumb       = command_bar::scroll_thumb;
+                                static constexpr auto cb_vsb_thumb_hover = command_bar::scroll_hover;
+                                static constexpr auto cb_vsb_thumb_drag  = command_bar::scroll_drag;
+                                static constexpr auto cb_match_fg        = command_bar::match_fg;
+
+                                // Dim entire tile area.
+                                parent_canvas.fill([ovl_id](cell& c)
+                                {
+                                    c.bgc().faint();
+                                    c.fgc().faint();
+                                    c.cur(text_cursor::none);
+                                    c.link(ovl_id);
+                                });
+
+                                auto& query        = *query_ptr;
+                                auto  sel_idx      = *sel_idx_ptr;
+                                auto  hover_vsb    = *hover_vsb_ptr;
+                                auto  hover_hsb    = *hover_hsb_ptr;
+                                auto  dragging_vsb = *dragging_vsb_ptr;
+                                auto  dragging_hsb = *dragging_hsb_ptr;
+                                auto  query_len    = command_bar::cp_len(query);
+                                auto  caret_cp     = std::clamp(*caret_cp_ptr, si32{ 0 }, query_len);
+                                auto  data = command_bar::build_model(*cmd_list, query);
+                                auto  l    = command_bar::layout_of(parent_canvas.area().size,
+                                                                    data,
+                                                                    query_len,
+                                                                    *v_scroll_off_ptr,
+                                                                    *h_scroll_off_ptr,
+                                                                    *list_h_scroll_off_ptr);
+                                if (!l.ok) return;
+                                *v_scroll_off_ptr      = l.v_scroll;
+                                *h_scroll_off_ptr      = l.h_scroll;
+                                *list_h_scroll_off_ptr = l.list_h_scroll;
+
+                                auto& filtered          = data.filtered;
+                                auto  tip_off           = data.tooltip_col;
+                                auto  n_visible         = l.n_visible;
+                                auto  dlg_w             = l.dlg_w;
+                                auto  dlg_h             = l.dlg_h;
+                                auto  dlg_x             = l.dlg_x;
+                                auto  dlg_y             = l.dlg_y;
+                                auto  inner_x           = l.inner_x;
+                                auto  vsb_x             = l.vsb_x;
+                                auto  entry_disp_w      = l.entry_disp_w;
+                                auto  list_disp_w       = l.list_disp_w;
+                                auto  list_content_w    = l.list_content_w;
+                                auto  has_hsb           = l.has_hsb;
+                                auto  list_h_scroll_off = l.list_h_scroll;
+                                auto  max_list_hs       = l.max_list_hscroll;
+                                auto  list_rows         = l.list_rows;
+                                auto  v_scroll_off      = l.v_scroll;
+                                auto  h_scroll_off      = l.h_scroll;
+                                if (h_scroll_off > caret_cp) h_scroll_off = caret_cp;
+                                if (caret_cp - h_scroll_off >= entry_disp_w)
+                                {
+                                    h_scroll_off = caret_cp - entry_disp_w + 1;
+                                }
+                                h_scroll_off = std::clamp(h_scroll_off, si32{ 0 }, l.max_hscroll);
+                                *caret_cp_ptr     = caret_cp;
+                                *h_scroll_off_ptr = h_scroll_off;
+
+                                auto put_str = [&](si32 x, si32 y, view str, ui32 fg, ui32 bg, si32 max_cells)
+                                {
+                                    command_bar::put_text(parent_canvas, ovl_id, x, y, str, fg, bg, max_cells);
+                                };
+                                auto put_str_skipped = [&](si32 x, si32 y, view str, ui32 fg, ui32 bg, si32 max_cells, si32 skip_cps)
+                                {
+                                    command_bar::put_text(parent_canvas, ovl_id, x, y, str, fg, bg, max_cells, skip_cps);
+                                };
+                                auto put_str_highlighted_skipped = [&](si32 x, si32 y, view str, ui32 fg, ui32 match_fg, ui32 bg, si32 max_cells, view query, si32 skip_cps)
+                                {
+                                    command_bar::put_highlighted(parent_canvas, ovl_id, x, y, str, fg, match_fg, bg, max_cells, query, skip_cps);
+                                };
+
+                                // Fill dialog background.
+                                parent_canvas.fill(rect{{ dlg_x, dlg_y }, { dlg_w, dlg_h }}, [=, ovl_id = ovl_id](cell& c)
+                                {
+                                    c.bgc(cb_bg).fgc(cb_text).txt(whitespace).link(ovl_id);
+                                });
+
+                                // Upper decoration: ▄ above entry row (fg = entry bg, bg = transparent).
+                                if (dlg_y > 0)
+                                {
+                                    parent_canvas.fill(rect{{ dlg_x, dlg_y - 1 }, { dlg_w, 1 }}, [=, ovl_id = ovl_id](cell& c)
+                                    {
+                                        c.fgc(cb_surface).txt("\xe2\x96\x84").link(ovl_id); // ▄
+                                    });
+                                }
+
+                                // Row 0: entry (Surface0 bg, "> " prompt, h-scrolled query text).
+                                {
+                                    auto entry_y = dlg_y;
+                                    parent_canvas.fill(rect{{ dlg_x, entry_y }, { dlg_w, 1 }}, [=, ovl_id = ovl_id](cell& c)
+                                    {
+                                        c.bgc(cb_surface).fgc(cb_text).txt(whitespace).link(ovl_id);
+                                    });
+                                    // ">" prompt.
+                                    parent_canvas.fill(rect{{ inner_x, entry_y }, { 1, 1 }}, [=, ovl_id = ovl_id](cell& c)
+                                    {
+                                        c.bgc(cb_surface).fgc(cb_prompt).txt(">").link(ovl_id);
+                                    });
+                                    // Space after prompt.
+                                    parent_canvas.fill(rect{{ inner_x + 1, entry_y }, { 1, 1 }}, [=, ovl_id = ovl_id](cell& c)
+                                    {
+                                        c.bgc(cb_surface).fgc(cb_text).txt(whitespace).link(ovl_id);
+                                    });
+                                    // Query text (h-scrolled).
+                                    auto q_x = inner_x + 2;
+                                    put_str_skipped(q_x, entry_y, query, cb_text, cb_surface, entry_disp_w, h_scroll_off);
+                                    // Block cursor at the visible caret position.
+                                    auto cursor_vis_x = caret_cp - h_scroll_off;
+                                    if (cursor_vis_x >= 0 && cursor_vis_x < entry_disp_w)
+                                    {
+                                        parent_canvas.fill(rect{{ q_x + cursor_vis_x, entry_y }, { 1, 1 }}, [=, ovl_id = ovl_id](cell& c)
+                                        {
+                                            c.bgc(cb_text).fgc(cb_surface).link(ovl_id);
+                                            if (c.txt().empty() || c.txt() == " ") c.txt(whitespace);
+                                        });
+                                    }
+                                    parent_canvas.fill(rect{{ q_x, entry_y }, { entry_disp_w, 1 }}, [=, ovl_id = ovl_id](cell& c)
+                                    {
+                                        c.und(unln::line).unc(0).link(ovl_id);
+                                    });
+                                }
+
+                                // Row 1: lower separator ▀ (fg = entry bg, bg = list bg).
+                                parent_canvas.fill(rect{{ dlg_x, dlg_y + 1 }, { dlg_w, 1 }}, [=, ovl_id = ovl_id](cell& c)
+                                {
+                                    c.bgc(cb_bg).fgc(cb_surface).txt("\xe2\x96\x80").link(ovl_id); // ▀
+                                });
+
+                                // Rows 2..N: command list or "No matches".
+                                if (filtered.empty())
+                                {
+                                    put_str(inner_x, dlg_y + 2, "No matches", cb_subtext, cb_bg, dlg_w - 2);
+                                }
+                                else
+                                {
+                                    for (auto vi = si32{}; vi < n_visible; vi++)
+                                    {
+                                        auto fi       = vi + v_scroll_off;
+                                        auto cmd_idx  = filtered[(size_t)fi];
+                                        auto row_y    = dlg_y + 2 + vi;
+                                        auto is_active = (fi == sel_idx);
+                                        auto row_bg    = is_active ? cb_surface : cb_bg;
+                                        auto row_fg    = cb_text;
+                                        // Fill row background (exclude VSB column).
+                                        parent_canvas.fill(rect{{ dlg_x, row_y }, { dlg_w - 1, 1 }}, [=, ovl_id = ovl_id](cell& c)
+                                        {
+                                            c.bgc(row_bg).fgc(row_fg).txt(whitespace).link(ovl_id);
+                                        });
+                                        // Indicator prefix: always at inner_x, not affected by horizontal scrolling.
+                                        parent_canvas.fill(rect{{ inner_x, row_y }, { 1, 1 }}, [=, ovl_id = ovl_id](cell& c)
+                                        {
+                                            c.bgc(row_bg).fgc(row_fg).txt(is_active ? "\xe2\x96\xba" : " ").link(ovl_id); // ► or space
+                                        });
+                                        // Scrollable content (label + tooltip) rendered into columns inner_x+2..vsb_x-1.
+                                        // The 2-column prefix (indicator + space) is pinned and never scrolls.
+                                        auto lbl_match_fg = cb_match_fg;
+                                        auto max_lbl_w_r  = tip_off - 6; // max label display width
+                                        auto content_x    = inner_x + 2;
+                                        {
+                                            // Label: at virtual column 0 of the scrollable area; skip list_h_scroll_off chars.
+                                            auto lbl_skip  = list_h_scroll_off;
+                                            auto lbl_max_w = std::max(0, std::min(vsb_x - content_x, max_lbl_w_r - lbl_skip));
+                                            if (lbl_max_w > 0)
+                                                put_str_highlighted_skipped(content_x, row_y, (*cmd_list)[cmd_idx].display, row_fg, lbl_match_fg, row_bg, lbl_max_w, query, lbl_skip);
+                                        }
+                                        {
+                                            // Tooltip: at virtual column (tip_off - 2) of the scrollable area.
+                                            auto tip_canvas_x = content_x + (tip_off - 2) - list_h_scroll_off;
+                                            auto tip_skip     = std::max(0, content_x - tip_canvas_x);
+                                            auto tip_x        = std::max(content_x, tip_canvas_x);
+                                            auto tip_max_w    = std::max(0, vsb_x - tip_x);
+                                            if (tip_max_w > 0)
+                                                put_str_skipped(tip_x, row_y, (*cmd_list)[cmd_idx].tooltip, cb_subtext, row_bg, tip_max_w, tip_skip);
+                                        }
+                                    }
+                                }
+
+                                // VSB: last column, rows dlg_y+2 to dlg_y+2+list_rows-1.
+                                // Space is always reserved; track+thumb rendered only when list is scrollable.
+                                {
+                                    auto list_top_y = dlg_y + 2;
+                                    auto n_total    = (si32)filtered.size();
+                                    if (n_total > command_bar::max_items && n_visible > 0)
+                                    {
+                                        auto vsb_mark = (dragging_vsb || hover_vsb) ? "\xe2\x96\x88"  // U+2588
+                                                                                     : "\xe2\x96\x90"; // U+2590
+                                        // Track (extends into HSB row corner cell).
+                                        parent_canvas.fill(rect{{ vsb_x, list_top_y }, { 1, list_rows + 1 }}, [=, ovl_id = ovl_id](cell& c)
+                                        {
+                                            c.bgc(cb_bg).fgc(cb_vsb_track).txt(vsb_mark).link(ovl_id);
+                                        });
+                                        // Thumb.
+                                        auto track_h   = list_rows + 1; // Full track including corner cell.
+                                        auto thumb_h   = std::max(1, track_h * n_visible / n_total);
+                                        auto max_vs    = n_total - command_bar::max_items;
+                                        auto thumb_off = max_vs > 0 ? v_scroll_off * (track_h - thumb_h) / max_vs : 0;
+                                        auto thumb_y   = list_top_y + thumb_off;
+                                        auto thumb_fg  = dragging_vsb ? cb_vsb_thumb_drag
+                                                       : hover_vsb    ? cb_vsb_thumb_hover
+                                                       :                 cb_vsb_thumb;
+                                        parent_canvas.fill(rect{{ vsb_x, thumb_y }, { 1, thumb_h }}, [=, ovl_id = ovl_id](cell& c)
+                                        {
+                                            c.bgc(cb_bg).fgc(thumb_fg).txt(vsb_mark).link(ovl_id);
+                                        });
+                                    }
+                                    // else: dialog background fill already covers the column with cb_bg.
+                                }
+
+                                // HSB: bottom row, always reserved.
+                                // Track+thumb rendered when list content overflows; otherwise cb_bg blank (list background color).
+                                {
+                                    auto hsb_y = dlg_y + dlg_h - 1;
+                                    if (has_hsb)
+                                    {
+                                        auto track_w = dlg_w - 1; // cols dlg_x..vsb_x-1; bottom-right cell left blank
+                                        auto thumb_w = std::max(1, track_w * list_disp_w / list_content_w);
+                                        auto thumb_x = dlg_x + (max_list_hs > 0 ? list_h_scroll_off * (track_w - thumb_w) / max_list_hs : 0);
+                                        auto hsb_mark = (dragging_hsb || hover_hsb) ? "\xe2\x96\x84"  // U+2584
+                                                                                     : "\xe2\x96\x82"; // U+2582
+                                        // Track.
+                                        parent_canvas.fill(rect{{ dlg_x, hsb_y }, { track_w, 1 }}, [=, ovl_id = ovl_id](cell& c)
+                                        {
+                                            c.bgc(cb_bg).fgc(cb_vsb_track).txt(hsb_mark).link(ovl_id);
+                                        });
+                                        // Thumb.
+                                        auto thumb_fg = dragging_hsb ? cb_vsb_thumb_drag
+                                                      : hover_hsb    ? cb_vsb_thumb_hover
+                                                      :                 cb_vsb_thumb;
+                                        parent_canvas.fill(rect{{ thumb_x, hsb_y }, { thumb_w, 1 }}, [=, ovl_id = ovl_id](cell& c)
+                                        {
+                                            c.bgc(cb_bg).fgc(thumb_fg).txt(hsb_mark).link(ovl_id);
+                                        });
+                                    }
+                                    // else: dialog background fill already covers hsb_y row with cb_bg (list background color).
+                                }
+                            };
+
+                            // MouseMove: update hover state.
+                            ovl.on(tier::mouserelease, input::key::MouseMove,
+                                [cmd_list, query_ptr, v_scroll_off_ptr,
+                                 hover_row_ptr, hover_vsb_ptr, hover_hsb_ptr,
+                                 list_h_scroll_off_ptr, h_scroll_off_ptr,
+                                 sel_idx_ptr, kbd_lock_coord_ptr, popup_ready_ptr,
+                                 overlay_shadow](hids& gear)
+                            {
+                                // Initialization gate: discard the very first MouseMove (which reflects
+                                // the cursor position before the command bar opened) so that a pre-resting
+                                // cursor never highlights an item on entry. Lock kbd_lock_coord_ptr to
+                                // that coord so a stationary cursor also stays suppressed.
+                                if (!*popup_ready_ptr)
+                                {
+                                    *popup_ready_ptr = true;
+                                    *kbd_lock_coord_ptr = gear.coord;
+                                    return;
+                                }
+                                auto ovl_ptr = overlay_shadow.lock();
+                                if (!ovl_ptr) return;
+                                // Keyboard priority: while the mouse cursor remains at the exact cell
+                                // it occupied when the last keyboard action fired, treat this MouseMove
+                                // as noise and skip all hover-derived updates. As soon as the cursor
+                                // lands on a different cell we drop the lock and process normally.
+                                if (gear.coord == *kbd_lock_coord_ptr) return;
+                                *kbd_lock_coord_ptr = twod{ -32768, -32768 };
+
+                                auto& query = *query_ptr;
+                                auto data = command_bar::build_model(*cmd_list, query);
+                                auto l = command_bar::layout_of(ovl_ptr->base::area().size,
+                                                                 data,
+                                                                 (si32)utf::length(query),
+                                                                 *v_scroll_off_ptr,
+                                                                 *h_scroll_off_ptr,
+                                                                 *list_h_scroll_off_ptr);
+                                if (!l.ok) return;
+                                auto mx = (si32)gear.coord.x;
+                                auto my = (si32)gear.coord.y;
+
+                                auto new_hover_row = si32{ -1 };
+                                auto new_hover_vsb = faux;
+                                auto new_hover_hsb = faux;
+
+                                if (mx == l.vsb_x && my >= l.dlg_y + 2 && my <= l.dlg_y + 2 + l.list_rows)
+                                {
+                                    new_hover_vsb = !data.filtered.empty() && (si32)data.filtered.size() > command_bar::max_items;
+                                }
+                                else if (l.has_hsb && my == l.dlg_y + l.dlg_h - 1 && mx >= l.dlg_x && mx < l.vsb_x)
+                                {
+                                    new_hover_hsb = true;
+                                }
+                                else if (!data.filtered.empty()
+                                      && my >= l.dlg_y + 2 && my < l.dlg_y + 2 + l.n_visible
+                                      && mx >= l.dlg_x && mx < l.vsb_x)
+                                {
+                                    auto vi = my - (l.dlg_y + 2);
+                                    auto fi = vi + l.v_scroll;
+                                    if (fi >= 0 && fi < (si32)data.filtered.size())
+                                        new_hover_row = fi;
+                                }
+
+                                auto changed = (new_hover_row != *hover_row_ptr)
+                                            || (new_hover_vsb != *hover_vsb_ptr)
+                                            || (new_hover_hsb != *hover_hsb_ptr);
+                                *hover_row_ptr = new_hover_row;
+                                *hover_vsb_ptr = new_hover_vsb;
+                                *hover_hsb_ptr = new_hover_hsb;
+                                // Update the unified active row when mouse genuinely moves to a list item.
+                                // (The kbd-lock guard above ensures stationary cursors cannot trigger this.)
+                                if (new_hover_row >= 0 && new_hover_row != *sel_idx_ptr)
+                                {
+                                    *sel_idx_ptr = new_hover_row;
+                                    changed = true;
+                                }
+                                if (changed) ovl_ptr->base::deface();
+                            });
+
+                            // MouseLeave: clear all hover state.
+                            ovl.on(tier::mouserelease, input::key::MouseLeave,
+                                [hover_row_ptr, hover_vsb_ptr, hover_hsb_ptr, overlay_shadow](hids& /*gear*/)
+                            {
+                                auto changed = (*hover_row_ptr >= 0) || *hover_vsb_ptr || *hover_hsb_ptr;
+                                *hover_row_ptr = -1;
+                                *hover_vsb_ptr = faux;
+                                *hover_hsb_ptr = faux;
+                                if (changed)
+                                    if (auto p = overlay_shadow.lock()) p->base::deface();
+                            });
+
+                            // MouseWheel: scroll the command list.
+                            ovl.on(tier::mouserelease, input::key::MouseWheel,
+                                [cmd_list, query_ptr, v_scroll_off_ptr, overlay_shadow](hids& gear)
+                            {
+                                auto ovl_ptr = overlay_shadow.lock();
+                                if (!ovl_ptr) return;
+                                auto data = command_bar::build_model(*cmd_list, *query_ptr);
+                                auto delta  = gear.whlsi < 0 ? 1 : -1;
+                                auto max_vs = std::max(0, (si32)data.filtered.size() - command_bar::max_items);
+                                *v_scroll_off_ptr = std::clamp(*v_scroll_off_ptr + delta, 0, max_vs);
+                                ovl_ptr->base::deface();
+                                gear.dismiss();
+                            });
+
+                            // LeftClick: execute selected command, scroll via track area, or dismiss.
+                            ovl.on(tier::mouserelease, input::key::LeftClick,
+                                [cmd_list, query_ptr, v_scroll_off_ptr, h_scroll_off_ptr, list_h_scroll_off_ptr,
+                                 hover_row_ptr, dragging_vsb_ptr, dragging_hsb_ptr,
+                                 dismiss_visual, dismiss_hook, overlay_shadow,
+                                 boss_shadow](hids& gear)
+                            {
+                                if (*dragging_vsb_ptr || *dragging_hsb_ptr) return; // Drag already handled.
+                                auto ovl_ptr = overlay_shadow.lock();
+                                if (!ovl_ptr) return;
+                                auto& query = *query_ptr;
+                                auto data = command_bar::build_model(*cmd_list, query);
+                                auto l = command_bar::layout_of(ovl_ptr->base::area().size,
+                                                                 data,
+                                                                 (si32)utf::length(query),
+                                                                 *v_scroll_off_ptr,
+                                                                 *h_scroll_off_ptr,
+                                                                 *list_h_scroll_off_ptr);
+                                if (!l.ok) return;
+
+                                auto& filtered = data.filtered;
+                                auto n_total = l.n_total;
+                                auto n_visible = l.n_visible;
+                                auto dlg_w = l.dlg_w;
+                                auto dlg_h = l.dlg_h;
+                                auto dlg_x = l.dlg_x;
+                                auto dlg_y = l.dlg_y;
+                                auto vsb_x = l.vsb_x;
+                                auto list_disp_w = l.list_disp_w;
+                                auto list_content_w = l.list_content_w;
+                                auto has_hsb = l.has_hsb;
+                                auto list_rows = l.list_rows;
+                                auto v_scroll_off = l.v_scroll;
+                                auto list_h_scroll_off = l.list_h_scroll;
+                                auto mx = (si32)gear.coord.x;
+                                auto my = (si32)gear.coord.y;
+
+                                // Click on a list item — execute its script.
+                                if (!filtered.empty()
+                                 && my >= dlg_y + 2 && my < dlg_y + 2 + n_visible
+                                 && mx >= dlg_x && mx < vsb_x)
+                                {
+                                    auto vi = my - (dlg_y + 2);
+                                    auto fi = vi + v_scroll_off;
+                                    if (fi >= 0 && fi < n_total)
+                                    {
+                                        auto cmd_idx = filtered[(size_t)fi];
+                                        auto script = (*cmd_list)[cmd_idx].script;
+                                        dismiss_visual();
+                                        dismiss_hook();
+                                        if (!script.empty())
+                                            if (auto boss_ptr = boss_shadow.lock())
+                                            {
+                                                boss_ptr->bell::indexer.luafx.set_gear(gear);
+                                                boss_ptr->bell::indexer.luafx.run_script(*boss_ptr, script);
+                                            }
+                                    }
+                                    gear.dismiss();
+                                    return;
+                                }
+
+                                // Click on VSB track area — page up or page down.
+                                if (mx == vsb_x && n_total > command_bar::max_items && n_visible > 0
+                                 && my >= dlg_y + 2 && my <= dlg_y + 2 + list_rows)
+                                {
+                                    auto track_h   = list_rows + 1; // Full track including corner cell.
+                                    auto thumb_h   = std::max(1, track_h * n_visible / n_total);
+                                    auto max_vs    = n_total - command_bar::max_items;
+                                    auto thumb_off = max_vs > 0 ? v_scroll_off * (track_h - thumb_h) / max_vs : 0;
+                                    auto thumb_y   = dlg_y + 2 + thumb_off;
+                                    if (my < thumb_y)
+                                        *v_scroll_off_ptr = std::clamp(v_scroll_off - command_bar::max_items, 0, max_vs);
+                                    else if (my >= thumb_y + thumb_h)
+                                        *v_scroll_off_ptr = std::clamp(v_scroll_off + command_bar::max_items, 0, max_vs);
+                                    ovl_ptr->base::deface();
+                                    gear.dismiss();
+                                    return;
+                                }
+
+                                // Click on HSB track area — page left or page right.
+                                if (has_hsb && my == dlg_y + dlg_h - 1 && mx >= dlg_x && mx < vsb_x)
+                                {
+                                    auto track_w = dlg_w - 1;
+                                    auto max_hs  = list_content_w - list_disp_w;
+                                    auto thumb_w = std::max(1, track_w * list_disp_w / list_content_w);
+                                    auto h_off   = list_h_scroll_off;
+                                    auto thumb_x = dlg_x + (max_hs > 0 ? h_off * (track_w - thumb_w) / max_hs : 0);
+                                    if (mx < thumb_x)
+                                        *list_h_scroll_off_ptr = std::clamp(h_off - list_disp_w, 0, max_hs);
+                                    else if (mx >= thumb_x + thumb_w)
+                                        *list_h_scroll_off_ptr = std::clamp(h_off + list_disp_w, 0, max_hs);
+                                    ovl_ptr->base::deface();
+                                    gear.dismiss();
+                                    return;
+                                }
+
+                                // Click outside dialog — dismiss.
+                                if (my < dlg_y || my >= dlg_y + dlg_h || mx < dlg_x || mx >= dlg_x + dlg_w)
+                                {
+                                    dismiss_visual();
+                                    dismiss_hook();
+                                    gear.dismiss();
+                                }
+                            });
+
+                            // LeftDragStart: begin VSB or HSB drag.
+                            ovl.on(tier::mouserelease, input::key::LeftDragStart,
+                                [cmd_list, query_ptr, v_scroll_off_ptr, h_scroll_off_ptr, list_h_scroll_off_ptr,
+                                 hover_vsb_ptr, hover_hsb_ptr,
+                                 dragging_vsb_ptr, dragging_hsb_ptr,
+                                 drag_vsb_grab_ptr, drag_hsb_grab_ptr,
+                                 overlay_shadow](hids& gear)
+                            {
+                                auto ovl_ptr = overlay_shadow.lock();
+                                if (!ovl_ptr) return;
+                                auto& query = *query_ptr;
+                                auto data = command_bar::build_model(*cmd_list, query);
+                                auto l = command_bar::layout_of(ovl_ptr->base::area().size,
+                                                                 data,
+                                                                 (si32)utf::length(query),
+                                                                 *v_scroll_off_ptr,
+                                                                 *h_scroll_off_ptr,
+                                                                 *list_h_scroll_off_ptr);
+                                if (!l.ok) return;
+
+                                auto n_visible      = l.n_visible;
+                                auto dlg_w          = l.dlg_w;
+                                auto list_disp_w    = l.list_disp_w;
+                                auto list_content_w = l.list_content_w;
+                                auto has_hsb        = l.has_hsb;
+                                auto list_rows      = l.list_rows;
+                                auto dlg_h          = l.dlg_h;
+                                auto dlg_x          = l.dlg_x;
+                                auto dlg_y          = l.dlg_y;
+                                auto vsb_x          = l.vsb_x;
+                                auto n_total        = l.n_total;
+                                auto v_scroll_off   = l.v_scroll;
+                                auto list_h_scroll_off = l.list_h_scroll;
+                                auto mx             = (si32)gear.pressxy.x;
+                                auto my             = (si32)gear.pressxy.y;
+
+                                // VSB drag start.
+                                if (mx == vsb_x && n_total > command_bar::max_items && n_visible > 0
+                                 && my >= dlg_y + 2 && my <= dlg_y + 2 + list_rows)
+                                {
+                                    auto track_h   = list_rows + 1; // Full track including corner cell.
+                                    auto thumb_h   = std::max(1, track_h * n_visible / n_total);
+                                    auto max_vs    = n_total - command_bar::max_items;
+                                    auto thumb_off = max_vs > 0 ? v_scroll_off * (track_h - thumb_h) / max_vs : 0;
+                                    auto thumb_y   = dlg_y + 2 + thumb_off;
+                                    if (my >= thumb_y && my < thumb_y + thumb_h)
+                                    {
+                                        *drag_vsb_grab_ptr = my - thumb_y;
+                                    }
+                                    else
+                                    {
+                                        // Snap thumb center to click.
+                                        *drag_vsb_grab_ptr = thumb_h / 2;
+                                        auto new_thumb_y   = my - *drag_vsb_grab_ptr - (dlg_y + 2);
+                                        auto new_vs        = (track_h > thumb_h && max_vs > 0)
+                                                           ? new_thumb_y * max_vs / (track_h - thumb_h) : 0;
+                                        *v_scroll_off_ptr  = std::clamp(new_vs, 0, max_vs);
+                                    }
+                                    *dragging_vsb_ptr = true;
+                                    *hover_vsb_ptr    = true;
+                                    ovl_ptr->base::deface();
+                                    gear.dismiss();
+                                    return;
+                                }
+
+                                // HSB drag start.
+                                if (has_hsb && my == dlg_y + dlg_h - 1 && mx >= dlg_x && mx < vsb_x)
+                                {
+                                    auto track_w = dlg_w - 1;
+                                    auto max_hs  = list_content_w - list_disp_w;
+                                    auto thumb_w = std::max(1, track_w * list_disp_w / list_content_w);
+                                    auto h_off   = list_h_scroll_off;
+                                    auto thumb_x = dlg_x + (max_hs > 0 ? h_off * (track_w - thumb_w) / max_hs : 0);
+                                    if (mx >= thumb_x && mx < thumb_x + thumb_w)
+                                    {
+                                        *drag_hsb_grab_ptr = mx - thumb_x;
+                                    }
+                                    else
+                                    {
+                                        // Snap thumb center to click.
+                                        *drag_hsb_grab_ptr = thumb_w / 2;
+                                        auto new_thumb_x   = mx - *drag_hsb_grab_ptr - dlg_x;
+                                        auto new_hs_val    = (track_w > thumb_w && max_hs > 0)
+                                                           ? new_thumb_x * max_hs / (track_w - thumb_w) : 0;
+                                        *list_h_scroll_off_ptr = std::clamp(new_hs_val, 0, max_hs);
+                                    }
+                                    *dragging_hsb_ptr = true;
+                                    *hover_hsb_ptr    = true;
+                                    ovl_ptr->base::deface();
+                                    gear.dismiss();
+                                    return;
+                                }
+                            });
+
+                            // LeftDragPull: update scroll offset while dragging.
+                            ovl.on(tier::mouserelease, input::key::LeftDragPull,
+                                [cmd_list, query_ptr, v_scroll_off_ptr, h_scroll_off_ptr, list_h_scroll_off_ptr,
+                                 dragging_vsb_ptr, dragging_hsb_ptr,
+                                 drag_vsb_grab_ptr, drag_hsb_grab_ptr,
+                                 overlay_shadow](hids& gear)
+                            {
+                                if (!*dragging_vsb_ptr && !*dragging_hsb_ptr) return;
+                                auto ovl_ptr = overlay_shadow.lock();
+                                if (!ovl_ptr) return;
+                                auto& query = *query_ptr;
+                                auto data = command_bar::build_model(*cmd_list, query);
+                                auto l = command_bar::layout_of(ovl_ptr->base::area().size,
+                                                                 data,
+                                                                 (si32)utf::length(query),
+                                                                 *v_scroll_off_ptr,
+                                                                 *h_scroll_off_ptr,
+                                                                 *list_h_scroll_off_ptr);
+                                if (!l.ok) return;
+
+                                auto n_visible      = l.n_visible;
+                                auto dlg_w          = l.dlg_w;
+                                auto list_disp_w    = l.list_disp_w;
+                                auto list_content_w = l.list_content_w;
+                                auto n_total        = l.n_total;
+                                auto mx             = (si32)gear.coord.x;
+                                auto my             = (si32)gear.coord.y;
+
+                                if (*dragging_vsb_ptr)
+                                {
+                                    auto max_vs     = n_total - command_bar::max_items;
+                                    if (max_vs <= 0) return;
+                                    auto list_rows   = n_visible; // n_visible == max_items when dragging
+                                    auto track_h     = list_rows + 1; // Full track including corner cell.
+                                    auto thumb_h     = std::max(1, track_h * n_visible / n_total);
+                                    auto dlg_y       = l.dlg_y;
+                                    auto new_thumb_y = my - *drag_vsb_grab_ptr - (dlg_y + 2);
+                                    auto new_vs      = (track_h > thumb_h)
+                                                     ? new_thumb_y * max_vs / (track_h - thumb_h) : 0;
+                                    *v_scroll_off_ptr = std::clamp(new_vs, 0, max_vs);
+                                    ovl_ptr->base::deface();
+                                    gear.dismiss();
+                                    return;
+                                }
+
+                                if (*dragging_hsb_ptr)
+                                {
+                                    auto dlg_x       = l.dlg_x;
+                                    auto track_w     = dlg_w - 1;
+                                    auto max_hs      = std::max(0, list_content_w - list_disp_w);
+                                    auto thumb_w     = std::max(1, track_w * list_disp_w / std::max(1, list_content_w));
+                                    auto new_thumb_x = mx - *drag_hsb_grab_ptr - dlg_x;
+                                    auto new_hs_val  = (track_w > thumb_w && max_hs > 0)
+                                                     ? new_thumb_x * max_hs / (track_w - thumb_w) : 0;
+                                    *list_h_scroll_off_ptr = std::clamp(new_hs_val, 0, max_hs);
+                                    ovl_ptr->base::deface();
+                                    gear.dismiss();
+                                    return;
+                                }
+                            });
+
+                            // LeftDragStop: end drag.
+                            ovl.on(tier::mouserelease, input::key::LeftDragStop,
+                                [dragging_vsb_ptr, dragging_hsb_ptr,
+                                 hover_vsb_ptr, hover_hsb_ptr, overlay_shadow](hids& gear)
+                            {
+                                if (!*dragging_vsb_ptr && !*dragging_hsb_ptr) return;
+                                *dragging_vsb_ptr = faux;
+                                *dragging_hsb_ptr = faux;
+                                if (auto p = overlay_shadow.lock()) p->base::deface();
+                                gear.dismiss();
+                            });
+
+                            // LeftDragCancel: cancel drag.
+                            ovl.on(tier::mouserelease, input::key::LeftDragCancel,
+                                [dragging_vsb_ptr, dragging_hsb_ptr,
+                                 hover_vsb_ptr, hover_hsb_ptr, overlay_shadow](hids& gear)
+                            {
+                                if (!*dragging_vsb_ptr && !*dragging_hsb_ptr) return;
+                                *dragging_vsb_ptr = faux;
+                                *dragging_hsb_ptr = faux;
+                                *hover_vsb_ptr    = faux;
+                                *hover_hsb_ptr    = faux;
+                                if (auto p = overlay_shadow.lock()) p->base::deface();
+                                gear.dismiss();
+                            });
+                        });
+                        wrapper_ptr->attach(overlay_ptr);
+                        wrapper_ptr->base::reflow();
+                        wrapper_ptr->base::deface();
+
+                        // Keyboard interceptor.
+                        wrapper_ptr->bell::submit(tier::preview, input::events::keybd::any, *kbd_hook)
+                            = [cmd_list, query_ptr, caret_cp_ptr, sel_idx_ptr,
+                               v_scroll_off_ptr, h_scroll_off_ptr,
+                               kbd_lock_coord_ptr,
+                               overlay_shadow, boss_shadow,
+                               dismiss_visual, dismiss_hook, pending_unhook](hids& gear) mutable
+                        {
+                            if (gear.payload != input::keybd::type::keypress
+                             && gear.payload != input::keybd::type::keypaste) return;
+                            if (gear.payload == input::keybd::type::keypress
+                             && gear.keystat == input::key::interrupted)      return;
+                            if (gear.keybd::handled)                          return;
+
+                            // After visual dismiss: swallow trailing events until key release.
+                            if (*pending_unhook)
+                            {
+                                if (gear.payload == input::keybd::type::keypress
+                                 && gear.keystat == input::key::released) dismiss_hook();
+                                gear.set_handled(faux);
+                                return;
+                            }
+
+                            // Swallow key-release events.
+                            if (gear.payload == input::keybd::type::keypress
+                             && gear.keystat == input::key::released)
+                            {
+                                gear.set_handled(faux);
+                                return;
+                            }
+
+                            auto ovl_ptr = overlay_shadow.lock();
+
+                            // Helper: rebuild the filtered index list.
+                            auto build_filtered = [&]() -> std::vector<si32>
+                            {
+                                return command_bar::build_model(*cmd_list, *query_ptr).filtered;
+                            };
+
+                            // Helper: compute entry_disp_w from overlay area.
+                            auto get_entry_disp_w = [&]() -> si32
+                            {
+                                if (!ovl_ptr) return 60; // Fallback.
+                                auto full_w = ovl_ptr->base::area().size.x;
+                                auto dw = std::min(command_bar::dlg_w_max, full_w - 4);
+                                return std::max(1, dw - 4);
+                            };
+
+                            auto keep_caret_visible = [&]
+                            {
+                                auto& q = *query_ptr;
+                                auto query_len = command_bar::cp_len(q);
+                                *caret_cp_ptr = std::clamp(*caret_cp_ptr, si32{ 0 }, query_len);
+                                auto edw = get_entry_disp_w();
+                                if (*h_scroll_off_ptr > *caret_cp_ptr)
+                                {
+                                    *h_scroll_off_ptr = *caret_cp_ptr;
+                                }
+                                if (*caret_cp_ptr - *h_scroll_off_ptr >= edw)
+                                {
+                                    *h_scroll_off_ptr = *caret_cp_ptr - edw + 1;
+                                }
+                                auto max_hs = std::max(si32{ 0 }, query_len - edw + 1);
+                                *h_scroll_off_ptr = std::clamp(*h_scroll_off_ptr, si32{ 0 }, max_hs);
+                            };
+
+                            auto keep_selection_valid = [&]
+                            {
+                                auto filtered = build_filtered();
+                                if (*sel_idx_ptr >= (si32)filtered.size())
+                                {
+                                    *sel_idx_ptr = filtered.empty() ? 0 : (si32)filtered.size() - 1;
+                                }
+                                auto max_vs = std::max(si32{ 0 }, (si32)filtered.size() - command_bar::max_items);
+                                *v_scroll_off_ptr = std::clamp(*v_scroll_off_ptr, si32{ 0 }, max_vs);
+                            };
+
+                            auto refresh_query = [&]
+                            {
+                                keep_selection_valid();
+                                keep_caret_visible();
+                            };
+
+                            auto insert_query_text = [&](view src) -> bool
+                            {
+                                auto buf = command_bar::filter_input_text(src);
+                                if (buf.empty()) return faux;
+                                auto& q = *query_ptr;
+                                auto query_len = command_bar::cp_len(q);
+                                *caret_cp_ptr = std::clamp(*caret_cp_ptr, si32{ 0 }, query_len);
+                                auto pos = command_bar::byte_of_cp(q, *caret_cp_ptr);
+                                q.insert(pos, buf);
+                                *caret_cp_ptr += command_bar::cp_len(buf);
+                                refresh_query();
+                                return true;
+                            };
+
+                            if (gear.payload == input::keybd::type::keypaste)
+                            {
+                                if (insert_query_text(gear.cluster))
+                                    if (ovl_ptr) ovl_ptr->base::deface();
+                                gear.set_handled(faux);
+                                return;
+                            }
+
+                            auto k = gear.keybd::generic();
+                            auto ctrl = !!(gear.ctlstat & hids::anyCtrl);
+                            auto alt  = !!(gear.ctlstat & hids::anyAlt);
+
+                            auto move_selection = [&](si32 delta)
+                            {
+                                auto filtered = build_filtered();
+                                if (!filtered.empty())
+                                {
+                                    auto next = std::clamp(*sel_idx_ptr + delta, si32{ 0 }, (si32)filtered.size() - 1);
+                                    if (next != *sel_idx_ptr)
+                                    {
+                                        *sel_idx_ptr = next;
+                                        if (*sel_idx_ptr < *v_scroll_off_ptr)
+                                        {
+                                            *v_scroll_off_ptr = *sel_idx_ptr;
+                                        }
+                                        auto vis_end = *v_scroll_off_ptr + command_bar::max_items - 1;
+                                        if (*sel_idx_ptr > vis_end)
+                                        {
+                                            *v_scroll_off_ptr = *sel_idx_ptr - command_bar::max_items + 1;
+                                        }
+                                    }
+                                }
+                                *kbd_lock_coord_ptr = gear.coord; // Lock out echo MouseMove at this coord.
+                                if (ovl_ptr) ovl_ptr->base::deface();
+                            };
+
+                            auto total_cp = [&] { return command_bar::cp_len(*query_ptr); };
+                            auto is_ws_cp = [&](si32 cp) -> bool
+                            {
+                                auto total = total_cp();
+                                if (cp < 0 || cp >= total) return true;
+                                auto i = command_bar::byte_of_cp(*query_ptr, cp);
+                                auto c = (unsigned char)(*query_ptr)[i];
+                                return c == 0x20 || c == 0x09;
+                            };
+                            auto prev_word_cp = [&](si32 cp) -> si32
+                            {
+                                if (cp <= 0) return 0;
+                                while (cp > 0 && is_ws_cp(cp - 1)) --cp;
+                                while (cp > 0 && !is_ws_cp(cp - 1)) --cp;
+                                return cp;
+                            };
+                            auto next_word_cp = [&](si32 cp) -> si32
+                            {
+                                auto total = total_cp();
+                                if (cp >= total) return total;
+                                while (cp < total && is_ws_cp(cp)) ++cp;
+                                while (cp < total && !is_ws_cp(cp)) ++cp;
+                                return cp;
+                            };
+                            auto erase_cp_range = [&](si32 from_cp, si32 to_cp) -> bool
+                            {
+                                auto& q = *query_ptr;
+                                auto total = total_cp();
+                                from_cp = std::clamp(from_cp, si32{ 0 }, total);
+                                to_cp   = std::clamp(to_cp,   si32{ 0 }, total);
+                                if (from_cp >= to_cp) return faux;
+                                auto a = command_bar::byte_of_cp(q, from_cp);
+                                auto b = command_bar::byte_of_cp(q, to_cp);
+                                q.erase(a, b - a);
+                                if (*caret_cp_ptr > to_cp)        *caret_cp_ptr -= to_cp - from_cp;
+                                else if (*caret_cp_ptr > from_cp) *caret_cp_ptr  = from_cp;
+                                refresh_query();
+                                return true;
+                            };
+
+                            // Esc — dismiss.
+                            if (k == input::key::Esc)
+                            {
+                                dismiss_visual();
+                                gear.set_handled(faux);
+                                return;
+                            }
+
+                            // Enter — execute selected command and dismiss.
+                            if (k == input::key::KeyEnter || k == input::key::NumpadEnter)
+                            {
+                                auto filtered = build_filtered();
+                                if (!filtered.empty() && *sel_idx_ptr < (si32)filtered.size())
+                                {
+                                    auto cmd_idx = filtered[(size_t)*sel_idx_ptr];
+                                    auto script = (*cmd_list)[cmd_idx].script;
+                                    dismiss_visual();
+                                    dismiss_hook();
+                                    if (!script.empty())
+                                        if (auto boss_ptr = boss_shadow.lock())
+                                        {
+                                            boss_ptr->bell::indexer.luafx.set_gear(gear);
+                                            boss_ptr->bell::indexer.luafx.run_script(*boss_ptr, script);
+                                        }
+                                }
+                                else
+                                {
+                                    dismiss_visual();
+                                    dismiss_hook();
+                                }
+                                gear.set_handled(faux);
+                                return;
+                            }
+
+                            // Arrow Up — move selection up, adjust v_scroll_off.
+                            if (k == input::key::KeyUpArrow
+                             || k == input::key::NumpadUpArrow
+                             || (ctrl && !alt && k == input::key::KeyP))
+                            {
+                                move_selection(-1);
+                                gear.set_handled(faux);
+                                return;
+                            }
+
+                            // Arrow Down — move selection down, adjust v_scroll_off.
+                            if (k == input::key::KeyDownArrow
+                             || k == input::key::NumpadDownArrow
+                             || (ctrl && !alt && k == input::key::KeyN))
+                            {
+                                move_selection(1);
+                                gear.set_handled(faux);
+                                return;
+                            }
+
+                            // Backspace - delete before caret, or kill word backward with Alt.
+                            if (k == input::key::Backspace)
+                            {
+                                auto changed = alt ? erase_cp_range(prev_word_cp(*caret_cp_ptr), *caret_cp_ptr)
+                                                   : erase_cp_range(*caret_cp_ptr - 1, *caret_cp_ptr);
+                                if (changed)
+                                    if (ovl_ptr) ovl_ptr->base::deface();
+                                gear.set_handled(faux);
+                                return;
+                            }
+
+                            if (k == input::key::KeyDelete || k == input::key::NumpadDelete)
+                            {
+                                auto changed = alt ? erase_cp_range(*caret_cp_ptr, next_word_cp(*caret_cp_ptr))
+                                                   : erase_cp_range(*caret_cp_ptr, *caret_cp_ptr + 1);
+                                if (changed)
+                                    if (ovl_ptr) ovl_ptr->base::deface();
+                                gear.set_handled(faux);
+                                return;
+                            }
+
+                            if (ctrl && !alt && k == input::key::KeyA)
+                            {
+                                if (*caret_cp_ptr != 0)
+                                {
+                                    *caret_cp_ptr = 0;
+                                    keep_caret_visible();
+                                    if (ovl_ptr) ovl_ptr->base::deface();
+                                }
+                                gear.set_handled(faux);
+                                return;
+                            }
+
+                            if (ctrl && !alt && k == input::key::KeyE)
+                            {
+                                auto total = total_cp();
+                                if (*caret_cp_ptr != total)
+                                {
+                                    *caret_cp_ptr = total;
+                                    keep_caret_visible();
+                                    if (ovl_ptr) ovl_ptr->base::deface();
+                                }
+                                gear.set_handled(faux);
+                                return;
+                            }
+
+                            if (ctrl && !alt && k == input::key::KeyB)
+                            {
+                                if (*caret_cp_ptr > 0)
+                                {
+                                    --(*caret_cp_ptr);
+                                    keep_caret_visible();
+                                    if (ovl_ptr) ovl_ptr->base::deface();
+                                }
+                                gear.set_handled(faux);
+                                return;
+                            }
+
+                            if (ctrl && !alt && k == input::key::KeyF)
+                            {
+                                auto total = total_cp();
+                                if (*caret_cp_ptr < total)
+                                {
+                                    ++(*caret_cp_ptr);
+                                    keep_caret_visible();
+                                    if (ovl_ptr) ovl_ptr->base::deface();
+                                }
+                                gear.set_handled(faux);
+                                return;
+                            }
+
+                            if (ctrl && !alt && k == input::key::KeyD)
+                            {
+                                auto changed = erase_cp_range(*caret_cp_ptr, *caret_cp_ptr + 1);
+                                if (changed)
+                                    if (ovl_ptr) ovl_ptr->base::deface();
+                                gear.set_handled(faux);
+                                return;
+                            }
+
+                            if (ctrl && !alt && k == input::key::KeyH)
+                            {
+                                auto changed = erase_cp_range(*caret_cp_ptr - 1, *caret_cp_ptr);
+                                if (changed)
+                                    if (ovl_ptr) ovl_ptr->base::deface();
+                                gear.set_handled(faux);
+                                return;
+                            }
+
+                            if (ctrl && !alt && k == input::key::KeyK)
+                            {
+                                auto changed = erase_cp_range(*caret_cp_ptr, total_cp());
+                                if (changed)
+                                    if (ovl_ptr) ovl_ptr->base::deface();
+                                gear.set_handled(faux);
+                                return;
+                            }
+
+                            if (ctrl && !alt && k == input::key::KeyU)
+                            {
+                                auto changed = erase_cp_range(0, *caret_cp_ptr);
+                                if (changed)
+                                    if (ovl_ptr) ovl_ptr->base::deface();
+                                gear.set_handled(faux);
+                                return;
+                            }
+
+                            if (ctrl && !alt && k == input::key::KeyW)
+                            {
+                                auto changed = erase_cp_range(prev_word_cp(*caret_cp_ptr), *caret_cp_ptr);
+                                if (changed)
+                                    if (ovl_ptr) ovl_ptr->base::deface();
+                                gear.set_handled(faux);
+                                return;
+                            }
+
+                            if (alt && !ctrl && k == input::key::KeyB)
+                            {
+                                auto next = prev_word_cp(*caret_cp_ptr);
+                                if (next != *caret_cp_ptr)
+                                {
+                                    *caret_cp_ptr = next;
+                                    keep_caret_visible();
+                                    if (ovl_ptr) ovl_ptr->base::deface();
+                                }
+                                gear.set_handled(faux);
+                                return;
+                            }
+
+                            if (alt && !ctrl && k == input::key::KeyF)
+                            {
+                                auto next = next_word_cp(*caret_cp_ptr);
+                                if (next != *caret_cp_ptr)
+                                {
+                                    *caret_cp_ptr = next;
+                                    keep_caret_visible();
+                                    if (ovl_ptr) ovl_ptr->base::deface();
+                                }
+                                gear.set_handled(faux);
+                                return;
+                            }
+
+                            if (alt && !ctrl && k == input::key::KeyD)
+                            {
+                                auto changed = erase_cp_range(*caret_cp_ptr, next_word_cp(*caret_cp_ptr));
+                                if (changed)
+                                    if (ovl_ptr) ovl_ptr->base::deface();
+                                gear.set_handled(faux);
+                                return;
+                            }
+
+                            if (k == input::key::KeyLeftArrow || k == input::key::NumpadLeftArrow)
+                            {
+                                if (*caret_cp_ptr > 0)
+                                {
+                                    --(*caret_cp_ptr);
+                                    keep_caret_visible();
+                                    if (ovl_ptr) ovl_ptr->base::deface();
+                                }
+                                gear.set_handled(faux);
+                                return;
+                            }
+
+                            if (k == input::key::KeyRightArrow || k == input::key::NumpadRightArrow)
+                            {
+                                auto total = total_cp();
+                                if (*caret_cp_ptr < total)
+                                {
+                                    ++(*caret_cp_ptr);
+                                    keep_caret_visible();
+                                    if (ovl_ptr) ovl_ptr->base::deface();
+                                }
+                                gear.set_handled(faux);
+                                return;
+                            }
+
+                            if (k == input::key::KeyHome || k == input::key::NumpadHome)
+                            {
+                                if (*caret_cp_ptr != 0)
+                                {
+                                    *caret_cp_ptr = 0;
+                                    keep_caret_visible();
+                                    if (ovl_ptr) ovl_ptr->base::deface();
+                                }
+                                gear.set_handled(faux);
+                                return;
+                            }
+
+                            if (k == input::key::KeyEnd || k == input::key::NumpadEnd)
+                            {
+                                auto total = total_cp();
+                                if (*caret_cp_ptr != total)
+                                {
+                                    *caret_cp_ptr = total;
+                                    keep_caret_visible();
+                                    if (ovl_ptr) ovl_ptr->base::deface();
+                                }
+                                gear.set_handled(faux);
+                                return;
+                            }
+
+                            if (ctrl && !alt && k == input::key::KeyY)
+                            {
+                                gear.owner.base::signal(tier::request, input::events::clipboard, gear);
+                                if (insert_query_text(gear.board::cargo.utf8))
+                                    if (ovl_ptr) ovl_ptr->base::deface();
+                                gear.set_handled(faux);
+                                return;
+                            }
+
+                            // Printable character - insert at caret.
+                            auto& ch = gear.keybd::cluster;
+                            if (!ctrl && !alt && !ch.empty() && (unsigned char)ch[0] >= 0x20)
+                            {
+                                if (insert_query_text(ch))
+                                    if (ovl_ptr) ovl_ptr->base::deface();
+                                gear.set_handled(faux);
+                                return;
+                            }
+
+                            // Ignore all other keys.
                             gear.set_handled(faux);
                         };
 

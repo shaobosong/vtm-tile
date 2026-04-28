@@ -221,12 +221,75 @@ R"==(
             <item id="term" label="term"    type="dtvt" cmd="$0 -r term"/>
             <item id="vtty" label="vtty"    type="dtvt" cmd="$0 -r vtty"/>
         </app>
+        <commandbar group*>
+            <group label="pane" item*>
+                <item label="Focus Previous"     tooltip=/Ns/Tile/FocusPrev/tooltip      script=TileFocusPrev/>
+                <item label="Focus Next"         tooltip=/Ns/Tile/FocusNext/tooltip      script=TileFocusNext/>
+                <item label="Previous Pane"      tooltip=/Ns/Tile/FocusPrevPane/tooltip  script=TileFocusPrevPane/>
+                <item label="Next Pane"          tooltip=/Ns/Tile/FocusNextPane/tooltip  script=TileFocusNextPane/>
+                <item label="Last Pane"          tooltip=/Ns/Tile/LastPane/tooltip       script=TileLastPane/>
+                <item label="Focus Left Pane"    tooltip=/Ns/Tile/FocusLeftPane/tooltip  script=TileFocusLeftPane/>
+                <item label="Focus Right Pane"   tooltip=/Ns/Tile/FocusRightPane/tooltip script=TileFocusRightPane/>
+                <item label="Focus Up Pane"      tooltip=/Ns/Tile/FocusUpPane/tooltip    script=TileFocusUpPane/>
+                <item label="Focus Down Pane"    tooltip=/Ns/Tile/FocusDownPane/tooltip  script=TileFocusDownPane/>
+                <item label="Show Pane Index"    tooltip=/Ns/Tile/ShowPaneIndex/tooltip  script=TileShowPaneIndex/>
+                <item label="Select All Panes"   tooltip=/Ns/Tile/SelectAllPanes/tooltip script=TileSelectAllPanes/>
+                <item label="Zoom Pane"          tooltip=/Ns/Tile/ZoomPane/tooltip       script=TileZoomPane/>
+                <item label="Close Pane"         tooltip=/Ns/Tile/ClosePane/tooltip      script=TileClosePane/>
+            </group>
+            <group label="app" item*>
+                <item label="Run Application"       tooltip=/Ns/Tile/RunApplication/tooltip             script=TileRunApplication/>
+                <item label="Next Application"      tooltip=/Ns/Tile/SelectApplication/tooltip          script=TileSelectApplication/>
+                <item label="Previous Application"  tooltip=/Ns/Tile/SelectApplicationReverse/tooltip   script=TileSelectApplicationReverse/>
+            </group>
+            <group label="layout" item*>
+                <item label="Split Horizontal"   tooltip=/Ns/Tile/SplitHorizontally/tooltip     script=TileSplitHorizontally/>
+                <item label="Split Vertical"     tooltip=/Ns/Tile/SplitVertically/tooltip       script=TileSplitVertically/>
+                <item label="Rotate Split"       tooltip=/Ns/Tile/SplitOrientation/tooltip      script=TileSplitOrientation/>
+                <item label="Swap Panes"         tooltip=/Ns/Tile/SwapPanes/tooltip             script=TileSwapPanes/>
+                <item label="Equalize Splits"    tooltip=/Ns/Tile/EqualizeSplitRatio/tooltip    script=TileEqualizeSplitRatio/>
+            </group>
+            <group label="workspace" item*>
+                <item label="Create Workspace"   tooltip=/Ns/Tile/CreateWorkspace/tooltip       script=TileCreateWorkspace/>
+                <item label="Destroy Workspace"  tooltip=/Ns/Tile/DestroyWorkspace/tooltip      script=TileDestroyWorkspace/>
+                <item label="Switch Workspace 0" tooltip=/Ns/Tile/SwitchWorkspace0/tooltip      script=TileSwitchWorkspace0/>
+                <item label="Switch Workspace 1" tooltip=/Ns/Tile/SwitchWorkspace1/tooltip      script=TileSwitchWorkspace1/>
+                <item label="Switch Workspace 2" tooltip=/Ns/Tile/SwitchWorkspace2/tooltip      script=TileSwitchWorkspace2/>
+                <item label="Switch Workspace 3" tooltip=/Ns/Tile/SwitchWorkspace3/tooltip      script=TileSwitchWorkspace3/>
+                <item label="Switch Workspace 4" tooltip=/Ns/Tile/SwitchWorkspace4/tooltip      script=TileSwitchWorkspace4/>
+                <item label="Switch Workspace 5" tooltip=/Ns/Tile/SwitchWorkspace5/tooltip      script=TileSwitchWorkspace5/>
+                <item label="Switch Workspace 6" tooltip=/Ns/Tile/SwitchWorkspace6/tooltip      script=TileSwitchWorkspace6/>
+                <item label="Switch Workspace 7" tooltip=/Ns/Tile/SwitchWorkspace7/tooltip      script=TileSwitchWorkspace7/>
+                <item label="Switch Workspace 8" tooltip=/Ns/Tile/SwitchWorkspace8/tooltip      script=TileSwitchWorkspace8/>
+                <item label="Switch Workspace 9" tooltip=/Ns/Tile/SwitchWorkspace9/tooltip      script=TileSwitchWorkspace9/>
+                <item label="Next Workspace"     tooltip=/Ns/Tile/NextWorkspace/tooltip         script=TileNextWorkspace/>
+                <item label="Previous Workspace" tooltip=/Ns/Tile/PrevWorkspace/tooltip         script=TilePrevWorkspace/>
+                <item label="Last Workspace"     tooltip=/Ns/Tile/LastWorkspace/tooltip         script=TileLastWorkspace/>
+                <item label="Workspace Popup"    tooltip=/Ns/Tile/OpenWorkspacePopup/tooltip    script=TileOpenWorkspacePopup/>
+            </group>
+            <!-- <group label="grip" item*> -->
+            <!--     <item label="Move Grip Left"     tooltip=/Ns/Tile/MoveGripLeft/tooltip          script=TileMoveGripLeft/> -->
+            <!--     <item label="Move Grip Right"    tooltip=/Ns/Tile/MoveGripRight/tooltip         script=TileMoveGripRight/> -->
+            <!--     <item label="Move Grip Up"       tooltip=/Ns/Tile/MoveGripUp/tooltip            script=TileMoveGripUp/> -->
+            <!--     <item label="Move Grip Down"     tooltip=/Ns/Tile/MoveGripDown/tooltip          script=TileMoveGripDown/> -->
+            <!--     <item label="Decrease Grip Width" tooltip=/Ns/Tile/DecreaseGripWidth/tooltip    script=TileDecreaseGripWidth/> -->
+            <!--     <item label="Increase Grip Width" tooltip=/Ns/Tile/IncreaseGripWidth/tooltip    script=TileIncreaseGripWidth/> -->
+            <!--     <item label="Previous Grip"      tooltip=/Ns/Tile/FocusPrevGrip/tooltip         script=TileFocusPrevGrip/> -->
+            <!--     <item label="Next Grip"          tooltip=/Ns/Tile/FocusNextGrip/tooltip         script=TileFocusNextGrip/> -->
+            <!-- </group> -->
+            <group label="manager" item*>
+                <!-- <item label="Set Manager Title"  tooltip=/Ns/Tile/SetManagerTitle/tooltip   script=TileSetManagerTitle/> -->
+                <!-- <item label="Open Command Bar"   tooltip=/Ns/Tile/OpenCommandBar/tooltip    script=TileOpenCommandBar/> -->
+                <item label="Disconnect"         tooltip=/Ns/Tile/Disconnect/tooltip        script=TileDisconnect/>
+                <item label="Shutdown"           tooltip=/Ns/Tile/Shutdown/tooltip          script=TileShutdown/>
+            </group>
+        </commandbar>
         <menu item*>
             <autohide=/Menu/Defaults/autohide/>
             <slim=/Menu/Defaults/slim/>
             <item=/Menu/Buttons/AlwaysOnTop/>
-            <item label="  <  " tooltip=" Focus the previous pane "         script=OnLeftClick|TileFocusPrevPane/>
-            <item label="  >  " tooltip=" Focus the next pane "             script=OnLeftClick|TileFocusNextPane/>
+            <item label="  <  " tooltip=/Ns/Tile/FocusPrevPane/tooltip      script=OnLeftClick|TileFocusPrevPane/>
+            <item label="  >  " tooltip=/Ns/Tile/FocusNextPane/tooltip      script=OnLeftClick|TileFocusNextPane/>
             <item tooltip=/Ns/Tile/SelectApplication/tooltip>
                 <script=OnLeftClick|TileSelectApplication/>
                 <script=OnRightClick|TileSelectApplicationReverse/>
@@ -246,7 +309,7 @@ R"==(
             <item label="  >|<  " tooltip=/Ns/Tile/EqualizeSplitRatio/tooltip script=OnLeftClick|TileEqualizeSplitRatio/>
             <item label="  <->  " tooltip=/Ns/Tile/SwapPanes/tooltip          script=OnLeftClick|TileSwapPanes/>
             <item label="  -/-  " tooltip=/Ns/Tile/SplitOrientation/tooltip   script=OnLeftClick|TileSplitOrientation/>
-            <item label="  =D-  " tooltip=" Disconnect "                      script=OnLeftClick|TileDisconnect>
+            <item label="  =D-  " tooltip=/Ns/Tile/Disconnect/tooltip         script=OnLeftClick|TileDisconnect>
                 <hover fgc="0xFFFFFFFF" bgc="0xFFFF8700"/>
             </item>
             <!-- <item label="  #  " tooltip=/Ns/Tile/SetManagerTitle/tooltip    script=OnLeftClick|TileSetManagerTitle/> -->
@@ -652,6 +715,21 @@ R"==(
             <Shutdown    label="× Shutdown"   tooltip=" Disconnect all users and shutdown "/>
         </Taskbar>
         <Tile>
+            <FocusPrev         tooltip=" Focus the previous pane or split grip "                 />
+            <FocusNext         tooltip=" Focus the next pane or split grip "                     />
+            <FocusPrevPane     tooltip=" Focus the previous pane "                               />
+            <FocusNextPane     tooltip=" Focus the next pane "                                   />
+            <LastPane          tooltip=" Focus the previously focused pane "                     />
+            <FocusLeftPane     tooltip=" Focus the nearest pane to the left "                    />
+            <FocusRightPane    tooltip=" Focus the nearest pane to the right "                   />
+            <FocusUpPane       tooltip=" Focus the nearest pane above "                          />
+            <FocusDownPane     tooltip=" Focus the nearest pane below "                          />
+            <ShowPaneIndex>
+                <tooltip>
+                    " Show pane index overlay for quick pane switching. ""\n"
+                    " Press the displayed character to focus a pane.    "
+                </tooltip>
+            </ShowPaneIndex>
             <RunApplication>
                 <tooltip>
                     " Launch application instances in active empty slots.     ""\n"
@@ -665,13 +743,44 @@ R"==(
                     " Click to cycle through available applications.  "
                 </tooltip>
             </SelectApplication>
+            <SelectApplicationReverse tooltip=" Select the previous default application type "  />
             <SplitHorizontally  tooltip=" Split active panes horizontally "                     />
             <SplitVertically    tooltip=" Split active panes vertically "                       />
             <SplitOrientation   tooltip=" Change split orientation "                            />
             <SwapPanes          tooltip=" Swap two or more panes "                              />
             <EqualizeSplitRatio tooltip=" Equalize split ratio "                                />
             <SetManagerTitle    tooltip=" Set tiling window manager title using clipboard data "/>
+            <ZoomPane           tooltip=" Zoom active application "                             />
             <ClosePane          tooltip=" Close active application "                            />
+            <Disconnect         tooltip=" Disconnect tile manager "                             />
+            <Shutdown           tooltip=" Shutdown tile manager "                               />
+            <CreateWorkspace    tooltip=" Create a new workspace and switch to it "             />
+            <DestroyWorkspace   tooltip=" Destroy the current workspace "                       />
+            <SwitchWorkspace0   tooltip=" Switch to workspace 0 "                               />
+            <SwitchWorkspace1   tooltip=" Switch to workspace 1 "                               />
+            <SwitchWorkspace2   tooltip=" Switch to workspace 2 "                               />
+            <SwitchWorkspace3   tooltip=" Switch to workspace 3 "                               />
+            <SwitchWorkspace4   tooltip=" Switch to workspace 4 "                               />
+            <SwitchWorkspace5   tooltip=" Switch to workspace 5 "                               />
+            <SwitchWorkspace6   tooltip=" Switch to workspace 6 "                               />
+            <SwitchWorkspace7   tooltip=" Switch to workspace 7 "                               />
+            <SwitchWorkspace8   tooltip=" Switch to workspace 8 "                               />
+            <SwitchWorkspace9   tooltip=" Switch to workspace 9 "                               />
+            <NextWorkspace      tooltip=" Switch to the next workspace "                        />
+            <PrevWorkspace      tooltip=" Switch to the previous workspace "                    />
+            <LastWorkspace      tooltip=" Switch to the last visited workspace "                />
+            <OpenWorkspacePopup tooltip=" Open the workspace preview popup "                    />
+            <OpenCommandBar     tooltip=" Open the command bar "                                />
+            <MoveGripLeft       tooltip=" Move the split grip to the left "                     />
+            <MoveGripRight      tooltip=" Move the split grip to the right "                    />
+            <MoveGripUp         tooltip=" Move the split grip up "                              />
+            <MoveGripDown       tooltip=" Move the split grip down "                            />
+)==" // MSVC2022: C2026 String too big, trailing characters truncated.
+R"==(
+            <DecreaseGripWidth  tooltip=" Decrease the split grip width "                       />
+            <IncreaseGripWidth  tooltip=" Increase the split grip width "                       />
+            <FocusPrevGrip      tooltip=" Focus the previous split grip "                       />
+            <FocusNextGrip      tooltip=" Focus the next split grip "                           />
         </Tile>
         <FindPrev>
             <tooltip>
@@ -876,6 +985,21 @@ R"==(
             <Shutdown    label="× Завершить работу" tooltip=" Отключить всех пользователей и завершить работу рабочего стола "/>
         </Taskbar>
         <Tile>
+            <FocusPrev         tooltip=" Перейти к предыдущему слоту или разделителю "                          />
+            <FocusNext         tooltip=" Перейти к следующему слоту или разделителю "                           />
+            <FocusPrevPane     tooltip=" Перейти к предыдущему слоту "                                          />
+            <FocusNextPane     tooltip=" Перейти к следующему слоту "                                           />
+            <LastPane          tooltip=" Вернуть фокус к предыдущему активному слоту "                          />
+            <FocusLeftPane     tooltip=" Перейти к ближайшему слоту слева "                                     />
+            <FocusRightPane    tooltip=" Перейти к ближайшему слоту справа "                                    />
+            <FocusUpPane       tooltip=" Перейти к ближайшему слоту выше "                                      />
+            <FocusDownPane     tooltip=" Перейти к ближайшему слоту ниже "                                      />
+            <ShowPaneIndex>
+                <tooltip>
+                    " Показать индексы слотов для быстрого переключения. ""\n"
+                    " Нажмите показанный символ, чтобы выбрать слот.      "
+                </tooltip>
+            </ShowPaneIndex>
             <RunApplication>
                 <tooltip>
                     " Запустить приложение по-умолчанию в активных незадействованных слотах  \n"
@@ -883,13 +1007,50 @@ R"==(
                 </tooltip>
             </RunApplication>
             <SelectAllPanes     tooltip=" Установить фокус на все слоты (активировать) "                    />
+            <SelectApplication>
+                <tooltip>
+                    " Выбрать тип приложения по-умолчанию для новых слотов. ""\n"
+                    " Нажмите, чтобы перейти к следующему приложению.       "
+                </tooltip>
+            </SelectApplication>
+            <SelectApplicationReverse tooltip=" Выбрать предыдущий тип приложения по-умолчанию "            />
             <SplitHorizontally  tooltip=" Разделить активные слоты горизонтально "                          />
             <SplitVertically    tooltip=" Разделить активные слоты вертикально "                            />
             <SplitOrientation   tooltip=" Повернуть разделение на 90 градусов "                             />
             <SwapPanes          tooltip=" Поменять слоты местами по кругу "                                 />
             <EqualizeSplitRatio tooltip=" Выровнять соотношение разделения слотов "                         />
             <SetManagerTitle    tooltip=" Установить заголовок менеджера, используя текст из буфера обмена "/>
+            <ZoomPane           tooltip=" Развернуть активное приложение "                                  />
             <ClosePane          tooltip=" Закрыть приложения в активных слотах "                            />
+            <Disconnect         tooltip=" Отключить тайловый менеджер "                                     />
+            <Shutdown           tooltip=" Завершить работу тайлового менеджера "                            />
+            <CreateWorkspace    tooltip=" Создать новую рабочую область и перейти к ней "                   />
+            <DestroyWorkspace   tooltip=" Удалить текущую рабочую область "                                 />
+            <SwitchWorkspace0   tooltip=" Перейти к рабочей области 0 "                                     />
+            <SwitchWorkspace1   tooltip=" Перейти к рабочей области 1 "                                     />
+            <SwitchWorkspace2   tooltip=" Перейти к рабочей области 2 "                                     />
+            <SwitchWorkspace3   tooltip=" Перейти к рабочей области 3 "                                     />
+            <SwitchWorkspace4   tooltip=" Перейти к рабочей области 4 "                                     />
+            <SwitchWorkspace5   tooltip=" Перейти к рабочей области 5 "                                     />
+            <SwitchWorkspace6   tooltip=" Перейти к рабочей области 6 "                                     />
+            <SwitchWorkspace7   tooltip=" Перейти к рабочей области 7 "                                     />
+            <SwitchWorkspace8   tooltip=" Перейти к рабочей области 8 "                                     />
+            <SwitchWorkspace9   tooltip=" Перейти к рабочей области 9 "                                     />
+            <NextWorkspace      tooltip=" Перейти к следующей рабочей области "                             />
+            <PrevWorkspace      tooltip=" Перейти к предыдущей рабочей области "                            />
+            <LastWorkspace      tooltip=" Перейти к последней посещенной рабочей области "                  />
+            <OpenWorkspacePopup tooltip=" Открыть окно предварительного просмотра рабочих областей "        />
+            <OpenCommandBar     tooltip=" Открыть панель команд "                                           />
+)==" // MSVC2022: C2026 String too big, trailing characters truncated.
+R"==(
+            <MoveGripLeft       tooltip=" Переместить разделитель влево "                                   />
+            <MoveGripRight      tooltip=" Переместить разделитель вправо "                                  />
+            <MoveGripUp         tooltip=" Переместить разделитель вверх "                                   />
+            <MoveGripDown       tooltip=" Переместить разделитель вниз "                                    />
+            <DecreaseGripWidth  tooltip=" Уменьшить ширину разделителя "                                    />
+            <IncreaseGripWidth  tooltip=" Увеличить ширину разделителя "                                    />
+            <FocusPrevGrip      tooltip=" Перейти к предыдущему разделителю "                               />
+            <FocusNextGrip      tooltip=" Перейти к следующему разделителю "                                />
         </Tile>
         <FindPrev>
             <tooltip>
@@ -1222,7 +1383,8 @@ R"==(
     <TileNextWorkspace     ="vtm.tile.NextWorkspace();"/>          <!-- Switch to the next workspace (wrapping). -->
     <TilePrevWorkspace     ="vtm.tile.PrevWorkspace();"/>          <!-- Switch to the previous workspace (wrapping). -->
     <TileLastWorkspace     ="vtm.tile.LastWorkspace();"/>          <!-- Switch to the last visited workspace. -->
-    <TileOpenWorkspacePopup="vtm.tile.OpenWorkspacePopup();"/>      <!-- Open the workspace preview popup (Win+Tab style). -->
+    <TileOpenWorkspacePopup="vtm.tile.OpenWorkspacePopup();"/>     <!-- Open the workspace preview popup (Win+Tab style). -->
+    <TileOpenCommandBar    ="vtm.tile.OpenCommandBar();"/>         <!-- Open the command bar (fuzzy command launcher, Ctrl+P style). -->
     <TileMoveGripLeft      ="vtm.grip.MoveGrip(-1, 0);"/>          <!-- Move the split grip to the left. -->
     <TileMoveGripRight     ="vtm.grip.MoveGrip( 1, 0);"/>          <!-- Move the split grip to the right. -->
     <TileMoveGripUp        ="vtm.grip.MoveGrip( 0,-1);"/>          <!-- Move the split grip up. -->
