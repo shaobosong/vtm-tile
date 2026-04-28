@@ -523,34 +523,316 @@ namespace netxs::app::tile
             return buf;
         }
 
-        static auto fuzzy_match(view query, view target) -> bool
+        enum class char_class : si32
         {
-            if (query.empty()) return true;
-            auto ti = size_t{};
-            for (auto qch : query)
-            {
-                auto lc = (char)std::tolower((unsigned char)qch);
-                while (ti < target.size() && (char)std::tolower((unsigned char)target[ti]) != lc) ++ti;
-                if (ti >= target.size()) return false;
-                ++ti;
-            }
-            return true;
+            white,
+            non_word,
+            delimiter,
+            lower,
+            upper,
+            letter,
+            number,
+        };
+
+        struct fuzzy_result
+        {
+            bool                matched = faux;
+            si32                score   = 0;
+            std::vector<size_t> offsets;
+        };
+
+        static constexpr auto score_match                 = si32{ 16 };
+        static constexpr auto score_gap_start             = si32{ -3 };
+        static constexpr auto score_gap_extension         = si32{ -1 };
+        static constexpr auto bonus_boundary              = score_match / 2;
+        static constexpr auto bonus_non_word              = score_match / 2;
+        static constexpr auto bonus_camel123              = bonus_boundary + score_gap_extension;
+        static constexpr auto bonus_consecutive           = -(score_gap_start + score_gap_extension);
+        static constexpr auto bonus_first_char_multiplier = si32{ 2 };
+        static constexpr auto bonus_boundary_white        = bonus_boundary + 2;
+        static constexpr auto bonus_boundary_delimiter    = bonus_boundary + 1;
+
+        static auto ascii_lower(unsigned char c) -> char
+        {
+            return (char)(c >= 'A' && c <= 'Z' ? c + ('a' - 'A') : c);
         }
 
-        static auto match_offsets(view query, view target) -> std::vector<size_t>
+        static auto is_fuzzy_white(unsigned char c) -> bool
+        {
+            return c == ' ' || c == '\t' || c == '\n' || c == '\v' || c == '\f' || c == '\r';
+        }
+
+        static auto is_fuzzy_delimiter(unsigned char c) -> bool
+        {
+            return c == '/' || c == ',' || c == ':' || c == ';' || c == '|';
+        }
+
+        static auto class_of(unsigned char c) -> char_class
+        {
+            if (c >= 'a' && c <= 'z') return char_class::lower;
+            if (c >= 'A' && c <= 'Z') return char_class::upper;
+            if (c >= '0' && c <= '9') return char_class::number;
+            if (is_fuzzy_white(c))    return char_class::white;
+            if (is_fuzzy_delimiter(c)) return char_class::delimiter;
+            return char_class::non_word;
+        }
+
+        static auto bonus_for(char_class prev, char_class curr) -> si32
+        {
+            if ((si32)curr > (si32)char_class::non_word)
+            {
+                switch (prev)
+                {
+                    case char_class::white:     return bonus_boundary_white;
+                    case char_class::delimiter: return bonus_boundary_delimiter;
+                    case char_class::non_word:  return bonus_boundary;
+                    default: break;
+                }
+            }
+
+            if ((prev == char_class::lower && curr == char_class::upper)
+             || (prev != char_class::number && curr == char_class::number))
+            {
+                return bonus_camel123;
+            }
+
+            switch (curr)
+            {
+                case char_class::non_word:
+                case char_class::delimiter: return bonus_non_word;
+                case char_class::white:     return bonus_boundary_white;
+                default:                    return 0;
+            }
+        }
+
+        static auto max3(si32 a, si32 b, si32 c) -> si32
+        {
+            return std::max(a, std::max(b, c));
+        }
+
+        static auto greedy_offsets(view query, view target) -> std::vector<size_t>
         {
             auto offsets = std::vector<size_t>{};
-            if (query.empty()) return offsets;
             auto ti = size_t{};
             for (auto qch : query)
             {
-                auto lc = (char)std::tolower((unsigned char)qch);
-                while (ti < target.size() && (char)std::tolower((unsigned char)target[ti]) != lc) ++ti;
+                auto lc = ascii_lower((unsigned char)qch);
+                while (ti < target.size() && ascii_lower((unsigned char)target[ti]) != lc) ++ti;
                 if (ti >= target.size()) break;
                 offsets.push_back(ti);
                 ++ti;
             }
             return offsets;
+        }
+
+        static auto fuzzy_search(view query, view target) -> fuzzy_result
+        {
+            auto result = fuzzy_result{};
+            if (query.empty())
+            {
+                result.matched = true;
+                return result;
+            }
+
+            auto const m = (si32)query.size();
+            auto const n = (si32)target.size();
+            if (m > n) return result;
+
+            auto pattern = std::vector<char>{};
+            pattern.reserve(query.size());
+            for (auto c : query)
+            {
+                pattern.push_back(ascii_lower((unsigned char)c));
+            }
+
+            auto text_chars = std::vector<char>((size_t)n);
+            auto bonuses    = std::vector<si32>((size_t)n);
+            auto first_pos  = std::vector<si32>((size_t)m, -1);
+
+            auto pidx = si32{};
+            auto pchr = pattern.front();
+            auto last_idx = si32{ -1 };
+            auto prev_class = char_class::white;
+            for (auto i = si32{}; i < n; ++i)
+            {
+                auto raw = (unsigned char)target[(size_t)i];
+                auto cls = class_of(raw);
+                auto chr = ascii_lower(raw);
+                text_chars[(size_t)i] = chr;
+                bonuses[(size_t)i] = bonus_for(prev_class, cls);
+                prev_class = cls;
+
+                if (chr == pchr)
+                {
+                    if (pidx < m)
+                    {
+                        first_pos[(size_t)pidx] = i;
+                        ++pidx;
+                        pchr = pattern[(size_t)std::min(pidx, m - 1)];
+                    }
+                    last_idx = i;
+                }
+            }
+            if (pidx != m) return result;
+
+            result.matched = true;
+
+            auto h0 = std::vector<si32>((size_t)n);
+            auto c0 = std::vector<si32>((size_t)n);
+            auto max_score = si32{};
+            auto max_score_pos = first_pos.front();
+            auto prev_h0 = si32{};
+            auto in_gap = faux;
+            for (auto i = si32{}; i < n; ++i)
+            {
+                if (text_chars[(size_t)i] == pattern.front())
+                {
+                    auto score = score_match + bonuses[(size_t)i] * bonus_first_char_multiplier;
+                    h0[(size_t)i] = score;
+                    c0[(size_t)i] = 1;
+                    if (m == 1 && score > max_score)
+                    {
+                        max_score = score;
+                        max_score_pos = i;
+                    }
+                    in_gap = faux;
+                }
+                else
+                {
+                    h0[(size_t)i] = std::max(prev_h0 + (in_gap ? score_gap_extension : score_gap_start), si32{ 0 });
+                    c0[(size_t)i] = 0;
+                    in_gap = true;
+                }
+                prev_h0 = h0[(size_t)i];
+            }
+
+            if (m == 1)
+            {
+                result.score = max_score;
+                result.offsets.push_back((size_t)max_score_pos);
+                return result;
+            }
+
+            auto const first_idx = first_pos.front();
+            auto const width = last_idx - first_idx + 1;
+            auto h = std::vector<si32>((size_t)(width * m));
+            auto c = std::vector<si32>((size_t)(width * m));
+            for (auto i = first_idx; i <= last_idx; ++i)
+            {
+                auto dst = (size_t)(i - first_idx);
+                h[dst] = h0[(size_t)i];
+                c[dst] = c0[(size_t)i];
+            }
+
+            for (auto pattern_idx = si32{ 1 }; pattern_idx < m; ++pattern_idx)
+            {
+                auto const row = pattern_idx * width;
+                auto const prev_row = row - width;
+                auto gap = faux;
+                for (auto col = first_pos[(size_t)pattern_idx]; col <= last_idx; ++col)
+                {
+                    auto const j0 = col - first_idx;
+                    auto const idx = row + j0;
+                    auto const left = j0 > 0 ? h[(size_t)(idx - 1)] : si32{};
+                    auto s2 = left + (gap ? score_gap_extension : score_gap_start);
+                    auto s1 = si32{};
+                    auto consecutive = si32{};
+
+                    if (text_chars[(size_t)col] == pattern[(size_t)pattern_idx])
+                    {
+                        auto const diag = prev_row + j0 - 1;
+                        s1 = h[(size_t)diag] + score_match;
+                        auto bonus = bonuses[(size_t)col];
+                        consecutive = c[(size_t)diag] + 1;
+                        if (consecutive > 1)
+                        {
+                            auto first_bonus = bonuses[(size_t)(col - consecutive + 1)];
+                            if (bonus >= bonus_boundary && bonus > first_bonus)
+                            {
+                                consecutive = 1;
+                            }
+                            else
+                            {
+                                bonus = max3(bonus, bonus_consecutive, first_bonus);
+                            }
+                        }
+                        if (s1 + bonus < s2)
+                        {
+                            s1 += bonuses[(size_t)col];
+                            consecutive = 0;
+                        }
+                        else
+                        {
+                            s1 += bonus;
+                        }
+                    }
+
+                    c[(size_t)idx] = consecutive;
+                    gap = s1 < s2;
+                    auto score = max3(s1, s2, 0);
+                    if (pattern_idx == m - 1 && score > max_score)
+                    {
+                        max_score = score;
+                        max_score_pos = col;
+                    }
+                    h[(size_t)idx] = score;
+                }
+            }
+
+            result.score = max_score;
+            result.offsets.reserve(query.size());
+            auto pattern_idx = m - 1;
+            auto col = max_score_pos;
+            auto prefer_match = true;
+            while (col >= first_idx)
+            {
+                auto const row = pattern_idx * width;
+                auto const j0 = col - first_idx;
+                auto const idx = row + j0;
+                auto const score = h[(size_t)idx];
+                auto s1 = si32{};
+                auto s2 = si32{};
+                if (pattern_idx > 0 && col >= first_pos[(size_t)pattern_idx] && j0 > 0)
+                {
+                    s1 = h[(size_t)(idx - width - 1)];
+                }
+                if (col > first_pos[(size_t)pattern_idx] && j0 > 0)
+                {
+                    s2 = h[(size_t)(idx - 1)];
+                }
+
+                if (score > s1 && (score > s2 || (score == s2 && prefer_match)))
+                {
+                    result.offsets.push_back((size_t)col);
+                    if (pattern_idx == 0) break;
+                    --pattern_idx;
+                }
+
+                auto const next_idx = idx + width + 1;
+                prefer_match = c[(size_t)idx] > 1
+                             || (next_idx < (si32)c.size() && c[(size_t)next_idx] > 0);
+                --col;
+            }
+
+            if ((si32)result.offsets.size() != m)
+            {
+                result.offsets = greedy_offsets(query, target);
+            }
+            else
+            {
+                std::sort(result.offsets.begin(), result.offsets.end());
+            }
+            return result;
+        }
+
+        [[maybe_unused]] static auto fuzzy_match(view query, view target) -> bool
+        {
+            return fuzzy_search(query, target).matched;
+        }
+
+        static auto match_offsets(view query, view target) -> std::vector<size_t>
+        {
+            return fuzzy_search(query, target).offsets;
         }
 
         static auto load(auto& cfg) -> netxs::sptr<std::vector<item>>
@@ -575,13 +857,41 @@ namespace netxs::app::tile
 
         static auto build_model(std::vector<item> const& commands, view query) -> model
         {
+            struct ranked_match
+            {
+                si32 index;
+                si32 score;
+                si32 length;
+            };
+
             auto result = model{};
+            auto ranked = std::vector<ranked_match>{};
+            ranked.reserve(commands.size());
             for (auto i = si32{}; i < (si32)commands.size(); ++i)
             {
-                if (!fuzzy_match(query, commands[i].display)) continue;
-                result.filtered.push_back(i);
-                result.tooltip_col = std::max(result.tooltip_col, (si32)utf::length(commands[i].display) + 6);
+                auto match = fuzzy_search(query, commands[i].display);
+                if (!match.matched) continue;
+                auto length = (si32)utf::length(commands[i].display);
+                if (query.empty())
+                {
+                    result.filtered.push_back(i);
+                }
+                else
+                {
+                    ranked.push_back({ i, match.score, length });
+                }
+                result.tooltip_col = std::max(result.tooltip_col, length + 6);
                 result.max_tooltip = std::max(result.max_tooltip, (si32)utf::length(commands[i].tooltip));
+            }
+            std::sort(ranked.begin(), ranked.end(), [](auto const& a, auto const& b)
+            {
+                if (a.score  != b.score ) return a.score  > b.score;
+                if (a.length != b.length) return a.length < b.length;
+                return a.index < b.index;
+            });
+            for (auto const& match : ranked)
+            {
+                result.filtered.push_back(match.index);
             }
             return result;
         }
