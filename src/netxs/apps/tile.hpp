@@ -825,14 +825,58 @@ namespace netxs::app::tile
             return result;
         }
 
+        static auto fuzzy_terms(view query) -> std::vector<view>
+        {
+            auto terms = std::vector<view>{};
+            auto pos = size_t{};
+            while (pos < query.size())
+            {
+                while (pos < query.size() && is_fuzzy_white((unsigned char)query[pos])) ++pos;
+                auto start = pos;
+                while (pos < query.size() && !is_fuzzy_white((unsigned char)query[pos])) ++pos;
+                if (start < pos)
+                {
+                    terms.push_back(query.substr(start, pos - start));
+                }
+            }
+            return terms;
+        }
+
+        static auto fuzzy_search_terms(std::vector<view> const& terms, view target) -> fuzzy_result
+        {
+            auto result = fuzzy_result{};
+            if (terms.empty())
+            {
+                result.matched = true;
+                return result;
+            }
+
+            result.matched = true;
+            for (auto term : terms)
+            {
+                auto match = fuzzy_search(term, target);
+                if (!match.matched) return {};
+                result.score += match.score;
+                result.offsets.insert(result.offsets.end(), match.offsets.begin(), match.offsets.end());
+            }
+            std::sort(result.offsets.begin(), result.offsets.end());
+            result.offsets.erase(std::unique(result.offsets.begin(), result.offsets.end()), result.offsets.end());
+            return result;
+        }
+
+        static auto fuzzy_search_terms(view query, view target) -> fuzzy_result
+        {
+            return fuzzy_search_terms(fuzzy_terms(query), target);
+        }
+
         [[maybe_unused]] static auto fuzzy_match(view query, view target) -> bool
         {
-            return fuzzy_search(query, target).matched;
+            return fuzzy_search_terms(query, target).matched;
         }
 
         static auto match_offsets(view query, view target) -> std::vector<size_t>
         {
-            return fuzzy_search(query, target).offsets;
+            return fuzzy_search_terms(query, target).offsets;
         }
 
         static auto load(auto& cfg) -> netxs::sptr<std::vector<item>>
@@ -865,14 +909,15 @@ namespace netxs::app::tile
             };
 
             auto result = model{};
+            auto terms = fuzzy_terms(query);
             auto ranked = std::vector<ranked_match>{};
             ranked.reserve(commands.size());
             for (auto i = si32{}; i < (si32)commands.size(); ++i)
             {
-                auto match = fuzzy_search(query, commands[i].display);
+                auto match = fuzzy_search_terms(terms, commands[i].display);
                 if (!match.matched) continue;
                 auto length = (si32)utf::length(commands[i].display);
-                if (query.empty())
+                if (terms.empty())
                 {
                     result.filtered.push_back(i);
                 }

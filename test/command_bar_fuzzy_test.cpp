@@ -43,6 +43,23 @@ namespace
             && model.filtered[1] == 1;
     }
 
+    auto verify_space_separated_terms_are_anded() -> bool
+    {
+        auto commands = std::vector<tile::command_bar::item>
+        {
+            { "layout: Split Horizontal", "", "" },
+            { "layout: Split Vertical",   "", "" },
+            { "layout: Rotate Split",     "", "" },
+            { "layout: Swap Panes",       "", "" },
+            { "layout: Equalize Splits",  "", "" },
+        };
+        auto model = tile::command_bar::build_model(commands, "hor sp");
+        return model.filtered.size() == 1
+            && model.filtered[0] == 0
+            && tile::command_bar::fuzzy_match("hor sp", commands[0].display)
+            && !tile::command_bar::fuzzy_match("hor sp", commands[1].display);
+    }
+
     auto verify_special_chars_are_literal() -> bool
     {
         return  tile::command_bar::fuzzy_match("^", "caret ^ command")
@@ -57,6 +74,7 @@ auto main() -> int
     if (!verify_optimal_offsets())             return 1;
     if (!verify_boundary_ranking())            return 2;
     if (!verify_empty_query_keeps_order())     return 3;
-    if (!verify_special_chars_are_literal())   return 4;
+    if (!verify_space_separated_terms_are_anded()) return 4;
+    if (!verify_special_chars_are_literal())   return 5;
     return 0;
 }
