@@ -281,6 +281,134 @@ namespace netxs::app::tile
         return item_ptr;
     }
 
+    // Property name on the tile boss that stores a resolver mapping a gear id
+    // to the currently focused applet inside the active workspace. Installed
+    // by the tile boss during construction; consumed by the vtm.terminal Lua
+    // proxy (see install_terminal_proxy below) so that scripts invoked from
+    // anywhere (keybinds, command bar, prerun) can be forwarded to the right
+    // dtvt child process at call time.
+    static constexpr auto terminal_proxy_resolver_field = "tile.terminal_proxy_resolver";
+    using terminal_proxy_resolver_t = std::function<ui::sptr(netxs::id_t /*gear_id*/)>;
+
+    // Lua C function: __index on the vtm.terminal proxy table installed in the
+    // tile manager's lua_State. Receives (proxy_table, method_name) on stack
+    // and returns a closure carrying the method name as upvalue. Calling that
+    // closure invokes tile_terminal_proxy_call below, which rebuilds the
+    // script string "vtm.terminal.<method>(<args>)" and signals it to the
+    // currently focused dtvt pane via e2::command::run; the dtvt parent-side
+    // listener forwards over the pipe and the child re-fires + runs it in its
+    // own Lua engine where vtm.terminal.* is actually bound.
+    static netxs::si32 tile_terminal_proxy_call(::lua_State* lua);
+    static netxs::si32 tile_terminal_proxy_index(::lua_State* lua)
+    {
+        // Stack: 1=proxy_table, 2=method_name(string).
+        ::lua_pushvalue(lua, 2);                                       // Dup method name as upvalue.
+        ::lua_pushcclosure(lua, &tile_terminal_proxy_call, 1);
+        return 1;
+    }
+
+    // Quote a Lua-side argument back into Lua source form. Strings get a
+    // backslash-escaped double-quoted form; numbers and booleans pass through
+    // verbatim; other types degrade to nil to keep the regenerated script
+    // syntactically valid (the receiving terminal will simply ignore the arg).
+    static auto tile_terminal_proxy_quote_arg(::lua_State* lua, netxs::si32 idx)
+    {
+        auto crop = netxs::text{};
+        auto type = ::lua_type(lua, idx);
+        if (type == LUA_TBOOLEAN)
+        {
+            crop = ::lua_toboolean(lua, idx) ? "true" : "false";
+        }
+        else if (type == LUA_TNUMBER)
+        {
+            ::lua_pushvalue(lua, idx);
+            auto len = size_t{};
+            auto ptr = ::lua_tolstring(lua, -1, &len);
+            crop.assign(ptr, len);
+            ::lua_pop(lua, 1);
+        }
+        else if (type == LUA_TSTRING)
+        {
+            auto len = size_t{};
+            auto ptr = ::lua_tolstring(lua, idx, &len);
+            crop.reserve(len + 2);
+            crop.push_back('"');
+            for (size_t i = 0; i < len; i++)
+            {
+                auto c = ptr[i];
+                switch (c)
+                {
+                    case '\\': crop += "\\\\"; break;
+                    case '"':  crop += "\\\""; break;
+                    case '\n': crop += "\\n";  break;
+                    case '\r': crop += "\\r";  break;
+                    case '\t': crop += "\\t";  break;
+                    default:
+                        if ((unsigned char)c < 0x20) // Other control chars: \xHH-style escape.
+                        {
+                            char buf[8];
+                            std::snprintf(buf, sizeof(buf), "\\%d", (int)(unsigned char)c);
+                            crop += buf;
+                        }
+                        else crop.push_back(c);
+                        break;
+                }
+            }
+            crop.push_back('"');
+        }
+        else
+        {
+            // nil / table / function / userdata / unsupported: degrade to nil.
+            crop = "nil";
+        }
+        return crop;
+    }
+
+    static netxs::si32 tile_terminal_proxy_call(::lua_State* lua)
+    {
+        // Stack: 1..N = forwarded method args.
+        // Upvalue 1: method name (string).
+        return netxs::events::luna::vtmlua_run_with_indexer(lua, [&](netxs::events::auth& indexer)
+        {
+            auto fx_name_ptr = ::lua_tostring(lua, lua_upvalueindex(1));
+            if (!fx_name_ptr) return 0;
+            auto fx_name = view{ fx_name_ptr };
+
+            // Find the tile boss (single instance per process); without it we
+            // have nowhere to dispatch and would emit a noisy
+            // "vtm.terminal.X" against a non-existent target.
+            auto class_iter = indexer.classes.find(basename::tile);
+            if (class_iter == indexer.classes.end() || !class_iter->second) return 0;
+            auto& subobjects = class_iter->second->objects;
+            if (subobjects.empty()) return 0;
+            auto& boss = subobjects.front().get();
+
+            // Resolve focused applet via the resolver installed at boss
+            // construction. Active gear is set by callers before script
+            // execution (luafx.set_gear in command bar; bindings::keybind
+            // path in input::bindings).
+            auto& gear = indexer.active_gear_ref.get();
+            auto& resolver = boss.base::template property<terminal_proxy_resolver_t>(terminal_proxy_resolver_field);
+            if (!resolver) return 0;
+            auto applet_ptr = resolver(gear.id);
+            if (!applet_ptr) return 0;
+
+            // Rebuild script source: vtm.terminal.<fx>(arg1, arg2, ...).
+            auto args_count = ::lua_gettop(lua);
+            auto script = text{ "vtm.terminal." } + text{ fx_name } + "(";
+            for (auto i = 1; i <= args_count; i++)
+            {
+                if (i > 1) script += ", ";
+                script += tile_terminal_proxy_quote_arg(lua, i);
+            }
+            script += ")";
+
+            auto cmd = eccc{ .cmd = script };
+            applet_ptr->base::signal(tier::release, e2::command::run, cmd);
+            return 0;
+        });
+    }
+
     static auto is_standalone_tile(ui::base& boss)
     {
         return !boss.base::signal(tier::general, e2::config::creator);
@@ -3864,6 +3992,72 @@ namespace netxs::app::tile
                                                         }},
                     });
 
+                    // Install the focused-pane resolver consumed by the
+                    // vtm.terminal Lua proxy. Reading is gear-id-driven so
+                    // every script invocation (keybind, command bar, prerun)
+                    // dispatches to the pane that the calling user currently
+                    // owns focus on. Falls back to last-focused, then to a
+                    // single tracked slot, mirroring the command bar's own
+                    // resolution heuristic for keyboard-shortcut entry where
+                    // gear focus history may not yet exist.
+                    auto& terminal_proxy_resolver = boss.base::template property<terminal_proxy_resolver_t>(terminal_proxy_resolver_field);
+                    terminal_proxy_resolver = [current_focus_history](id_t gear_id) -> ui::sptr
+                    {
+                        auto focus_history_ptr = current_focus_history();
+                        if (!focus_history_ptr) return {};
+                        auto slot_ptr = ui::sptr{};
+                        if (auto iter = focus_history_ptr->current.find(gear_id);
+                            iter != focus_history_ptr->current.end())
+                        {
+                            slot_ptr = iter->second.lock();
+                        }
+                        if (!slot_ptr) slot_ptr = focus_history_ptr->last(gear_id);
+                        if (!slot_ptr && focus_history_ptr->current.size() == 1)
+                        {
+                            slot_ptr = focus_history_ptr->current.begin()->second.lock();
+                        }
+                        if (!slot_ptr) return {};
+                        return get_slot_focus_target(slot_ptr);
+                    };
+
+                    // Install the vtm.terminal Lua proxy on the tile
+                    // manager's lua_State. The tile manager has no terminal
+                    // applet of its own (those live in dtvt child processes
+                    // with their own Lua engines), so vtm.terminal.X(...)
+                    // would otherwise resolve to nothing and warn. We
+                    // override with a metatable that, on any field access,
+                    // returns a closure forwarding the call to the focused
+                    // dtvt pane via e2::command::run. The dtvt parent-side
+                    // listener serializes the script string over the pipe
+                    // and the child's gate listener runs it in the
+                    // terminal's own Lua engine where vtm.terminal.* is
+                    // bound. This makes scripts like
+                    //     vtm.terminal.PasteClipboard()
+                    // work uniformly from keybinds, command bar, prerun
+                    // hooks, etc., without any caller-side routing.
+                    {
+                        auto* L = luafx.lua;
+                        static auto term_proxy_metaindex = std::to_array<luaL_Reg>(
+                            {{ "__index",    &tile_terminal_proxy_index },
+                             { "__tostring", netxs::events::luna::vtmlua_object2string },
+                             { nullptr,      nullptr }});
+                        if (::luaL_newmetatable(L, "tile_terminal_proxy_metaindex"))
+                        {
+                            ::luaL_setfuncs(L, term_proxy_metaindex.data(), 0);
+                        }
+                        ::lua_pop(L, 1); // Pop the metatable returned by luaL_newmetatable.
+                        // Install the proxy as vtm.terminal: rawset on the
+                        // global vtm table so Lua finds it before invoking
+                        // vtm's __index (which would otherwise fall through
+                        // to auth::get_target("terminal", ...) and log a
+                        // "no terminal object found" warning).
+                        ::lua_getglobal(L, basename::vtm.data());                              // [vtm]
+                        ::lua_createtable(L, 0, 0);                                            // [vtm, proxy]
+                        ::luaL_setmetatable(L, "tile_terminal_proxy_metaindex");               // [vtm, proxy]
+                        ::lua_setfield(L, -2, basename::terminal.data());                      // [vtm]
+                        ::lua_pop(L, 1);                                                       // []
+                    }
+
                     boss.LISTEN(tier::preview, app::tile::events::ui::any, gear)
                     {
                         if (boss.bell::protos() == app::tile::events::ui::create.id) return;
@@ -4493,7 +4687,7 @@ namespace netxs::app::tile
 
                         gear.set_handled();
                     };
-                    boss.LISTEN(tier::preview, app::tile::events::ui::focus::commandbar, gear, -, (command_bar_active, wrapper_shadow = ptr::shadow(wrapper), current_focus_history))
+                    boss.LISTEN(tier::preview, app::tile::events::ui::focus::commandbar, gear, -, (command_bar_active, wrapper_shadow = ptr::shadow(wrapper)))
                     {
                         if (*command_bar_active) { gear.set_handled(); return; }
                         auto wrapper_ptr = wrapper_shadow.lock();
@@ -4501,32 +4695,6 @@ namespace netxs::app::tile
 
                         auto cmd_list = command_bar::load(boss.bell::indexer.config);
                         if (cmd_list->empty()) return;
-
-                        // Snapshot the focused pane *before* the command bar opens.
-                        // The [CMD] menu button click does not retarget focus
-                        // tracking (track_slot_focus only fires for tile slots),
-                        // so focus_history.current[gear.id] still points at the
-                        // previously-focused pane's slot. Fall back to previous()
-                        // and then to a single tile-managed gear if the gear
-                        // entry is missing (keyboard-shortcut path with no
-                        // gear focus history yet).
-                        auto focused_slot_ptr = ui::sptr{};
-                        if (auto focus_history_ptr = current_focus_history())
-                        {
-                            if (auto iter = focus_history_ptr->current.find(gear.id);
-                                iter != focus_history_ptr->current.end())
-                            {
-                                focused_slot_ptr = iter->second.lock();
-                            }
-                            if (!focused_slot_ptr)
-                            {
-                                focused_slot_ptr = focus_history_ptr->last(gear.id);
-                            }
-                            if (!focused_slot_ptr && focus_history_ptr->current.size() == 1)
-                            {
-                                focused_slot_ptr = focus_history_ptr->current.begin()->second.lock();
-                            }
-                        }
 
                         *command_bar_active = true;
 
@@ -4572,67 +4740,23 @@ namespace netxs::app::tile
                         };
                         auto dismiss_hook = [kbd_hook]{ kbd_hook->reset(); };
 
-                        // Capture the applet inside the slot that held focus
-                        // at the moment the command bar opened. Dispatching
-                        // commands only to this single applet matches user
-                        // expectations: e.g. vtm.terminal.Find() on a split
-                        // workspace must affect the focused terminal pane,
-                        // not all panes. If no focused slot was resolvable
-                        // (degenerate case with no panes yet), fall back to
-                        // the empty target list and dispatch_script will
-                        // run the script against the tile manager itself.
-                        auto dispatch_targets = ptr::shared(std::vector<netxs::wptr<base>>{});
-                        if (focused_slot_ptr)
-                        {
-                            if (auto applet_ptr = get_slot_focus_target(focused_slot_ptr))
-                            {
-                                dispatch_targets->emplace_back(ptr::shadow(applet_ptr));
-                            }
-                        }
-
-                        // Dispatch the selected command script.
-                        // Routing is decided by script content:
-                        //   * Scripts that touch vtm.terminal.* are sent
-                        //     via e2::command::run to the focused applet
-                        //     so dtvt proxies forward them into the
-                        //     terminal child process (which owns its own
-                        //     Lua engine and binds vtm.terminal.*).
-                        //   * Everything else (vtm.tile.*, vtm.desktop.*,
-                        //     bare Lua, etc.) is executed in-process
-                        //     against the tile manager itself, because
-                        //     vtm.tile.* methods are registered on the
-                        //     tile boss via base::add_methods and would
-                        //     no-op (or warn) if dispatched into a
-                        //     terminal child that doesn't know them.
-                        // Dispatching only to the relevant target avoids
-                        // spurious "method not found" errors and keeps
-                        // tile commands like vtm.tile.SplitPane() working
-                        // when issued from the command bar.
-                        auto dispatch_script = [boss_shadow, dispatch_targets](text const& script, hids& gear)
+                        // Dispatch the selected command script. The
+                        // vtm.terminal proxy installed on the tile boss's
+                        // lua_State (see tile_terminal_proxy_index in
+                        // app::tile) intercepts vtm.terminal.* calls and
+                        // forwards them to the focused dtvt pane via
+                        // e2::command::run, so we no longer need to scan
+                        // the script source for routing hints here. Plain
+                        // vtm.tile.*, vtm.desktop.* and bare Lua just run
+                        // in-process against the tile manager's own engine.
+                        auto dispatch_script = [boss_shadow](text const& script, hids& gear)
                         {
                             if (script.empty()) return;
                             auto boss_ptr = boss_shadow.lock();
                             if (!boss_ptr) return;
                             auto& luafx = boss_ptr->bell::indexer.luafx;
                             luafx.set_gear(gear);
-                            auto routes_to_terminal = script.find("vtm.terminal.") != text::npos;
-                            auto dispatched = faux;
-                            if (routes_to_terminal)
-                            {
-                                for (auto& wp : *dispatch_targets)
-                                {
-                                    if (auto target_ptr = wp.lock())
-                                    {
-                                        auto cmd = eccc{ .cmd = script };
-                                        target_ptr->base::signal(tier::release, e2::command::run, cmd);
-                                        dispatched = true;
-                                    }
-                                }
-                            }
-                            if (!dispatched)
-                            {
-                                luafx.run_script(*boss_ptr, script);
-                            }
+                            luafx.run_script(*boss_ptr, script);
                         };
 
                         overlay_ptr->invoke([&](auto& ovl)
