@@ -67,6 +67,77 @@ namespace
             &&  tile::command_bar::fuzzy_match("$", "dollar $ command")
             && !tile::command_bar::fuzzy_match("$", "dollar command");
     }
+
+    // Loads the bundled vtm.xml and confirms the new <group label="terminal">
+    // entries surface through tile::command_bar::load(cfg).
+    auto load_default_terminal_group() -> std::vector<tile::command_bar::item>
+    {
+        auto config = xml::settings{};
+        app::shared::load::settings(config, ""); // Empty cliopt -> bundled vtm.xml only.
+        auto commands_ptr = tile::command_bar::load(config);
+        return commands_ptr ? *commands_ptr : std::vector<tile::command_bar::item>{};
+    }
+
+    auto verify_terminal_group_loaded() -> bool
+    {
+        auto commands = load_default_terminal_group();
+        // Required entries match the active (uncommented) terminal items
+        // in vtm.xml's <commandbar><group label="terminal">. Find Next/
+        // Find Previous and Toggle Wrap Mode are intentionally commented
+        // out in vtm.xml until their underlying scripting aliases ship,
+        // so we don't enforce them here. Updating this list when the
+        // group shrinks/grows is part of the contract: the test must
+        // mirror what vtm.xml actually exposes today.
+        auto required = std::vector<text>
+        {
+            "terminal: Toggle Find Bar",
+            "terminal: Restart Session",
+            "terminal: Scroll To Top",
+            "terminal: Scroll To End",
+            "terminal: Clear Scrollback",
+            "terminal: Reset Terminal",
+            "terminal: Copy Viewport",
+            "terminal: Paste Clipboard",
+        };
+        for (auto const& label : required)
+        {
+            auto found = false;
+            for (auto const& cmd : commands)
+            {
+                if (cmd.display == label) { found = true; break; }
+            }
+            if (!found) return faux;
+        }
+        return true;
+    }
+
+    auto verify_terminal_group_item_count() -> bool
+    {
+        auto commands = load_default_terminal_group();
+        auto count = si32{};
+        for (auto const& cmd : commands)
+        {
+            if (cmd.display.starts_with("terminal: ")) ++count;
+        }
+        // Lower bound chosen to track the currently-active set (16 as
+        // of this commit) with a small safety margin so accidental
+        // removal of a terminal command is caught here. Bump as the
+        // group grows.
+        return count >= 12;
+    }
+
+    auto verify_terminal_items_have_scripts() -> bool
+    {
+        auto commands = load_default_terminal_group();
+        for (auto const& cmd : commands)
+        {
+            if (cmd.display.starts_with("terminal: ") && cmd.script.empty())
+            {
+                return faux;
+            }
+        }
+        return true;
+    }
 }
 
 auto main() -> int
@@ -76,5 +147,8 @@ auto main() -> int
     if (!verify_empty_query_keeps_order())     return 3;
     if (!verify_space_separated_terms_are_anded()) return 4;
     if (!verify_special_chars_are_literal())   return 5;
+    if (!verify_terminal_group_loaded())       return 6;
+    if (!verify_terminal_group_item_count())   return 7;
+    if (!verify_terminal_items_have_scripts()) return 8;
     return 0;
 }

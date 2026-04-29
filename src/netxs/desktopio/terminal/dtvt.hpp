@@ -494,6 +494,20 @@
                 stream.syskeybd.send(*this, gear);
                 gear.dismiss();
             };
+            // Forward locally-fired e2::command::run scripts to the dtvt
+            // child so that callers in the parent process (e.g. the tile
+            // command bar) can dispatch vtm.terminal.* / vtm.gear.* scripts
+            // that must execute against the applet's own Lua engine. The
+            // child's s11n::xs::command handler in console.hpp re-fires
+            // e2::command::run there, where it reaches the applet's
+            // run_ext_script and class registry.
+            LISTEN(tier::release, e2::command::run, script)
+            {
+                if (script.cmd.size())
+                {
+                    stream.command.send(*this, script.cmd);
+                }
+            };
             LISTEN(tier::anycast, e2::form::prop::cwd, path)
             {
                 stream.cwd.send(*this, path);

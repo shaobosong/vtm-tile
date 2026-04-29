@@ -4493,7 +4493,7 @@ namespace netxs::app::tile
 
                         gear.set_handled();
                     };
-                    boss.LISTEN(tier::preview, app::tile::events::ui::focus::commandbar, gear, -, (command_bar_active, wrapper_shadow = ptr::shadow(wrapper)))
+                    boss.LISTEN(tier::preview, app::tile::events::ui::focus::commandbar, gear, -, (command_bar_active, wrapper_shadow = ptr::shadow(wrapper), current_focus_history))
                     {
                         if (*command_bar_active) { gear.set_handled(); return; }
                         auto wrapper_ptr = wrapper_shadow.lock();
@@ -4501,6 +4501,32 @@ namespace netxs::app::tile
 
                         auto cmd_list = command_bar::load(boss.bell::indexer.config);
                         if (cmd_list->empty()) return;
+
+                        // Snapshot the focused pane *before* the command bar opens.
+                        // The [CMD] menu button click does not retarget focus
+                        // tracking (track_slot_focus only fires for tile slots),
+                        // so focus_history.current[gear.id] still points at the
+                        // previously-focused pane's slot. Fall back to previous()
+                        // and then to a single tile-managed gear if the gear
+                        // entry is missing (keyboard-shortcut path with no
+                        // gear focus history yet).
+                        auto focused_slot_ptr = ui::sptr{};
+                        if (auto focus_history_ptr = current_focus_history())
+                        {
+                            if (auto iter = focus_history_ptr->current.find(gear.id);
+                                iter != focus_history_ptr->current.end())
+                            {
+                                focused_slot_ptr = iter->second.lock();
+                            }
+                            if (!focused_slot_ptr)
+                            {
+                                focused_slot_ptr = focus_history_ptr->last(gear.id);
+                            }
+                            if (!focused_slot_ptr && focus_history_ptr->current.size() == 1)
+                            {
+                                focused_slot_ptr = focus_history_ptr->current.begin()->second.lock();
+                            }
+                        }
 
                         *command_bar_active = true;
 
@@ -4545,6 +4571,69 @@ namespace netxs::app::tile
                             if (auto p = overlay_shadow.lock()) p->base::detach();
                         };
                         auto dismiss_hook = [kbd_hook]{ kbd_hook->reset(); };
+
+                        // Capture the applet inside the slot that held focus
+                        // at the moment the command bar opened. Dispatching
+                        // commands only to this single applet matches user
+                        // expectations: e.g. vtm.terminal.Find() on a split
+                        // workspace must affect the focused terminal pane,
+                        // not all panes. If no focused slot was resolvable
+                        // (degenerate case with no panes yet), fall back to
+                        // the empty target list and dispatch_script will
+                        // run the script against the tile manager itself.
+                        auto dispatch_targets = ptr::shared(std::vector<netxs::wptr<base>>{});
+                        if (focused_slot_ptr)
+                        {
+                            if (auto applet_ptr = get_slot_focus_target(focused_slot_ptr))
+                            {
+                                dispatch_targets->emplace_back(ptr::shadow(applet_ptr));
+                            }
+                        }
+
+                        // Dispatch the selected command script.
+                        // Routing is decided by script content:
+                        //   * Scripts that touch vtm.terminal.* are sent
+                        //     via e2::command::run to the focused applet
+                        //     so dtvt proxies forward them into the
+                        //     terminal child process (which owns its own
+                        //     Lua engine and binds vtm.terminal.*).
+                        //   * Everything else (vtm.tile.*, vtm.desktop.*,
+                        //     bare Lua, etc.) is executed in-process
+                        //     against the tile manager itself, because
+                        //     vtm.tile.* methods are registered on the
+                        //     tile boss via base::add_methods and would
+                        //     no-op (or warn) if dispatched into a
+                        //     terminal child that doesn't know them.
+                        // Dispatching only to the relevant target avoids
+                        // spurious "method not found" errors and keeps
+                        // tile commands like vtm.tile.SplitPane() working
+                        // when issued from the command bar.
+                        auto dispatch_script = [boss_shadow, dispatch_targets](text const& script, hids& gear)
+                        {
+                            if (script.empty()) return;
+                            auto boss_ptr = boss_shadow.lock();
+                            if (!boss_ptr) return;
+                            auto& luafx = boss_ptr->bell::indexer.luafx;
+                            luafx.set_gear(gear);
+                            auto routes_to_terminal = script.find("vtm.terminal.") != text::npos;
+                            auto dispatched = faux;
+                            if (routes_to_terminal)
+                            {
+                                for (auto& wp : *dispatch_targets)
+                                {
+                                    if (auto target_ptr = wp.lock())
+                                    {
+                                        auto cmd = eccc{ .cmd = script };
+                                        target_ptr->base::signal(tier::release, e2::command::run, cmd);
+                                        dispatched = true;
+                                    }
+                                }
+                            }
+                            if (!dispatched)
+                            {
+                                luafx.run_script(*boss_ptr, script);
+                            }
+                        };
 
                         overlay_ptr->invoke([&](auto& ovl)
                         {
@@ -4912,6 +5001,7 @@ namespace netxs::app::tile
                                 [cmd_list, query_ptr, v_scroll_off_ptr, h_scroll_off_ptr, list_h_scroll_off_ptr,
                                  hover_row_ptr, dragging_vsb_ptr, dragging_hsb_ptr,
                                  dismiss_visual, dismiss_hook, overlay_shadow,
+                                 dispatch_script,
                                  boss_shadow](hids& gear)
                             {
                                 if (*dragging_vsb_ptr || *dragging_hsb_ptr) return; // Drag already handled.
@@ -4957,12 +5047,7 @@ namespace netxs::app::tile
                                         auto script = (*cmd_list)[cmd_idx].script;
                                         dismiss_visual();
                                         dismiss_hook();
-                                        if (!script.empty())
-                                            if (auto boss_ptr = boss_shadow.lock())
-                                            {
-                                                boss_ptr->bell::indexer.luafx.set_gear(gear);
-                                                boss_ptr->bell::indexer.luafx.run_script(*boss_ptr, script);
-                                            }
+                                        dispatch_script(script, gear);
                                     }
                                     gear.dismiss();
                                     return;
@@ -5203,6 +5288,7 @@ namespace netxs::app::tile
                                v_scroll_off_ptr, h_scroll_off_ptr, list_h_scroll_off_ptr,
                                kbd_lock_coord_ptr,
                                overlay_shadow, boss_shadow,
+                               dispatch_script,
                                dismiss_visual, dismiss_hook, pending_unhook](hids& gear) mutable
                         {
                             if (gear.payload != input::keybd::type::keypress
@@ -5397,12 +5483,7 @@ namespace netxs::app::tile
                                     auto script = (*cmd_list)[cmd_idx].script;
                                     dismiss_visual();
                                     dismiss_hook();
-                                    if (!script.empty())
-                                        if (auto boss_ptr = boss_shadow.lock())
-                                        {
-                                            boss_ptr->bell::indexer.luafx.set_gear(gear);
-                                            boss_ptr->bell::indexer.luafx.run_script(*boss_ptr, script);
-                                        }
+                                    dispatch_script(script, gear);
                                 }
                                 else
                                 {

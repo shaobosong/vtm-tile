@@ -283,6 +283,31 @@ R"==(
                 <item label="Disconnect"         tooltip=/Ns/Tile/Disconnect/tooltip        script=TileDisconnect/>
                 <item label="Shutdown"           tooltip=/Ns/Tile/Shutdown/tooltip          script=TileShutdown/>
             </group>
+            <group label="terminal" item*>  <!-- Per-pane terminal commands. Enter/Click dispatches the script to focused pane(s) so that vtm.terminal.* lua methods target the focused terminal. -->
+                <!-- <item label="Find Next"          tooltip=" Highlight the next match of the selected text fragment. "                                  script=TerminalFindNext/> -->
+                <!-- <item label="Find Previous"      tooltip=" Highlight the previous match of the selected text fragment. "                              script=TerminalFindPrev/> -->
+                <item label="Toggle Find Bar"    tooltip=" Toggle the terminal find-bar overlay. "                                                    script=TerminalFindBarToggle/>
+                <!-- <item label="Show Find Bar"      tooltip=" Show the terminal find-bar overlay. "                                                      script=TerminalFindBarShow/> -->
+                <!-- <item label="Hide Find Bar"      tooltip=" Hide the terminal find-bar overlay. "                                                      script=TerminalFindBarHide/> -->
+                <item label="Restart Session"    tooltip=" Terminate running console apps and restart the current session. "                          script=TerminalRestart/>
+                <item label="Scroll To Top"      tooltip=" Scroll the viewport to the top of the scrollback. "                                        script=TerminalScrollViewportToTop/>
+                <item label="Scroll To End"      tooltip=" Scroll the viewport to the bottom of the scrollback. "                                     script=TerminalScrollViewportToEnd/>
+                <item label="Page Up"            tooltip=" Scroll the viewport one page up. "                                                         script=TerminalScrollViewportOnePageUp/>
+                <item label="Page Down"          tooltip=" Scroll the viewport one page down. "                                                       script=TerminalScrollViewportOnePageDown/>
+                <item label="Clear Scrollback"   tooltip=" Clear the scrollback above the current line. "                                             script=TerminalClearScrollback/>
+                <item label="Reset Terminal"     tooltip=" Clear scrollback and SGR attributes. "                                                     script=TerminalReset/>
+                <item label="Copy Viewport"      tooltip=" Copy the visible viewport to the clipboard. "                                              script=TerminalCopyViewport/>
+                <item label="Copy Selection"     tooltip=" Copy the active selection to the clipboard. "                                              script=TerminalCopySelection/>
+                <item label="Paste Clipboard"    tooltip=" Paste the clipboard contents into the terminal. "                                          script=TerminalClipboardPaste/>
+                <item label="Clear Clipboard"    tooltip=" Wipe the clipboard contents. "                                                             script=TerminalClipboardWipe/>
+                <item label="Cancel Selection"   tooltip=" Drop the current selection. "                                                              script=TerminalSelectionCancel/>
+                <item label="Toggle Selection Form" tooltip=" Toggle between linear and rectangular selection forms. "                                script=TerminalSelectionForm/>
+                <!-- <item label="Toggle Wrap Mode"   tooltip=" Toggle scrollback line wrapping mode. "                                                    script=TerminalWrapMode/> -->
+                <!-- <item label="Cycle Align Mode"   tooltip=" Cycle scrollback line alignment: left -> right -> center. "                                script=TerminalAlignMode/> -->
+                <item label="Toggle CWD Sync"    tooltip=" Toggle current working directory synchronization mode. "                                   script=TerminalCwdSync/>
+                <item label="Cycle Clipboard Format" tooltip=" Cycle terminal text selection copy format. "                                           script=TerminalClipboardFormat/>
+                <!-- <item label="Toggle Stdio Log"   tooltip=" Toggle stdin/stdout logging. "                                                             script=TerminalStdioLog/> -->
+            </group>
         </commandbar>
         <menu item*>
             <autohide=/Menu/Defaults/autohide/>
