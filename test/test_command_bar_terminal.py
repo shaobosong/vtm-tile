@@ -594,6 +594,84 @@ def test_command_bar_runs_tile_scoped_command():
         return True
 
 
+# Keybind-proxy test config: binds Alt+Shift+P to a script that calls
+# vtm.terminal.Print(<marker>) directly from the tile manager's Lua
+# state. The proxy installed on the tile boss must rewrite that call
+# into a vtm.terminal.Print(...) script and forward it to the focused
+# dtvt child for execution. If the proxy is missing or broken the call
+# logs "No 'vtm.terminal' object found" and the marker never appears.
+#
+# We deliberately exercise three argument shapes (string, integer,
+# boolean) in one binding to validate tile_terminal_proxy_quote_arg's
+# coverage of the supported Lua scalar types in a single round-trip.
+KEYBIND_PROXY_MARKER = "KBPROXYOK42"
+KEYBIND_PROXY_TILE_CONFIG = (
+    "<config>"
+        "<tile>"
+            '<app selected="term">'
+                '<item id="term" label="term" type="dtvt" cmd="$0 -r term"/>'
+            "</app>"
+            "<menu item*>"
+                '<item label="  [CMD]  " tooltip=" cmd " script=OnLeftClick|TileOpenCommandBar/>'
+            "</menu>"
+        "</tile>"
+        "<events><tile>"
+            '<script=KeybindProxyPrint on="Alt+Shift+P"/>'
+        "</tile></events>"
+    "</config>"
+    "<Scripting>"
+        # Three args: string + integer + boolean; concatenate the
+        # integer back to the marker string so we can confirm the
+        # number survived quoting (Lua coerces tonumber()..string).
+        f'<KeybindProxyPrint=\'vtm.terminal.Print("{KEYBIND_PROXY_MARKER}_", 42, "_", tostring(true))\'/>'
+    "</Scripting>"
+)
+KEYBIND_PROXY_TILE_ARGS = ["-c", KEYBIND_PROXY_TILE_CONFIG]
+
+
+def test_keybind_proxies_terminal_call_to_focused_pane():
+    """Direct keybind -> vtm.terminal.Print -> focused pane.
+
+    Bypasses the command bar entirely: the script lives in <Scripting>
+    and is invoked by Alt+Shift+P. The tile manager's Lua state has no
+    real vtm.terminal table, only the proxy installed on the tile boss.
+    A successful PASS proves:
+      * The proxy's __index closure was invoked for 'Print'.
+      * tile_terminal_proxy_quote_arg correctly serialised a string,
+        an integer, and a boolean back to Lua source.
+      * The reconstructed script reached the focused dtvt child via
+        e2::command::run and was executed by the child's Lua engine.
+    """
+    print("TEST: keybind proxies vtm.terminal.* to focused pane ... ", end="", flush=True)
+    expected = f"{KEYBIND_PROXY_MARKER}_42_true"
+    with VtmTileSession(KEYBIND_PROXY_TILE_ARGS) as s:
+        if not s.is_alive():
+            return fail("vtm-tile did not start")
+        s.snapshot(timeout=2.0)
+
+        # Alt+Shift+P. Many xterm-style terminals encode Alt as ESC
+        # prefix; uppercase 'P' carries the Shift modifier.
+        s.reset_buffer()
+        s.write(b"\x1bP")
+        time.sleep(0.5)
+        rendered = s.snapshot(timeout=1.5)
+
+        # Print() pushes the marker into the pty as if typed at the
+        # shell prompt. Without a trailing newline it sits on the
+        # command line where the shell echoes it back. Either way, the
+        # marker text becomes a visible glyph run in the pane.
+        compact = rendered.replace(" ", "")
+        if expected not in compact:
+            return fail(
+                f"marker '{expected}' not found after Alt+Shift+P "
+                f"(proxy likely did not forward to focused pane)"
+            )
+        if not s.is_alive():
+            return fail("vtm-tile crashed after keybind dispatch")
+        print("PASS")
+        return True
+
+
 if __name__ == "__main__":
     if not os.path.isfile(VTM_TILE_BINARY):
         print(f"ERROR: vtm-tile binary not found at {VTM_TILE_BINARY}")
@@ -610,6 +688,10 @@ if __name__ == "__main__":
             kill_all_vtm()
             time.sleep(0.5)
             ok = test_command_bar_runs_tile_scoped_command()
+        if ok:
+            kill_all_vtm()
+            time.sleep(0.5)
+            ok = test_keybind_proxies_terminal_call_to_focused_pane()
     finally:
         kill_all_vtm()
     sys.exit(0 if ok else 1)
