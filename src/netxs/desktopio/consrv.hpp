@@ -5212,6 +5212,23 @@ struct consrv : ipc::stdcon
     std::thread stdinput{};
     pidt        group_id{};
 
+    // sighup_watchdog: fallback escalation thread spawned by sighup().
+    // Some interactive shells (e.g. bash with a partially-buffered escape
+    // sequence in readline) install a SIGHUP handler that cleans up but
+    // does not always terminate, leaving the child alive after our SIGHUP.
+    // The watchdog escalates to SIGTERM and finally SIGKILL on the child
+    // process group if the leader is still alive after grace periods.
+    // It is detached and self-terminates as soon as kill(pgid, 0) reports
+    // ESRCH, so the common (cooperative) case finishes within one probe.
+    // It MUST NOT be join'd from cleanup(): cleanup() blocks on
+    // stdinput.join(), which itself only unblocks after the pty closes,
+    // which only happens after the child dies; joining the watchdog there
+    // would deadlock against the very escalation it is meant to perform.
+    std::thread             sighup_watchdog{};
+    std::mutex              sighup_mtx{};
+    std::condition_variable sighup_cv{};
+    bool                    sighup_done{ faux };
+
     template<class Term>
     consrv(Term&)
     { }
@@ -5222,11 +5239,27 @@ struct consrv : ipc::stdcon
     }
     void cleanup(bool io_log)
     {
+        // NOTE: we deliberately do NOT join the SIGHUP watchdog here.
+        // stdinput.join() below blocks until the pty closes, which only
+        // happens after the child dies, which (in pathological cases like
+        // a SIGHUP-swallowing bash) is exactly what the watchdog has to
+        // make happen by escalating signals. Letting the watchdog finish
+        // independently breaks the deadlock.
         if (stdinput.joinable())
         {
             if (io_log) log(prompt::vtty, "Reading thread joining", ' ', utf::to_hex_0x(stdinput.get_id()));
             stdinput.join();
         }
+        // The child is reaped (or being reaped) by wait() now; the
+        // watchdog will see kill(pgid,0)==ESRCH on its next probe and
+        // exit. Join it here to avoid leaving a thread hanging across
+        // consrv destruction.
+        {
+            auto lock = std::lock_guard{ sighup_mtx };
+            sighup_done = true;
+        }
+        sighup_cv.notify_all();
+        if (sighup_watchdog.joinable()) sighup_watchdog.join();
         stdcon::cleanup();
     }
     void winsz(twod new_size)
@@ -5360,6 +5393,40 @@ struct consrv : ipc::stdcon
     {
         // Send SIGHUP to all processes in the proc_pid group (negative value).
         ok(::kill(-group_id, SIGHUP), "::kill(-pid, SIGHUP)", os::unexpected);
+        // Start escalation watchdog. SIGHUP delivery is best-effort: an
+        // interactive shell may have installed a handler that swallows it
+        // (bash readline mid-escape-sequence is a documented case). Wait
+        // a short grace period; if the child group leader is still alive,
+        // escalate to SIGTERM, then SIGKILL. The watchdog is cancelled by
+        // cleanup() once the child has been reaped, so the common case
+        // pays no latency.
+        if (group_id <= 0) return;
+        if (sighup_watchdog.joinable()) return; // already armed
+        auto pgid = group_id;
+        sighup_watchdog = std::thread{ [this, pgid]
+        {
+            using namespace std::chrono_literals;
+            auto wait_for = [&](auto dur)
+            {
+                auto lock = std::unique_lock{ sighup_mtx };
+                return sighup_cv.wait_for(lock, dur, [&]{ return sighup_done; });
+            };
+            auto leader_alive = [&]
+            {
+                // ESRCH = gone; EPERM/0 = still around (kernel keeps a
+                // pid slot until reap). After a few hundred ms in
+                // practice the slot transitions to ESRCH once wait()
+                // reaps it.
+                return ::kill(pgid, 0) == 0 || errno == EPERM;
+            };
+            // Grace period for cooperative SIGHUP shutdown.
+            if (wait_for(500ms)) return;
+            if (!leader_alive()) return;
+            ::kill(-pgid, SIGTERM);
+            if (wait_for(500ms)) return;
+            if (!leader_alive()) return;
+            ::kill(-pgid, SIGKILL);
+        }};
     }
     auto wait()
     {

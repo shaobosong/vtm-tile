@@ -47,4 +47,17 @@ if(Python3_FOUND)
         ENVIRONMENT "VTM_TILE_BINARY=$<TARGET_FILE:vtm-tile>"
         TIMEOUT 300
         LABELS "tui;commandbar")
+
+    # Regression test for the vtm-tile shutdown orphan-process bug:
+    # an interactive bash with a half-buffered escape sequence in
+    # readline (e.g. user pressed Esc) ignores the SIGHUP that vtm-tile
+    # sends on shutdown, leaving the shell reparented to PID 1. This
+    # test exercises the full cmdbar shutdown path and asserts that no
+    # tagged shell child survives.
+    add_test(NAME tile_shutdown_orphans_test
+             COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test_tile_shutdown_orphans.py")
+    set_tests_properties(tile_shutdown_orphans_test PROPERTIES
+        ENVIRONMENT "VTM_TILE_BINARY=$<TARGET_FILE:vtm-tile>"
+        TIMEOUT 300
+        LABELS "tui;tile;shutdown;regression")
 endif()
