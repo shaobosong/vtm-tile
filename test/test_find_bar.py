@@ -39,13 +39,16 @@ VTM_DESK_BINARY = os.environ.get(
 COLS = 80
 ROWS = 24
 READ_TIMEOUT = 5.0
-SETTLE_DELAY = 2.5
+SETTLE_DELAY = 1.0
 
 # Complete desk/terminal configuration: find-bar key bindings with their
 # scripting definitions.  This makes the tests fully self-contained and
 # independent of vtm.xml built-in defaults.
 DESK_CONFIG = (
     "<config>"
+        "<terminal>"
+            "<confirm_close=0/>"
+        "</terminal>"
         "<events><terminal>"
             '<script=IgnoreAltbuf | TerminalFindBarToggle on="F3"/>'
         "</terminal></events>"
@@ -227,6 +230,38 @@ class VtmSession:
             self.pid = None
             return False
 
+    def wait_for_exit(self, timeout=5.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if not self.is_alive():
+                return True
+            time.sleep(0.1)
+        return False
+
+    def click_close_button(self):
+        """Click the x close button on the title bar (row 1, near right edge)."""
+        self.click(COLS - 2, 1)
+
+    def normal_exit(self, timeout=5.0):
+        """Return to the vtm-desk window and click the top-right close button
+        for a normal exit.
+
+        Clicks the close button on the title bar (row 1, near right edge).
+        With ``confirm_close`` disabled, this exits vtm-desk directly.  We
+        intentionally do NOT pre-send Esc — when the find-bar is closed and
+        the underlying shell has focus, a stray Esc starts an incomplete CSI
+        sequence in the shell that can interfere with the clean shutdown.
+        The titlebar click is handled by the desk frame irrespective of
+        which child overlay (find-bar, etc.) is open.
+
+        Returns True if the process exited within ``timeout`` seconds.
+        """
+        # Drain any pending output so the click isn't racing a render.
+        self.drain(timeout=0.2)
+        time.sleep(0.2)
+        self.click_close_button()
+        return self.wait_for_exit(timeout=timeout)
+
 
 # ---------------------------------------------------------------------------
 # Stream assertions.  We search the raw emitted bytes because vtm paints the
@@ -282,6 +317,9 @@ def test_f3_opens_bar():
         except AssertionError as e:
             print(f"FAIL - {e}")
             return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-desk did not exit cleanly via close button")
+            return False
         print("PASS")
         return True
 
@@ -298,6 +336,9 @@ def test_f3_toggles_bar():
             assert_bar_absent(stream)
         except AssertionError as e:
             print(f"FAIL - {e}")
+            return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-desk did not exit cleanly via close button")
             return False
         print("PASS")
         return True
@@ -319,6 +360,9 @@ def test_esc_closes_bar():
         if not s.is_alive():
             print("FAIL - vtm died")
             return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-desk did not exit cleanly via close button")
+            return False
         print("PASS")
         return True
 
@@ -333,6 +377,9 @@ def test_typing_shows_in_input():
         stream = s.snapshot(settle=0.8)
         if b"hello" not in stream:
             print("FAIL - 'hello' not rendered in input")
+            return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-desk did not exit cleanly via close button")
             return False
         print("PASS")
         return True
@@ -350,6 +397,9 @@ def test_close_button_click_closes_bar():
             assert_bar_absent(stream)
         except AssertionError as e:
             print(f"FAIL - {e}")
+            return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-desk did not exit cleanly via close button")
             return False
         print("PASS")
         return True
@@ -386,6 +436,9 @@ def test_bar_right_aligned_with_margin():
         if BTN_X_COL < COLS - 6:
             print(f"FAIL - BTN_X_COL={BTN_X_COL} not near right edge (COLS={COLS})")
             return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-desk did not exit cleanly via close button")
+            return False
         print("PASS")
         return True
 
@@ -402,6 +455,9 @@ def test_keys_do_not_leak_to_shell():
         stream = s.snapshot(settle=1.0)
         if b"zzmarkerzz" in stream:
             print("FAIL - marker leaked to shell after closing bar")
+            return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-desk did not exit cleanly via close button")
             return False
         print("PASS")
         return True
@@ -426,6 +482,9 @@ def test_long_input_horizontal_scroll():
         except AssertionError as e:
             print(f"FAIL - {e}")
             return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-desk did not exit cleanly via close button")
+            return False
         print("PASS")
         return True
 
@@ -449,6 +508,9 @@ def test_backspace_removes_char():
         # '_' to appear in the post-BS frame.
         if UNDERLINE.encode() not in after:
             print("FAIL - no underline re-rendered after backspace")
+            return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-desk did not exit cleanly via close button")
             return False
         print("PASS")
         return True
@@ -477,6 +539,9 @@ def test_counter_initial_is_zero_padded():
             assert_bar_rendered(stream)
         except AssertionError as e:
             print(f"FAIL - {e}")
+            return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-desk did not exit cleanly via close button")
             return False
         print("PASS")
         return True
@@ -509,6 +574,9 @@ def test_counter_updates_on_typing():
         if b"zzzzz" not in plain:
             print("FAIL - typed query not visible in bar")
             return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-desk did not exit cleanly via close button")
+            return False
         print("PASS")
         return True
 
@@ -527,6 +595,9 @@ def test_default_direction_is_down():
         stream = s.snapshot(settle=1.2)
         if ACTIVE_BG_SGR not in stream:
             print(f"FAIL - active-direction bg SGR {ACTIVE_BG_SGR!r} not in stream")
+            return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-desk did not exit cleanly via close button")
             return False
         print("PASS")
         return True
@@ -559,6 +630,9 @@ def test_up_button_click_switches_direction():
         if ACTIVE_BG_SGR not in stream:
             print("FAIL - no active-direction bg after ↑ click")
             return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-desk did not exit cleanly via close button")
+            return False
         print("PASS")
         return True
 
@@ -583,6 +657,9 @@ def test_enter_does_not_close_bar():
             assert_bar_rendered(stream)
         except AssertionError as e:
             print(f"FAIL - bar disappeared after Enter: {e}")
+            return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-desk did not exit cleanly via close button")
             return False
         print("PASS")
         return True
@@ -764,6 +841,9 @@ def test_empty_query_resets_counter():
         except AssertionError as e:
             print(f"FAIL - bar missing after erase: {e}")
             return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-desk did not exit cleanly via close button")
+            return False
         print("PASS")
         return True
 
@@ -790,6 +870,9 @@ def test_close_bar_clears_counter_state():
             assert_bar_rendered(stream)
         except AssertionError as e:
             print(f"FAIL - reopened bar not fully rendered: {e}")
+            return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-desk did not exit cleanly via close button")
             return False
         print("PASS")
         return True
@@ -840,6 +923,9 @@ def test_counter_width_is_fixed_for_high_totals():
             assert_bar_rendered(stream)
         except AssertionError as e:
             print(f"FAIL - bar not rendered: {e}")
+            return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-desk did not exit cleanly via close button")
             return False
         print("PASS")
         return True
@@ -912,6 +998,9 @@ def test_arrow_keys_navigate_matches():
             return False
         if idx2 != idx0:
             print(f"FAIL - Up did not undo Down: start={idx0}, after Dn={idx1}, after Up={idx2}")
+            return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-desk did not exit cleanly via close button")
             return False
         print("PASS")
         return True
@@ -1003,6 +1092,9 @@ def test_clear_button_appears_when_typing():
         if not s.is_alive():
             print("FAIL - vtm died")
             return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-desk did not exit cleanly via close button")
+            return False
         print("PASS")
         return True
 
@@ -1021,6 +1113,9 @@ def test_clear_button_absent_with_empty_query():
         cell = grid[r][c]
         if cell == BTN_CLEAR_GLYPH_UTF8:
             print(f"FAIL - × rendered at col {BTN_CLEAR_COL} with empty query")
+            return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-desk did not exit cleanly via close button")
             return False
         print("PASS")
         return True
@@ -1069,6 +1164,9 @@ def test_clear_button_click_clears_query():
         if not s.is_alive():
             print("FAIL - vtm died after clear-click")
             return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-desk did not exit cleanly via close button")
+            return False
         print("PASS")
         return True
 
@@ -1098,6 +1196,9 @@ def test_clear_button_disappears_after_backspace():
             assert_bar_rendered(stream)
         except AssertionError as e:
             print(f"FAIL - bar unexpectedly closed: {e}")
+            return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-desk did not exit cleanly via close button")
             return False
         print("PASS")
         return True

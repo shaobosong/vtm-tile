@@ -44,7 +44,7 @@ VTM_TILE_BINARY = os.environ.get(
 COLS = 120
 ROWS = 30
 READ_TIMEOUT = 5.0
-SETTLE_DELAY = 2.5
+SETTLE_DELAY = 1.0
 
 # Self-contained tile config: spawn a single 'term' pane and pin the
 # tile <menu> contents inside the test so the suite is independent of
@@ -57,6 +57,7 @@ SETTLE_DELAY = 2.5
 TILE_CONFIG = (
     "<config>"
         "<tile>"
+            "<confirm_close=0/>"
             '<app selected="term">'
                 '<item id="term" label="term" type="dtvt" cmd="$0 -r term"/>'
             "</app>"
@@ -76,6 +77,7 @@ TILE_ARGS = ["-c", TILE_CONFIG]
 MULTI_PANE_TILE_CONFIG = (
     "<config>"
         "<tile>"
+            "<confirm_close=0/>"
             '<app selected="term">'
                 '<item id="term" label="term" type="dtvt" cmd="$0 -r term"/>'
             "</app>"
@@ -233,6 +235,32 @@ class VtmTileSession:
         except ChildProcessError:
             self.pid = None
             return False
+
+    def wait_for_exit(self, timeout=5.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if not self.is_alive():
+                return True
+            time.sleep(0.1)
+        return False
+
+    def click_close_button(self):
+        """Click the x close button on the title bar (row 1, near right edge)."""
+        self.click(COLS - 2, 1)
+
+    def normal_exit(self, timeout=5.0):
+        """Click the vtm-tile top-right close button for a normal exit.
+
+        With ``confirm_close`` disabled in the tile config, clicking the
+        close button exits vtm-tile directly.  We deliberately do NOT send
+        Esc first: if the shell has focus, a bare Esc starts an incomplete
+        CSI sequence that can swallow the subsequent click.  Returns True
+        if the process exited within ``timeout`` seconds.
+        """
+        self.read(timeout=0.2)
+        time.sleep(0.2)
+        self.click_close_button()
+        return self.wait_for_exit(timeout=timeout)
 
     def snapshot(self, timeout=1.0):
         """Drain pending output and return the cumulative cleaned screen.
@@ -402,6 +430,8 @@ def test_command_bar_opens_via_menu_and_dispatches_to_terminal():
         if not s.is_alive():
             return fail("vtm-tile crashed after dispatch")
 
+        if not s.normal_exit():
+            return fail("vtm-tile did not exit after clicking close button")
         print("PASS")
         return True
 
@@ -526,6 +556,8 @@ def test_command_bar_dispatches_only_to_focused_pane():
         if not s.is_alive():
             return fail("vtm-tile crashed during multi-pane dispatch")
 
+        if not s.normal_exit():
+            return fail("vtm-tile did not exit after clicking close button")
         print(f"PASS (first={first_side}, second={second_side})")
         return True
 
@@ -590,6 +622,8 @@ def test_command_bar_runs_tile_scoped_command():
             return fail("vtm-tile crashed after tile-scoped dispatch")
 
         side = "left" if has_left else "right"
+        if not s.normal_exit():
+            return fail("vtm-tile did not exit after clicking close button")
         print(f"PASS (split confirmed, find bar on {side})")
         return True
 
@@ -608,6 +642,7 @@ KEYBIND_PROXY_MARKER = "KBPROXYOK42"
 KEYBIND_PROXY_TILE_CONFIG = (
     "<config>"
         "<tile>"
+            "<confirm_close=0/>"
             '<app selected="term">'
                 '<item id="term" label="term" type="dtvt" cmd="$0 -r term"/>'
             "</app>"
@@ -668,6 +703,8 @@ def test_keybind_proxies_terminal_call_to_focused_pane():
             )
         if not s.is_alive():
             return fail("vtm-tile crashed after keybind dispatch")
+        if not s.normal_exit():
+            return fail("vtm-tile did not exit after clicking close button")
         print("PASS")
         return True
 

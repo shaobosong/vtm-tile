@@ -280,6 +280,11 @@ def test_term_close_button_shows_dialog():
         if not open_dialog_and_verify(s):
             print("FAIL - vtm exited immediately")
             return False
+        # Confirm with Y so vtm exits normally instead of being SIGKILLed.
+        s.write(b"y")
+        if not s.wait_for_exit(timeout=5.0):
+            print("FAIL - vtm did not exit after confirming dialog")
+            return False
         print("PASS")
         return True
 
@@ -437,6 +442,11 @@ def test_tile_close_button_shows_dialog():
     with VtmTestSession(VTM_TILE_BINARY, TILE_ARGS, settle_delay=TILE_SETTLE_DELAY) as s:
         if not open_dialog_and_verify(s):
             print("FAIL - vtm exited immediately")
+            return False
+        # Confirm with Y so vtm exits normally instead of being SIGKILLed.
+        s.write(b"y")
+        if not s.wait_for_exit(timeout=5.0):
+            print("FAIL - vtm did not exit after confirming dialog")
             return False
         print("PASS")
         return True

@@ -33,7 +33,7 @@ ROWS = 24
 READ_TIMEOUT = 5.0
 
 # Tile needs startup time for shell launch + initial render.
-SETTLE_DELAY = 4.0
+SETTLE_DELAY = 1.0
 
 # Workspace button width in cells (must match ws_btn_w in tile.hpp).
 WS_BTN_W = 3
@@ -159,6 +159,23 @@ class VtmTileSession:
     def click_close_button(self):
         """Click the x close button (row 1, near right edge)."""
         self.click(COLS - 2, 1)
+
+    def normal_exit(self, timeout=5.0):
+        """Return to the vtm-tile window and click the top-right close button
+        to perform a normal exit.
+
+        Sends Esc first to dismiss any open popup/dialog so the click reaches
+        the main vtm-tile window. With ``confirm_close`` disabled, clicking the
+        close button exits the process directly. Returns True if the process
+        exited within ``timeout`` seconds.
+        """
+        # Dismiss any popup/dialog so focus returns to the vtm-tile window.
+        self.write(b"\x1b")
+        time.sleep(0.3)
+        self.read(timeout=0.2)
+        # Click the close button on the top-right of the title bar.
+        self.click_close_button()
+        return self.wait_for_exit(timeout=timeout)
 
     def is_alive(self):
         if self.pid is None:
@@ -314,7 +331,7 @@ class VtmTileSession:
 TILE_CONFIG = (
     "<config>"
         "<tile>"
-            "<confirm_close=1/>"
+            "<confirm_close=0/>"
             '<app selected="term">'
                 '<item id="term" label="term" type="dtvt" cmd="$0 -r term"/>'
                 '<item id="calc" label="calc" type="calc" cmd=""/>'
@@ -371,6 +388,9 @@ def test_workspace_starts_with_one():
         if not s.is_alive():
             print("FAIL - crashed after switching to workspace 0")
             return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-tile did not exit cleanly via close button")
+            return False
         print("PASS")
         return True
 
@@ -387,6 +407,9 @@ def test_create_workspace():
         s.read(timeout=0.5)
         if not s.is_alive():
             print("FAIL - crashed after creating workspace")
+            return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-tile did not exit cleanly via close button")
             return False
         print("PASS")
         return True
@@ -414,6 +437,9 @@ def test_destroy_workspace():
         if not s.is_alive():
             print("FAIL - crashed after destroying workspace 1")
             return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-tile did not exit cleanly via close button")
+            return False
         print("PASS")
         return True
 
@@ -437,7 +463,7 @@ def test_destroy_last_workspace_exits():
 
 
 def test_workspace_close_button_still_works():
-    """Close button (confirm dialog) works after workspace operations."""
+    """Close button works after workspace operations (confirm_close disabled => exits directly)."""
     print("TEST: workspace - close button after workspace ops ... ", end="", flush=True)
     with VtmTileSession(TILE_ARGS) as s:
         if not s.is_alive():
@@ -453,19 +479,11 @@ def test_workspace_close_button_still_works():
         if not s.is_alive():
             print("FAIL - crashed during workspace ops")
             return False
-        # Click close button - should show dialog (not exit immediately).
-        s.click_close_button()
-        time.sleep(0.8)
-        s.read(timeout=0.5)
-        if not s.is_alive():
-            print("FAIL - vtm exited immediately (no dialog)")
-            return False
-        # Confirm with Y.
-        s.write(b"y")
-        if s.wait_for_exit(timeout=5.0):
+        # With confirm_close disabled, normal_exit clicks close and tile exits.
+        if s.normal_exit(timeout=5.0):
             print("PASS")
             return True
-        print("FAIL - vtm did not exit after confirming close")
+        print("FAIL - vtm did not exit after clicking close button")
         return False
 
 
@@ -493,6 +511,9 @@ def test_create_multiple_workspaces():
             if not s.is_alive():
                 print(f"FAIL - crashed switching to workspace {idx}")
                 return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-tile did not exit cleanly via close button")
+            return False
         print("PASS")
         return True
 
@@ -533,6 +554,9 @@ def test_split_in_workspace():
         if not s.is_alive():
             print("FAIL - crashed switching to workspace 1")
             return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-tile did not exit cleanly via close button")
+            return False
         print("PASS")
         return True
 
@@ -572,6 +596,9 @@ def test_next_workspace():
         s.read(timeout=0.3)
         if not s.is_alive():
             print("FAIL - crashed after NextWorkspace (1->2)")
+            return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-tile did not exit cleanly via close button")
             return False
         print("PASS")
         return True
@@ -620,6 +647,9 @@ def test_prev_workspace():
         if not s.is_alive():
             print("FAIL - crashed after PrevWorkspace (1->0)")
             return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-tile did not exit cleanly via close button")
+            return False
         print("PASS")
         return True
 
@@ -660,6 +690,9 @@ def test_last_workspace():
         if not s.is_alive():
             print("FAIL - crashed after LastWorkspace (1->0 again)")
             return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-tile did not exit cleanly via close button")
+            return False
         print("PASS")
         return True
 
@@ -689,6 +722,9 @@ def test_next_prev_single_workspace():
         s.read(timeout=0.3)
         if not s.is_alive():
             print("FAIL - crashed after LastWorkspace on single workspace")
+            return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-tile did not exit cleanly via close button")
             return False
         print("PASS")
         return True
@@ -729,6 +765,9 @@ def test_next_prev_after_destroy():
         s.read(timeout=0.3)
         if not s.is_alive():
             print("FAIL - crashed after PrevWorkspace post-destroy")
+            return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-tile did not exit cleanly via close button")
             return False
         print("PASS")
         return True
@@ -777,6 +816,9 @@ def test_switch_workspace_by_index():
         if not s.is_alive():
             print("FAIL - crashed after SwitchWorkspace to current")
             return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-tile did not exit cleanly via close button")
+            return False
         print("PASS")
         return True
 
@@ -800,6 +842,9 @@ def test_switch_workspace_out_of_range():
         s.read(timeout=0.3)
         if not s.is_alive():
             print("FAIL - crashed after SwitchWorkspace(2) out of range")
+            return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-tile did not exit cleanly via close button")
             return False
         print("PASS")
         return True
@@ -839,6 +884,9 @@ def test_create_workspace_uses_selected_app():
         s.read(timeout=0.3)
         if not s.is_alive():
             print("FAIL - crashed switching back to workspace 1 (selected app)")
+            return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-tile did not exit cleanly via close button")
             return False
         print("PASS")
         return True
@@ -887,6 +935,9 @@ def test_select_app_then_create_multiple_workspaces():
             if not s.is_alive():
                 print(f"FAIL - crashed switching to workspace {idx}")
                 return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-tile did not exit cleanly via close button")
+            return False
         print("PASS")
         return True
 
@@ -917,6 +968,9 @@ def test_create_workspace_default_app_without_selection():
         s.read(timeout=0.3)
         if not s.is_alive():
             print("FAIL - crashed switching to workspace 1")
+            return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-tile did not exit cleanly via close button")
             return False
         print("PASS")
         return True
@@ -956,6 +1010,9 @@ def test_lastpane_within_single_workspace():
         s.read(timeout=0.3)
         if not s.is_alive():
             print("FAIL - crashed after second LastPane")
+            return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-tile did not exit cleanly via close button")
             return False
         print("PASS")
         return True
@@ -1037,6 +1094,9 @@ def test_lastpane_isolated_across_workspaces():
         if not s.is_alive():
             print("FAIL - crashed after second LastPane in workspace 0")
             return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-tile did not exit cleanly via close button")
+            return False
         print("PASS")
         return True
 
@@ -1099,6 +1159,9 @@ def test_lastpane_after_workspace_destroy():
         if not s.is_alive():
             print("FAIL - crashed after second LastPane in workspace 0 post-destroy")
             return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-tile did not exit cleanly via close button")
+            return False
         print("PASS")
         return True
 
@@ -1146,6 +1209,9 @@ def test_lastpane_no_history_in_new_workspace():
         s.read(timeout=0.3)
         if not s.is_alive():
             print("FAIL - crashed after second LastPane in empty workspace 1")
+            return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-tile did not exit cleanly via close button")
             return False
         print("PASS")
         return True
@@ -1237,6 +1303,9 @@ def test_lastpane_three_workspaces():
         if not s.is_alive():
             print("FAIL - crashed after final LastPane in workspace 2")
             return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-tile did not exit cleanly via close button")
+            return False
         print("PASS")
         return True
 
@@ -1273,6 +1342,9 @@ def test_popup_open_and_dismiss_click():
         s.read(timeout=0.5)
         if not s.is_alive():
             print("FAIL - crashed after post-dismiss workspace creation")
+            return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-tile did not exit cleanly via close button")
             return False
         print("PASS")
         return True
@@ -1312,6 +1384,9 @@ def test_popup_switch_workspace():
         if not s.is_alive():
             print("FAIL - crashed switching to workspace 1 via popup")
             return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-tile did not exit cleanly via close button")
+            return False
         print("PASS")
         return True
 
@@ -1345,6 +1420,9 @@ def test_popup_create_workspace_via_plus():
         s.read(timeout=0.3)
         if not s.is_alive():
             print("FAIL - crashed switching to workspace 1")
+            return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-tile did not exit cleanly via close button")
             return False
         print("PASS")
         return True
@@ -1384,6 +1462,9 @@ def test_popup_reopen_after_dismiss():
         s.read(timeout=0.3)
         if not s.is_alive():
             print("FAIL - crashed after second dismiss")
+            return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-tile did not exit cleanly via close button")
             return False
         print("PASS")
         return True
@@ -1433,6 +1514,9 @@ def test_popup_switch_then_operations():
         s.read(timeout=0.3)
         if not s.is_alive():
             print("FAIL - crashed after next workspace")
+            return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-tile did not exit cleanly via close button")
             return False
         print("PASS")
         return True
@@ -1488,6 +1572,9 @@ def test_popup_keyboard_navigation_bottom():
         s.read(timeout=0.2)
         if not s.is_alive():
             print("FAIL - crashed after post-popup Enter")
+            return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-tile did not exit cleanly via close button")
             return False
         print("PASS")
         return True
@@ -1547,6 +1634,9 @@ def test_popup_tab_toggle_sections():
         if not s.is_alive():
             print("FAIL - crashed after Esc dismiss")
             return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-tile did not exit cleanly via close button")
+            return False
         print("PASS")
         return True
 
@@ -1585,6 +1675,9 @@ def test_popup_tab_enter_focuses_pane():
         if not s.is_alive():
             print("FAIL - crashed switching workspace after pane-commit")
             return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-tile did not exit cleanly via close button")
+            return False
         print("PASS")
         return True
 
@@ -1621,6 +1714,9 @@ def test_popup_tab_toggle_no_panes():
         s.read(timeout=0.3)
         if not s.is_alive():
             print("FAIL - crashed after single-pane Tab-back + Esc")
+            return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-tile did not exit cleanly via close button")
             return False
         print("PASS")
         return True
@@ -1695,6 +1791,9 @@ def test_popup_top_section_label_key_selects_pane():
         s.read(timeout=0.3)
         if not s.is_alive():
             print("FAIL - crashed dismissing popup after out-of-range label")
+            return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-tile did not exit cleanly via close button")
             return False
         print("PASS")
         return True
