@@ -2111,11 +2111,24 @@ namespace netxs::app::tile
             //auto c1 = danger_color;
 
             // Wrap in a cake to support overlay dialogs (e.g., close confirmation).
+            // The wrapper itself uses mode::focusable as a defensive halt point;
+            // the primary halt point for the inner-pane Ctrl+LeftClick unfocus
+            // riseup is the `object` fork below (also mode::focusable), which
+            // is reached first by the riseup and stops it before the menubar
+            // (driven by object's e2::form::state::focus::count listener) can
+            // be repainted inactive.
             auto wrapper = ui::cake::ctor()
-                ->plugin<pro::focus>();
+                ->plugin<pro::focus>(pro::focus::mode::focusable);
+            // Use mode::focusable on `object` so the unfocus riseup from a pane's
+            // Ctrl+LeftClick toggle halts here (controls.hpp:2479-2491 last_step
+            // returns via bell::expire) WITHOUT calling notify_focus_state on
+            // object. This prevents object's `state::focus::count` signal from
+            // firing with count=0, which would otherwise flip `is_focused` to
+            // false and repaint the tile menubar inactive even though the tile
+            // applet is still the focused leaf at the gate level.
             auto object = wrapper->attach(ui::fork::ctor(axis::Y))
                 ->plugin<items>()
-                ->plugin<pro::focus>()
+                ->plugin<pro::focus>(pro::focus::mode::focusable)
                 ->plugin<pro::keybd>();
             auto& window_clr = object->base::field(skin::color(tone::window_clr));
             auto& is_focused = object->base::field(faux);
