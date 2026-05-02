@@ -41,6 +41,7 @@
         text       imetxt; // term: IME composition preview source.
         flow       imefmt; // term: IME composition preview layout.
         eccc       appcfg; // term: Application startup inits.
+        text       restart_cwd_override; // term: cwd captured from the live child at restart() time; consumed once by start_term().
         hook       onerun; // term: One-shot token for restart session.
         bool       rawkbd; // term: Exclusive keyboard access.
         bool       bottom_anchored; // term: Anchor scrollback content when resizing (default is anchor at bottom).
@@ -1316,6 +1317,13 @@
         void start_term(eccc cfg, os::fdrw fds = {})
         {
             appcfg = cfg;
+            // Consume any cwd captured by a prior restart() call. This survives
+            // the listener-captured original cfg being passed back into us.
+            if (restart_cwd_override.size())
+            {
+                appcfg.cwd = restart_cwd_override;
+                restart_cwd_override.clear();
+            }
             if (!ipccon)
             {
                 if (restart_pending.exchange(faux))
@@ -1341,6 +1349,23 @@
         }
         void restart()
         {
+            // If the user opted into restart_cwd, capture the child's current
+            // working directory NOW (before the child receives SIGHUP and the
+            // /proc/<pid>/cwd entry / Windows PEB go away) and stash it for
+            // start_term() to consume on the next launch. We only set it on
+            // success; on failure start_term() falls back to the original cwd.
+            if (defcfg.def_restart_cwd && ipccon.termlink)
+            {
+                auto pid = ipccon.termlink->child_pid();
+                if (pid)
+                {
+                    auto child_cwd = os::process::cwd_of(pid);
+                    if (child_cwd.size())
+                    {
+                        restart_cwd_override = child_cwd;
+                    }
+                }
+            }
             resume.exchange(true);
             restart_pending.exchange(true);
             if (!ipccon.sighup(faux) && !ipccon.stdwrite.joinable())

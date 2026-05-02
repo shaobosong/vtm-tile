@@ -211,6 +211,10 @@ R"==(
                                 close:   Always close.
                                 restart: Restart session.
                                 retry:   Restart session if exit code != 0. -->
+        <restart_cwd=false/>  <!-- When true, terminal restart (vtm.terminal.Restart() / atexit=restart|retry) relaunches
+                                   the shell in the current working directory of the child process instead of the
+                                   directory inherited at session start. Works on both Linux (via /proc/<pid>/cwd)
+                                   and Windows (via NtQueryInformationProcess). Default: false. -->
         <confirm_close=true/>  <!-- Show a confirmation dialog when the close button is clicked. -->
     </terminal>
 )==" // MSVC2022: C2026 String too big, trailing characters truncated.

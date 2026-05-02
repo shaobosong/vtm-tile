@@ -16,6 +16,9 @@ struct consrv
     pidt        proc_pid{};
     std::thread waitexit;                 // consrv: The trailing thread for the child process.
 
+    // consrv: Return the OS pid of the child process (0 if no child).
+    auto child_pid() const { return proc_pid; }
+
     virtual si32 wait() = 0;
     virtual void undo(bool undo_redo)  = 0;
     virtual void start() = 0;
@@ -5211,6 +5214,9 @@ struct consrv : ipc::stdcon
 {
     std::thread stdinput{};
     pidt        group_id{};
+
+    // consrv: Return the OS pid of the child process leader (0 if no child).
+    auto child_pid() const { return group_id; }
 
     // sighup_watchdog: fallback escalation thread spawned by sighup().
     // Some interactive shells (e.g. bash with a partially-buffered escape

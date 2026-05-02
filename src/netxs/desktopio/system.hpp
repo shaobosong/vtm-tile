@@ -2716,6 +2716,89 @@ namespace netxs::os
             log(args...);
             process::exit(code);
         }
+        // os::process: Best-effort retrieval of the current working directory of
+        // the process identified by 'pid'. Returns empty string on failure or
+        // when the platform/permissions do not allow inspection. Intended for
+        // features such as terminal restart-in-cwd: callers MUST tolerate an
+        // empty result and fall back to their default cwd in that case.
+        auto cwd_of([[maybe_unused]] pidt pid)
+        {
+            auto cwd = text{};
+            #if defined(_WIN32)
+
+                // Best-effort on Windows: read the child PEB's ProcessParameters->CurrentDirectory.
+                // We resolve NtQueryInformationProcess dynamically to avoid a
+                // hard ntdll import dependency at link time.
+                if (!pid) return cwd;
+                using NtQueryInformationProcess_ptr = LONG(__stdcall*)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+                static auto pNtQueryInformationProcess = []() -> NtQueryInformationProcess_ptr
+                {
+                    auto mod = ::GetModuleHandleW(L"ntdll.dll");
+                    if (!mod) mod = ::LoadLibraryExW(L"ntdll.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+                    return mod ? reinterpret_cast<NtQueryInformationProcess_ptr>(::GetProcAddress(mod, "NtQueryInformationProcess"))
+                               : nullptr;
+                }();
+                if (!pNtQueryInformationProcess) return cwd;
+                auto handle = ::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, FALSE, pid);
+                if (!handle) return cwd;
+                struct PROCESS_BASIC_INFORMATION_local
+                {
+                    PVOID     Reserved1;
+                    PVOID     PebBaseAddress;
+                    PVOID     Reserved2[2];
+                    ULONG_PTR UniqueProcessId;
+                    PVOID     Reserved3;
+                };
+                auto pbi = PROCESS_BASIC_INFORMATION_local{};
+                auto rlen = ULONG{};
+                auto status = pNtQueryInformationProcess(handle, 0 /*ProcessBasicInformation*/, &pbi, sizeof(pbi), &rlen);
+                if (status == 0 && pbi.PebBaseAddress)
+                {
+                    // PEB layout (offsets validated for both 32-bit and 64-bit Windows 10/11):
+                    //   PEB.ProcessParameters offset = 0x20 (x64) / 0x10 (x86)
+                    //   RTL_USER_PROCESS_PARAMETERS.CurrentDirectory.DosPath (UNICODE_STRING) offset
+                    //                                = 0x38 (x64) / 0x24 (x86)
+                    constexpr auto pp_off  = sizeof(PVOID) == 8 ? 0x20 : 0x10;
+                    constexpr auto cwd_off = sizeof(PVOID) == 8 ? 0x38 : 0x24;
+                    auto pp_ptr = PVOID{};
+                    if (::ReadProcessMemory(handle, (PBYTE)pbi.PebBaseAddress + pp_off, &pp_ptr, sizeof(pp_ptr), nullptr) && pp_ptr)
+                    {
+                        struct UNICODE_STRING_local { USHORT Length; USHORT MaximumLength; PWSTR Buffer; };
+                        auto us = UNICODE_STRING_local{};
+                        if (::ReadProcessMemory(handle, (PBYTE)pp_ptr + cwd_off, &us, sizeof(us), nullptr)
+                         && us.Length && us.Buffer)
+                        {
+                            auto buf = std::wstring(us.Length / sizeof(wchar_t), L'\0');
+                            if (::ReadProcessMemory(handle, us.Buffer, buf.data(), us.Length, nullptr))
+                            {
+                                // Strip a trailing backslash (Windows CWD strings carry one).
+                                while (buf.size() > 3 /*keep "X:\\"*/ && (buf.back() == L'\\' || buf.back() == L'\0')) buf.pop_back();
+                                cwd = utf::to_utf(buf);
+                            }
+                        }
+                    }
+                }
+                ::CloseHandle(handle);
+
+            #else
+
+                // Linux: /proc/<pid>/cwd is a symlink to the child's current
+                // working directory. readlink() works regardless of whether
+                // the child is a session leader / process group leader, as
+                // long as we have permission to inspect the target.
+                if (pid <= 0) return cwd;
+                auto path = "/proc/" + std::to_string(pid) + "/cwd";
+                auto buf = std::array<char, 4096>{};
+                auto n = ::readlink(path.c_str(), buf.data(), buf.size() - 1);
+                if (n > 0)
+                {
+                    buf[n] = '\0';
+                    cwd.assign(buf.data(), (size_t)n);
+                }
+
+            #endif
+            return cwd;
+        }
         auto sysfork()
         {
             #if defined(_WIN32)
