@@ -6,8 +6,9 @@
 TUI regression tests for the close confirmation dialog.
 
 Tests that clicking the x button in term/tile apps shows a confirmation
-dialog (when confirm_close=true), and that pressing Y/N/Esc/Enter/clicking
-Yes/No buttons correctly confirms or cancels the close.
+dialog (when confirm_close=true), and that pressing Esc/Tab/Enter or
+clicking the Confirm/Cancel buttons correctly confirms or cancels the
+close.
 
 Uses SGR mouse protocol and raw keyboard input to simulate user activity.
 """
@@ -43,7 +44,7 @@ READ_TIMEOUT = 5.0
 SETTLE_DELAY = 2.5
 
 # Tile (C/S architecture) needs more startup time.
-TILE_SETTLE_DELAY = 4.0
+TILE_SETTLE_DELAY = 1.0
 
 # Self-contained desk/term configuration: confirm_close enabled for the
 # terminal, so tests do not depend on vtm.xml built-in defaults.
@@ -252,7 +253,7 @@ def open_dialog_and_verify(session):
 
 def verify_cancel_via_reconfirm(session):
     """After a cancel action, verify the dialog was really dismissed by
-    opening it again and confirming with Y.  If vtm exits, the dialog
+    opening it again and confirming with Enter.  If vtm exits, the dialog
     was truly functional.  Returns True on success.
     """
     time.sleep(0.5)
@@ -264,8 +265,8 @@ def verify_cancel_via_reconfirm(session):
     session.read(timeout=0.3)
     if not session.is_alive():
         return False  # vtm exited when opening dialog (bad)
-    # Confirm with Y.
-    session.write(b"y")
+    # Confirm with Enter (default selection is Confirm).
+    session.write(b"\r")
     return session.wait_for_exit(timeout=5.0)
 
 
@@ -280,28 +281,13 @@ def test_term_close_button_shows_dialog():
         if not open_dialog_and_verify(s):
             print("FAIL - vtm exited immediately")
             return False
-        # Confirm with Y so vtm exits normally instead of being SIGKILLed.
-        s.write(b"y")
+        # Confirm with Enter so vtm exits normally instead of being SIGKILLed.
+        s.write(b"\r")
         if not s.wait_for_exit(timeout=5.0):
             print("FAIL - vtm did not exit after confirming dialog")
             return False
         print("PASS")
         return True
-
-
-def test_term_confirm_y():
-    """Pressing Y while dialog is open confirms close."""
-    print("TEST: term - confirm by Y ... ", end="", flush=True)
-    with VtmTestSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
-        if not open_dialog_and_verify(s):
-            print("FAIL - vtm exited before dialog")
-            return False
-        s.write(b"y")
-        if s.wait_for_exit(timeout=5.0):
-            print("PASS")
-            return True
-        print("FAIL - vtm did not exit after Y")
-        return False
 
 
 def test_term_confirm_enter():
@@ -316,6 +302,104 @@ def test_term_confirm_enter():
             print("PASS")
             return True
         print("FAIL - vtm did not exit after Enter")
+        return False
+
+
+def test_term_tab_then_enter_cancels():
+    """Default selection is Confirm; Tab toggles to Cancel; Enter then cancels."""
+    print("TEST: term - Tab then Enter cancels ... ", end="", flush=True)
+    with VtmTestSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
+        if not open_dialog_and_verify(s):
+            print("FAIL - vtm exited before dialog")
+            return False
+        # Tab → highlight Cancel.
+        s.write(b"\t")
+        time.sleep(0.3)
+        # Enter dispatches to currently selected (Cancel) → dialog dismisses,
+        # vtm stays alive.
+        s.write(b"\r")
+        time.sleep(0.5)
+        if not s.is_alive():
+            print("FAIL - vtm exited after Tab+Enter (should have cancelled)")
+            return False
+        # Reconfirm by re-opening dialog and pressing Enter (default Confirm).
+        if verify_cancel_via_reconfirm(s):
+            print("PASS")
+            return True
+        print("FAIL - could not reconfirm after Tab+Enter cancel")
+        return False
+
+
+def test_term_tab_twice_then_enter_confirms():
+    """Tab twice toggles back to Confirm; Enter then confirms close."""
+    print("TEST: term - Tab x2 then Enter confirms ... ", end="", flush=True)
+    with VtmTestSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
+        if not open_dialog_and_verify(s):
+            print("FAIL - vtm exited before dialog")
+            return False
+        # Tab Tab → back to Confirm.
+        s.write(b"\t")
+        time.sleep(0.2)
+        s.write(b"\t")
+        time.sleep(0.3)
+        s.write(b"\r")
+        if s.wait_for_exit(timeout=5.0):
+            print("PASS")
+            return True
+        print("FAIL - vtm did not exit after Tab x2 + Enter")
+        return False
+
+
+def test_term_hover_cancel_then_enter_cancels():
+    """Hovering Cancel button selects it; Enter then cancels."""
+    print("TEST: term - hover Cancel then Enter cancels ... ", end="", flush=True)
+    with VtmTestSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
+        if not open_dialog_and_verify(s):
+            print("FAIL - vtm exited before dialog")
+            return False
+        # Compute Cancel button center (see test_term_click_no_button).
+        dialog_left = (COLS - 44) // 2 + 1
+        dialog_top = (ROWS - 5) // 2 + 1
+        inner_left = dialog_left + 3
+        button_row = dialog_top + 1 + 2
+        cancel_center = inner_left + 18 + 2 + 18 // 2
+        # MouseEnter handler fires on a move into the cell.
+        s.mouse_move(cancel_center, button_row)
+        time.sleep(0.4)
+        # Enter dispatches to currently selected (Cancel).
+        s.write(b"\r")
+        time.sleep(0.5)
+        if not s.is_alive():
+            print("FAIL - vtm exited after hover-Cancel + Enter")
+            return False
+        if verify_cancel_via_reconfirm(s):
+            print("PASS")
+            return True
+        print("FAIL - could not reconfirm after hover-Cancel cancel")
+        return False
+
+
+def test_term_hover_cancel_then_tab_then_enter_confirms():
+    """Hover Cancel, then Tab toggles back to Confirm; Enter confirms close."""
+    print("TEST: term - hover Cancel then Tab then Enter confirms ... ", end="", flush=True)
+    with VtmTestSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
+        if not open_dialog_and_verify(s):
+            print("FAIL - vtm exited before dialog")
+            return False
+        dialog_left = (COLS - 44) // 2 + 1
+        dialog_top = (ROWS - 5) // 2 + 1
+        inner_left = dialog_left + 3
+        button_row = dialog_top + 1 + 2
+        cancel_center = inner_left + 18 + 2 + 18 // 2
+        s.mouse_move(cancel_center, button_row)  # selects Cancel via hover
+        time.sleep(0.3)
+        s.write(b"\t")  # Toggles selection back to Confirm.
+        time.sleep(0.2)
+        s.write(b"\r")
+        if s.wait_for_exit(timeout=5.0):
+            print("PASS")
+            return True
+        print("FAIL - vtm did not exit after hover+Tab+Enter")
         return False
 
 
@@ -336,25 +420,6 @@ def test_term_cancel_esc():
             print("PASS")
             return True
         print("FAIL - could not reconfirm after Esc cancel")
-        return False
-
-
-def test_term_cancel_n():
-    """Pressing N while dialog is open cancels the close."""
-    print("TEST: term - cancel by N ... ", end="", flush=True)
-    with VtmTestSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
-        if not open_dialog_and_verify(s):
-            print("FAIL - vtm exited before dialog")
-            return False
-        s.write(b"n")
-        time.sleep(0.5)
-        if not s.is_alive():
-            print("FAIL - vtm exited after N")
-            return False
-        if verify_cancel_via_reconfirm(s):
-            print("PASS")
-            return True
-        print("FAIL - could not reconfirm after N cancel")
         return False
 
 
@@ -385,19 +450,19 @@ def test_term_click_yes_button():
         if not open_dialog_and_verify(s):
             print("FAIL - vtm exited before dialog")
             return False
-        # Dialog is 42 × 7, centered, with setpad(l=3, r=3, t=2, b=1) → inner 36 × 4.
-        # Layout: slot_1 (message) 3 rows, slot_2 (buttons) 1 row.
-        # Button row (X-fork, gap=2): slot_1 = Confirm (17 cols), gap 2, slot_2 = Cancel (17 cols).
-        #   dialog_left = (80-42)//2 + 1 = 20   (1-indexed)
-        #   dialog_top  = (24-7)//2 + 1  = 9
-        #   inner_left  = 20 + 3 = 23
-        #   button_row  = 9 + 2 + 3     = 14   (outer_top + t_pad + 3 message rows)
-        #   confirm_x   = 23 + 17//2    = 31
-        dialog_left = (COLS - 42) // 2 + 1
-        dialog_top = (ROWS - 7) // 2 + 1
+        # Dialog is 44 × 5, centered, with setpad(l=3, r=3, t=1, b=1) → inner 38 × 3.
+        # Layout: slot_1 (message) 2 rows, slot_2 (buttons) 1 row.
+        # Button row (X-fork, gap=2): slot_1 = Confirm (18 cols), gap 2, slot_2 = Cancel (18 cols).
+        #   dialog_left = (80-44)//2 + 1 = 19   (1-indexed)
+        #   dialog_top  = (24-5)//2 + 1  = 10
+        #   inner_left  = 19 + 3 = 22
+        #   button_row  = 10 + 1 + 2    = 13   (outer_top + t_pad + 2 message rows)
+        #   confirm_x   = 22 + 18//2    = 31
+        dialog_left = (COLS - 44) // 2 + 1
+        dialog_top = (ROWS - 5) // 2 + 1
         inner_left = dialog_left + 3           # setpad l=3
-        button_row = dialog_top + 2 + 3        # t_pad(2) + message rows(3)
-        confirm_center = inner_left + 17 // 2  # center of slot_1 (~17 cols wide)
+        button_row = dialog_top + 1 + 2        # t_pad(1) + message rows(2)
+        confirm_center = inner_left + 18 // 2  # center of slot_1 (18 cols wide)
         s.click(confirm_center, button_row)
         if s.wait_for_exit(timeout=5.0):
             print("PASS")
@@ -414,12 +479,12 @@ def test_term_click_no_button():
             print("FAIL - vtm exited before dialog")
             return False
         # See test_term_click_yes_button for layout derivation.
-        #   cancel_x = inner_left + 17 + 2 + 17//2
-        dialog_left = (COLS - 42) // 2 + 1
-        dialog_top = (ROWS - 7) // 2 + 1
+        #   cancel_x = inner_left + 18 + 2 + 18//2
+        dialog_left = (COLS - 44) // 2 + 1
+        dialog_top = (ROWS - 5) // 2 + 1
         inner_left = dialog_left + 3
-        button_row = dialog_top + 2 + 3
-        cancel_center = inner_left + 17 + 2 + 17 // 2  # center of slot_2
+        button_row = dialog_top + 1 + 2
+        cancel_center = inner_left + 18 + 2 + 18 // 2  # center of slot_2
         s.click(cancel_center, button_row)
         time.sleep(0.5)
         if not s.is_alive():
@@ -443,28 +508,13 @@ def test_tile_close_button_shows_dialog():
         if not open_dialog_and_verify(s):
             print("FAIL - vtm exited immediately")
             return False
-        # Confirm with Y so vtm exits normally instead of being SIGKILLed.
-        s.write(b"y")
+        # Confirm with Enter so vtm exits normally instead of being SIGKILLed.
+        s.write(b"\r")
         if not s.wait_for_exit(timeout=5.0):
             print("FAIL - vtm did not exit after confirming dialog")
             return False
         print("PASS")
         return True
-
-
-def test_tile_confirm_y():
-    """Pressing Y while tile dialog is open confirms close."""
-    print("TEST: tile - confirm by Y ... ", end="", flush=True)
-    with VtmTestSession(VTM_TILE_BINARY, TILE_ARGS, settle_delay=TILE_SETTLE_DELAY) as s:
-        if not open_dialog_and_verify(s):
-            print("FAIL - vtm exited before dialog")
-            return False
-        s.write(b"y")
-        if s.wait_for_exit(timeout=5.0):
-            print("PASS")
-            return True
-        print("FAIL - vtm did not exit after Y")
-        return False
 
 
 def test_tile_cancel_esc():
@@ -549,10 +599,10 @@ def test_tile_split_then_close_confirm():
         if not open_dialog_and_verify(s):
             print("FAIL - vtm exited without showing dialog after split")
             return False
-        # Confirm with Y.
-        s.write(b"y")
+        # Confirm with Enter.
+        s.write(b"\r")
         if not s.wait_for_exit(timeout=8.0):
-            print("FAIL - vtm client did not exit after Y")
+            print("FAIL - vtm client did not exit after Enter")
             return False
         # Verify all vtm processes exited (Bug 2: server/children lingered).
         if check_all_vtm_exited(timeout=8.0):
@@ -577,10 +627,10 @@ def test_tile_split_twice_then_close_confirm():
         if not open_dialog_and_verify(s):
             print("FAIL - vtm exited without showing dialog after 2 splits")
             return False
-        # Confirm with Y.
-        s.write(b"y")
+        # Confirm with Enter.
+        s.write(b"\r")
         if not s.wait_for_exit(timeout=8.0):
-            print("FAIL - vtm client did not exit after Y")
+            print("FAIL - vtm client did not exit after Enter")
             return False
         # Verify all vtm processes exited.
         if check_all_vtm_exited(timeout=8.0):
@@ -637,16 +687,18 @@ def main():
     tests = [
         # Term tests.
         test_term_close_button_shows_dialog,
-        test_term_confirm_y,
         test_term_confirm_enter,
         test_term_cancel_esc,
-        test_term_cancel_n,
         test_term_cancel_click_outside,
         test_term_click_yes_button,
         test_term_click_no_button,
+        # Term tests (Tab/selection cursor).
+        test_term_tab_then_enter_cancels,
+        test_term_tab_twice_then_enter_confirms,
+        test_term_hover_cancel_then_enter_cancels,
+        test_term_hover_cancel_then_tab_then_enter_confirms,
         # Tile tests (basic).
         test_tile_close_button_shows_dialog,
-        test_tile_confirm_y,
         test_tile_cancel_esc,
         # Tile tests (split regression — Bug 1 & Bug 2).
         test_tile_split_then_close_intercept,

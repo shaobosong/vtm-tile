@@ -73,6 +73,22 @@ namespace netxs::app::shared
         // key-release event (esp. for Esc whose press+release pair is
         // generated synchronously).
         auto pending_unhook = ptr::shared(faux);
+        // Shared selection cursor for the button bar.  0 = Confirm (default),
+        // 1 = Cancel.  Driven by both Tab (keyboard) and MouseEnter (mouse);
+        // hover and keyboard switch instantly without conflicting (mirrors
+        // the workspace popup design — the most recent input wins).
+        auto selected_idx = ptr::shared(si32{ 0 });
+        // Weak refs to both button items for redraws when selection changes.
+        // Populated once the buttons are attached below.
+        auto confirm_shadow = ptr::shared(netxs::wptr<ui::base>{});
+        auto cancel_shadow  = ptr::shared(netxs::wptr<ui::base>{});
+        // Helper: trigger redraw of both buttons (so the highlight follows
+        // the selection cursor).
+        auto refresh_buttons = [confirm_shadow, cancel_shadow]
+        {
+            if (auto p = confirm_shadow->lock()) p->base::deface();
+            if (auto p = cancel_shadow->lock())  p->base::deface();
+        };
 
         // dismiss_visual: Remove overlay and clear dialog_active flag, but
         //                 keep the keyboard interceptor alive.
@@ -101,7 +117,8 @@ namespace netxs::app::shared
         // Setting gear.handled prevents pro::focus from delivering the key to
         // the focused child (e.g. ui::term / shell).
         parent.bell::submit(tier::preview, input::events::keybd::any, *kbd_hook)
-            = [dismiss_visual, dismiss_hook, on_confirm, on_cancel, pending_unhook](hids& gear) mutable
+            = [dismiss_visual, dismiss_hook, on_confirm, on_cancel, pending_unhook,
+               selected_idx, refresh_buttons](hids& gear) mutable
         {
             if (gear.payload != input::keybd::type::keypress
                 || gear.keystat == input::key::interrupted
@@ -120,19 +137,46 @@ namespace netxs::app::shared
                 }
                 return;
             }
+            // From here on we only act on key-press events.  Key-release
+            // events are swallowed unconditionally — letting them through
+            // would (a) re-trigger the Tab/Enter handlers on release, and
+            // (b) leak releases into the focused child below the overlay.
+            if (gear.keystat != input::key::pressed)
+            {
+                gear.set_handled(faux);
+                return;
+            }
             auto k = gear.keybd::generic();
             auto& ch = gear.keybd::cluster;
-            if (k == input::key::Esc || ch == "n" || ch == "N")
+            if (k == input::key::Esc)
             {
                 dismiss_visual();
                 if (on_cancel) on_cancel();
                 gear.set_handled(faux);
             }
-            else if (k == input::key::KeyEnter || ch == "y" || ch == "Y")
+            else if (k == input::key::Tab)
             {
-                dismiss_visual();
-                dismiss_hook();
-                on_confirm();
+                // Tab toggles which button is highlighted.  The next Enter
+                // will dispatch to whichever button is currently selected.
+                *selected_idx = (*selected_idx == 0) ? 1 : 0;
+                refresh_buttons();
+                gear.set_handled(faux);
+            }
+            else if (k == input::key::KeyEnter)
+            {
+                // Enter dispatches based on the current selection cursor
+                // rather than always confirming.
+                if (*selected_idx == 0) // Confirm.
+                {
+                    dismiss_visual();
+                    dismiss_hook();
+                    on_confirm();
+                }
+                else // Cancel.
+                {
+                    dismiss_visual();
+                    if (on_cancel) on_cancel();
+                }
                 gear.set_handled(faux);
             }
             else // Swallow all other keys while dialog is open.
@@ -167,43 +211,86 @@ namespace netxs::app::shared
 
         // Layer 2: Centered dialog card (Tokyo Night palette).
         //
-        //  ┌────────────────────────────────────────────┐
-        //  │                                            │  row 1
-        //  │                                            │  row 2
-        //  │   Do you want to close this window?        │  row 3  message
-        //  │                                            │  row 4
-        //  │                                            │  row 5
-        //  │   [    Confirm     ]  [     Cancel     ]   │  row 6  buttons
-        //  │                                            │  row 7
-        //  └────────────────────────────────────────────┘
+        // ████████████████████████████████████████████  row 1
+        // ███You are closing this window...███████████  row 2  message
+        // ████████████████████████████████████████████  row 3
+        // ███     Confirm      ██      Cancel      ███  row 4  buttons
+        // ████████████████████████████████████████████  row 5
         //
-        //  Outer 42 × 7, setpad(l=3 r=3 t=2 b=1) → inner 36 × 4.
-        //  slot_1 (message) : 3 rows   slot_2 (buttons) : 1 row.
+        // Outer 44 × 5, setpad(l=3 r=3 t=1 b=1) → inner 38 × 3.
+        // slot_1 (message) : 3 rows   slot_2 (buttons) : 1 row.
         //
         auto dialog = overlay_ptr->attach(ui::fork::ctor(axis::Y))
             ->alignment({ snap::center, snap::center })
-            ->limits({ 42, 7 }, { 42, 7 }) /* This a suggested, not forceable value (42) in cross-axis. */
+            ->limits({ 44, 5 }, { 44, 5 }) /* This a suggested, not forceable value (42) in cross-axis. */
             ->colors(argb{ 0xffc0caf5 }, argb{ 0xff1a1b26 })
-            ->setpad({ 3, 3, 2, 1 });
+            ->setpad({ 3, 3, 1, 1 });
 
         // Message label — flexible keeps full slot width.
         // No alignment() here: the Y-fork inform() bug yields zero-size
         // regions for children; center alignment would shift the item
         // off-screen.  Blue accent (0xff7aa2f7) for the question text.
-        dialog->attach(slot::_1, ui::item::ctor(ansi::fgc(0xff7aa2f7).add("Do you want to close this window?")))
+        // ui::item disables wrapping by default (controls.hpp _set() forces
+        // wrap::off). Re-enable it via an inline wrp(wrap::on) directive so
+        // long messages flow into multiple lines instead of being truncated.
+        dialog->attach(slot::_1,
+                ui::item::ctor(ansi::wrp(wrap::on)
+                    .fgc(0xffcdd6f4)
+                    .add("You are closing this window...")))
             ->flexible();
 
         // Button bar (fixed 1 row).
         auto buttons = dialog->attach(slot::_2, ui::fork::ctor(axis::X, 2))
             ->limits({ -1, 1 }, { -1, 1 });
 
-        // [ Confirm ] button — muted Tokyo Night dark green; xlight brightens on hover
-        //                      because luma(73,132,55) ≈ 107 < 140.
-        buttons->attach(slot::_1, ui::item::ctor(ansi::fgc(0xff1a1b26).add("     Confirm      ")))
-            ->active(argb{ 0xffc0caf5 }, argb{ 0xff498437 })
-            ->shader(cell::shaders::xlight, e2::form::state::hover)
-            ->invoke([dismiss_visual, dismiss_hook, on_confirm](auto& boss)
+        // Button color scheme — matches the command search bar's vertical
+        // scrollbar thumb:
+        //   * idle  : bg = scroll_thumb (0xFF3B4261), fg = light text
+        //   * active: bg = scroll_drag  (0xFF89B4FA), fg = dark  text
+        // The "active" treatment fires both for keyboard selection and for
+        // mouse hover, since both update *selected_idx.
+        static constexpr auto btn_idle_bg     = argb{ 0xff3b4261 };
+        static constexpr auto btn_idle_fg     = argb{ 0xffcdd6f4 };
+        static constexpr auto btn_active_bg   = argb{ 0xff89b4fa };
+        static constexpr auto btn_active_fg   = argb{ 0xff1e1e2e };
+        // Note: use a default-constructed cell (no glyph, no mosaic metadata)
+        // so that fusefull only blends fg/bg into existing cells without
+        // overwriting the label glyphs (gc) — otherwise the active-state
+        // re-paint would replace the rendered text with whitespace.
+        auto active_brush = cell{}.fgc(btn_active_fg).bgc(btn_active_bg);
+
+        // [ Confirm ] button.
+        auto confirm_btn = buttons->attach(slot::_1, ui::item::ctor(ansi::fgc(btn_idle_fg).add("     Confirm      ")))
+            ->active(btn_idle_fg, btn_idle_bg)
+            ->invoke([dismiss_visual, dismiss_hook, on_confirm, selected_idx, refresh_buttons, active_brush](auto& boss)
             {
+                // Render-time highlight: paint the active palette on top of
+                // the idle one when this button is the current selection.
+                // Both Tab (keyboard) and MouseEnter (mouse) update
+                // *selected_idx, so the highlight follows whichever input
+                // arrived last (mirrors the workspace popup design).
+                //
+                // We listen on the foreground render pass (e2::render::any)
+                // rather than the background pass, so that the active brush
+                // overpaints the label glyphs themselves — otherwise the
+                // glyph foreground (baked in via ansi::fgc(btn_idle_fg) on
+                // the label content) would render on top of the active
+                // brush and btn_active_fg would never take effect.
+                boss.LISTEN(tier::release, e2::render::any, parent_canvas, -, (selected_idx, active_brush))
+                {
+                    if (*selected_idx == 0)
+                    {
+                        parent_canvas.fill(cell::shaders::fusefull(active_brush));
+                    }
+                };
+                boss.on(tier::mouserelease, input::key::MouseEnter, [selected_idx, refresh_buttons](hids& /*gear*/)
+                {
+                    if (*selected_idx != 0)
+                    {
+                        *selected_idx = 0;
+                        refresh_buttons();
+                    }
+                });
                 boss.on(tier::mouserelease, input::key::LeftClick, [&, dismiss_visual, dismiss_hook, on_confirm](hids& gear)
                 {
                     dismiss_visual();
@@ -212,13 +299,28 @@ namespace netxs::app::shared
                     gear.dismiss();
                 });
             });
+        *confirm_shadow = ptr::shadow(confirm_btn);
 
-        // [ Cancel ] button — muted Tokyo Night storm surface (0xff414868).
-        buttons->attach(slot::_2, ui::item::ctor(ansi::fgc(0xffa9b1d6).add("      Cancel      ")))
-            ->active(argb{ 0xffa9b1d6 }, argb{ 0xff414868 })
-            ->shader(cell::shaders::xlight, e2::form::state::hover)
-            ->invoke([dismiss_visual, dismiss_hook, on_cancel](auto& boss)
+        // [ Cancel ] button.
+        auto cancel_btn = buttons->attach(slot::_2, ui::item::ctor(ansi::fgc(btn_idle_fg).add("      Cancel      ")))
+            ->active(btn_idle_fg, btn_idle_bg)
+            ->invoke([dismiss_visual, dismiss_hook, on_cancel, selected_idx, refresh_buttons, active_brush](auto& boss)
             {
+                boss.LISTEN(tier::release, e2::render::any, parent_canvas, -, (selected_idx, active_brush))
+                {
+                    if (*selected_idx == 1)
+                    {
+                        parent_canvas.fill(cell::shaders::fusefull(active_brush));
+                    }
+                };
+                boss.on(tier::mouserelease, input::key::MouseEnter, [selected_idx, refresh_buttons](hids& /*gear*/)
+                {
+                    if (*selected_idx != 1)
+                    {
+                        *selected_idx = 1;
+                        refresh_buttons();
+                    }
+                });
                 boss.on(tier::mouserelease, input::key::LeftClick, [&, dismiss_visual, dismiss_hook, on_cancel](hids& gear)
                 {
                     dismiss_visual();
@@ -227,6 +329,7 @@ namespace netxs::app::shared
                     gear.dismiss();
                 });
             });
+        *cancel_shadow = ptr::shadow(cancel_btn);
 
         // Attach the overlay to the parent and trigger layout.
         parent.attach(overlay_ptr);
