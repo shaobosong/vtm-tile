@@ -498,6 +498,98 @@ def test_term_click_no_button():
 
 
 # ---------------------------------------------------------------------------
+# Tests for Left/Right arrow key navigation (term)
+# ---------------------------------------------------------------------------
+
+def test_term_right_arrow_selects_cancel():
+    """Right arrow moves selection from Confirm to Cancel; Enter then cancels close."""
+    print("TEST: term - Right arrow selects Cancel ... ", end="", flush=True)
+    with VtmTestSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
+        if not open_dialog_and_verify(s):
+            print("FAIL - vtm exited before dialog")
+            return False
+        # Right arrow → highlight Cancel.
+        s.write(b"\x1b[C")
+        time.sleep(0.3)
+        # Enter dispatches to currently selected (Cancel) → vtm stays alive.
+        s.write(b"\r")
+        time.sleep(0.5)
+        if not s.is_alive():
+            print("FAIL - vtm exited after Right+Enter (should have cancelled)")
+            return False
+        if verify_cancel_via_reconfirm(s):
+            print("PASS")
+            return True
+        print("FAIL - could not reconfirm after Right arrow cancel")
+        return False
+
+
+def test_term_left_arrow_after_right_selects_confirm():
+    """Right then Left arrow returns selection to Confirm; Enter confirms close."""
+    print("TEST: term - Right then Left arrow selects Confirm ... ", end="", flush=True)
+    with VtmTestSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
+        if not open_dialog_and_verify(s):
+            print("FAIL - vtm exited before dialog")
+            return False
+        # Right → Cancel, Left → Confirm.
+        s.write(b"\x1b[C")
+        time.sleep(0.2)
+        s.write(b"\x1b[D")
+        time.sleep(0.3)
+        # Enter dispatches to currently selected (Confirm) → vtm exits.
+        s.write(b"\r")
+        if s.wait_for_exit(timeout=5.0):
+            print("PASS")
+            return True
+        print("FAIL - vtm did not exit after Right+Left+Enter")
+        return False
+
+
+def test_term_right_arrow_no_wrap():
+    """Right arrow from Cancel (index 1) does not wrap back to Confirm; Enter cancels."""
+    print("TEST: term - Right arrow no wrap at Cancel ... ", end="", flush=True)
+    with VtmTestSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
+        if not open_dialog_and_verify(s):
+            print("FAIL - vtm exited before dialog")
+            return False
+        # Navigate to Cancel with Right, then press Right again (should stay at Cancel).
+        s.write(b"\x1b[C")
+        time.sleep(0.2)
+        s.write(b"\x1b[C")
+        time.sleep(0.3)
+        # Enter should still dispatch to Cancel → vtm stays alive.
+        s.write(b"\r")
+        time.sleep(0.5)
+        if not s.is_alive():
+            print("FAIL - vtm exited (Right arrow wrapped from Cancel back to Confirm)")
+            return False
+        if verify_cancel_via_reconfirm(s):
+            print("PASS")
+            return True
+        print("FAIL - could not reconfirm after no-wrap Right arrow cancel")
+        return False
+
+
+def test_term_left_arrow_no_wrap():
+    """Left arrow from Confirm (index 0) does not wrap to Cancel; Enter confirms."""
+    print("TEST: term - Left arrow no wrap at Confirm ... ", end="", flush=True)
+    with VtmTestSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
+        if not open_dialog_and_verify(s):
+            print("FAIL - vtm exited before dialog")
+            return False
+        # Press Left while already at Confirm (index 0) — selection stays at Confirm.
+        s.write(b"\x1b[D")
+        time.sleep(0.3)
+        # Enter dispatches to Confirm → vtm exits.
+        s.write(b"\r")
+        if s.wait_for_exit(timeout=5.0):
+            print("PASS")
+            return True
+        print("FAIL - vtm did not exit (Left arrow may have wrapped to Cancel)")
+        return False
+
+
+# ---------------------------------------------------------------------------
 # Tests for `vtm-tile`
 # ---------------------------------------------------------------------------
 
@@ -533,6 +625,46 @@ def test_tile_cancel_esc():
             print("PASS")
             return True
         print("FAIL - could not reconfirm after Esc cancel")
+        return False
+
+
+def test_tile_right_arrow_selects_cancel():
+    """Right arrow moves selection to Cancel in tile; Enter then cancels close."""
+    print("TEST: tile - Right arrow selects Cancel ... ", end="", flush=True)
+    with VtmTestSession(VTM_TILE_BINARY, TILE_ARGS, settle_delay=TILE_SETTLE_DELAY) as s:
+        if not open_dialog_and_verify(s):
+            print("FAIL - vtm exited before dialog")
+            return False
+        s.write(b"\x1b[C")
+        time.sleep(0.3)
+        s.write(b"\r")
+        time.sleep(0.5)
+        if not s.is_alive():
+            print("FAIL - vtm exited after Right+Enter (should have cancelled)")
+            return False
+        if verify_cancel_via_reconfirm(s):
+            print("PASS")
+            return True
+        print("FAIL - could not reconfirm after tile Right arrow cancel")
+        return False
+
+
+def test_tile_left_arrow_after_right_selects_confirm():
+    """Right then Left arrow returns selection to Confirm in tile; Enter confirms close."""
+    print("TEST: tile - Right then Left arrow selects Confirm ... ", end="", flush=True)
+    with VtmTestSession(VTM_TILE_BINARY, TILE_ARGS, settle_delay=TILE_SETTLE_DELAY) as s:
+        if not open_dialog_and_verify(s):
+            print("FAIL - vtm exited before dialog")
+            return False
+        s.write(b"\x1b[C")
+        time.sleep(0.2)
+        s.write(b"\x1b[D")
+        time.sleep(0.3)
+        s.write(b"\r")
+        if s.wait_for_exit(timeout=5.0):
+            print("PASS")
+            return True
+        print("FAIL - vtm did not exit after tile Right+Left+Enter")
         return False
 
 
@@ -697,9 +829,17 @@ def main():
         test_term_tab_twice_then_enter_confirms,
         test_term_hover_cancel_then_enter_cancels,
         test_term_hover_cancel_then_tab_then_enter_confirms,
+        # Term tests (Left/Right arrow navigation).
+        test_term_right_arrow_selects_cancel,
+        test_term_left_arrow_after_right_selects_confirm,
+        test_term_right_arrow_no_wrap,
+        test_term_left_arrow_no_wrap,
         # Tile tests (basic).
         test_tile_close_button_shows_dialog,
         test_tile_cancel_esc,
+        # Tile tests (Left/Right arrow navigation).
+        test_tile_right_arrow_selects_cancel,
+        test_tile_left_arrow_after_right_selects_confirm,
         # Tile tests (split regression — Bug 1 & Bug 2).
         test_tile_split_then_close_intercept,
         test_tile_split_then_close_confirm,

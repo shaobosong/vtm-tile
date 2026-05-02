@@ -147,7 +147,6 @@ namespace netxs::app::shared
                 return;
             }
             auto k = gear.keybd::generic();
-            auto& ch = gear.keybd::cluster;
             if (k == input::key::Esc)
             {
                 dismiss_visual();
@@ -160,6 +159,26 @@ namespace netxs::app::shared
                 // will dispatch to whichever button is currently selected.
                 *selected_idx = (*selected_idx == 0) ? 1 : 0;
                 refresh_buttons();
+                gear.set_handled(faux);
+            }
+            else if (k == input::key::KeyLeftArrow)
+            {
+                // Left arrow: move selection to Confirm (index 0) — no wrap.
+                if (*selected_idx != 0)
+                {
+                    *selected_idx = 0;
+                    refresh_buttons();
+                }
+                gear.set_handled(faux);
+            }
+            else if (k == input::key::KeyRightArrow)
+            {
+                // Right arrow: move selection to Cancel (index 1) — no wrap.
+                if (*selected_idx != 1)
+                {
+                    *selected_idx = 1;
+                    refresh_buttons();
+                }
                 gear.set_handled(faux);
             }
             else if (k == input::key::KeyEnter)
