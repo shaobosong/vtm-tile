@@ -46,6 +46,11 @@ ROWS = 30
 READ_TIMEOUT = 5.0
 SETTLE_DELAY = 1.0
 
+# SGR mouse button code for Ctrl+LeftClick: bit 4 (= 16) marks the Ctrl
+# modifier per the xterm SGR mouse spec.  Used to drop keyboard focus
+# from a pane without switching it to another one.
+CTRL_LEFT = 16
+
 # Self-contained tile config: spawn a single 'term' pane and pin the
 # tile <menu> contents inside the test so the suite is independent of
 # vtm.xml's /config/tile/menu defaults. Reducing this coupling means
@@ -59,7 +64,21 @@ TILE_CONFIG = (
         "<tile>"
             "<confirm_close=0/>"
             '<app selected="term">'
-                '<item id="term" label="term" type="dtvt" cmd="$0 -r term"/>'
+                # Pass -c before -r: -r consumes all remaining args via
+                # getopt.rest(), so any flag that must be parsed by the
+                # child's getopt loop must come first.
+                # Clear the terminal's default menu bar (which includes a
+                # "Search"/FindBar button) so that when the command bar
+                # dismisses and repaints the underlying dimmed area, no
+                # "Search" text from the terminal menu appears in the delta
+                # and false-fails the no-op dispatch tests.
+                # <item*/> clears vtm.xml's default app items (id="term",
+                # id="vtty") so our custom item is the only one; without it
+                # the default cmd="$0 -r term" entry persists alongside the
+                # custom one and the terminal may be launched without -c.
+                "<item*/>"
+                '<item id="term" label="term" type="dtvt"'
+                ' cmd="$0 -c \'<config><terminal><menu item*></menu></terminal></config>\' -r term"/>'
             "</app>"
             "<menu item*>"
                 '<item label="  [CMD]  " tooltip=" Open the command bar (fuzzy command launcher). " script=OnLeftClick|TileOpenCommandBar/>'
@@ -79,7 +98,13 @@ MULTI_PANE_TILE_CONFIG = (
         "<tile>"
             "<confirm_close=0/>"
             '<app selected="term">'
-                '<item id="term" label="term" type="dtvt" cmd="$0 -r term"/>'
+                # Same -c fix as TILE_CONFIG: clear terminal menu bar items
+                # so that command bar dismissal does not repaint "Search"
+                # into the delta and false-fail the no-op dispatch tests.
+                # <item*/> clears vtm.xml defaults before adding our item.
+                "<item*/>"
+                '<item id="term" label="term" type="dtvt"'
+                ' cmd="$0 -c \'<config><terminal><menu item*></menu></terminal></config>\' -r term"/>'
             "</app>"
             "<menu item*>"
                 '<item label="  [CMD]  " tooltip=" Open the command bar (fuzzy command launcher). " script=OnLeftClick|TileOpenCommandBar/>'
@@ -664,6 +689,570 @@ KEYBIND_PROXY_TILE_CONFIG = (
 KEYBIND_PROXY_TILE_ARGS = ["-c", KEYBIND_PROXY_TILE_CONFIG]
 
 
+# Broadcast-config: same as MULTI_PANE_TILE_CONFIG but also binds
+# Alt+Shift+A => vtm.tile.SelectAllPanes(). After splitting and selecting
+# all panes, every pane is "focused" for the active gear (multi-focus,
+# solo::off). Any vtm.terminal.* call routed through the tile manager's
+# proxy must then fan out to *all* selected panes — that is the contract
+# of tile_terminal_proxy_call's broadcaster path. We verify both routes:
+# command-bar dispatch (the original symptom) and direct keybind dispatch
+# (catches regressions in the proxy itself, independent of the cmd bar).
+BROADCAST_MARKER = "BCASTOK77"
+BROADCAST_TILE_CONFIG = (
+    "<config>"
+        "<tile>"
+            "<confirm_close=0/>"
+            '<app selected="term">'
+                "<item*/>"
+                # Pass -c before -r: -r consumes all remaining args via
+                # getopt.rest(), so any flag that must be parsed by the
+                # child's getopt loop must come first.
+                # The config fragment clears the terminal's default menu bar
+                # (which includes a "Search"/FindBar button).  Without this,
+                # a user config that ships a Search button in the terminal
+                # menu would cause
+                # test_command_bar_does_not_dispatch_when_only_pane_unfocused
+                # to false-fail: the test uses the absence of "Search" in the
+                # post-dispatch paint delta to confirm the find bar did NOT
+                # open.  The terminal runs as a dtvt child process with its
+                # own config, so the fix must be applied via -c on the child
+                # command line, not via <terminal> in the parent tile config.
+                '<item id="term" label="term" type="dtvt"'
+                ' cmd="$0 -c \'<config><terminal><menu item*></menu></terminal></config>\' -r term"/>'
+            "</app>"
+            "<menu item*>"
+                '<item label="  [CMD]  " tooltip=" cmd " script=OnLeftClick|TileOpenCommandBar/>'
+            "</menu>"
+        "</tile>"
+        "<events><tile>"
+            """<script=TileSplitHorizontally on="Alt+Shift+'|'"/>"""
+            '<script=TileFocusNextPane     on="Alt+Shift+N"/>'
+            '<script=TileSelectAllPanes    on="Alt+Shift+A"/>'
+            '<script=BroadcastPrint        on="Alt+Shift+P"/>'
+        "</tile></events>"
+    "</config>"
+    "<Scripting>"
+        '<TileSplitHorizontally="vtm.tile.SplitPane(0);"/>'
+        '<TileFocusNextPane="vtm.tile.FocusNextPane(1);"/>'
+        '<TileSelectAllPanes="vtm.tile.SelectAllPanes();"/>'
+        f'<BroadcastPrint=\'vtm.terminal.Print("{BROADCAST_MARKER}")\'/>'
+    "</Scripting>"
+)
+BROADCAST_TILE_ARGS = ["-c", BROADCAST_TILE_CONFIG]
+
+
+def test_command_bar_broadcasts_to_all_selected_panes():
+    """SelectAllPanes + ToggleFindBar via the command bar must open the
+    find bar in every selected pane.
+
+    Reproduces the original report: with horizontal split + select-all,
+    a vtm.terminal.ToggleFindBar dispatched from the command bar used to
+    only reach the last-remembered focused pane (focus_history.current
+    holds one slot per gear). The broadcaster path in
+    tile_terminal_proxy_call now iterates every applet currently focused
+    for the gear and signals e2::command::run on each.
+
+    Detection: count distinct halves of the 120-col screen that paint
+    the "Search" header. With two horizontal panes split at COLS/2,
+    a successful broadcast paints the header in BOTH halves; the bug
+    only painted it in one.
+    """
+    print("TEST: command bar broadcasts to all selected panes ... ", end="", flush=True)
+    with VtmTileSession(BROADCAST_TILE_ARGS) as s:
+        if not s.is_alive():
+            return fail("vtm-tile did not start")
+        # Drain initial paint; same retry pattern as
+        # test_command_bar_dispatches_only_to_focused_pane (the [CMD]
+        # paint can be slow when multiple sessions run back-to-back).
+        for _ in range(4):
+            s.snapshot(timeout=1.5)
+            if find_cmd_button(s._screen_buf) is not None:
+                break
+
+        # Split horizontally -> two terminal panes.
+        s.write(b"\x1b|")
+        time.sleep(0.6)
+        s.snapshot(timeout=1.5)
+
+        # Select all panes -> every pane is focused for the active gear
+        # (solo::off multi-focus). This is the precondition the
+        # broadcaster keys off of.
+        s.write(b"\x1bA")
+        time.sleep(0.4)
+        s.snapshot(timeout=1.0)
+
+        # Dispatch ToggleFindBar from the command bar. We do not reset
+        # the buffer before find_cmd_button: vtm coalesces menu repaints
+        # and discarding the buffer can erase the only [CMD] glyph.
+        ok, why = _open_cmd_bar_and_run_find(s)
+        if not ok:
+            return fail(f"toggle dispatch: {why}")
+
+        hits = find_marker_columns(s._screen_buf, "Search")
+        if not hits:
+            return fail("no 'Search' header rendered after broadcast toggle")
+        cols = [c for _r, c in hits]
+        has_left = any(c < COLS // 2 for c in cols)
+        has_right = any(c >= COLS // 2 for c in cols)
+        if not (has_left and has_right):
+            side = "left" if has_left else "right" if has_right else "neither"
+            return fail(
+                f"find bar did not broadcast to all panes "
+                f"(only on {side}, cols={cols}); "
+                f"expected hits in BOTH halves of the {COLS}-col screen"
+            )
+        if not s.is_alive():
+            return fail("vtm-tile crashed during broadcast dispatch")
+        if not s.normal_exit():
+            return fail("vtm-tile did not exit after clicking close button")
+        print(f"PASS (cols={cols})")
+        return True
+
+
+def test_keybind_broadcasts_terminal_call_to_all_selected_panes():
+    """Direct keybind path mirror of the broadcast test.
+
+    Bypasses the command bar so a regression in the proxy itself
+    (tile_terminal_proxy_call broadcaster path) is detectable
+    independently of the cmd bar's filter/dispatch UX. We bind
+    Alt+Shift+P to vtm.terminal.Print(<marker>); after split +
+    select-all, the marker must appear TWICE in the rendered screen
+    (once per pane). With the bug it appeared once.
+
+    Counting via find_marker_columns(MARKER) gives one (row,col) entry
+    per visible paint; we additionally require the columns to land in
+    both halves so a single repainted-twice glyph in one pane cannot
+    masquerade as a successful broadcast.
+    """
+    print("TEST: keybind broadcasts vtm.terminal.* to all selected panes ... ", end="", flush=True)
+    with VtmTileSession(BROADCAST_TILE_ARGS) as s:
+        if not s.is_alive():
+            return fail("vtm-tile did not start")
+        s.snapshot(timeout=2.0)
+
+        # Split + select-all (same precondition as above).
+        s.write(b"\x1b|")
+        time.sleep(0.6)
+        s.snapshot(timeout=1.0)
+        s.write(b"\x1bA")
+        time.sleep(0.4)
+        s.snapshot(timeout=1.0)
+
+        # Reset the buffer so subsequent marker scans only see paints
+        # produced by this dispatch (avoids matching unrelated CSI
+        # noise that happens to contain the marker substring -- the
+        # marker is ASCII-only so this is just defensive).
+        s.reset_buffer()
+        s.write(b"\x1bP")  # Alt+Shift+P -> vtm.terminal.Print(<marker>)
+        time.sleep(0.7)
+        s.snapshot(timeout=1.5)
+
+        hits = find_marker_columns(s._screen_buf, BROADCAST_MARKER)
+        if len(hits) < 2:
+            return fail(
+                f"marker '{BROADCAST_MARKER}' painted {len(hits)} time(s); "
+                f"expected at least 2 (one per selected pane). hits={hits!r}"
+            )
+        cols = [c for _r, c in hits]
+        has_left = any(c < COLS // 2 for c in cols)
+        has_right = any(c >= COLS // 2 for c in cols)
+        if not (has_left and has_right):
+            return fail(
+                f"marker did not broadcast across both halves "
+                f"(cols={cols}); expected hits in BOTH halves of the "
+                f"{COLS}-col screen"
+            )
+        if not s.is_alive():
+            return fail("vtm-tile crashed after broadcast keybind")
+        if not s.normal_exit():
+            return fail("vtm-tile did not exit after clicking close button")
+        print(f"PASS (cols={cols})")
+        return True
+
+
+def test_keybind_single_pane_still_dispatches():
+    """Sanity / non-regression: in the single-pane case (no split, no
+    select-all), the broadcaster path matches exactly one pane and the
+    fallback resolver is not exercised but must not be needed either.
+    The marker must still appear once and vtm-tile must not crash.
+
+    This guards against an over-eager broadcaster that ignores the
+    'no focused applet' edge case and skips dispatch entirely.
+    """
+    print("TEST: single-pane keybind still dispatches ... ", end="", flush=True)
+    with VtmTileSession(BROADCAST_TILE_ARGS) as s:
+        if not s.is_alive():
+            return fail("vtm-tile did not start")
+        s.snapshot(timeout=2.0)
+
+        s.reset_buffer()
+        s.write(b"\x1bP")
+        time.sleep(0.5)
+        s.snapshot(timeout=1.5)
+
+        hits = find_marker_columns(s._screen_buf, BROADCAST_MARKER)
+        if not hits:
+            return fail(
+                f"marker '{BROADCAST_MARKER}' missing in single-pane case "
+                f"(broadcaster regressed the no-split path?)"
+            )
+        if not s.is_alive():
+            return fail("vtm-tile crashed after single-pane keybind")
+        if not s.normal_exit():
+            return fail("vtm-tile did not exit after clicking close button")
+        print(f"PASS ({len(hits)} hit(s))")
+        return True
+
+
+def test_command_bar_does_not_dispatch_when_only_pane_unfocused():
+    """Ctrl+LeftClick on the only pane drops keyboard focus from it.
+
+    With no pane focused for the active gear, the broadcaster's
+    foreach(gear.id, ...) walk yields zero applets, so the dispatch
+    is a silent no-op: the find bar must NOT appear inside the
+    (now-unfocused) terminal pane.
+
+    Rationale: routing a terminal-scoped script to a pane the user
+    has explicitly stepped away from is surprising — visual feedback
+    (the find bar appearing) would surface on a pane that no longer
+    holds keyboard focus, and any subsequent keystrokes typed by the
+    user would not reach that find bar. The proxy therefore declines
+    to recover the most-recently-active pane via focus history.
+
+    Why the command bar is opened by *clicking* [CMD] rather than a
+    keybind: keybind dispatch routes through the active gear's
+    focus chain, and we deliberately just dropped focus from the
+    only pane. A mouse click on the [CMD] menu cell is independent
+    of keyboard focus and reliably opens the bar regardless.
+    """
+    print("TEST: command bar no-ops when only pane is ctrl+click defocused ... ", end="", flush=True)
+    with VtmTileSession(BROADCAST_TILE_ARGS) as s:
+        if not s.is_alive():
+            return fail("vtm-tile did not start")
+        # Drain initial paint; retry to tolerate slow first-paint when
+        # this test runs back-to-back with prior sessions.
+        for _ in range(4):
+            s.snapshot(timeout=1.5)
+            if find_cmd_button(s._screen_buf) is not None:
+                break
+
+        # Ctrl+LeftClick on the terminal pane buffer to drop focus.
+        # SGR mouse encoding: button field carries modifier bits;
+        # ctrl is bit 4 (= 16) per the xterm spec, so button=16
+        # encodes "left button + ctrl". The tile-side focus plugin
+        # (controls.hpp pro::focus LeftClick handler) uses this
+        # exact predicate (gear.meta(hids::anyCtrl)) to toggle
+        # focus off when the boss is currently focused.
+        #
+        # Coordinates: row 10, col 20 lands well inside the pane
+        # buffer for a 30x120 screen, clear of the title bar
+        # (row 1) and the menu strip (where [CMD] lives) so the
+        # click is delivered to the terminal applet rather than
+        # tile chrome.
+        BUFFER_ROW = 10
+        BUFFER_COL = 20
+        CTRL_LEFT = 16
+        s.click(BUFFER_COL, BUFFER_ROW, button=CTRL_LEFT)
+        time.sleep(0.4)
+        s.snapshot(timeout=1.0)
+
+        # Now drive the command bar by mouse to bypass keyboard
+        # focus entirely. We do not reset_buffer here because the
+        # [CMD] glyph may not be repainted again (vtm coalesces
+        # menu cell repaints) and we still need its coordinates.
+        coords = find_cmd_button(s._screen_buf)
+        if coords is None:
+            return fail("[CMD] menu marker not rendered after Ctrl+Click")
+        target_row, target_col = coords
+        s.reset_buffer()
+        s.click(target_col, target_row)
+        rendered = s.snapshot(timeout=1.5)
+        if "pane: Focus" not in rendered:
+            return fail("command bar did not open after [CMD] click")
+
+        # Filter to ToggleFindBar and dispatch.  We mirror
+        # _open_cmd_bar_and_run_find: reset the buffer immediately before
+        # pressing Enter so the post-dispatch paint can be inspected in
+        # isolation (the terminal applet's title bar already contains the
+        # word "Search" — Clear/Restart/Search — and is *not* repainted
+        # because it did not change, so a fresh-paint snapshot only
+        # captures the find bar's "Search" header if it actually
+        # appeared).
+        s.reset_buffer()
+        s.write(b"term tog find")
+        rendered = s.snapshot(timeout=1.5)
+        if "ToggleFind" not in rendered.replace(" ", ""):
+            return fail("filter did not surface 'Toggle Find Bar'")
+        s.reset_buffer()
+        s.write(b"\r")
+        # Grace window for any (incorrect) fallback dispatch to surface
+        # the find bar; the bar must remain absent for the full window.
+        s.snapshot(timeout=2.0)
+
+        # Use the CUP-tracking column scanner — a "Search" hit means a
+        # fresh CUP-positioned paint of the find bar's header (the
+        # always-painted title-bar "Search" at row 3 is not in the delta
+        # stream because the title bar did not change since reset_buffer).
+        hits = find_marker_columns(s._screen_buf, "Search")
+        if hits:
+            cols = [(r, c) for r, c in hits]
+            return fail(
+                f"find bar appeared on the unfocused pane (hits={cols}); "
+                f"the dispatch should have been a silent no-op when no "
+                f"pane is focused (resolver fallback re-introduced; the "
+                f"proxy must not recover an unfocused pane via focus history)"
+            )
+        if not s.is_alive():
+            return fail("vtm-tile crashed after no-op dispatch")
+        if not s.normal_exit():
+            return fail("vtm-tile did not exit after clicking close button")
+        print("PASS")
+        return True
+
+
+def test_single_pane_ctrl_click_defocus_cmdbar_no_ops():
+    """Single terminal pane: Ctrl+LeftClick to defocus, then a command
+    bar terminal-event dispatch must be a silent no-op (find bar must
+    NOT appear).
+
+    Scenario:
+      1. Start vtm-tile with a single terminal pane (it is focused at
+         launch).
+      2. Ctrl+LeftClick inside the pane buffer area to drop keyboard
+         focus from that pane.
+      3. Open the command bar by *mouse-clicking* the [CMD] menu cell
+         (a mouse click is independent of keyboard focus and works even
+         when no pane is focused for the active gear).
+      4. Type "term tog find" to filter to "terminal: Toggle Find Bar"
+         and press Enter to dispatch.
+      5. Expect the terminal find bar ("Search") NOT to appear: with
+         no pane focused, the broadcaster's foreach(gear.id, ...) walk
+         yields zero applets and the dispatch is intentionally dropped
+         rather than being routed to the unfocused pane via focus
+         history.
+
+    Rationale: the previous behavior silently routed terminal events
+    to the most-recently-active pane via a focus-history fallback,
+    which surprised users — visual feedback (e.g., the find bar
+    appearing) showed up on a pane the user had explicitly stepped
+    away from, and any keystrokes typed afterward would not reach
+    that find bar because keyboard focus had been dropped. The proxy
+    therefore declines the fallback and the script is a no-op until
+    the user re-focuses a pane.
+    """
+    print("TEST: single pane ctrl+click defocus -> cmdbar dispatch is a no-op ... ",
+          end="", flush=True)
+    with VtmTileSession(TILE_ARGS) as s:
+        if not s.is_alive():
+            return fail("vtm-tile did not start")
+        # Drain initial paint; retry to tolerate slow first-paint.
+        for _ in range(4):
+            s.snapshot(timeout=1.5)
+            if find_cmd_button(s._screen_buf) is not None:
+                break
+
+        # Ctrl+LeftClick on the terminal pane buffer.  Coordinates: row 10,
+        # col 20 land well inside the buffer area of a 30x120 screen (clear
+        # of the title bar at row 1 and the [CMD] menu strip at row 2).
+        BUFFER_ROW = 10
+        BUFFER_COL = 20
+        s.click(BUFFER_COL, BUFFER_ROW, button=CTRL_LEFT)
+        time.sleep(0.4)
+        s.snapshot(timeout=1.0)
+
+        # Open command bar via mouse (keyboard focus was dropped above, so
+        # we must not use a keybind here).  We intentionally do NOT reset
+        # the screen buffer before find_cmd_button: vtm coalesces menu-cell
+        # repaints, so the [CMD] glyph may not be re-emitted and discarding
+        # the buffer would make the lookup fail.
+        coords = find_cmd_button(s._screen_buf)
+        if coords is None:
+            return fail("[CMD] menu marker not found after Ctrl+LeftClick")
+        target_row, target_col = coords
+        s.reset_buffer()
+        s.click(target_col, target_row)
+        rendered = s.snapshot(timeout=1.5)
+        if "pane: Focus" not in rendered:
+            return fail("command bar did not open after [CMD] mouse click")
+
+        # Filter to "terminal: Toggle Find Bar" and dispatch.  We reset
+        # the buffer immediately before pressing Enter (mirroring
+        # _open_cmd_bar_and_run_find): the terminal applet's title bar
+        # already contains the word "Search" (Clear/Restart/Search), but
+        # the title bar is not repainted in the post-Enter delta because
+        # it did not change, so a fresh-paint snapshot only captures the
+        # find bar's "Search" header if it actually appeared.
+        s.reset_buffer()
+        s.write(b"term tog find")
+        rendered = s.snapshot(timeout=1.5)
+        if "ToggleFind" not in rendered.replace(" ", ""):
+            return fail("filter 'term tog find' did not surface 'Toggle Find Bar'")
+        s.reset_buffer()
+        s.write(b"\r")
+        # Grace window for any (incorrect) fallback dispatch to surface
+        # the find bar; the bar must remain absent for the full window.
+        s.snapshot(timeout=2.0)
+
+        # Use the CUP-tracking column scanner — a "Search" hit means a
+        # fresh CUP-positioned paint of the find bar's header.
+        hits = find_marker_columns(s._screen_buf, "Search")
+        if hits:
+            cols = [(r, c) for r, c in hits]
+            return fail(
+                f"terminal find bar appeared on the defocused pane "
+                f"(hits={cols}); the dispatch should have been a silent "
+                f"no-op when no pane is focused (resolver fallback "
+                f"re-introduced; the proxy must not recover an unfocused "
+                f"pane via focus history)"
+            )
+        if not s.is_alive():
+            return fail("vtm-tile crashed after no-op dispatch")
+        if not s.normal_exit():
+            return fail("vtm-tile did not exit after clicking close button")
+        print("PASS")
+        return True
+
+
+def test_two_pane_both_ctrl_click_defocused_cmdbar_no_ops():
+    """Two terminal panes: Ctrl+LeftClick each while focused; with both
+    panes unfocused, a command bar terminal-event dispatch must be a
+    silent no-op — in particular the find bar must NOT appear on the
+    last-defocused pane.
+
+    Scenario:
+      1. Start vtm-tile and split horizontally (Alt+Shift+|).  After the
+         split, vtm gives keyboard focus to the newly-created right pane.
+      2. Ctrl+LeftClick the RIGHT pane (it is focused) to drop its focus.
+         Right pane is now the *first* pane defocused via Ctrl+LeftClick.
+      3. Plain left-click the LEFT pane to give it exclusive keyboard
+         focus.  This is more reliable than sending Alt+Shift+N via the
+         PTY because ESC N (0x1bN) is parsed by vtm's VT decoder as SS2
+         (Single Shift Two) and consumed before it reaches the keybind
+         system, so TileFocusNextPane never fires.
+      4. Ctrl+LeftClick the LEFT pane (it is now focused) to drop its
+         focus.  LEFT pane is now the *last* pane defocused via
+         Ctrl+LeftClick — i.e., the focus-history's most-recent entry.
+      5. Open the command bar by *mouse-clicking* [CMD] (keyboard focus
+         was dropped; a mouse click on the menu cell is independent of
+         keyboard focus).
+      6. Filter to "terminal: Toggle Find Bar" and press Enter.
+      7. Expect the find bar NOT to appear in EITHER half of the screen:
+         the broadcaster yields zero applets when no pane is focused and
+         the dispatch is intentionally dropped, so neither the LEFT
+         (last-defocused) pane nor the RIGHT (first-defocused) pane is
+         a target.
+
+    Rationale: the previous behavior used a focus-history tracker to
+    recover the last-defocused pane as a "best guess" target, which
+    surfaced the find bar on a pane the user had already stepped away
+    from.  The proxy now declines the fallback so terminal-scoped
+    scripts only ever reach a currently-focused pane.
+    """
+    print("TEST: two panes both ctrl+click defocused -> cmdbar dispatch is a no-op ... ",
+          end="", flush=True)
+    with VtmTileSession(MULTI_PANE_TILE_ARGS) as s:
+        if not s.is_alive():
+            return fail("vtm-tile did not start")
+        # Drain initial paint; retry for slow first-paint (same pattern
+        # as test_command_bar_dispatches_only_to_focused_pane).
+        for _ in range(4):
+            s.snapshot(timeout=1.5)
+            if find_cmd_button(s._screen_buf) is not None:
+                break
+
+        # Step 1: split horizontally; focus moves to the right pane.
+        s.write(b"\x1b|")   # Alt+Shift+| -> TileSplitHorizontally
+        time.sleep(0.6)
+        s.snapshot(timeout=1.5)
+
+        # Pane column landmarks for a 120-col screen split in half.
+        LEFT_COL  = COLS // 4       # ≈ 30 — centre of left pane
+        RIGHT_COL = COLS * 3 // 4   # ≈ 90 — centre of right pane
+        PANE_ROW  = 10              # Row well inside the buffer area
+
+        # Step 2: Ctrl+LeftClick RIGHT pane (currently focused) to drop its
+        # focus.  RIGHT pane = first Ctrl+LeftClicked.
+        s.click(RIGHT_COL, PANE_ROW, button=CTRL_LEFT)
+        time.sleep(0.4)
+        s.snapshot(timeout=0.5)
+
+        # Step 3: Give the LEFT pane exclusive keyboard focus with a plain
+        # left click.  Do NOT use the TileFocusNextPane keybind (\x1bN /
+        # Alt+Shift+N) here: vtm's VT decoder recognises ESC N as SS2
+        # (Single Shift Two, ansivt.hpp line ~2381) and consumes the
+        # two-byte sequence before the keybind system sees it, so
+        # TileFocusNextPane never fires.  Without this step the left pane
+        # has no keyboard focus when step 4 runs, which means the
+        # Ctrl+LeftClick on the unfocused left pane adds it to the focus
+        # group (controls.hpp pro::focus solo::off path) instead of
+        # removing it, leaving the left pane focused and causing the
+        # subsequent command-bar dispatch to surface the find bar there.
+        s.click(LEFT_COL, PANE_ROW)  # plain left click → exclusive focus on left pane
+        time.sleep(0.4)
+        s.snapshot(timeout=0.5)
+
+        # Step 4: Ctrl+LeftClick LEFT pane (now focused) to drop its focus.
+        # LEFT pane = last Ctrl+LeftClicked = most-recently-defocused target.
+        s.click(LEFT_COL, PANE_ROW, button=CTRL_LEFT)
+        time.sleep(0.4)
+        s.snapshot(timeout=0.5)
+
+        # Step 5: open command bar via mouse (no pane has keyboard focus, so
+        # a keybind would not route here; mouse click on [CMD] works
+        # regardless of keyboard focus state).
+        coords = find_cmd_button(s._screen_buf)
+        if coords is None:
+            return fail("[CMD] menu marker not found after defocusing both panes")
+        target_row, target_col = coords
+        s.reset_buffer()
+        s.click(target_col, target_row)
+        rendered = s.snapshot(timeout=1.5)
+        if "pane: Focus" not in rendered:
+            return fail("command bar did not open after [CMD] mouse click")
+
+        # Step 6: filter to "terminal: Toggle Find Bar" and dispatch.
+        # Reset the buffer right before Enter so the post-dispatch paint
+        # is inspected in isolation (the terminal title bars on each
+        # pane already contain the word "Search" — they are not in the
+        # delta stream because they did not change).
+        s.reset_buffer()
+        s.write(b"term tog find")
+        rendered = s.snapshot(timeout=1.5)
+        if "ToggleFind" not in rendered.replace(" ", ""):
+            return fail("filter 'term tog find' did not surface 'Toggle Find Bar'")
+        s.reset_buffer()
+        s.write(b"\r")
+        # Grace window for any (incorrect) fallback dispatch to surface
+        # the find bar; the bar must remain absent on BOTH sides.
+        s.snapshot(timeout=2.0)
+
+        # Step 7: verify the find bar appeared in NEITHER half of the
+        # screen using the CUP-tracking column scanner — a "Search" hit
+        # means a fresh CUP-positioned paint of the find bar's header.
+        hits = find_marker_columns(s._screen_buf, "Search")
+        if hits:
+            cols = [(r, c) for r, c in hits]
+            visible = strip_ansi(s._screen_buf).decode("utf-8", errors="replace")
+            print(f"\nDEBUG two-pane visible (first 600 chars): {repr(visible[:600])}")
+            # Show raw bytes around first "Search" hit to identify the source.
+            raw = s._screen_buf
+            idx = raw.find(b"Search")
+            if idx >= 0:
+                print(f"DEBUG raw bytes around 'Search' (idx={idx}): {raw[max(0,idx-30):idx+40]!r}")
+            return fail(
+                f"find bar appeared even though both panes were unfocused "
+                f"(hits={cols}); expected a silent no-op so the LEFT "
+                f"(last-defocused) pane is NOT recovered via focus history "
+                f"(screen midpoint = col {COLS // 2})"
+            )
+        if not s.is_alive():
+            return fail("vtm-tile crashed after no-op dispatch")
+        if not s.normal_exit():
+            return fail("vtm-tile did not exit after clicking close button")
+        print("PASS")
+        return True
+
+
 def test_keybind_proxies_terminal_call_to_focused_pane():
     """Direct keybind -> vtm.terminal.Print -> focused pane.
 
@@ -729,6 +1318,30 @@ if __name__ == "__main__":
             kill_all_vtm()
             time.sleep(0.5)
             ok = test_keybind_proxies_terminal_call_to_focused_pane()
+        if ok:
+            kill_all_vtm()
+            time.sleep(0.5)
+            ok = test_command_bar_broadcasts_to_all_selected_panes()
+        if ok:
+            kill_all_vtm()
+            time.sleep(0.5)
+            ok = test_keybind_broadcasts_terminal_call_to_all_selected_panes()
+        if ok:
+            kill_all_vtm()
+            time.sleep(0.5)
+            ok = test_keybind_single_pane_still_dispatches()
+        if ok:
+            kill_all_vtm()
+            time.sleep(0.5)
+            ok = test_command_bar_does_not_dispatch_when_only_pane_unfocused()
+        if ok:
+            kill_all_vtm()
+            time.sleep(0.5)
+            ok = test_single_pane_ctrl_click_defocus_cmdbar_no_ops()
+        if ok:
+            kill_all_vtm()
+            time.sleep(0.5)
+            ok = test_two_pane_both_ctrl_click_defocused_cmdbar_no_ops()
     finally:
         kill_all_vtm()
     sys.exit(0 if ok else 1)

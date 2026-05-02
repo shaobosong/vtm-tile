@@ -290,6 +290,20 @@ namespace netxs::app::tile
     static constexpr auto terminal_proxy_resolver_field = "tile.terminal_proxy_resolver";
     using terminal_proxy_resolver_t = std::function<ui::sptr(netxs::id_t /*gear_id*/)>;
 
+    // Broadcaster for vtm.terminal.* scripts. Callers (the proxy below) pass a
+    // gear id and a visitor; the broadcaster invokes the visitor once per
+    // applet that is currently focused for that gear (i.e., every pane that
+    // SelectAllPanes / multi-focus has marked as "selected"). Installed on the
+    // tile boss in parallel with terminal_proxy_resolver_field so that scripts
+    // dispatched from the command bar / keybinds / prerun fan out to all
+    // selected panes instead of only the last-remembered one. When no applet
+    // is currently focused for the gear, the broadcaster invokes the visitor
+    // zero times and the proxy falls back to the single-target resolver to
+    // preserve existing single-focus semantics.
+    static constexpr auto terminal_proxy_broadcaster_field = "tile.terminal_proxy_broadcaster";
+    using terminal_proxy_broadcaster_visitor_t = std::function<void(ui::sptr& /*applet_ptr*/)>;
+    using terminal_proxy_broadcaster_t = std::function<void(netxs::id_t /*gear_id*/, terminal_proxy_broadcaster_visitor_t const& /*visit*/)>;
+
     // Lua C function: __index on the vtm.terminal proxy table installed in the
     // tile manager's lua_State. Receives (proxy_table, method_name) on stack
     // and returns a closure carrying the method name as upvalue. Calling that
@@ -383,15 +397,22 @@ namespace netxs::app::tile
             if (subobjects.empty()) return 0;
             auto& boss = subobjects.front().get();
 
-            // Resolve focused applet via the resolver installed at boss
-            // construction. Active gear is set by callers before script
-            // execution (luafx.set_gear in command bar; bindings::keybind
-            // path in input::bindings).
+            // Resolve target applet(s) for the active gear. Active gear is
+            // set by callers before script execution (luafx.set_gear in
+            // command bar; bindings::keybind path in input::bindings).
+            //
+            // Dispatch is strictly broadcaster-only: fan the script out to
+            // every currently focused applet for this gear via
+            // foreach(gear.id, ...) — the same walk that vtm.tile.* commands
+            // (split, rotate, close, ...) use. If no applet is currently
+            // focused (e.g., user dropped focus from every pane via
+            // Ctrl+LeftClick), the script is intentionally a no-op rather
+            // than being routed to a "last-defocused" pane via focus
+            // history. Routing to an unfocused pane was surprising: the
+            // user could not see which pane the dispatch landed on, and
+            // visual feedback (e.g., the find bar appearing) showed up on
+            // a pane the user had explicitly stepped away from.
             auto& gear = indexer.active_gear_ref.get();
-            auto& resolver = boss.base::template property<terminal_proxy_resolver_t>(terminal_proxy_resolver_field);
-            if (!resolver) return 0;
-            auto applet_ptr = resolver(gear.id);
-            if (!applet_ptr) return 0;
 
             // Rebuild script source: vtm.terminal.<fx>(arg1, arg2, ...).
             auto args_count = ::lua_gettop(lua);
@@ -404,7 +425,15 @@ namespace netxs::app::tile
             script += ")";
 
             auto cmd = eccc{ .cmd = script };
-            applet_ptr->base::signal(tier::release, e2::command::run, cmd);
+            auto& broadcaster = boss.base::template property<terminal_proxy_broadcaster_t>(terminal_proxy_broadcaster_field);
+            if (broadcaster)
+            {
+                broadcaster(gear.id, [&](ui::sptr& applet_ptr)
+                {
+                    if (!applet_ptr) return;
+                    applet_ptr->base::signal(tier::release, e2::command::run, cmd);
+                });
+            }
             return 0;
         });
     }
@@ -4031,6 +4060,30 @@ namespace netxs::app::tile
                         }
                         if (!slot_ptr) return {};
                         return get_slot_focus_target(slot_ptr);
+                    };
+
+                    // Install the broadcaster consumed by the vtm.terminal Lua
+                    // proxy. Iterates every applet currently focused for the
+                    // gear (i.e. every pane that SelectAllPanes / multi-focus
+                    // has marked as "selected") and invokes the visitor on
+                    // each, so terminal-side scripts (ToggleFindBar, Paste,
+                    // ClearScrollback, ScrollViewport*, ...) fan out to all
+                    // selected panes — mirroring the foreach(gear.id, ...)
+                    // pattern used by tile-side commands (split, rotate,
+                    // close, ...). When no pane is currently focused for the
+                    // gear, the proxy falls back to the single-target
+                    // resolver above so single-focus and edge-case (very
+                    // first keybind, standalone tile) semantics are
+                    // preserved.
+                    auto& terminal_proxy_broadcaster = boss.base::template property<terminal_proxy_broadcaster_t>(terminal_proxy_broadcaster_field);
+                    terminal_proxy_broadcaster = [&foreach](id_t gear_id, terminal_proxy_broadcaster_visitor_t const& visit)
+                    {
+                        if (gear_id == id_t{}) return; // No active gear: nothing to broadcast to.
+                        foreach(gear_id, [&](auto& item_ptr, si32 item_type, auto /*node_veer_ptr*/)
+                        {
+                            if (item_type != item_type::applet) return;
+                            visit(item_ptr);
+                        });
                     };
 
                     // Install the vtm.terminal Lua proxy on the tile
