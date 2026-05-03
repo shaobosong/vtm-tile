@@ -273,8 +273,9 @@ namespace netxs::app::terminal
         //
         //  * Rounded corners  : ╭╮╰╯
         //  * Straight edges   : ─  │
-        //  * Input field      : underlined row of _, scrolls horizontally
-        //                       when the query is longer than the field
+        //  * Input field      : underlined row (cell underline attribute, no
+        //                       `_` glyphs); scrolls horizontally when the
+        //                       query is longer than the field
         //  * Match counter    : right-aligned "NNN/NNN" (≤999) or "999+/999+"
         //                       (overflow), shown as "000/000" when the
         //                       query is empty.
@@ -320,7 +321,6 @@ namespace netxs::app::terminal
             static constexpr auto ch_br    = "╯";
             static constexpr auto ch_hz    = "─";
             static constexpr auto ch_vt    = "│";
-            static constexpr auto ch_uline = "_";
             static constexpr auto ch_sp    = " ";
 
             // Fixed geometry.  Kept small enough to work on 46-column terminals.
@@ -329,22 +329,27 @@ namespace netxs::app::terminal
             static constexpr auto gap_rows = si32{ 1 };           // space above the bar
             // Inner layout. Every control has 1 cell of padding on each side
             // (the `[` and `]` in the ASCII-art above). Controls sit flush
-            // against each other and against the frame borders.
-            //   border + pad   = 2 cells on each side
-            //   input group    = 1 + 20 + 1 = 22 cells
+            // against each other and against the frame borders.  As of the
+            // gap-tightening change the input group drops its 1-cell right
+            // pad (the counter's left pad already provides visible
+            // separation), shaving one cell off the gap between the counter
+            // and the in-input clear button.
+            //   border + pad   = 2 cells on the left, 0 on the right
+            //   input group    = 1 + 21 + 0 = 22 cells (left pad + 21-cell field)
             //   counter group  = 1 +  9 + 1 = 11 cells   ("999+/999+" = 9 glyphs, right-aligned)
             //   each button    = 1 +  1 + 1 =  3 cells
             //   buttons area   = 3 ×  3     =  9 cells
-            //   total          = 2 + 22 + 11 + 9 + 0 = 44  (border cols accounted in 2+…+0)
+            //   total          = 1 + 22 + 11 + 9 + 1 = 44  (1 border cell on each side)
             static constexpr auto counter_cells      = si32{ 11 };   // including surrounding pads
             static constexpr auto counter_digits     = si32{ 3 };    // per side, 3-digit zero-pad (max 999)
             static constexpr auto counter_max        = si32{ 999 };  // overflow threshold (show "999+")
             static constexpr auto counter_text_width = si32{ 9 };    // right-aligned text field width
             static constexpr auto btn_area_cells     = si32{ 9 };    // 3 buttons × 3 cells
             static constexpr auto btn_width          = si32{ 3 };
-            // Left/right padding inside the frame (the cell just after `│`).
+            // Left padding inside the frame (the cell just after `│`).  No
+            // right pad: the input strip extends right up to the counter's
+            // own left pad, which is what visually separates the two.
             static constexpr auto input_pad_l = si32{ 1 };
-            static constexpr auto input_pad_r = si32{ 1 };
 
             // Colour palette (Tokyo-Night-ish, matches close-confirm dialog).
             static constexpr auto col_bg     = argb{ 0xff1a1b26 };
@@ -428,14 +433,17 @@ namespace netxs::app::terminal
                 //   outer_w = 44 layout (cols 0..43):
                 //        0: │
                 //        1: pad
-                //    2..21: [input 20 chars]
-                //       22: pad
+                //    2..22: [input 21 chars]   (input_x1 extended by 1: gap to counter reduced)
                 //   23..33: [counter 11 cells]
                 //   34..36: [↑]
                 //   37..39: [↓]
                 //   40..42: [×]
                 //       43: │
                 //   Centers: ↑=35, ↓=38, ×=41.
+                //
+                //   Note: the visible gap between the counter text and the
+                //   in-input clear-query '×' is now 1 cell (col 23 = counter
+                //   left pad), down from 2 cells previously.
                 L.btn_x_x  = outer_w - 3;                         // 41
                 L.btn_dn_x = outer_w - 6;                         // 38
                 L.btn_up_x = outer_w - 9;                         // 35
@@ -444,13 +452,16 @@ namespace netxs::app::terminal
                 L.count_x0 = L.count_x1 - counter_cells + 1;      // 23
                 L.count_text_x0 = L.count_x0 + 1;                 // 24 (skip 1-cell left pad)
                 // Input field: leftmost region, between frame border and counter.
+                // Drop the previous 1-cell right pad of the input -- the
+                // counter group already carries its own 1-cell left pad, so
+                // the visible separation stays at 1 cell instead of 2.
                 L.input_x0 = 1 + input_pad_l;                     // 2
-                L.input_x1 = L.count_x0 - 1 - 1;                  // 21 (leave 1-cell right pad)
+                L.input_x1 = L.count_x0 - 1;                      // 22 (input grows by 1)
                 if (L.input_x1 < L.input_x0) L.input_x1 = L.input_x0;
                 L.input_w  = L.input_x1 - L.input_x0 + 1;
                 // Clear-query button: rightmost 3 cells of the input area.
                 // Center column = input_x1 - 1 (spans input_x1-2 .. input_x1).
-                L.btn_clear_x = L.input_x1 - 1;                    // 20
+                L.btn_clear_x = L.input_x1 - 1;                    // 21
                 return L;
             };
 
@@ -591,14 +602,20 @@ namespace netxs::app::terminal
                     [frame_bg](cell& c){ c.bgc(frame_bg).fgc(col_brd).txt(ch_vt).cur(text_cursor::none); });
 
                 // Input underline area (row mid_y, cols [input_x0, input_x1]).
-                // First paint every input cell with an underscore in col_uline.
+                // The whole input span (including the 3-cell clear-query button
+                // when visible) is rendered as a single underlined strip so the
+                // clear button looks visually connected to the input field.
+                // The underline is drawn via the cell's `und(unln::line)`
+                // attribute (with `unc(col_uline)` for color), instead of the
+                // legacy `_` glyph -- this matches the tile.hpp command-search
+                // bar style and keeps the strip continuous beneath text glyphs.
                 // When the query is non-empty the rightmost 3 cells are reserved
                 // for the clear-query button, so text rendering is capped to the
                 // remaining (input_w - btn_width) cells.
                 auto eff_input_w = st.query.empty() ? L.input_w : (L.input_w - btn_width);
                 auto input_bg = st.hover == hov_input ? col_hov_bg : col_bg;
                 canvas.fill(rect{{ x0 + L.input_x0, mid_y }, { L.input_w, 1 }},
-                    [input_bg](cell& c){ c.bgc(input_bg).fgc(col_uline).txt(ch_uline).cur(text_cursor::none); });
+                    [input_bg](cell& c){ c.bgc(input_bg).fgc(col_text).txt(ch_sp).cur(text_cursor::none).und(unln::line).unc(col_uline); });
 
                 // Bound scroll window so the caret stays visible.
                 auto total = cp_len(st.query);
@@ -619,7 +636,9 @@ namespace netxs::app::terminal
                 }
 
                 auto visible_text = slice_cp(st.query, st.scroll_cp, eff_input_w);
-                // Overlay text glyphs on top of the underscores.
+                // Overlay text glyphs on top of the underlined strip. Each
+                // overlaid cell preserves the underline attribute so the
+                // strip stays continuous beneath the text.
                 auto i_col = x0 + L.input_x0;
                 auto it   = visible_text.begin();
                 auto stop = visible_text.end();
@@ -630,7 +649,7 @@ namespace netxs::app::terminal
                     while (it != stop && ((byte)*it & 0xC0) == 0x80) ++it;
                     auto glyph = text(begin, it);
                     canvas.fill(rect{{ i_col, mid_y }, { 1, 1 }},
-                        [&glyph, input_bg](cell& c){ c.bgc(input_bg).fgc(col_text).txt(glyph).cur(text_cursor::none); });
+                        [&glyph, input_bg](cell& c){ c.bgc(input_bg).fgc(col_text).txt(glyph).cur(text_cursor::none).und(unln::line).unc(col_uline); });
                     ++i_col;
                 }
 
@@ -644,8 +663,10 @@ namespace netxs::app::terminal
                             // Draw a visible block cursor (own cursor). The
                             // terminal cursor is already suppressed everywhere
                             // inside the bar by cur(text_cursor::none) above.
-                            c.bgc(col_caret).fgc(col_bg).cur(text_cursor::none);
-                            if (c.txt().empty() || c.txt() == ch_uline) c.txt(ch_sp);
+                            // Drop the underline attribute on the caret cell
+                            // so the I-bar block reads as a solid highlight.
+                            c.bgc(col_caret).fgc(col_bg).cur(text_cursor::none).und(unln::none).unc(0);
+                            if (c.txt().empty()) c.txt(ch_sp);
                         });
                 }
 
@@ -672,7 +693,10 @@ namespace netxs::app::terminal
                 // The direction (↑/↓) buttons are rendered as a radio pair:
                 // the one matching st.dir is drawn with col_act_bg so the
                 // user instantly sees which way Enter will jump.
-                auto draw_btn = [&](si32 center_x, view glyph, argb fg, bool hov, bool active)
+                // `underlined` = true draws the underline attribute under the
+                // whole 3-cell button so it visually connects to the input
+                // strip (used for the in-input clear-query button only).
+                auto draw_btn = [&](si32 center_x, view glyph, argb fg, bool hov, bool active, bool underlined = faux)
                 {
                     auto bg = active ? col_act_bg
                                      : (hov ? col_hov_bg : col_bg);
@@ -685,7 +709,11 @@ namespace netxs::app::terminal
                         if (cx < 1 || cx >= w - 1) continue;
                         auto& ch = (k == 1) ? g : sp;
                         canvas.fill(rect{{ x0 + cx, mid_y }, { 1, 1 }},
-                            [&ch, fg, bg](cell& c){ c.bgc(bg).fgc(fg).txt(ch).cur(text_cursor::none); });
+                            [&ch, fg, bg, underlined](cell& c)
+                            {
+                                c.bgc(bg).fgc(fg).txt(ch).cur(text_cursor::none);
+                                if (underlined) c.und(unln::line).unc(col_uline);
+                            });
                     }
                 };
                 draw_btn(L.btn_up_x, "↑", col_btn,   st.hover == hov_btn_up, st.dir == dir_up);
@@ -693,7 +721,9 @@ namespace netxs::app::terminal
                 draw_btn(L.btn_x_x,  "×", col_btn_x, st.hover == hov_btn_x,  faux);
                 if (!st.query.empty())
                 {
-                    draw_btn(L.btn_clear_x, "×", col_btn_x, st.hover == hov_btn_clear, faux);
+                    // Underlined so the clear button reads as a continuation
+                    // of the input strip rather than a free-standing control.
+                    draw_btn(L.btn_clear_x, "×", col_btn_x, st.hover == hov_btn_clear, faux, true);
                 }
             };
 

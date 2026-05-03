@@ -80,27 +80,29 @@ BAR_BOTTOM_BORDER_ROW = GAP_ROWS + 3          # row 4
 # (pad + glyph + pad); the column below is the CENTER cell (glyph) — clicking
 # any of the 3 cells (center-1 .. center+1) triggers it.
 # Layout of outer_w = 44 (local cols 0..43):
-#   0: │   1: pad   2..21: [input 20 chars]   22: pad
+#   0: │   1: pad   2..22: [input 21 chars]
 #   23..33: [counter right-aligned 9 chars (11 cells incl. pads)]
 #   34..36: [↑]   37..39: [↓]   40..42: [×]   43: │
 # btn_up_x (local) = 35, btn_dn_x (local) = 38, btn_x_x (local) = 41.
+# Note: input drops its previous 1-cell right pad so the visible gap between
+# the counter text and the in-input clear button is now 1 cell instead of 2.
 BTN_UP_COL = BAR_LEFT + 35
 BTN_DN_COL = BAR_LEFT + 38
 BTN_X_COL  = BAR_LEFT + 41
-# Input field: local [2 .. 21] (20 cells wide).
+# Input field: local [2 .. 22] (21 cells wide).
 INPUT_X0   = BAR_LEFT + 2
-INPUT_X1   = BAR_LEFT + 21
-INPUT_W    = INPUT_X1 - INPUT_X0 + 1           # 20 cells
+INPUT_X1   = BAR_LEFT + 22
+INPUT_W    = INPUT_X1 - INPUT_X0 + 1           # 21 cells
 # Counter text (right-aligned, 9 chars) starts at local col 24 (count_text_x0).
 COUNTER_COL0 = BAR_LEFT + 24
 COUNTER_W    = 9
 
 # Clear-query button (new feature — inside the input area).
-# btn_clear_x (local) = input_x1 - 1 = 21 - 1 = 20.  Spans local [19..21].
+# btn_clear_x (local) = input_x1 - 1 = 22 - 1 = 21.  Spans local [20..22].
 # Mirrors btn_clear_x and btn_width from term.hpp.
-BTN_CLEAR_COL        = BAR_LEFT + 20     # global center column of the clear button
+BTN_CLEAR_COL        = BAR_LEFT + 21     # global center column of the clear button
 BTN_WIDTH            = 3                  # button occupies 3 cells (center ± 1)
-EFF_INPUT_W          = INPUT_W - BTN_WIDTH  # 17: text area width when query non-empty
+EFF_INPUT_W          = INPUT_W - BTN_WIDTH  # 18: text area width when query non-empty
 BTN_CLEAR_GLYPH_UTF8 = b"\xc3\x97"       # UTF-8 encoding of × (U+00D7)
 
 
@@ -272,6 +274,16 @@ class VtmSession:
 FRAME_CHARS = ["\u256d", "\u256e", "\u2570", "\u256f", "\u2500", "\u2502"]  # ╭╮╰╯─│
 LABEL = " Search "
 UNDERLINE = "_"
+# SGR sequences emitted by the new (tile.hpp-style) underlined input strip.
+# The find-bar no longer paints `_` glyphs; it sets the cell underline
+# attribute (SGR 4 = underline on, SGR 24 = off) with a custom underline
+# color (SGR 58:2::r:g:b) matching col_uline = 0xff565f89 -> RGB 86,95,137.
+SGR_ULINE_ON  = b"\x1b[4m"
+SGR_ULINE_OFF = b"\x1b[24m"
+# Underline color (col_uline = 0xff565f89, RGB 86,95,137); after vt256
+# round-trip through cell::unc, the encoder emits one of a few possible
+# SGR 58 forms.  We just check the SGR 58 sequence appears at all.
+SGR_ULINE_COLOR_PREFIX = b"\x1b[58"
 BTN_UP = "\u2191"   # ↑
 BTN_DN = "\u2193"   # ↓
 BTN_X  = "\u00d7"   # ×
@@ -287,7 +299,20 @@ def assert_bar_rendered(stream):
     missing = [c for c in FRAME_CHARS if not contains(stream, c)]
     assert not missing, f"missing frame chars: {missing!r}"
     assert contains(stream, LABEL),    "missing ' Search ' label"
-    assert contains(stream, UNDERLINE), "missing underline input fill"
+    # Input strip is now drawn via cell underline attribute (no `_` glyphs).
+    # Verify both SGR underline-on and the custom underline-color SGR appear.
+    assert SGR_ULINE_ON in stream, "missing SGR underline (ESC[4m) on input strip"
+    assert SGR_ULINE_COLOR_PREFIX in stream, "missing SGR underline color (ESC[58...) on input strip"
+    # The legacy `_` glyph fill must NOT appear inside the bar's input row.
+    # We can't easily slice by row from a stream of escape sequences, so just
+    # assert that the bar's mid-row span between the two `│` borders contains
+    # no `_` glyph.  Detected by checking the substring between the leftmost
+    # `│` after the top border and the trailing `│` of the same row.
+    bar_top = stream.find("\u256d".encode())  # ╭
+    bar_bot = stream.find("\u2570".encode())  # ╰
+    if bar_top != -1 and bar_bot != -1 and bar_bot > bar_top:
+        bar_body = stream[bar_top:bar_bot]
+        assert b"_" not in bar_body, "stray `_` glyph inside find-bar body (should be underline attribute)"
     assert contains(stream, BTN_UP),   "missing ↑ button"
     assert contains(stream, BTN_DN),   "missing ↓ button"
     assert contains(stream, BTN_X),    "missing × button"
@@ -469,7 +494,7 @@ def test_long_input_horizontal_scroll():
         s.write(F3)
         s.snapshot(settle=0.6)
         payload = ("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-                   "abcdefghijklmnopqrstuvwx")  # 60 chars, INPUT_W=20
+                   "abcdefghijklmnopqrstuvwx")  # 60 chars, INPUT_W=21
         s.write(payload.encode())
         stream = s.snapshot(settle=1.2)
         # Tail (last chars) must be visible on screen.
@@ -504,10 +529,15 @@ def test_backspace_removes_char():
         s.write(b"\x7f\x7f")
         after = s.snapshot(settle=1.0)
         # After two BS, the cells that used to hold 'l' and 'o' should be
-        # overwritten with the underline char '_'.  So we expect at least one
-        # '_' to appear in the post-BS frame.
-        if UNDERLINE.encode() not in after:
-            print("FAIL - no underline re-rendered after backspace")
+        # repainted as part of the underlined input strip. With the new
+        # tile.hpp-style underline (cell attribute, not `_` glyph), we
+        # can't grep for a glyph; instead we expect the SGR underline-on
+        # sequence to reappear in the post-BS frame as the bar redraws
+        # the input row.  The previous-character cells now revert to space
+        # under an underlined attribute, so the redraw must emit ESC[4m
+        # at least once.
+        if SGR_ULINE_ON not in after:
+            print("FAIL - underline strip not re-rendered after backspace (no SGR 4m)")
             return False
         if not s.normal_exit(timeout=5.0):
             print("FAIL - vtm-desk did not exit cleanly via close button")
@@ -1205,8 +1235,77 @@ def test_clear_button_disappears_after_backspace():
 
 
 # ---------------------------------------------------------------------------
-# Main
+# Underline-style input strip (tile.hpp-style).
+#
+# The find-bar's input field is rendered as a continuous underlined strip
+# using the cell underline attribute (SGR 4 / 24, with custom underline
+# color via SGR 58:2::r:g:b), instead of legacy `_` glyphs.  When the
+# query is non-empty, the clear-query '×' button shares the same underline
+# so it visually connects to the input field.
 # ---------------------------------------------------------------------------
+
+def test_input_strip_uses_underline_attribute():
+    """The empty input field must be drawn with SGR underline attribute and
+    must not contain stray `_` glyphs."""
+    print("TEST: input strip uses cell underline attribute (no `_` glyphs) ... ", end="", flush=True)
+    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
+        s.fresh_snapshot(settle=0.4)
+        s.write(F3)
+        stream = s.snapshot(settle=1.0)
+        # Bar must be visible.
+        if "\u256d".encode() not in stream:
+            print("FAIL - bar not rendered")
+            return False
+        # SGR underline-on must appear (input strip).
+        if SGR_ULINE_ON not in stream:
+            print("FAIL - missing SGR underline-on (ESC[4m)")
+            return False
+        # Custom underline color SGR.
+        if SGR_ULINE_COLOR_PREFIX not in stream:
+            print("FAIL - missing SGR underline-color (ESC[58...)")
+            return False
+        # Bar body should contain no `_` glyphs.
+        bar_top = stream.find("\u256d".encode())
+        bar_bot = stream.find("\u2570".encode())
+        if bar_top != -1 and bar_bot != -1 and bar_bot > bar_top:
+            body = stream[bar_top:bar_bot]
+            if b"_" in body:
+                print("FAIL - stray `_` glyph inside find-bar body")
+                return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-desk did not exit cleanly via close button")
+            return False
+        print("PASS")
+        return True
+
+
+def test_clear_button_shares_underline_with_input():
+    """When the query is non-empty, the clear-query '×' button must share
+    the underline attribute with the input strip (visual continuity).
+    This is detectable by the SGR underline-on sequence (ESC[4m) appearing
+    in the bar redraw stream while typing."""
+    print("TEST: clear button connected to input strip via underline ... ", end="", flush=True)
+    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
+        s.write(F3)
+        s.snapshot(settle=0.6)
+        # Type something so the clear-button appears.
+        s._buffer = b""
+        s.write(b"abc")
+        after = s.snapshot(settle=1.0)
+        # × glyph must appear -- it's the clear button (and possibly the
+        # close button on the right).  The relevant evidence here is the
+        # underline-on SGR co-emitted with the redraw of the input row.
+        if "\u00d7".encode() not in after:
+            print("FAIL - × glyph not on screen")
+            return False
+        if SGR_ULINE_ON not in after:
+            print("FAIL - input row redraw lacked SGR underline-on (ESC[4m) -- clear button not connected to input strip")
+            return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-desk did not exit cleanly via close button")
+            return False
+        print("PASS")
+        return True
 
 def main():
     if not os.path.isfile(VTM_DESK_BINARY):
@@ -1240,6 +1339,9 @@ def main():
         test_clear_button_absent_with_empty_query,
         test_clear_button_click_clears_query,
         test_clear_button_disappears_after_backspace,
+        # underline-style input strip tests (tile.hpp-style)
+        test_input_strip_uses_underline_attribute,
+        test_clear_button_shares_underline_with_input,
     ]
     passed = 0
     failed = 0
