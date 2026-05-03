@@ -155,17 +155,19 @@ def sgr_release(col, row): return f"\033[<0;{col};{row}m".encode()
 
 
 class VtmSession:
-    def __init__(self, binary, args, settle_delay=SETTLE_DELAY):
+    def __init__(self, binary, args, settle_delay=SETTLE_DELAY, cols=COLS, rows=ROWS):
         self.binary = binary
         self.args = args
         self.settle_delay = settle_delay
+        self.cols = cols
+        self.rows = rows
         self.master_fd = None
         self.pid = None
         self._buffer = b""
 
     def __enter__(self):
         self.master_fd, slave_fd = pty.openpty()
-        set_winsize(self.master_fd, ROWS, COLS)
+        set_winsize(self.master_fd, self.rows, self.cols)
         self.pid = os.fork()
         if self.pid == 0:
             os.close(self.master_fd)
@@ -242,7 +244,7 @@ class VtmSession:
 
     def click_close_button(self):
         """Click the x close button on the title bar (row 1, near right edge)."""
-        self.click(COLS - 2, 1)
+        self.click(self.cols - 2, 1)
 
     def normal_exit(self, timeout=5.0):
         """Return to the vtm-desk window and click the top-right close button
@@ -1307,6 +1309,188 @@ def test_clear_button_shares_underline_with_input():
         print("PASS")
         return True
 
+
+# ---------------------------------------------------------------------------
+# Responsive layout tests.  When the host terminal (and therefore the bar's
+# parent X-fork) is too narrow to grant the bar its preferred 44-cell outer
+# width, controls drop in reverse priority order:
+#     ↑↓ direction pair (lowest)  ->  counter  ->  clear-button capacity
+#     ->  finally the input field shrinks to its 4-cell floor.
+# Close button (×), input field (>= 4 cells), borders, and the " Search "
+# label are mandatory at every renderable width.
+# ---------------------------------------------------------------------------
+
+def _open_bar_at_cols(cols, settle_open=1.0):
+    """Spawn vtm-desk at the given terminal cols, open the find-bar with F3,
+    and return (session, post-F3 stream).  Caller is responsible for closing
+    the session via context manager / normal_exit."""
+    s = VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS, cols=cols).__enter__()
+    try:
+        s.fresh_snapshot(settle=0.4)
+        s.write(F3)
+        stream = s.snapshot(settle=settle_open)
+        return s, stream
+    except Exception:
+        s.__exit__(None, None, None)
+        raise
+
+
+def _bar_visible(stream):
+    """Bar is on screen if at least one rounded corner glyph is emitted."""
+    return contains(stream, "\u256d") or contains(stream, "\u256e") \
+        or contains(stream, "\u2570") or contains(stream, "\u256f")
+
+
+def test_bar_renders_at_full_width():
+    print("TEST: responsive: full layout at wide terminal (cols=80) ... ", end="", flush=True)
+    s, stream = _open_bar_at_cols(80)
+    try:
+        ok = (_bar_visible(stream)
+              and contains(stream, BTN_X)
+              and contains(stream, BTN_UP)
+              and contains(stream, BTN_DN)
+              and contains(stream, LABEL))
+        if not ok:
+            print("FAIL - expected full bar (label + ↑ + ↓ + ×) at cols=80")
+            return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-desk did not exit cleanly")
+            return False
+        print("PASS")
+        return True
+    finally:
+        s.__exit__(None, None, None)
+
+
+def test_bar_drops_dir_buttons_when_narrow():
+    """At cols=40 the bar's outer width is forced below the threshold needed
+    for the ↑↓ pair.  Counter may also be hidden (priority below dir-pair on
+    the keep list, but the X-fork distribution often forces both away
+    simultaneously).  The close button and label must remain."""
+    print("TEST: responsive: ↑↓ hidden when bar narrows (cols=40) ... ", end="", flush=True)
+    s, stream = _open_bar_at_cols(40)
+    try:
+        if not _bar_visible(stream):
+            print("FAIL - bar did not render at cols=40")
+            return False
+        if not contains(stream, BTN_X):
+            print("FAIL - close (×) button missing at cols=40")
+            return False
+        if not contains(stream, LABEL):
+            print("FAIL - ' Search ' label missing at cols=40")
+            return False
+        if contains(stream, BTN_UP) or contains(stream, BTN_DN):
+            print("FAIL - ↑↓ buttons should be hidden at cols=40")
+            return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-desk did not exit cleanly")
+            return False
+        print("PASS")
+        return True
+    finally:
+        s.__exit__(None, None, None)
+
+
+def test_bar_renders_at_minimum_width():
+    """At very narrow terminal widths (cols=14) the bar must still render
+    with at minimum:  borders + ' Search ' label + 4-cell input + × close.
+    No counter, no ↑↓.  Process must not crash."""
+    print("TEST: responsive: bar renders at minimum width (cols=14) ... ", end="", flush=True)
+    s, stream = _open_bar_at_cols(14)
+    try:
+        if not _bar_visible(stream):
+            print("FAIL - bar did not render at cols=14")
+            return False
+        if not contains(stream, BTN_X):
+            print("FAIL - close (×) button missing at cols=14")
+            return False
+        if contains(stream, BTN_UP) or contains(stream, BTN_DN):
+            print("FAIL - ↑↓ buttons should be hidden at cols=14")
+            return False
+        # Process must still be alive (responsive layout must not crash).
+        if not s.is_alive():
+            print("FAIL - vtm-desk crashed at cols=14")
+            return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-desk did not exit cleanly")
+            return False
+        print("PASS")
+        return True
+    finally:
+        s.__exit__(None, None, None)
+
+
+def test_typing_works_at_narrow_width():
+    """The input field is mandatory (>= 4 cells) at every renderable width.
+    Typing must echo into the bar's input row even when the bar is narrow."""
+    print("TEST: responsive: typing still works at cols=40 ... ", end="", flush=True)
+    s, stream = _open_bar_at_cols(40)
+    try:
+        s._buffer = b""
+        s.write(b"hi")
+        after = s.snapshot(settle=0.8)
+        if b"hi" not in after:
+            print("FAIL - typed 'hi' did not appear in narrow find-bar input")
+            return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-desk did not exit cleanly")
+            return False
+        print("PASS")
+        return True
+    finally:
+        s.__exit__(None, None, None)
+
+
+def test_close_button_works_at_narrow_width():
+    """The × close button on the bar (mandatory at every width) must still
+    close the bar when clicked, even when the bar is in degraded layout."""
+    print("TEST: responsive: bar × button works at cols=40 ... ", end="", flush=True)
+    s, stream = _open_bar_at_cols(40)
+    try:
+        # The bar's × close button is the rightmost × on the bar's input row.
+        # Replay the screen to find its column dynamically (responsive
+        # layout means we can't compute it from constants).
+        grid = _replay_screen(stream, rows=ROWS, cols=40)
+        # _screen_counter docstring notes the interactive row is empirically
+        # BAR_INPUT_ROW+1 (1-indexed) in the replayed grid.  Search both rows
+        # for the × glyph and pick the rightmost match -- that's the close
+        # button on the bar (clear-button × is absent because query is empty).
+        target_col = None
+        target_row_idx = None
+        for r_idx in (BAR_INPUT_ROW - 1, BAR_INPUT_ROW):  # 0-indexed candidates
+            if r_idx >= len(grid):
+                continue
+            for i, cell in enumerate(grid[r_idx]):
+                if cell == BTN_CLEAR_GLYPH_UTF8:
+                    target_col = i + 1  # 1-indexed
+                    target_row_idx = r_idx
+        if target_col is None:
+            print("FAIL - could not locate × on bar input row at cols=40")
+            return False
+        s._buffer = b""
+        # Click using the row we found × on (1-indexed).
+        s.click(target_col, target_row_idx + 1)
+        after = s.snapshot(settle=1.0)
+        # After closing, no rounded corners should remain.
+        if _bar_visible(after):
+            # The pre-close stream had corners; verify the corners disappear
+            # by looking at the post-click frame only.
+            grid2 = _replay_screen(after, rows=ROWS, cols=40)
+            still = any("\u256d".encode() in c or "\u256e".encode() in c
+                        or "\u2570".encode() in c or "\u256f".encode() in c
+                        for r in grid2 for c in r)
+            if still:
+                print("FAIL - bar still rendered after × click at cols=40")
+                return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-desk did not exit cleanly")
+            return False
+        print("PASS")
+        return True
+    finally:
+        s.__exit__(None, None, None)
+
+
 def main():
     if not os.path.isfile(VTM_DESK_BINARY):
         print(f"ERROR: vtm-desk binary not found at {VTM_DESK_BINARY}")
@@ -1342,6 +1526,12 @@ def main():
         # underline-style input strip tests (tile.hpp-style)
         test_input_strip_uses_underline_attribute,
         test_clear_button_shares_underline_with_input,
+        # responsive layout tests (priority-based control hiding when narrow)
+        test_bar_renders_at_full_width,
+        test_bar_drops_dir_buttons_when_narrow,
+        test_bar_renders_at_minimum_width,
+        test_typing_works_at_narrow_width,
+        test_close_button_works_at_narrow_width,
     ]
     passed = 0
     failed = 0

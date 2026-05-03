@@ -323,10 +323,20 @@ namespace netxs::app::terminal
             static constexpr auto ch_vt    = "│";
             static constexpr auto ch_sp    = " ";
 
-            // Fixed geometry.  Kept small enough to work on 46-column terminals.
-            static constexpr auto bar_rows = si32{ 3 };           // frame height
-            static constexpr auto bar_cols = si32{ 44 };          // outer width including corners
-            static constexpr auto gap_rows = si32{ 1 };           // space above the bar
+            // Geometry.  The bar adapts to the available width with a hard
+            // minimum below which it refuses to render.  At full width it
+            // shows: borders + input(21) + counter(11) + ↑↓×(9) = 44 cells.
+            // When the host terminal is narrow, controls are dropped in
+            // reverse priority order so the most important ones survive
+            // (see `layout_of`).
+            static constexpr auto bar_rows     = si32{ 3 };       // frame height
+            static constexpr auto bar_cols     = si32{ 44 };      // preferred (max) outer width including corners
+            static constexpr auto min_input_w  = si32{ 4 };       // mandatory minimum input field cells
+            // Smallest bar that still carries the most-important controls
+            // (close button + 4-cell input + borders + left pad).
+            //   borders(2) + pad_l(1) + input(4) + close_btn(3) = 10
+            static constexpr auto min_bar_cols = si32{ 10 };
+            static constexpr auto gap_rows     = si32{ 1 };       // space above the bar
             // Inner layout. Every control has 1 cell of padding on each side
             // (the `[` and `]` in the ASCII-art above). Controls sit flush
             // against each other and against the frame borders.  As of the
@@ -352,11 +362,11 @@ namespace netxs::app::terminal
             static constexpr auto input_pad_l = si32{ 1 };
 
             // Colour palette (Tokyo-Night-ish, matches close-confirm dialog).
-            static constexpr auto col_bg     = argb{ 0xff1a1b26 };
+            static constexpr auto col_bg     = argb{ 0x00000000 };
             static constexpr auto col_hov_bg = argb{ 0xff414868 }; // hover background (brighter than col_bg)
             static constexpr auto col_act_bg = argb{ 0xff3d59a1 }; // active direction-button background (distinct blue)
             static constexpr auto col_brd    = argb{ 0xff7aa2f7 };
-            static constexpr auto col_label  = argb{ 0xff7dcfff };
+            static constexpr auto col_label  = argb{ 0xff7aa2f7 };
             static constexpr auto col_text   = argb{ 0xffc0caf5 };
             static constexpr auto col_uline  = argb{ 0xff565f89 };
             static constexpr auto col_btn    = argb{ 0xffa9b1d6 };
@@ -404,64 +414,108 @@ namespace netxs::app::terminal
             // Inner fork: bar (fixed width) + 2-cell right margin.
             auto right_split = bar_row->attach(slot::_2, ui::fork::ctor(axis::X));
             auto bar = right_split->attach(slot::_1, ui::mock::ctor())
-                ->limits({ bar_cols, bar_rows }, { bar_cols, bar_rows });
+                ->limits({ min_bar_cols, bar_rows }, { bar_cols, bar_rows });
             right_split->attach(slot::_2, ui::mock::ctor())
                 ->limits({ 2, -1 }, { 2, -1 });
 
             // Helper: compute layout of the inner input row.  Returns the
-            // cell ranges for each interactive region of the bar. The bar is
-            // drawn left-to-right as:
-            //   │ [input 20 cells] [999+/999+] [↑] [↓] [×] │
+            // cell ranges for each interactive region of the bar plus
+            // visibility flags for optional controls.  At full width the
+            // bar is drawn left-to-right as:
+            //   │ [input] [counter] [↑] [↓] [×] │
             // Each [...] group carries its own 1-cell padding on both sides.
+            //
+            // Responsive degradation order (least important dropped first):
+            //   1. Direction buttons (↑↓ pair, 6 cells).
+            //   2. Counter group (11 cells).
+            //   3. In-input clear button capacity (3 input cells).
+            //   4. Input width down to `min_input_w` (4 cells).
+            // The close button (×, 3 cells), borders, and left pad are
+            // always preserved as long as the bar is rendered at all.
+            // When `outer_w < min_bar_cols` the layout is invalid and
+            // `valid` is set to false (caller must skip rendering).
             struct bar_layout
             {
+                bool valid;         // outer_w >= min_bar_cols
+                bool show_dir;      // ↑ and ↓ buttons rendered
+                bool show_counter;  // counter group rendered
+                bool clear_fits;    // input is wide enough to host the clear button (>= min_input_w + btn_width)
                 si32 input_x0;      // first input cell (local x)
                 si32 input_x1;      // last  input cell (local x)
                 si32 input_w;       // width in cells
-                si32 count_x0;      // first counter cell (pad included)
-                si32 count_x1;      // last  counter cell (pad included)
+                si32 count_x0;      // first counter cell (pad included), 0 when !show_counter
+                si32 count_x1;      // last  counter cell (pad included), 0 when !show_counter
                 si32 count_text_x0; // first cell that holds the 9-char right-aligned counter text
-                si32 btn_up_x;      // column of "↑" glyph (center of 3-cell button)
-                si32 btn_dn_x;      // column of "↓" glyph
+                si32 btn_up_x;      // column of "↑" glyph (center of 3-cell button), 0 when !show_dir
+                si32 btn_dn_x;      // column of "↓" glyph, 0 when !show_dir
                 si32 btn_x_x;       // column of "×" glyph (close button, right of bar)
                 si32 btn_clear_x;   // column of "×" glyph (clear-query button, inside input area)
             };
             auto layout_of = [](si32 outer_w) -> bar_layout
             {
                 auto L = bar_layout{};
-                // Buttons sit flush to the right border:
-                //   outer_w = 44 layout (cols 0..43):
-                //        0: │
-                //        1: pad
-                //    2..22: [input 21 chars]   (input_x1 extended by 1: gap to counter reduced)
-                //   23..33: [counter 11 cells]
-                //   34..36: [↑]
-                //   37..39: [↓]
-                //   40..42: [×]
-                //       43: │
-                //   Centers: ↑=35, ↓=38, ×=41.
-                //
-                //   Note: the visible gap between the counter text and the
-                //   in-input clear-query '×' is now 1 cell (col 23 = counter
-                //   left pad), down from 2 cells previously.
-                L.btn_x_x  = outer_w - 3;                         // 41
-                L.btn_dn_x = outer_w - 6;                         // 38
-                L.btn_up_x = outer_w - 9;                         // 35
-                // Counter group: 11 cells, to the left of the button area.
-                L.count_x1 = L.btn_up_x - 1 - 1;                  // 33
-                L.count_x0 = L.count_x1 - counter_cells + 1;      // 23
-                L.count_text_x0 = L.count_x0 + 1;                 // 24 (skip 1-cell left pad)
-                // Input field: leftmost region, between frame border and counter.
-                // Drop the previous 1-cell right pad of the input -- the
-                // counter group already carries its own 1-cell left pad, so
-                // the visible separation stays at 1 cell instead of 2.
-                L.input_x0 = 1 + input_pad_l;                     // 2
-                L.input_x1 = L.count_x0 - 1;                      // 22 (input grows by 1)
-                if (L.input_x1 < L.input_x0) L.input_x1 = L.input_x0;
-                L.input_w  = L.input_x1 - L.input_x0 + 1;
+                L.valid = outer_w >= min_bar_cols;
+                if (!L.valid) return L;
+                // Mandatory cells: 2 borders + 1 left pad + 3 close-btn = 6.
+                // Remaining budget feeds (in priority of being kept):
+                //   input (>= min_input_w) > clear-button capacity (3) >
+                //   counter (11) > dir-pair (6).
+                // Dropping order is the reverse: dir, counter, clear, then
+                // shrink input (never below min_input_w).
+                auto avail = outer_w - 6;          // for [input + counter? + dir?]
+                auto input_w = min_input_w;        // mandatory floor
+                auto remaining = avail - input_w;  // >= 0 (since outer_w >= min_bar_cols)
+                // 1. Reserve 3 cells of clear-button capacity inside input.
+                if (remaining >= btn_width) { input_w += btn_width; remaining -= btn_width; }
+                // 2. Add counter (11 cells, fixed).
+                L.show_counter = remaining >= counter_cells;
+                if (L.show_counter) remaining -= counter_cells;
+                // 3. Add direction-button pair (6 cells, fixed).  Direction
+                // buttons rank below the counter in the priority order, so
+                // they only appear when the counter has already been kept.
+                L.show_dir = L.show_counter && remaining >= 2 * btn_width;
+                if (L.show_dir) remaining -= 2 * btn_width;
+                // 4. Distribute leftover to input growth (no upper cap is
+                // needed: parent fork already caps outer_w at bar_cols=44).
+                input_w += remaining;
+                L.clear_fits = input_w >= min_input_w + btn_width;
+                // Lay out left-to-right inside the frame.
+                //   col 0       : │ (left border)
+                //   col 1       : pad
+                //   col 2 ..    : input field (input_w cells)
+                //   then        : counter group (counter_cells cells), if shown
+                //   then        : ↑↓ buttons (3+3 cells), if shown
+                //   col W-4..W-2: × close button (3 cells)
+                //   col W-1     : │ (right border)
+                L.input_x0 = 1 + input_pad_l;                          // 2
+                L.input_x1 = L.input_x0 + input_w - 1;
+                L.input_w  = input_w;
+                if (L.show_counter)
+                {
+                    L.count_x0      = L.input_x1 + 1;
+                    L.count_x1      = L.count_x0 + counter_cells - 1;
+                    L.count_text_x0 = L.count_x0 + 1;                  // skip 1-cell left pad
+                }
+                else
+                {
+                    L.count_x0 = 0;
+                    L.count_x1 = 0;
+                    L.count_text_x0 = 0;
+                }
+                L.btn_x_x  = outer_w - 3;                              // center of 3-cell close button (spans W-4..W-2; W-1 is │)
+                if (L.show_dir)
+                {
+                    L.btn_dn_x = L.btn_x_x  - btn_width;
+                    L.btn_up_x = L.btn_dn_x - btn_width;
+                }
+                else
+                {
+                    L.btn_up_x = 0;
+                    L.btn_dn_x = 0;
+                }
                 // Clear-query button: rightmost 3 cells of the input area.
                 // Center column = input_x1 - 1 (spans input_x1-2 .. input_x1).
-                L.btn_clear_x = L.input_x1 - 1;                    // 21
+                L.btn_clear_x = L.input_x1 - 1;
                 return L;
             };
 
@@ -542,8 +596,9 @@ namespace netxs::app::terminal
             auto term_weak_for_render = std::weak_ptr<ui::term>(term);
             auto render_bar = [layout_of, slice_cp, cp_len, format_counter, term_weak_for_render](auto& canvas, rect box, find_state& st)
             {
-                if (box.size.x < 4 || box.size.y < bar_rows) return;
+                if (box.size.x < min_bar_cols || box.size.y < bar_rows) return;
                 auto L = layout_of(box.size.x);
+                if (!L.valid) return;
                 auto x0 = box.coor.x;
                 auto y0 = box.coor.y;
                 auto w  = box.size.x;
@@ -611,8 +666,11 @@ namespace netxs::app::terminal
                 // bar style and keeps the strip continuous beneath text glyphs.
                 // When the query is non-empty the rightmost 3 cells are reserved
                 // for the clear-query button, so text rendering is capped to the
-                // remaining (input_w - btn_width) cells.
-                auto eff_input_w = st.query.empty() ? L.input_w : (L.input_w - btn_width);
+                // remaining (input_w - btn_width) cells.  At very narrow widths
+                // (input_w < min_input_w + btn_width) the clear button cannot
+                // fit so it stays hidden even with a non-empty query.
+                auto clear_visible = !st.query.empty() && L.clear_fits;
+                auto eff_input_w = clear_visible ? (L.input_w - btn_width) : L.input_w;
                 auto input_bg = st.hover == hov_input ? col_hov_bg : col_bg;
                 canvas.fill(rect{{ x0 + L.input_x0, mid_y }, { L.input_w, 1 }},
                     [input_bg](cell& c){ c.bgc(input_bg).fgc(col_text).txt(ch_sp).cur(text_cursor::none).und(unln::line).unc(col_uline); });
@@ -673,6 +731,8 @@ namespace netxs::app::terminal
                 // Match counter: right-aligned in counter_text_width (9) cells,
                 // rendered at count_text_x0 in col_count.
                 // Padding cells (count_x0 and count_x1) inherit the bar background.
+                // Skipped entirely when the bar is too narrow to host the counter.
+                if (L.show_counter)
                 {
                     auto txt = format_counter(st.index, st.total);
                     auto i = 0;
@@ -716,10 +776,13 @@ namespace netxs::app::terminal
                             });
                     }
                 };
-                draw_btn(L.btn_up_x, "↑", col_btn,   st.hover == hov_btn_up, st.dir == dir_up);
-                draw_btn(L.btn_dn_x, "↓", col_btn,   st.hover == hov_btn_dn, st.dir == dir_down);
+                if (L.show_dir)
+                {
+                    draw_btn(L.btn_up_x, "↑", col_btn,   st.hover == hov_btn_up, st.dir == dir_up);
+                    draw_btn(L.btn_dn_x, "↓", col_btn,   st.hover == hov_btn_dn, st.dir == dir_down);
+                }
                 draw_btn(L.btn_x_x,  "×", col_btn_x, st.hover == hov_btn_x,  faux);
-                if (!st.query.empty())
+                if (clear_visible)
                 {
                     // Underlined so the clear button reads as a continuation
                     // of the input strip rather than a free-standing control.
@@ -747,14 +810,23 @@ namespace netxs::app::terminal
                         auto mx = si32(gear.coord.x);
                         auto my = si32(gear.coord.y);
                         if (my != 1) { gear.dismiss(true); return; } // only middle row is interactive
-                        auto L = layout_of(bar_cols);
+                        // Use the actual current bar width (responsive
+                        // layout): when the host terminal is narrow some
+                        // controls are dropped from the bar, so hit-testing
+                        // must be aware of which features are present.
+                        auto bar_ptr = bar_self.lock();
+                        if (!bar_ptr) { gear.dismiss(true); return; }
+                        auto outer_w = bar_ptr->base::size().x;
+                        auto L = layout_of(outer_w);
+                        if (!L.valid) { gear.dismiss(true); return; }
+                        auto clear_visible = !st.query.empty() && L.clear_fits;
                         // Each button is 3 cells wide; hit-test covers the
                         // whole span (center ± 1).
                         if (mx >= L.btn_x_x - 1 && mx <= L.btn_x_x + 1)
                         {
                             gear.owner.base::signal(tier::anycast, ui::terminal::events::find::toggle, 0);
                         }
-                        else if (mx >= L.btn_up_x - 1 && mx <= L.btn_up_x + 1)
+                        else if (L.show_dir && mx >= L.btn_up_x - 1 && mx <= L.btn_up_x + 1)
                         {
                             // Switch direction to "up" and re-seed the match
                             // list from the bottom (find::result will echo
@@ -770,7 +842,7 @@ namespace netxs::app::terminal
                             auto req = ui::terminal::events::find_req{ st.query, dir_up };
                             gear.owner.base::signal(tier::anycast, ui::terminal::events::find::request, req);
                         }
-                        else if (mx >= L.btn_dn_x - 1 && mx <= L.btn_dn_x + 1)
+                        else if (L.show_dir && mx >= L.btn_dn_x - 1 && mx <= L.btn_dn_x + 1)
                         {
                             // Switch direction to "down" and re-seed the match
                             // list from the top.
@@ -780,7 +852,7 @@ namespace netxs::app::terminal
                             auto req = ui::terminal::events::find_req{ st.query, dir_down };
                             gear.owner.base::signal(tier::anycast, ui::terminal::events::find::request, req);
                         }
-                        else if (!st.query.empty() && mx >= L.btn_clear_x - 1 && mx <= L.btn_clear_x + 1)
+                        else if (clear_visible && mx >= L.btn_clear_x - 1 && mx <= L.btn_clear_x + 1)
                         {
                             // Clear-query button: wipe the query, reset caret/scroll,
                             // notify the backend (empty query clears highlights).
@@ -793,10 +865,16 @@ namespace netxs::app::terminal
                         }
                         else if (mx >= L.input_x0 && mx <= L.input_x1)
                         {
-                            // Click positions the caret.
+                            // Click positions the caret.  When the clear
+                            // button overlaps the rightmost 3 input cells
+                            // it is handled above; here we cap the caret
+                            // position to the text region.
+                            auto eff_input_w = clear_visible ? (L.input_w - btn_width) : L.input_w;
                             auto total = si32{ 0 };
                             for (auto c : st.query) total += ((byte)c & 0xC0) != 0x80;
-                            auto new_cp = st.scroll_cp + (mx - L.input_x0);
+                            auto rel = mx - L.input_x0;
+                            if (rel >= eff_input_w) rel = eff_input_w - 1;
+                            auto new_cp = st.scroll_cp + rel;
                             if (new_cp > total) new_cp = total;
                             st.caret_cp = new_cp;
                             gear.owner.base::signal(tier::anycast, ui::terminal::events::find::status, 1); // trigger reflow
@@ -810,15 +888,20 @@ namespace netxs::app::terminal
                         auto& st = *state_ptr;
                         auto mx = si32(gear.coord.x);
                         auto my = si32(gear.coord.y);
-                        auto L = layout_of(bar_cols);
+                        auto bar_ptr = bar_self.lock();
+                        if (!bar_ptr) return;
+                        auto outer_w = bar_ptr->base::size().x;
+                        auto L = layout_of(outer_w);
+                        if (!L.valid) return;
+                        auto clear_visible = !st.query.empty() && L.clear_fits;
                         auto new_hover = hov_none;
                         if (my == 1)
                         {
                             // 3-cell hitbox per button (center ± 1).
                             if      (mx >= L.btn_x_x  - 1 && mx <= L.btn_x_x  + 1) new_hover = hov_btn_x;
-                            else if (mx >= L.btn_dn_x - 1 && mx <= L.btn_dn_x + 1) new_hover = hov_btn_dn;
-                            else if (mx >= L.btn_up_x - 1 && mx <= L.btn_up_x + 1) new_hover = hov_btn_up;
-                            else if (!st.query.empty()
+                            else if (L.show_dir && mx >= L.btn_dn_x - 1 && mx <= L.btn_dn_x + 1) new_hover = hov_btn_dn;
+                            else if (L.show_dir && mx >= L.btn_up_x - 1 && mx <= L.btn_up_x + 1) new_hover = hov_btn_up;
+                            else if (clear_visible
                                   && mx >= L.btn_clear_x - 1
                                   && mx <= L.btn_clear_x + 1)                       new_hover = hov_btn_clear;
                             else if (mx >= L.input_x0     && mx <= L.input_x1)     new_hover = hov_input;
