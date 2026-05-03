@@ -829,7 +829,52 @@ namespace netxs::app::shared
                 }
             }
             auto scrlarea = menufork->attach(menuslot, ui::cake::ctor());
-            auto scrlrail = scrlarea->attach(ui::rail::ctor(axes::X_only, axes::all));
+            auto scrlrail = scrlarea->attach(ui::rail::ctor(axes::X_only, axes::all))
+                ->invoke([&](auto& boss) // Mouse left-button drag to scroll the menu horizontally.
+                {
+                    auto& drag_origin = boss.base::template field<fp2d>();
+                    boss.on(tier::mouserelease, input::key::LeftDragStart, [&](hids& gear)
+                    {
+                        if (gear.capture(boss.bell::id))
+                        {
+                            drag_origin = gear.coord;
+                            gear.dismiss();
+                        }
+                    });
+                    boss.on(tier::mouserelease, input::key::LeftDragPull, [&](hids& gear)
+                    {
+                        if (gear.captured(boss.bell::id))
+                        {
+                            if (auto delta = twod{ gear.coord } - twod{ drag_origin })
+                            {
+                                drag_origin = gear.coord;
+                                if (delta.x)
+                                {
+                                    auto info = rack{};
+                                    info.vector = { delta.x, 0 };
+                                    boss.base::signal(tier::preview, e2::form::upon::scroll::bystep::x, info);
+                                }
+                            }
+                            gear.dismiss();
+                        }
+                    });
+                    boss.on(tier::mouserelease, input::key::LeftDragCancel, [&](hids& gear)
+                    {
+                        if (gear.captured(boss.bell::id))
+                        {
+                            gear.setfree();
+                            gear.dismiss();
+                        }
+                    });
+                    boss.on(tier::mouserelease, input::key::LeftDragStop, [&](hids& gear)
+                    {
+                        if (gear.captured(boss.bell::id))
+                        {
+                            gear.setfree();
+                            gear.dismiss();
+                        }
+                    });
+                });
             auto scrllist = scrlrail->attach(ui::list::ctor(axis::X))
                 ->invoke([&](auto& boss)
                 {
