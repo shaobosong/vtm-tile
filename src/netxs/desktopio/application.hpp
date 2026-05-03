@@ -231,7 +231,7 @@ namespace netxs::app::shared
         // Layer 2: Centered dialog card (Tokyo Night palette).
         //
         // ████████████████████████████████████████████  row 1
-        // ███You are closing this window...███████████  row 2  message
+        // ███Confirm closing this window?█████████████  row 2  message
         // ████████████████████████████████████████████  row 3
         // ███     Confirm      ██      Cancel      ███  row 4  buttons
         // ████████████████████████████████████████████  row 5
@@ -255,7 +255,7 @@ namespace netxs::app::shared
         dialog->attach(slot::_1,
                 ui::item::ctor(ansi::wrp(wrap::on)
                     .fgc(0xffcdd6f4)
-                    .add("You are closing this window...")))
+                    .add("Confirm closing this window?")))
             ->flexible();
 
         // Button bar (fixed 1 row).
