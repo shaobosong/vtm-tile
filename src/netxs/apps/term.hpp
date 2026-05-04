@@ -160,7 +160,7 @@ namespace netxs::app::terminal
         auto layers = term_stat_area->attach(slot::_1, ui::cake::ctor())
                                     ->limits(dot_11);
         auto scroll = layers->attach(ui::rail::ctor()->smooth(faux));
-        auto min_size = twod{ 12,1 }; // mc crashes when window is too small
+        auto min_size = twod{ 1,1 }; // Was 12,1 to avoid mc crashes; lowered so menubar can shrink to allow ctrllist close button to track right edge.
         auto max_size = -dot_11;
         scroll->limits(min_size, max_size)
             ->invoke([](auto& boss)

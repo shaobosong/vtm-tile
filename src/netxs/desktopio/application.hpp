@@ -706,9 +706,7 @@ namespace netxs::app::shared
             auto c1 = danger_color;
             auto macstyle = skin::globals().macstyle;
             auto menuveer = ui::veer::ctor();
-            auto menufork = ui::fork::ctor()
-                //todo
-                //->alignment({ snap::both, snap::both }, { macstyle ? snap::head : snap::tail, snap::both })
+            auto menufork = ui::fork::ctor(axis::X, 0, macstyle ? 0 : 1, macstyle ? 1 : 0)
                 ->active();
             auto makeitem = [&](auto& config)
             {
@@ -736,7 +734,8 @@ namespace netxs::app::shared
             };
             auto ctrlslot = macstyle ? slot::_1 : slot::_2;
             auto menuslot = macstyle ? slot::_2 : slot::_1;
-            auto ctrllist = menufork->attach(ctrlslot, ui::list::ctor(axis::X));
+            auto ctrllist = menufork->attach(ctrlslot, ui::list::ctor(axis::X)
+                ->alignment({ snap::both, snap::both }));
             if (custom) // Apply a custom menu controls.
             {
                 while (custom--)
@@ -828,7 +827,9 @@ namespace netxs::app::shared
                     ctrllist->attach(makeitem(control[2]));
                 }
             }
-            auto scrlarea = menufork->attach(menuslot, ui::cake::ctor());
+            auto scrlarea = menufork->attach(menuslot, ui::cake::ctor()
+                ->limits({ 0, -1 }) // Allow the menu area to shrink to zero so ctrllist stays at the right edge.
+                ->alignment({ snap::head, snap::both })); // Don't propagate "need more width" upstream so fork can give scrlarea negative split for narrow terminals.
             auto scrlrail = scrlarea->attach(ui::rail::ctor(axes::X_only, axes::all))
                 ->invoke([&](auto& boss) // Mouse left-button drag to scroll the menu horizontally.
                 {
