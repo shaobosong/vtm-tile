@@ -29,6 +29,7 @@ namespace netxs::events::userland
             {
                 EVENT_XS( create  , input::hids ), // Run app if pane is empty.
                 EVENT_XS( selectapp, app_request ), // Select default app type for new panes.
+                EVENT_XS( setapp,    text        ), // Set the selected default app by id.
                 EVENT_XS( selected_app, app_state* ), // Get selected app info.
                 EVENT_XS( close   , input::hids ), // Close panes.
                 EVENT_XS( swap    , input::hids ), // Swap panes.
@@ -56,6 +57,7 @@ namespace netxs::events::userland
                     EVENT_XS( downpane , input::hids ),
                     EVENT_XS( paneindex, input::hids ),
                     EVENT_XS( commandbar, input::hids ),
+                    EVENT_XS( pickapp,    input::hids ),
                 };
                 SUBSET_XS( split )
                 {
@@ -522,6 +524,7 @@ namespace netxs::app::tile
         X(RunApplication     ) \
         X(SelectApplication  ) \
         X(SelectedApp        ) \
+        X(SetSelectedApp     ) \
         X(SelectAllPanes     ) \
         X(SplitPane          ) \
         X(RotateSplit        ) \
@@ -542,6 +545,7 @@ namespace netxs::app::tile
         X(LastWorkspace      ) \
         X(OpenWorkspacePopup ) \
         X(OpenCommandBar     ) \
+        X(PickApplication    ) \
 
     struct methods
     {
@@ -2185,6 +2189,10 @@ namespace netxs::app::tile
             auto confirm_block = ptr::shared(faux); // Shared flag: set to true while close-confirmation dialog is shown.
             auto pane_index_active = ptr::shared(faux); // Shared flag: set to true while pane-index overlay is shown.
             auto command_bar_active = ptr::shared(faux); // Shared flag: set to true while command-bar overlay is shown.
+            // When non-null, the next focus::commandbar event uses this list instead of loading the
+            // default command list from config. This is how focus::pickapp re-uses the command-bar
+            // overlay machinery to render an "app picker" populated from /config/tile/app/item*.
+            auto pending_cmd_list_ptr = ptr::shared(netxs::sptr<std::vector<command_bar::item>>{});
             auto [menu_block, cover, menu_data] = menu::load(config);
             object->attach(slot::_1, menu_block);
             menu_data->active()
@@ -2442,6 +2450,16 @@ namespace netxs::app::tile
             // Click opens the workspace preview popup (Win+Tab style).
             auto hovered_tab = ptr::shared(si32{ -1 }); // Hover state for the single button (-1 = none, 0 = hovered).
             auto ws_popup_active = ptr::shared(faux);    // Whether the workspace preview popup is currently open.
+            // App-picker button (sits just right of the workspace button).
+            // current_app_label_ptr: cached label of the currently selected app (e.g. "term"),
+            // updated via the e2::form::prop::any broadcast emitted by selectapp/setapp.
+            // app_btn_hovered_ptr: tracks hover for the app button so it can be styled.
+            // app_btn_x_ptr / app_btn_w_ptr: cached layout (last rendered x and width) so the
+            // mouse handlers can hit-test without recomputing the label width.
+            auto current_app_label_ptr = ptr::shared(text{});
+            auto app_btn_hovered_ptr   = ptr::shared(faux);
+            auto app_btn_x_ptr         = ptr::shared(si32{ -1 });
+            auto app_btn_w_ptr         = ptr::shared(si32{ 0 });
             *refresh_status_bar_fn = [status_bar_ptr]
             {
                 status_bar_ptr->base::deface();
@@ -2615,11 +2633,41 @@ namespace netxs::app::tile
             status_bar_ptr->invoke([&, workspaces_ptr, current_ws_index_ptr, switch_workspace, create_workspace,
                                       hovered_tab, refresh_status_bar_fn, ws_popup_active,
                                       collect_ws_panes_fn, open_workspace_popup_fn,
-                                      wrapper_shadow = ptr::shadow(wrapper)](auto& boss)
+                                      current_app_label_ptr, app_btn_hovered_ptr,
+                                      app_btn_x_ptr, app_btn_w_ptr,
+                                      wrapper_shadow = ptr::shadow(wrapper),
+                                      object_shadow = ptr::shadow(object)](auto& boss)
             {
                 auto boss_id = boss.bell::id;
+                // App button geometry constants (used by both renderer and hit-test).
+                static constexpr auto app_btn_gap   = si32{ 0 };  // Gap between workspace button and app button.
+                static constexpr auto app_btn_pad_l = si32{ 1 };  // Left padding inside the app button.
+                static constexpr auto app_btn_pad_r = si32{ 1 };  // Right padding inside the app button.
+                static constexpr auto app_btn_max_label = si32{ 16 };
+                // Compute "App: <label>" display string (truncated) for current selected app.
+                // Capture by-reference so the lambda can be reused across render and hit-test.
+                auto compute_app_btn_label = [current_app_label_ptr](ui::base& boss) -> text
+                {
+                    // Prefer the cached label that was last broadcast via e2::form::prop::any
+                    // (set by the setapp / selectapp listeners on `object`). The status_bar's
+                    // own boss does NOT carry the "tile.selected" property, so falling back to
+                    // get_apps_data() here would always read the default and miss live updates.
+                    auto lbl = *current_app_label_ptr;
+                    if (lbl.empty())
+                    {
+                        // First paint (before any broadcast): self-heal from global config.
+                        auto data = get_apps_data(boss);
+                        lbl = data.selected_label.empty() ? data.selected_id : data.selected_label;
+                        *current_app_label_ptr = lbl;
+                    }
+                    if ((si32)lbl.size() > app_btn_max_label)
+                    {
+                        lbl = lbl.substr(0, (size_t)app_btn_max_label - 1) + "…";
+                    }
+                    return "App: "s + lbl;
+                };
                 // Render: draw only the current workspace index button with inactive styling.
-                boss.LISTEN(tier::release, e2::render::any, parent_canvas, -, (workspaces_ptr, current_ws_index_ptr, boss_id, hovered_tab))
+                boss.LISTEN(tier::release, e2::render::any, parent_canvas, -, (workspaces_ptr, current_ws_index_ptr, boss_id, hovered_tab, current_app_label_ptr, app_btn_hovered_ptr, app_btn_x_ptr, app_btn_w_ptr, compute_app_btn_label))
                 {
                     // Clear entire bar.
                     parent_canvas.fill([boss_id](cell& c)
@@ -2641,27 +2689,87 @@ namespace netxs::app::tile
                     {
                         c.bgc(bg).fgc(fg).txt(label).link(boss_id).bld(faux).und(uline).unc(popup_hov_ul);
                     });
+
+                    // Draw the app-picker button to the right of the workspace button.
+                    auto app_label_str = compute_app_btn_label(boss);
+                    auto app_w = (si32)app_label_str.size() + app_btn_pad_l + app_btn_pad_r;
+                    auto app_x = ws_btn_w + app_btn_gap;
+                    auto bar_w = parent_canvas.area().size.x;
+                    if (app_x + app_w > bar_w) app_w = std::max(0, bar_w - app_x);
+                    *app_btn_x_ptr = app_x;
+                    *app_btn_w_ptr = app_w;
+                    if (app_w > 0)
+                    {
+                        auto app_hover = *app_btn_hovered_ptr;
+                        auto app_bg    = app_hover ? popup_hov_bg : popup_bar_bg;
+                        auto app_fg    = app_hover ? popup_hov_fg : popup_dim_fg;
+                        auto app_uline = app_hover ? unln::dotted : unln::none;
+                        parent_canvas.fill(rect{{ app_x, 0 }, { app_w, 1 }}, [=](cell& c)
+                        {
+                            c.bgc(app_bg).fgc(app_fg).txt(whitespace).link(boss_id).bld(faux).und(app_uline).unc(popup_hov_ul);
+                        });
+                        // Render the label characters (single-byte ASCII for "App: " + label).
+                        auto put_x = app_x + app_btn_pad_l;
+                        auto avail = app_w - app_btn_pad_l - app_btn_pad_r;
+                        auto i = size_t{ 0 };
+                        auto put = si32{ 0 };
+                        while (i < app_label_str.size() && put < avail)
+                        {
+                            auto step = command_bar::utf8_step(app_label_str, i);
+                            auto ch   = app_label_str.substr(i, step);
+                            parent_canvas.fill(rect{{ put_x + put, 0 }, { 1, 1 }}, [=](cell& c)
+                            {
+                                c.bgc(app_bg).fgc(app_fg).txt(ch).link(boss_id).bld(faux).und(app_uline).unc(popup_hov_ul);
+                            });
+                            i += step;
+                            put += 1;
+                        }
+                    }
                 };
                 // Track mouse hover on the single workspace button.
-                boss.on(tier::mouserelease, input::key::MouseMove, [hovered_tab, refresh_status_bar_fn](hids& gear)
+                boss.on(tier::mouserelease, input::key::MouseMove, [hovered_tab, refresh_status_bar_fn, app_btn_hovered_ptr, app_btn_x_ptr, app_btn_w_ptr](hids& gear)
                 {
                     auto x = gear.coord.x;
                     auto new_tab = (x >= 0 && x < ws_btn_w) ? si32{ 0 } : si32{ -1 };
+                    auto app_x = *app_btn_x_ptr;
+                    auto app_w = *app_btn_w_ptr;
+                    auto new_app_hover = (app_x >= 0 && x >= app_x && x < app_x + app_w);
+                    auto changed = faux;
                     if (new_tab != *hovered_tab)
                     {
                         *hovered_tab = new_tab;
-                        (*refresh_status_bar_fn)();
+                        changed = true;
                     }
+                    if (new_app_hover != *app_btn_hovered_ptr)
+                    {
+                        *app_btn_hovered_ptr = new_app_hover;
+                        changed = true;
+                    }
+                    if (changed) (*refresh_status_bar_fn)();
                 });
                 // Clear hover when mouse leaves the status bar.
-                boss.on(tier::mouserelease, input::key::MouseLeave, [hovered_tab, refresh_status_bar_fn](hids& /*gear*/)
+                boss.on(tier::mouserelease, input::key::MouseLeave, [hovered_tab, refresh_status_bar_fn, app_btn_hovered_ptr](hids& /*gear*/)
                 {
+                    auto changed = faux;
                     if (*hovered_tab != -1)
                     {
                         *hovered_tab = -1;
-                        (*refresh_status_bar_fn)();
+                        changed = true;
                     }
+                    if (*app_btn_hovered_ptr)
+                    {
+                        *app_btn_hovered_ptr = faux;
+                        changed = true;
+                    }
+                    if (changed) (*refresh_status_bar_fn)();
                 });
+                // Listen for app-label change broadcasts (emitted by selectapp / setapp listeners).
+                // Refresh the status bar so the app button reflects the new label.
+                boss.LISTEN(tier::release, e2::form::prop::any, new_label, -, (current_app_label_ptr, refresh_status_bar_fn))
+                {
+                    *current_app_label_ptr = new_label;
+                    (*refresh_status_bar_fn)();
+                };
                 // Opens the workspace preview popup (Win+Tab style). Invoked by the status bar click
                 // and by the `vtm.tile.OpenWorkspacePopup()` Lua method.
                 *open_workspace_popup_fn =
@@ -3697,12 +3805,28 @@ namespace netxs::app::tile
                 };
 
                 // Click on the workspace button: open the workspace preview popup.
+                // Click on the app button (right of workspace button): open the app picker.
                 boss.on(tier::mouserelease, input::key::LeftClick,
-                    [open_workspace_popup_fn](hids& gear)
+                    [open_workspace_popup_fn, app_btn_x_ptr, app_btn_w_ptr, object_shadow](hids& gear)
                 {
                     auto x = gear.coord.x;
-                    if (x < 0 || x >= ws_btn_w) { gear.dismiss(); return; }
-                    (*open_workspace_popup_fn)();
+                    if (x >= 0 && x < ws_btn_w)
+                    {
+                        (*open_workspace_popup_fn)();
+                        gear.dismiss();
+                        return;
+                    }
+                    auto app_x = *app_btn_x_ptr;
+                    auto app_w = *app_btn_w_ptr;
+                    if (app_x >= 0 && x >= app_x && x < app_x + app_w)
+                    {
+                        if (auto op = object_shadow.lock())
+                        {
+                            op->base::signal(tier::preview, app::tile::events::ui::focus::pickapp, gear);
+                        }
+                        gear.dismiss();
+                        return;
+                    }
                     gear.dismiss();
                 });
             });
@@ -3900,6 +4024,14 @@ namespace netxs::app::tile
                                                             boss.base::signal(tier::preview, app::tile::events::ui::selected_app, &state);
                                                             luafx.set_return(state.label);
                                                         }},
+                        { methods::SetSelectedApp,      [&]
+                                                        {
+                                                            auto new_id = luafx.get_args_or(1, text{});
+                                                            if (!new_id.empty())
+                                                            {
+                                                                boss.base::signal(tier::preview, app::tile::events::ui::setapp, new_id);
+                                                            }
+                                                        }},
                         { methods::SelectAllPanes,      [&]
                                                         {
                                                             luafx.run_with_gear([&](auto& gear)
@@ -3983,6 +4115,13 @@ namespace netxs::app::tile
                                                             luafx.run_with_gear([&](auto& gear)
                                                             {
                                                                 boss.base::signal(tier::preview, app::tile::events::ui::focus::commandbar, gear);
+                                                            });
+                                                        }},
+                        { methods::PickApplication,      [&]
+                                                        {
+                                                            luafx.run_with_gear([&](auto& gear)
+                                                            {
+                                                                boss.base::signal(tier::preview, app::tile::events::ui::focus::pickapp, gear);
                                                             });
                                                         }},
                         { methods::Disconnect,          [&]
@@ -4753,13 +4892,17 @@ namespace netxs::app::tile
 
                         gear.set_handled();
                     };
-                    boss.LISTEN(tier::preview, app::tile::events::ui::focus::commandbar, gear, -, (command_bar_active, wrapper_shadow = ptr::shadow(wrapper)))
+                    boss.LISTEN(tier::preview, app::tile::events::ui::focus::commandbar, gear, -, (command_bar_active, pending_cmd_list_ptr, wrapper_shadow = ptr::shadow(wrapper)))
                     {
                         if (*command_bar_active) { gear.set_handled(); return; }
                         auto wrapper_ptr = wrapper_shadow.lock();
                         if (!wrapper_ptr) return;
 
-                        auto cmd_list = command_bar::load(boss.bell::indexer.config);
+                        // If a picker has staged a custom item list (e.g. from focus::pickapp),
+                        // use it; otherwise load the default command list from config.
+                        auto cmd_list = *pending_cmd_list_ptr ? *pending_cmd_list_ptr
+                                                              : command_bar::load(boss.bell::indexer.config);
+                        *pending_cmd_list_ptr = {};
                         if (cmd_list->empty()) return;
 
                         *command_bar_active = true;
@@ -5930,6 +6073,36 @@ namespace netxs::app::tile
 
                         gear.set_handled();
                     };
+                    boss.LISTEN(tier::preview, app::tile::events::ui::focus::pickapp, gear, -, (command_bar_active, pending_cmd_list_ptr))
+                    {
+                        if (*command_bar_active) { gear.set_handled(); return; }
+                        auto data = get_apps_data(boss);
+                        if (data.ids.empty()) { gear.set_handled(); return; }
+                        // Build a synthetic command-bar item list: one entry per configured app.
+                        // The script for each entry sets the selected default app via the
+                        // SetSelectedApp Lua method (which signals events::ui::setapp).
+                        auto items = ptr::shared(std::vector<command_bar::item>{});
+                        items->reserve(data.ids.size());
+                        for (auto i = 0u; i < data.ids.size(); ++i)
+                        {
+                            auto& id = data.ids[i];
+                            auto& lbl = data.labels[i];
+                            // Single-quote any embedded single quotes in id to keep the Lua literal safe.
+                            auto safe_id = text{};
+                            safe_id.reserve(id.size());
+                            for (auto c : id)
+                            {
+                                if (c == '\'' || c == '\\') safe_id.push_back('\\');
+                                safe_id.push_back(c);
+                            }
+                            auto display = (i == data.selected_index) ? "* "s + lbl : "  "s + lbl;
+                            auto tooltip = "id: "s + id;
+                            auto script  = "vtm.tile.SetSelectedApp('"s + safe_id + "')";
+                            items->push_back({ display, tooltip, script });
+                        }
+                        *pending_cmd_list_ptr = items;
+                        boss.base::signal(tier::preview, app::tile::events::ui::focus::commandbar, gear);
+                    };
                     boss.LISTEN(tier::preview, app::tile::events::ui::swap, gear, -, (current_focus_history))
                     {
                         auto focus_history_ptr = current_focus_history();
@@ -6047,6 +6220,25 @@ namespace netxs::app::tile
                             boss.base::broadcast(tier::release, e2::form::prop::any, new_label);
                         }
                         gear.set_handled();
+                    };
+                    boss.LISTEN(tier::preview, app::tile::events::ui::setapp, new_id)
+                    {
+                        auto data = get_apps_data(boss);
+                        auto found = false;
+                        auto new_label = new_id;
+                        for (auto i = 0u; i < data.ids.size(); i++)
+                        {
+                            if (data.ids[i] == new_id)
+                            {
+                                new_label = data.labels[i];
+                                found = true;
+                                break;
+                            }
+                        }
+                        if (!found && data.ids.empty()) return;
+                        boss.base::property("tile.selected") = new_id;
+                        root_veer().base::property("tile.selected") = new_id;
+                        boss.base::broadcast(tier::release, e2::form::prop::any, new_label);
                     };
                     boss.LISTEN(tier::preview, app::tile::events::ui::selected_app, state_ptr)
                     {

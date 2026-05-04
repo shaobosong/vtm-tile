@@ -245,6 +245,7 @@ R"==(
                 <item label="Run Application"       tooltip=/Ns/Tile/RunApplication/tooltip             script=TileRunApplication/>
                 <item label="Next Application"      tooltip=/Ns/Tile/SelectApplication/tooltip          script=TileSelectApplication/>
                 <item label="Previous Application"  tooltip=/Ns/Tile/SelectApplicationReverse/tooltip   script=TileSelectApplicationReverse/>
+                <item label="Pick Application"      tooltip=/Ns/Tile/PickApplication/tooltip            script=TilePickApplication/>
             </group>
             <group label="layout" item*>
                 <item label="Split Horizontal"   tooltip=/Ns/Tile/SplitHorizontally/tooltip     script=TileSplitHorizontally/>
@@ -693,6 +694,8 @@ R"==(
         <ClearScrollback label="  Clear  "   tooltip=" Clear scrollback "/>
         <Restart         label="  Restart  " tooltip=" Restart current terminal session "/>
         <FindBar         label="  Search  "  tooltip=" Toggle the terminal find-bar "/>
+)==" // MSVC2022: C2026 String too big, trailing characters truncated.
+R"==(
         <Taskbar>
             <taskbar_tooltip>
                 "\e[1m"" Desktop Taskbar                     ""\e[m\n"
@@ -773,6 +776,7 @@ R"==(
                 </tooltip>
             </SelectApplication>
             <SelectApplicationReverse tooltip=" Select the previous default application type "  />
+            <PickApplication    tooltip=" Open the application picker overlay to choose a default application "/>
             <SplitHorizontally  tooltip=" Split active panes horizontally "                     />
             <SplitVertically    tooltip=" Split active panes vertically "                       />
             <SplitOrientation   tooltip=" Change split orientation "                            />
@@ -1387,6 +1391,7 @@ R"==(
     <TileSelectAllPanes    ="vtm.tile.SelectAllPanes();"/>         <!-- Select all panes. -->
     <TileSelectApplication ="vtm.tile.SelectApplication( 1);"/>      <!-- Select default application type for new panes. -->
     <TileSelectApplicationReverse ="vtm.tile.SelectApplication(-1);"/>
+    <TilePickApplication   ="vtm.tile.PickApplication();"/>        <!-- Open the application picker overlay to choose a default application. -->
     <TileSplitHorizontally ="vtm.tile.SplitPane(0);"/>             <!-- Split active panes horizontally. -->
     <TileSplitVertically   ="vtm.tile.SplitPane(1);"/>             <!-- Split active panes vertically. -->
     <TileSplitOrientation  ="vtm.tile.RotateSplit();"/>            <!-- Change split orientation. -->
