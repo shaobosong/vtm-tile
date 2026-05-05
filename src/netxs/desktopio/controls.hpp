@@ -2025,11 +2025,12 @@ namespace netxs::ui
         public:
             struct mode
             {
-                static constexpr auto focusable = 0; // The object can be focused and active, it is unfocused by default. It cuts the  focus tree when focus is set on it.
-                static constexpr auto focused   = 1; // The object can be focused and active, it is focused by default. It cuts the  focus tree when focus is set on it.
-                static constexpr auto hub       = 2; // The object can't be focused, only active, it is inactive by default. It doesn't cut the focus tree when focus is set on it, it just activate a whole branch.
-                static constexpr auto active    = 3; // The object can't be focused, only active, it is active by default. It doesn't cut the focus tree when focus is set on it, it just activate a whole branch.
-                static constexpr auto relay     = 4; // The object is on the process/event domain boundary and can't be focused (gui and ui::dtvt). Always has default focus.
+                static constexpr auto focusable    = 0; // The object can be focused and active, it is unfocused by default. It cuts the  focus tree when focus is set on it.
+                static constexpr auto focused      = 1; // The object can be focused and active, it is focused by default. It cuts the  focus tree when focus is set on it.
+                static constexpr auto hub          = 2; // The object can't be focused, only active, it is inactive by default. It doesn't cut the focus tree when focus is set on it, it just activate a whole branch.
+                static constexpr auto active       = 3; // The object can't be focused, only active, it is active by default. It doesn't cut the focus tree when focus is set on it, it just activate a whole branch.
+                static constexpr auto relay        = 4; // The object is on the process/event domain boundary and can't be focused (gui and ui::dtvt). Always has default focus.
+                static constexpr auto hub_boundary = 5; // Like hub (doesn't cut focus tree on set::on), but acts as a hard stop for unfocus riseup (focus::set::off preview), preventing it from leaking past this node. Suitable for container widgets that own an internal focus sub-tree (e.g. tile applet).
             };
 
             template<class T>
@@ -2472,7 +2473,8 @@ namespace netxs::ui
                     }
                     else //if (!first_step)
                     {
-                        auto focusable = node_type == mode::focused || node_type == mode::focusable;
+                        auto focusable = node_type == mode::focused || node_type == mode::focusable
+                                      || node_type == mode::hub_boundary;
                         auto last_step = chain.next.size() > 1 || focusable;
                         chain.foreach([&](auto& nexthop, auto& status)
                         {
