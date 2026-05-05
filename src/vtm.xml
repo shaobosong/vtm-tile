@@ -314,9 +314,31 @@ R"==(
                 <!-- <item label="Toggle Stdio Log"   tooltip=" Toggle stdin/stdout logging. "                                                             script=TerminalStdioLog/> -->
             </group>
         </commandbar>
+)==" // MSVC2022: C2026 String too big, trailing characters truncated.
+R"==(
         <menu item*>
             <autohide=/Menu/Defaults/autohide/>
             <slim=/Menu/Defaults/slim/>
+            <item tooltip=/Ns/Tile/OpenWorkspacePopup/tooltip>
+                <script=OnLeftClick|TileOpenWorkspacePopup/>
+                <script>
+                    <on="release: e2::form::upon::started" source="tile"/>
+                    <on="release: e2::form::prop::any"/>
+                    vtm.item.Label("  WS: " .. tostring(vtm.tile.CurrentWorkspace()) .. "  ")
+                    vtm.item.Deface()
+                </script>
+            </item>
+            <item tooltip=/Ns/Tile/SelectApplication/tooltip>
+                <script=OnLeftClick|TilePickApplication/>
+                <script=OnRightClick|TileSelectApplicationReverse/>
+                <script>
+                    <on="release: e2::form::upon::started" source="tile"/>
+                    <on="release: e2::form::prop::any"/>
+                    local app_label = vtm.tile.SelectedApp()
+                    vtm.item.Label(app_label == "" and "  App  " or "  App: " .. app_label .. "  ")
+                    vtm.item.Deface()
+                </script>
+            </item>
             <item=/Menu/Buttons/AlwaysOnTop/>
             <item label="  <  " tooltip=/Ns/Tile/FocusPrevPane/tooltip      script=OnLeftClick|TileFocusPrevPane/>
             <item label="  >  " tooltip=/Ns/Tile/FocusNextPane/tooltip      script=OnLeftClick|TileFocusNextPane/>

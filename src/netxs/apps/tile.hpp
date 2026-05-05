@@ -546,6 +546,7 @@ namespace netxs::app::tile
         X(NextWorkspace      ) \
         X(PrevWorkspace      ) \
         X(LastWorkspace      ) \
+        X(CurrentWorkspace   ) \
         X(OpenWorkspacePopup ) \
         X(OpenCommandBar     ) \
         X(PickApplication    ) \
@@ -2295,13 +2296,10 @@ namespace netxs::app::tile
                 return veer;
             };
 
-            // Inner fork: slot::_1 = workspace host (flexible), slot::_2 = status bar (fixed 1 row).
-            auto inner_fork_ptr = object->attach(slot::_2, ui::fork::ctor(axis::Y, 0, 1, 0));
-            auto workspace_host_ptr = inner_fork_ptr->attach(slot::_1, ui::veer::ctor()
+            // Workspace host: directly attached to object slot::_2 (no status bar — the
+            // workspace switcher button and app picker have been migrated to the tile menu).
+            auto workspace_host_ptr = object->attach(slot::_2, ui::veer::ctor()
                 ->plugin<pro::focus>());
-            auto status_bar_ptr = inner_fork_ptr->attach(slot::_2, ui::mock::ctor()
-                ->limits({ -1, 1 }, { -1, 1 })
-                ->active());
 
             // Build initial workspace 0 (from appcfg.cmd param).
             auto workspace_0 = make_workspace_veer(view{ param });
@@ -2326,7 +2324,7 @@ namespace netxs::app::tile
             };
 
             // Switch active workspace to the given index.
-            auto switch_workspace = [workspaces_ptr, current_ws_index_ptr, previous_ws_index_ptr, workspace_host_ptr, refresh_status_bar_fn](size_t idx) -> bool
+            auto switch_workspace = [workspaces_ptr, current_ws_index_ptr, previous_ws_index_ptr, workspace_host_ptr, refresh_status_bar_fn, object_shadow = ptr::shadow(object)](size_t idx) -> bool
             {
                 if (idx >= workspaces_ptr->size()) return faux;
                 if (idx == *current_ws_index_ptr && workspace_host_ptr->count() > 0) return faux;
@@ -2348,6 +2346,15 @@ namespace netxs::app::tile
                 else           pro::focus::set(target, id_t{}, solo::on);
                 workspace_host_ptr->base::reflow();
                 (*refresh_status_bar_fn)();
+                // Notify menu items (e.g. workspace label) to refresh. The menu
+                // workspace/app items both subscribe to e2::form::prop::any and
+                // re-fetch their state via Lua on each broadcast, so a single
+                // signal here keeps every dependent label in sync.
+                if (auto op = object_shadow.lock())
+                {
+                    auto label = text(1, char(ws_min_index + idx));
+                    op->base::broadcast(tier::release, e2::form::prop::any, label);
+                }
                 return true;
             };
 
@@ -2367,7 +2374,7 @@ namespace netxs::app::tile
             };
 
             // Destroy workspace by index. When the last workspace is destroyed, shutdown the tile.
-            auto destroy_workspace = [workspaces_ptr, current_ws_index_ptr, workspace_host_ptr, refresh_status_bar_fn, focus_histories_ptr](size_t idx) -> bool
+            auto destroy_workspace = [workspaces_ptr, current_ws_index_ptr, workspace_host_ptr, refresh_status_bar_fn, focus_histories_ptr, object_shadow = ptr::shadow(object)](size_t idx) -> bool
             {
                 if (idx >= workspaces_ptr->size()) return faux;
                 if (workspaces_ptr->size() == 1)
@@ -2405,6 +2412,11 @@ namespace netxs::app::tile
                     workspace_host_ptr->base::reflow();
                 }
                 (*refresh_status_bar_fn)();
+                if (auto op = object_shadow.lock())
+                {
+                    auto label = text(1, char(ws_min_index + *current_ws_index_ptr));
+                    op->base::broadcast(tier::release, e2::form::prop::any, label);
+                }
                 // Destroy victim asynchronously outside the auth lock.
                 // The keyboard event handler holds the auth lock (recursive_mutex),
                 // and ~vtty()::payoff() calls stdinput.join() which can deadlock or
@@ -2444,23 +2456,15 @@ namespace netxs::app::tile
                 return switch_workspace(prev_idx);
             };
 
-            // Status bar: display only the current workspace index with inactive styling.
-            // Click opens the workspace preview popup (Win+Tab style).
-            auto hovered_tab = ptr::shared(si32{ -1 }); // Hover state for the single button (-1 = none, 0 = hovered).
+            // Workspace preview popup state (Win+Tab style; opened from the menu workspace button
+            // and from the `vtm.tile.OpenWorkspacePopup()` Lua method).
             auto ws_popup_active = ptr::shared(faux);    // Whether the workspace preview popup is currently open.
-            // App-picker button (sits just right of the workspace button).
-            // current_app_label_ptr: cached label of the currently selected app (e.g. "term"),
-            // updated via the e2::form::prop::any broadcast emitted by selectapp/setapp.
-            // app_btn_hovered_ptr: tracks hover for the app button so it can be styled.
-            // app_btn_x_ptr / app_btn_w_ptr: cached layout (last rendered x and width) so the
-            // mouse handlers can hit-test without recomputing the label width.
-            auto current_app_label_ptr = ptr::shared(text{});
-            auto app_btn_hovered_ptr   = ptr::shared(faux);
-            auto app_btn_x_ptr         = ptr::shared(si32{ -1 });
-            auto app_btn_w_ptr         = ptr::shared(si32{ 0 });
-            *refresh_status_bar_fn = [status_bar_ptr]
+            *refresh_status_bar_fn = []
             {
-                status_bar_ptr->base::deface();
+                // No-op: status bar removed; workspace and app-picker controls live in the tile menu now.
+                // The lambda is preserved (and called from switch/create/destroy paths) to avoid
+                // touching every capture site; the tile menu refreshes its labels via
+                // e2::form::prop::any broadcasts emitted by switch/create/destroy and by setapp.
             };
 
             // Helper: recursively collect pane layout from a workspace veer tree into a flat list with computed rects.
@@ -2628,147 +2632,8 @@ namespace netxs::app::tile
                 return inner;
             };
 
-            status_bar_ptr->invoke([&, workspaces_ptr, current_ws_index_ptr, switch_workspace, create_workspace,
-                                      hovered_tab, refresh_status_bar_fn, ws_popup_active,
-                                      collect_ws_panes_fn, open_workspace_popup_fn,
-                                      current_app_label_ptr, app_btn_hovered_ptr,
-                                      app_btn_x_ptr, app_btn_w_ptr,
-                                      wrapper_shadow = ptr::shadow(wrapper),
-                                      object_shadow = ptr::shadow(object)](auto& boss)
-            {
-                auto boss_id = boss.bell::id;
-                // App button geometry constants (used by both renderer and hit-test).
-                static constexpr auto app_btn_gap   = si32{ 0 };  // Gap between workspace button and app button.
-                static constexpr auto app_btn_pad_l = si32{ 1 };  // Left padding inside the app button.
-                static constexpr auto app_btn_pad_r = si32{ 1 };  // Right padding inside the app button.
-                static constexpr auto app_btn_max_label = si32{ 16 };
-                // Compute "App: <label>" display string (truncated) for current selected app.
-                // Capture by-reference so the lambda can be reused across render and hit-test.
-                auto compute_app_btn_label = [current_app_label_ptr](ui::base& boss) -> text
-                {
-                    // Prefer the cached label that was last broadcast via e2::form::prop::any
-                    // (set by the setapp / selectapp listeners on `object`). The status_bar's
-                    // own boss does NOT carry the "tile.selected" property, so falling back to
-                    // get_apps_data() here would always read the default and miss live updates.
-                    auto lbl = *current_app_label_ptr;
-                    if (lbl.empty())
-                    {
-                        // First paint (before any broadcast): self-heal from global config.
-                        auto data = get_apps_data(boss);
-                        lbl = data.selected_label.empty() ? data.selected_id : data.selected_label;
-                        *current_app_label_ptr = lbl;
-                    }
-                    if ((si32)lbl.size() > app_btn_max_label)
-                    {
-                        lbl = lbl.substr(0, (size_t)app_btn_max_label - 1) + "…";
-                    }
-                    return "App: "s + lbl;
-                };
-                // Render: draw only the current workspace index button with inactive styling.
-                boss.LISTEN(tier::release, e2::render::any, parent_canvas, -, (workspaces_ptr, current_ws_index_ptr, boss_id, hovered_tab, current_app_label_ptr, app_btn_hovered_ptr, app_btn_x_ptr, app_btn_w_ptr, compute_app_btn_label))
-                {
-                    // Clear entire bar.
-                    parent_canvas.fill([boss_id](cell& c)
-                    {
-                        c.bgc(popup_bar_bg).fgc(popup_bar_bg).txt(whitespace).link(boss_id).bld(faux).und(0).ovr(faux);
-                    });
-                    // Draw current workspace index button with inactive styling.
-                    auto hover = *hovered_tab;
-                    auto is_hover = (hover == 0);
-                    auto bg    = is_hover ? popup_hov_bg : popup_bar_bg;
-                    auto fg    = is_hover ? popup_hov_fg : popup_dim_fg;
-                    auto uline = is_hover ? unln::dotted : unln::none;
-                    auto label = text(1, char(ws_min_index + *current_ws_index_ptr));
-                    parent_canvas.fill(rect{{ 0, 0 }, { ws_btn_w, 1 }}, [=](cell& c)
-                    {
-                        c.bgc(bg).fgc(fg).txt(whitespace).link(boss_id).bld(faux).und(uline).unc(popup_hov_ul);
-                    });
-                    parent_canvas.fill(rect{{ 1, 0 }, { 1, 1 }}, [=](cell& c)
-                    {
-                        c.bgc(bg).fgc(fg).txt(label).link(boss_id).bld(faux).und(uline).unc(popup_hov_ul);
-                    });
-
-                    // Draw the app-picker button to the right of the workspace button.
-                    auto app_label_str = compute_app_btn_label(boss);
-                    auto app_w = (si32)app_label_str.size() + app_btn_pad_l + app_btn_pad_r;
-                    auto app_x = ws_btn_w + app_btn_gap;
-                    auto bar_w = parent_canvas.area().size.x;
-                    if (app_x + app_w > bar_w) app_w = std::max(0, bar_w - app_x);
-                    *app_btn_x_ptr = app_x;
-                    *app_btn_w_ptr = app_w;
-                    if (app_w > 0)
-                    {
-                        auto app_hover = *app_btn_hovered_ptr;
-                        auto app_bg    = app_hover ? popup_hov_bg : popup_bar_bg;
-                        auto app_fg    = app_hover ? popup_hov_fg : popup_dim_fg;
-                        auto app_uline = app_hover ? unln::dotted : unln::none;
-                        parent_canvas.fill(rect{{ app_x, 0 }, { app_w, 1 }}, [=](cell& c)
-                        {
-                            c.bgc(app_bg).fgc(app_fg).txt(whitespace).link(boss_id).bld(faux).und(app_uline).unc(popup_hov_ul);
-                        });
-                        // Render the label characters (single-byte ASCII for "App: " + label).
-                        auto put_x = app_x + app_btn_pad_l;
-                        auto avail = app_w - app_btn_pad_l - app_btn_pad_r;
-                        auto i = size_t{ 0 };
-                        auto put = si32{ 0 };
-                        while (i < app_label_str.size() && put < avail)
-                        {
-                            auto step = command_bar::utf8_step(app_label_str, i);
-                            auto ch   = app_label_str.substr(i, step);
-                            parent_canvas.fill(rect{{ put_x + put, 0 }, { 1, 1 }}, [=](cell& c)
-                            {
-                                c.bgc(app_bg).fgc(app_fg).txt(ch).link(boss_id).bld(faux).und(app_uline).unc(popup_hov_ul);
-                            });
-                            i += step;
-                            put += 1;
-                        }
-                    }
-                };
-                // Track mouse hover on the single workspace button.
-                boss.on(tier::mouserelease, input::key::MouseMove, [hovered_tab, refresh_status_bar_fn, app_btn_hovered_ptr, app_btn_x_ptr, app_btn_w_ptr](hids& gear)
-                {
-                    auto x = gear.coord.x;
-                    auto new_tab = (x >= 0 && x < ws_btn_w) ? si32{ 0 } : si32{ -1 };
-                    auto app_x = *app_btn_x_ptr;
-                    auto app_w = *app_btn_w_ptr;
-                    auto new_app_hover = (app_x >= 0 && x >= app_x && x < app_x + app_w);
-                    auto changed = faux;
-                    if (new_tab != *hovered_tab)
-                    {
-                        *hovered_tab = new_tab;
-                        changed = true;
-                    }
-                    if (new_app_hover != *app_btn_hovered_ptr)
-                    {
-                        *app_btn_hovered_ptr = new_app_hover;
-                        changed = true;
-                    }
-                    if (changed) (*refresh_status_bar_fn)();
-                });
-                // Clear hover when mouse leaves the status bar.
-                boss.on(tier::mouserelease, input::key::MouseLeave, [hovered_tab, refresh_status_bar_fn, app_btn_hovered_ptr](hids& /*gear*/)
-                {
-                    auto changed = faux;
-                    if (*hovered_tab != -1)
-                    {
-                        *hovered_tab = -1;
-                        changed = true;
-                    }
-                    if (*app_btn_hovered_ptr)
-                    {
-                        *app_btn_hovered_ptr = faux;
-                        changed = true;
-                    }
-                    if (changed) (*refresh_status_bar_fn)();
-                });
-                // Listen for app-label change broadcasts (emitted by selectapp / setapp listeners).
-                // Refresh the status bar so the app button reflects the new label.
-                boss.LISTEN(tier::release, e2::form::prop::any, new_label, -, (current_app_label_ptr, refresh_status_bar_fn))
-                {
-                    *current_app_label_ptr = new_label;
-                    (*refresh_status_bar_fn)();
-                };
-                // Opens the workspace preview popup (Win+Tab style). Invoked by the status bar click
+            auto wrapper_shadow = ptr::shadow(wrapper);
+                // Opens the workspace preview popup (Win+Tab style). Invoked by the menu workspace button
                 // and by the `vtm.tile.OpenWorkspacePopup()` Lua method.
                 *open_workspace_popup_fn =
                     [workspaces_ptr, current_ws_index_ptr, switch_workspace, create_workspace,
@@ -3802,33 +3667,6 @@ namespace netxs::app::tile
                     };
                 };
 
-                // Click on the workspace button: open the workspace preview popup.
-                // Click on the app button (right of workspace button): open the app picker.
-                boss.on(tier::mouserelease, input::key::LeftClick,
-                    [open_workspace_popup_fn, app_btn_x_ptr, app_btn_w_ptr, object_shadow](hids& gear)
-                {
-                    auto x = gear.coord.x;
-                    if (x >= 0 && x < ws_btn_w)
-                    {
-                        (*open_workspace_popup_fn)();
-                        gear.dismiss();
-                        return;
-                    }
-                    auto app_x = *app_btn_x_ptr;
-                    auto app_w = *app_btn_w_ptr;
-                    if (app_x >= 0 && x >= app_x && x < app_x + app_w)
-                    {
-                        if (auto op = object_shadow.lock())
-                        {
-                            op->base::signal(tier::preview, app::tile::events::ui::focus::pickapp, gear);
-                        }
-                        gear.dismiss();
-                        return;
-                    }
-                    gear.dismiss();
-                });
-            });
-
             // Handle a workspace's root-veer last-empty-slot close request:
             // the quit::any release handler on the root node_veer fires a
             // tier::request swap when its last empty slot is closed (count == 1).
@@ -4164,6 +4002,10 @@ namespace netxs::app::tile
                         { methods::LastWorkspace,       [&, last_workspace]
                                                         {
                                                             last_workspace();
+                                                        }},
+                        { methods::CurrentWorkspace,    [&, current_ws_index_ptr]
+                                                        {
+                                                            luafx.set_return((si32)*current_ws_index_ptr);
                                                         }},
                         { methods::OpenWorkspacePopup,  [&, open_workspace_popup_fn]
                                                         {
