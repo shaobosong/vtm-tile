@@ -463,6 +463,7 @@ namespace netxs::app::tile
         text selected_label;
         std::vector<text> ids;
         std::vector<text> labels;
+        std::vector<text> cmds;
         size_t selected_index = std::numeric_limits<size_t>::max();
     };
 
@@ -483,6 +484,7 @@ namespace netxs::app::tile
         {
             auto item_id = config.settings::take_value_from(item_ptr, "id", text{});
             auto item_label = config.settings::take_value_from(item_ptr, "label", item_id);
+            auto item_cmd = config.settings::take_value_from(item_ptr, "cmd", text{});
             if (!item_id.empty())
             {
                 if (item_id == selected_id)
@@ -492,6 +494,7 @@ namespace netxs::app::tile
                 }
                 res.ids.push_back(item_id);
                 res.labels.push_back(item_label);
+                res.cmds.push_back(item_cmd);
             }
         }
         return res;
@@ -6085,18 +6088,19 @@ namespace netxs::app::tile
                         items->reserve(data.ids.size());
                         for (auto i = 0u; i < data.ids.size(); ++i)
                         {
-                            auto& id = data.ids[i];
+                            auto& _id = data.ids[i];
                             auto& lbl = data.labels[i];
+                            auto& cmd = data.cmds[i];
                             // Single-quote any embedded single quotes in id to keep the Lua literal safe.
                             auto safe_id = text{};
-                            safe_id.reserve(id.size());
-                            for (auto c : id)
+                            safe_id.reserve(_id.size());
+                            for (auto c : _id)
                             {
                                 if (c == '\'' || c == '\\') safe_id.push_back('\\');
                                 safe_id.push_back(c);
                             }
                             auto display = (i == data.selected_index) ? "* "s + lbl : "  "s + lbl;
-                            auto tooltip = "id: "s + id;
+                            auto tooltip = cmd;
                             auto script  = "vtm.tile.SetSelectedApp('"s + safe_id + "')";
                             items->push_back({ display, tooltip, script });
                         }
