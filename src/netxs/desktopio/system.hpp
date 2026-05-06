@@ -5241,6 +5241,21 @@ namespace netxs::os
                                     //mouse(m); // Fire mouse event to update kb modifiers.
                                 }
                             }
+                            // Reconcile pushed modifier state with kbmod (derived from dwControlKeyState).
+                            // This prevents phantom Ctrl/Shift/Alt/Win chords when a host (e.g. Windows Terminal)
+                            // intercepts a modifier+key shortcut, swallows the subsequent key-up events, and
+                            // then delivers synthesized paste characters with dwControlKeyState=0.
+                            {
+                                auto sync_mod = [&](si32 bit, si32 keycode){ if (!(kbmod & bit)) chords.pushed.erase(keycode); };
+                                sync_mod(input::hids::LCtrl,  input::key::LeftCtrl  );
+                                sync_mod(input::hids::RCtrl,  input::key::RightCtrl );
+                                sync_mod(input::hids::LAlt,   input::key::LeftAlt   );
+                                sync_mod(input::hids::RAlt,   input::key::RightAlt  );
+                                sync_mod(input::hids::LShift, input::key::LeftShift );
+                                sync_mod(input::hids::RShift, input::key::RightShift);
+                                sync_mod(input::hids::LWin,   input::key::LeftWin   );
+                                sync_mod(input::hids::RWin,   input::key::RightWin  );
+                            }
                             if (utf::to_code(r.Event.KeyEvent.uChar.UnicodeChar, point))
                             {
                                 if (point) utf::to_utf_from_code(point, toutf);
