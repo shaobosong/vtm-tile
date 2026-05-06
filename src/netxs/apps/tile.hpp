@@ -32,6 +32,7 @@ namespace netxs::events::userland
                 EVENT_XS( setapp,    text        ), // Set the selected default app by id.
                 EVENT_XS( selected_app, app_state* ), // Get selected app info.
                 EVENT_XS( close   , input::hids ), // Close panes.
+                EVENT_XS( rerun   , input::hids ), // Close panes and immediately run the selected app.
                 EVENT_XS( swap    , input::hids ), // Swap panes.
                 EVENT_XS( rotate  , input::hids ), // Change split orientation.
                 EVENT_XS( equalize, input::hids ), // Make panes the same size.
@@ -525,6 +526,7 @@ namespace netxs::app::tile
         X(MoveGrip           ) \
         X(ResizeGrip         ) \
         X(RunApplication     ) \
+        X(ReRunApplication   ) \
         X(SelectApplication  ) \
         X(SelectedApp        ) \
         X(SetSelectedApp     ) \
@@ -623,6 +625,16 @@ namespace netxs::app::tile
         static constexpr auto scroll_drag     = 0xFF89B4FAu;
         static constexpr auto match_fg        = 0xFFF9E2AFu;
         static constexpr auto match_sel_fg    = 0xFFFFFFFFu;
+
+        // Bitmask flags that a caller may set via pending_cmd_flags_ptr before opening
+        // the command bar to opt-in to extra keyboard shortcuts for that session.
+        // New per-session capabilities should be added here as new bit values.
+        enum flags : si32
+        {
+            none           = 0,
+            allow_split    = 1 << 0,  // Ctrl+V (vertical) / Ctrl+S (horizontal) split shortcuts.
+            allow_replace  = 1 << 1,  // Ctrl+R (close pane + RunApplication) shortcut.
+        };
 
         static auto utf8_step(view utf8, size_t offset) -> size_t
         {
@@ -2192,6 +2204,9 @@ namespace netxs::app::tile
             // default command list from config. This is how focus::pickapp re-uses the command-bar
             // overlay machinery to render an "app picker" populated from /config/tile/app/item*.
             auto pending_cmd_list_ptr = ptr::shared(netxs::sptr<std::vector<command_bar::item>>{});
+            // Flags for the upcoming command-bar session (consumed alongside pending_cmd_list_ptr).
+            // Callers set these bits before firing focus::commandbar to opt-in to extra shortcuts.
+            auto pending_cmd_flags_ptr = ptr::shared(si32{ command_bar::flags::none });
             auto [menu_block, cover, menu_data] = menu::load(config);
             object->attach(slot::_1, menu_block);
             menu_data->active()
@@ -3846,6 +3861,13 @@ namespace netxs::app::tile
                                                                 boss.base::signal(tier::preview, app::tile::events::ui::create, gear);
                                                             });
                                                         }},
+                        { methods::ReRunApplication,    [&]
+                                                        {
+                                                            luafx.run_with_gear([&](auto& gear)
+                                                            {
+                                                                boss.base::signal(tier::preview, app::tile::events::ui::rerun, gear);
+                                                            });
+                                                        }},
                         { methods::SelectApplication,   [&]
                                                         {
                                                             luafx.run_with_gear([&](auto& gear)
@@ -4732,7 +4754,7 @@ namespace netxs::app::tile
 
                         gear.set_handled();
                     };
-                    boss.LISTEN(tier::preview, app::tile::events::ui::focus::commandbar, gear, -, (command_bar_active, pending_cmd_list_ptr, wrapper_shadow = ptr::shadow(wrapper)))
+                    boss.LISTEN(tier::preview, app::tile::events::ui::focus::commandbar, gear, -, (command_bar_active, pending_cmd_list_ptr, pending_cmd_flags_ptr, wrapper_shadow = ptr::shadow(wrapper)))
                     {
                         if (*command_bar_active) { gear.set_handled(); return; }
                         auto wrapper_ptr = wrapper_shadow.lock();
@@ -4743,6 +4765,8 @@ namespace netxs::app::tile
                         auto cmd_list = *pending_cmd_list_ptr ? *pending_cmd_list_ptr
                                                               : command_bar::load(boss.bell::indexer.config);
                         *pending_cmd_list_ptr = {};
+                        auto cmd_flags = *pending_cmd_flags_ptr;
+                        *pending_cmd_flags_ptr = command_bar::flags::none;
                         if (cmd_list->empty()) return;
 
                         *command_bar_active = true;
@@ -5461,7 +5485,7 @@ namespace netxs::app::tile
                                v_scroll_off_ptr, h_scroll_off_ptr, list_h_scroll_off_ptr,
                                kbd_lock_coord_ptr,
                                overlay_shadow, boss_shadow,
-                               dispatch_script,
+                               dispatch_script, cmd_flags,
                                dismiss_visual, dismiss_hook, pending_unhook](hids& gear) mutable
                         {
                             if (gear.payload != input::keybd::type::keypress
@@ -5638,8 +5662,9 @@ namespace netxs::app::tile
                                 return true;
                             };
 
-                            // Esc — dismiss.
-                            if (k == input::key::Esc)
+                            // Esc / Alt+L — dismiss.
+                            if (k == input::key::Esc
+                             || (alt && !ctrl && k == input::key::KeyL))
                             {
                                 dismiss_visual();
                                 gear.set_handled(faux);
@@ -5667,22 +5692,107 @@ namespace netxs::app::tile
                                 return;
                             }
 
-                            // Arrow Up — move selection up, adjust v_scroll_off.
+                            // Ctrl+V — execute selected command and split pane vertically (left/right).
+                            if (ctrl && !alt && k == input::key::KeyV
+                             && (cmd_flags & command_bar::flags::allow_split))
+                            {
+                                auto filtered = build_filtered();
+                                if (!filtered.empty() && *sel_idx_ptr < (si32)filtered.size())
+                                {
+                                    auto cmd_idx = filtered[(size_t)*sel_idx_ptr];
+                                    auto script = (*cmd_list)[cmd_idx].script + "\nvtm.tile.SplitPane(0);";
+                                    dismiss_visual();
+                                    dismiss_hook();
+                                    dispatch_script(script, gear);
+                                }
+                                else
+                                {
+                                    dismiss_visual();
+                                    dismiss_hook();
+                                }
+                                gear.set_handled(faux);
+                                return;
+                            }
+
+                            // Ctrl+S — execute selected command and split pane horizontally (top/bottom).
+                            if (ctrl && !alt && k == input::key::KeyS
+                             && (cmd_flags & command_bar::flags::allow_split))
+                            {
+                                auto filtered = build_filtered();
+                                if (!filtered.empty() && *sel_idx_ptr < (si32)filtered.size())
+                                {
+                                    auto cmd_idx = filtered[(size_t)*sel_idx_ptr];
+                                    auto script = (*cmd_list)[cmd_idx].script + "\nvtm.tile.SplitPane(1);";
+                                    dismiss_visual();
+                                    dismiss_hook();
+                                    dispatch_script(script, gear);
+                                }
+                                else
+                                {
+                                    dismiss_visual();
+                                    dismiss_hook();
+                                }
+                                gear.set_handled(faux);
+                                return;
+                            }
+
+                            // Ctrl+R — execute selected command, close current pane, then run application.
+                            if (ctrl && !alt && k == input::key::KeyR
+                             && (cmd_flags & command_bar::flags::allow_replace))
+                            {
+                                auto filtered = build_filtered();
+                                if (!filtered.empty() && *sel_idx_ptr < (si32)filtered.size())
+                                {
+                                    auto cmd_idx = filtered[(size_t)*sel_idx_ptr];
+                                    auto script = (*cmd_list)[cmd_idx].script
+                                                + "\nvtm.tile.ReRunApplication();";
+                                    dismiss_visual();
+                                    dismiss_hook();
+                                    dispatch_script(script, gear);
+                                }
+                                else
+                                {
+                                    dismiss_visual();
+                                    dismiss_hook();
+                                }
+                                gear.set_handled(faux);
+                                return;
+                            }
+
+                             // Arrow Up / Alt+K — move selection up.
                             if (k == input::key::KeyUpArrow
                              || k == input::key::NumpadUpArrow
-                             || (ctrl && !alt && k == input::key::KeyP))
+                             || (ctrl && !alt && k == input::key::KeyP)
+                             || (alt && !ctrl && k == input::key::KeyK))
                             {
                                 move_selection(-1);
                                 gear.set_handled(faux);
                                 return;
                             }
 
-                            // Arrow Down — move selection down, adjust v_scroll_off.
+                            // Arrow Down / Alt+J — move selection down.
                             if (k == input::key::KeyDownArrow
                              || k == input::key::NumpadDownArrow
-                             || (ctrl && !alt && k == input::key::KeyN))
+                             || (ctrl && !alt && k == input::key::KeyN)
+                             || (alt && !ctrl && k == input::key::KeyJ))
                             {
                                 move_selection(1);
+                                gear.set_handled(faux);
+                                return;
+                            }
+
+                            // PageUp — move selection up by one page.
+                            if (k == input::key::KeyPageUp || k == input::key::NumpadPageUp)
+                            {
+                                move_selection(-command_bar::max_items);
+                                gear.set_handled(faux);
+                                return;
+                            }
+
+                            // PageDown — move selection down by one page.
+                            if (k == input::key::KeyPageDown || k == input::key::NumpadPageDown)
+                            {
+                                move_selection(command_bar::max_items);
                                 gear.set_handled(faux);
                                 return;
                             }
@@ -5913,7 +6023,7 @@ namespace netxs::app::tile
 
                         gear.set_handled();
                     };
-                    boss.LISTEN(tier::preview, app::tile::events::ui::focus::pickapp, gear, -, (command_bar_active, pending_cmd_list_ptr))
+                    boss.LISTEN(tier::preview, app::tile::events::ui::focus::pickapp, gear, -, (command_bar_active, pending_cmd_list_ptr, pending_cmd_flags_ptr))
                     {
                         if (*command_bar_active) { gear.set_handled(); return; }
                         auto data = get_apps_data(boss);
@@ -5941,6 +6051,8 @@ namespace netxs::app::tile
                             auto script  = "vtm.tile.SetSelectedApp('"s + safe_id + "')";
                             items->push_back({ display, tooltip, script });
                         }
+                        *pending_cmd_flags_ptr = command_bar::flags::allow_split
+                                               | command_bar::flags::allow_replace;
                         *pending_cmd_list_ptr = items;
                         boss.base::signal(tier::preview, app::tile::events::ui::focus::commandbar, gear);
                     };
@@ -6178,6 +6290,42 @@ namespace netxs::app::tile
                                 item_ptr->base::riseup(tier::preview, e2::form::proceed::quit::one, true);
                                 gear.set_handled();
                             }
+                        });
+                    };
+                    boss.LISTEN(tier::preview, app::tile::events::ui::rerun, gear)
+                    {
+                        foreach(gear.id, [&](auto& item_ptr, si32 item_type, auto node_veer_ptr)
+                        {
+                            if (item_type == item_type::grip) return;
+                            if (item_type == item_type::empty_slot)
+                            {
+                                // Fast path: slot is already empty, run immediately.
+                                node_veer_ptr->base::signal(tier::request, e2::form::proceed::createby, gear);
+                                gear.set_handled();
+                                return;
+                            }
+                            // Slot has an applet: close it then spawn a new instance.
+                            // The veer's tier::release quit::any handler calls bell::expire(),
+                            // which terminates the dispatch chain — so a co-listener on the
+                            // same event would never run. Instead we rely on the close path's
+                            // documented async behaviour: tier::preview quit::one on the veer
+                            // (line ~1819) enqueues the actual quit::one+pop_back as a task on
+                            // the boss's queue. Enqueueing the createby AFTER that riseup
+                            // therefore guarantees FIFO ordering: pop_back runs first, our
+                            // task runs next when the slot is empty.
+                            auto gear_id = gear.id;
+                            auto veer_wptr = ptr::shadow(node_veer_ptr);
+                            item_ptr->base::riseup(tier::preview, e2::form::proceed::quit::one, true);
+                            boss.base::enqueue([gear_id, veer_wptr](auto& boss)
+                            {
+                                if (auto veer_ptr = veer_wptr.lock())
+                                if (veer_ptr->count() == 1) // Slot must be empty (pop_back done).
+                                if (auto gear_ptr = boss.base::template getref<hids>(gear_id))
+                                {
+                                    veer_ptr->base::signal(tier::request, e2::form::proceed::createby, *gear_ptr);
+                                }
+                            });
+                            gear.set_handled();
                         });
                     };
                 });

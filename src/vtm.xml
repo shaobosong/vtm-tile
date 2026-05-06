@@ -246,6 +246,7 @@ R"==(
                 <item label="Next Application"      tooltip=/Ns/Tile/SelectApplication/tooltip          script=TileSelectApplication/>
                 <item label="Previous Application"  tooltip=/Ns/Tile/SelectApplicationReverse/tooltip   script=TileSelectApplicationReverse/>
                 <item label="Pick Application"      tooltip=/Ns/Tile/PickApplication/tooltip            script=TilePickApplication/>
+                <item label="Rerun Application"     tooltip=/Ns/Tile/ReRunApplication/tooltip           script=TileReRunApplication/>
             </group>
             <group label="layout" item*>
                 <item label="Split Horizontal"   tooltip=/Ns/Tile/SplitHorizontally/tooltip     script=TileSplitHorizontally/>
@@ -768,6 +769,8 @@ R"==(
             <Disconnect  label="× Disconnect" tooltip=" Leave current session "/>
             <Shutdown    label="× Shutdown"   tooltip=" Disconnect all users and shutdown "/>
         </Taskbar>
+)==" // MSVC2022: C2026 String too big, trailing characters truncated.
+R"==(
         <Tile>
             <FocusPrev         tooltip=" Focus the previous pane or split grip "                 />
             <FocusNext         tooltip=" Focus the next pane or split grip "                     />
@@ -790,6 +793,12 @@ R"==(
                     " The app to run can be set by RightClick on the taskbar. "
                 </tooltip>
             </RunApplication>
+            <ReRunApplication>
+                <tooltip>
+                    " Close the current applets (if exists) in active slots. ""\n"
+                    " Launch the new applets.                                "
+                </tooltip>
+            </ReRunApplication>
             <SelectAllPanes     tooltip=" Select all panes "                                    />
             <SelectApplication>
                 <tooltip>
@@ -830,13 +839,13 @@ R"==(
             <MoveGripRight      tooltip=" Move the split grip to the right "                    />
             <MoveGripUp         tooltip=" Move the split grip up "                              />
             <MoveGripDown       tooltip=" Move the split grip down "                            />
-)==" // MSVC2022: C2026 String too big, trailing characters truncated.
-R"==(
             <DecreaseGripWidth  tooltip=" Decrease the split grip width "                       />
             <IncreaseGripWidth  tooltip=" Increase the split grip width "                       />
             <FocusPrevGrip      tooltip=" Focus the previous split grip "                       />
             <FocusNextGrip      tooltip=" Focus the next split grip "                           />
         </Tile>
+)==" // MSVC2022: C2026 String too big, trailing characters truncated.
+R"==(
         <FindPrev>
             <tooltip>
                 "\e[1m"" Previous match           Alt+LeftArrow  ""\e[m\n"
@@ -1410,6 +1419,7 @@ R"==(
     <TileFocusDownPane     ="vtm.tile.FocusDownPane();"/>          <!-- Focus the nearest pane below. -->
     <TileShowPaneIndex     ="vtm.tile.ShowPaneIndex();"/>          <!-- Show pane index overlay (ASCII 0x30~0x7E) for quick pane switching. Press the displayed character to focus a pane, or Esc to cancel. -->
     <TileRunApplication    ="vtm.tile.RunApplication();"/>         <!-- Launch application instances in active empty slots. The app to run can be set by RightClick on the taskbar. -->
+    <TileReRunApplication  ="vtm.tile.ReRunApplication();"/>       <!-- Close the current applets (if exists) in active slots and launch the new applets. -->
     <TileSelectAllPanes    ="vtm.tile.SelectAllPanes();"/>         <!-- Select all panes. -->
     <TileSelectApplication ="vtm.tile.SelectApplication( 1);"/>      <!-- Select default application type for new panes. -->
     <TileSelectApplicationReverse ="vtm.tile.SelectApplication(-1);"/>
