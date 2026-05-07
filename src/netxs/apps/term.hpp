@@ -305,6 +305,10 @@ namespace netxs::app::terminal
         //    Backspace         delete previous codepoint
         //    Left / Right      move caret one codepoint
         //    Home / End        jump to caret start / end
+        //    Tab               toggle active direction (↑ ↔ ↓) and
+        //                      re-seed the search from the new edge;
+        //                      the direction button highlight updates
+        //                      immediately
         //    Enter             navigate to next match in the active
         //                      direction (Shift+Enter = opposite dir,
         //                      subject to modifier reporting)
@@ -1244,6 +1248,18 @@ namespace netxs::app::terminal
                                 {
                                     // Ctrl+N: next match (down).
                                     fire = dir_down;
+                                }
+                                else if (!ctrl && !alt && !shift && k == input::key::Tab)
+                                {
+                                    // Tab: toggle the active navigation direction (↑ ↔ ↓).
+                                    // Re-seed the search from the new direction's start
+                                    // edge so the match counter and viewport highlight
+                                    // update immediately.  The direction button highlight
+                                    // also repaints right away via the changed flag below.
+                                    st.dir = (st.dir == dir_up) ? dir_down : dir_up;
+                                    changed = true;
+                                    auto req = ui::terminal::events::find_req{ st.query, st.dir };
+                                    gear.owner.base::signal(tier::anycast, ui::terminal::events::find::request, req);
                                 }
                                 else if (ctrl && !alt && k == input::key::KeyY)
                                 {

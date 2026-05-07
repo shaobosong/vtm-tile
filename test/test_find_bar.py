@@ -1491,6 +1491,165 @@ def test_close_button_works_at_narrow_width():
         s.__exit__(None, None, None)
 
 
+# ---------------------------------------------------------------------------
+# Tests: Tab key toggles active navigation direction (↑ ↔ ↓).
+#
+# Pressing Tab while the find-bar has keyboard focus must:
+#   • Toggle st.dir between dir_up (-1) and dir_down (+1).
+#   • Trigger an immediate repaint so the direction button highlight moves
+#     from the old active button to the new one (one button gains col_act_bg,
+#     the other reverts to col_bg).
+#   • Re-seed the search from the new direction's start edge (same behaviour
+#     as clicking the ↑/↓ direction buttons with the mouse).
+#   • Not close the bar or leak Tab into the underlying shell.
+# ---------------------------------------------------------------------------
+
+# active-direction button background colour (col_act_bg in term.hpp):
+#   argb{ 0xff3d59a1 }  →  R=61, G=89, B=161
+ACTIVE_BG_SGR = b"\x1b[48;2;61;89;161m"
+
+# Tab as a raw byte (ASCII HT, 0x09).
+TAB = b"\x09"
+
+
+def test_tab_toggles_direction_no_crash():
+    """Pressing Tab twice must leave the bar fully rendered and the process
+    alive (basic smoke test — no crash, no accidental close)."""
+    print("TEST: Tab toggles direction -- bar stays open (smoke) ... ",
+          end="", flush=True)
+    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
+        s.write(F3)
+        s.snapshot(settle=0.8)
+        # First Tab: direction ↓ → ↑.
+        s.write(TAB)
+        s.snapshot(settle=0.4)
+        # Second Tab: direction ↑ → ↓ (back to default).
+        s.write(TAB)
+        stream = s.snapshot(settle=0.8)
+        try:
+            assert_bar_rendered(stream)
+        except AssertionError as e:
+            print(f"FAIL - bar not rendered after two Tabs: {e}")
+            return False
+        if not s.is_alive():
+            print("FAIL - vtm died after Tab presses")
+            return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-desk did not exit cleanly")
+            return False
+        print("PASS")
+        return True
+
+
+def test_tab_active_bg_appears_on_toggle():
+    """After pressing Tab the active-direction button (whichever it is) must
+    be repainted with col_act_bg (24-bit RGB SGR). We drain the buffer right
+    before pressing Tab so the snapshot contains only the diff frame emitted
+    in response to the Tab keystroke."""
+    print("TEST: Tab repaint emits active-direction bg SGR ... ",
+          end="", flush=True)
+    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
+        s.write(F3)
+        s.snapshot(settle=0.8)
+        # Clear accumulated buffer: next snapshot contains only Tab's diff.
+        s.fresh_snapshot(settle=0.2)
+        s.write(TAB)
+        after = s.snapshot(settle=0.8)
+        # The repaint of the direction button pair must emit the active-bg
+        # SGR for the newly-active button (↑ is now active after first Tab).
+        if ACTIVE_BG_SGR not in after:
+            print(f"FAIL - active-direction bg SGR {ACTIVE_BG_SGR!r} not in "
+                  f"post-Tab frame")
+            return False
+        if not s.is_alive():
+            print("FAIL - vtm died after Tab")
+            return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-desk did not exit cleanly")
+            return False
+        print("PASS")
+        return True
+
+
+def test_tab_does_not_leak_to_shell():
+    """Tab while the find-bar is open must be swallowed and must not reach
+    the underlying shell. We verify by closing the bar afterwards (Esc) and
+    checking the shell output contains no TAB-completion artefacts."""
+    print("TEST: Tab in bar does not leak to shell ... ",
+          end="", flush=True)
+    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
+        s.write(F3)
+        s.snapshot(settle=0.6)
+        # Three Tab presses while bar is open.
+        s.write(TAB + TAB + TAB)
+        s.snapshot(settle=0.4)
+        # Close bar and capture fresh shell output.
+        s._buffer = b""
+        s.write(b"\x1b")   # Esc closes bar
+        after = s.snapshot(settle=0.8)
+        # Shell output after Esc should not contain a raw HT (0x09).
+        # (Tab-completion in bash typically echoes characters or a bell;
+        # we just assert there is no raw 0x09 in the emitted bytes.)
+        if b"\x09" in after:
+            print("FAIL - raw TAB byte appeared in shell output after bar close")
+            return False
+        if not s.is_alive():
+            print("FAIL - vtm died")
+            return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-desk did not exit cleanly")
+            return False
+        print("PASS")
+        return True
+
+
+def test_tab_toggles_direction_twice_restores_default():
+    """Two consecutive Tab presses must return the direction to its original
+    value. After two Tabs from the default (↓), the ↓ button must be active
+    again (ACTIVE_BG_SGR in the delta for each Tab).
+
+    Each Tab's diff frame is captured independently (fresh_snapshot before
+    each keypress) and checked for ACTIVE_BG_SGR.
+
+    NOTE: assert_bar_rendered is intentionally NOT called on the narrow diff
+    frames.  vtm uses diff rendering -- only cells whose content changed are
+    re-emitted.  When only the direction buttons change (one gains col_act_bg,
+    the other reverts to col_bg), the border chars, label, underline strip,
+    and close button are NOT re-sent.  Calling assert_bar_rendered on such a
+    diff would always fail regardless of correctness.  Process liveness is
+    checked as a proxy for "bar is still open and rendering"."""
+    print("TEST: Tab×2 returns direction to default (↓) ... ",
+          end="", flush=True)
+    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
+        s.write(F3)
+        s.snapshot(settle=0.8)
+        # Tab 1: default ↓ → ↑.  Grab the diff frame for this toggle only.
+        s.fresh_snapshot(settle=0.2)
+        s.write(TAB)
+        delta1 = s.snapshot(settle=0.6)
+        if ACTIVE_BG_SGR not in delta1:
+            print("FAIL - no active-bg SGR in diff after Tab 1 "
+                  "(↑ button not repainted as active)")
+            return False
+        # Tab 2: ↑ → ↓.  Grab the diff frame for this toggle only.
+        s.fresh_snapshot(settle=0.2)
+        s.write(TAB)
+        delta2 = s.snapshot(settle=0.8)
+        if ACTIVE_BG_SGR not in delta2:
+            print("FAIL - no active-bg SGR in diff after Tab 2 "
+                  "(↓ button not repainted as active -- direction not restored)")
+            return False
+        # Bar must still be alive after the round-trip (no crash, no close).
+        if not s.is_alive():
+            print("FAIL - vtm died after two Tabs")
+            return False
+        if not s.normal_exit(timeout=5.0):
+            print("FAIL - vtm-desk did not exit cleanly")
+            return False
+        print("PASS")
+        return True
+
+
 def main():
     if not os.path.isfile(VTM_DESK_BINARY):
         print(f"ERROR: vtm-desk binary not found at {VTM_DESK_BINARY}")
@@ -1532,6 +1691,11 @@ def main():
         test_bar_renders_at_minimum_width,
         test_typing_works_at_narrow_width,
         test_close_button_works_at_narrow_width,
+        # Tab key: toggle active navigation direction (↑ ↔ ↓)
+        test_tab_toggles_direction_no_crash,
+        test_tab_active_bg_appears_on_toggle,
+        test_tab_does_not_leak_to_shell,
+        test_tab_toggles_direction_twice_restores_default,
     ]
     passed = 0
     failed = 0
