@@ -294,6 +294,106 @@ namespace
 
         return child_quit_seen && !parent_quit_seen;
     }
+
+    // Fixture: fork with one slot holding a fake pane (kind == base::client).
+    //
+    //   workspace_host (ui::veer)
+    //     └── root_veer (ui::veer) — node_veer handlers
+    //           ├── root_empty (ui::cake, placeholder)
+    //           └── fork_node (ui::fork, node)
+    //                 ├── slot::_1 → slot_1_veer (ui::veer) — node_veer handlers
+    //                 │                ├── empty_1 (placeholder)
+    //                 │                └── fake_pane (kind == client)
+    //                 └── slot::_2 → slot_2_veer (ui::veer) — node_veer handlers
+    //                                   └── empty_2 (placeholder)
+    //
+    struct slot_with_pane_fixture
+    {
+        netxs::sptr<ui::veer> workspace_host;
+        netxs::sptr<ui::veer> root_veer;
+        netxs::sptr<ui::fork> fork_node;
+        netxs::sptr<ui::veer> slot_1_veer;
+        netxs::sptr<ui::veer> slot_2_veer;
+        netxs::sptr<ui::cake> root_empty;
+        netxs::sptr<ui::cake> empty_1;
+        netxs::sptr<ui::cake> fake_pane;  // simulates app_window: root=true, kind=client
+        netxs::sptr<ui::cake> empty_2;
+        bool shutdown_seen = false;
+
+        slot_with_pane_fixture()
+        {
+            workspace_host = ui::veer::ctor();
+            root_veer      = ui::veer::ctor()->plugin<pro::focus>();
+            setup_node_veer_handlers(*root_veer);
+
+            root_empty = ui::cake::ctor()->isroot(true, base::placeholder);
+            root_veer->attach(root_empty);
+
+            fork_node = ui::fork::ctor(axis::X, 0, 1, 1);
+            fork_node->isroot(faux, base::node);
+
+            slot_1_veer = ui::veer::ctor()->plugin<pro::focus>();
+            setup_node_veer_handlers(*slot_1_veer);
+            empty_1   = ui::cake::ctor()->isroot(true, base::placeholder);
+            slot_1_veer->attach(empty_1);
+            fake_pane = ui::cake::ctor()->isroot(true); // kind == base::client
+            slot_1_veer->attach(fake_pane);
+
+            slot_2_veer = ui::veer::ctor()->plugin<pro::focus>();
+            setup_node_veer_handlers(*slot_2_veer);
+            empty_2 = ui::cake::ctor()->isroot(true, base::placeholder);
+            slot_2_veer->attach(empty_2);
+
+            fork_node->attach(slot::_1, slot_1_veer);
+            fork_node->attach(slot::_2, slot_2_veer);
+            root_veer->attach(fork_node);
+            workspace_host->attach(root_veer);
+
+            workspace_host->LISTEN(tier::request, e2::form::proceed::swap, item_ptr)
+            {
+                if (item_ptr) shutdown_seen = true;
+            };
+        }
+    };
+
+    // -----------------------------------------------------------------------
+    // CloseSlot on empty slot: preview quit::one rises through node_veer,
+    // triggering the count==1 release path, which removes the slot.
+    // -----------------------------------------------------------------------
+    auto verify_close_slot_empty_slot() -> bool
+    {
+        auto f = two_empty_slots_fixture{};
+
+        // Simulate CloseSlot empty-slot path (item_ptr->riseup tier::preview).
+        // setup_node_veer_handlers fires the release synchronously (no enqueue).
+        f.empty_slot_1->base::riseup(tier::preview, e2::form::proceed::quit::one, true);
+
+        // Fork collapses; root_veer retains surviving empty_slot_0.
+        if (f.root_veer->count() != 1) return false;
+        if (f.shutdown_seen) return false;
+        return true;
+    }
+
+    // -----------------------------------------------------------------------
+    // CloseSlot on a slot with a pane: pane removed first (step 1), then the
+    // now-empty slot is removed from the layout (step 2).
+    // -----------------------------------------------------------------------
+    auto verify_close_slot_with_pane() -> bool
+    {
+        auto f = slot_with_pane_fixture{};
+
+        // Step 1: pane removal (release quit with count==2, kind==client → pop_back).
+        f.slot_1_veer->base::signal(tier::release, e2::form::proceed::quit::one, true);
+        if (f.slot_1_veer->count() != 1) return false; // Pane removed.
+
+        // Step 2: slot removal (enqueued release with count==1 → reorganize fork).
+        f.slot_1_veer->base::signal(tier::release, e2::form::proceed::quit::one, true);
+
+        // Fork collapsed; root_veer retains root_empty.
+        if (f.root_veer->count() != 1) return false;
+        if (f.shutdown_seen) return false;
+        return true;
+    }
 }
 
 auto main() -> int
@@ -304,5 +404,7 @@ auto main() -> int
     if (!verify_close_one_of_two_empty_slots_no_shutdown())   return 4;
     if (!verify_close_last_empty_slot_triggers_shutdown())     return 5;
     if (!verify_selectall_close_two_empty_slots_no_shutdown()) return 6;
+    if (!verify_close_slot_empty_slot())                       return 7;
+    if (!verify_close_slot_with_pane())                        return 8;
     return 0;
 }

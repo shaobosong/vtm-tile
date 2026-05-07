@@ -31,7 +31,8 @@ namespace netxs::events::userland
                 EVENT_XS( selectapp, app_request ), // Select default app type for new panes.
                 EVENT_XS( setapp,    text        ), // Set the selected default app by id.
                 EVENT_XS( selected_app, app_state* ), // Get selected app info.
-                EVENT_XS( close   , input::hids ), // Close panes.
+                EVENT_XS( close    , input::hids ), // Close panes.
+                EVENT_XS( closeslot, input::hids ), // Close pane and slot.
                 EVENT_XS( rerun   , input::hids ), // Close panes and immediately run the selected app.
                 EVENT_XS( swap    , input::hids ), // Swap panes.
                 EVENT_XS( rotate  , input::hids ), // Change split orientation.
@@ -538,6 +539,7 @@ namespace netxs::app::tile
         X(SetTitle           ) \
         X(ZoomPane           ) \
         X(ClosePane          ) \
+        X(CloseSlot          ) \
         X(SetMenuColor       ) \
         X(ShowPaneIndex      ) \
         X(Disconnect         ) \
@@ -3948,6 +3950,13 @@ namespace netxs::app::tile
                                                                 boss.base::signal(tier::preview, app::tile::events::ui::close, gear);
                                                             });
                                                         }},
+                        { methods::CloseSlot,           [&]
+                                                        {
+                                                            luafx.run_with_gear([&](auto& gear)
+                                                            {
+                                                                boss.base::signal(tier::preview, app::tile::events::ui::closeslot, gear);
+                                                            });
+                                                        }},
                         { methods::SetMenuColor,        [&, menu_data]
                                                         {
                                                             auto p_clr = luafx.get_args_or(1, ui32{ 0 });
@@ -6476,6 +6485,31 @@ namespace netxs::app::tile
                                 item_ptr->base::riseup(tier::preview, e2::form::proceed::quit::one, true);
                                 gear.set_handled();
                             }
+                        });
+                    };
+                    boss.LISTEN(tier::preview, app::tile::events::ui::closeslot, gear)
+                    {
+                        foreach(gear.id, [&](auto& item_ptr, si32 item_type, auto node_veer_ptr)
+                        {
+                            if (item_type == item_type::grip) return;
+                            if (item_type != item_type::applet) // Empty slot: reuse close-pane path.
+                            {
+                                item_ptr->base::riseup(tier::preview, e2::form::proceed::quit::one, true);
+                                gear.set_handled();
+                                return;
+                            }
+                            // Applet: close pane then remove slot (FIFO enqueue guarantees order).
+                            auto veer_wptr = ptr::shadow(node_veer_ptr);
+                            item_ptr->base::riseup(tier::preview, e2::form::proceed::quit::one, true);
+                            boss.base::enqueue([veer_wptr](auto& /*boss*/)
+                            {
+                                if (auto veer_ptr = veer_wptr.lock())
+                                if (veer_ptr->count() == 1) // Pane closed.
+                                {
+                                    veer_ptr->base::signal(tier::release, e2::form::proceed::quit::one, true);
+                                }
+                            });
+                            gear.set_handled();
                         });
                     };
                     boss.LISTEN(tier::preview, app::tile::events::ui::rerun, gear)

@@ -4,6 +4,12 @@ target_include_directories(tile_session_shutdown_test PRIVATE "${CMAKE_SOURCE_DI
 target_link_libraries(tile_session_shutdown_test PRIVATE Lua::Lua)
 add_test(NAME tile_session_shutdown_test COMMAND tile_session_shutdown_test)
 
+add_executable(tile_close_slot_test "tile_close_slot_test.cpp")
+target_include_directories(tile_close_slot_test PRIVATE "${CMAKE_SOURCE_DIR}/src"
+                                                        ${LUA_INCLUDE_DIR})
+target_link_libraries(tile_close_slot_test PRIVATE Lua::Lua)
+add_test(NAME tile_close_slot_test COMMAND tile_close_slot_test)
+
 add_executable(command_bar_fuzzy_test "command_bar_fuzzy_test.cpp")
 target_include_directories(command_bar_fuzzy_test PRIVATE "${CMAKE_SOURCE_DIR}/src"
                                                           ${LUA_INCLUDE_DIR})
