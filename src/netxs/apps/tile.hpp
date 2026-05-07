@@ -4811,12 +4811,13 @@ namespace netxs::app::tile
                         // (currently the focus::pickapp path).  Each button toggles a mutually
                         // exclusive mode that, while active, rewrites the Enter behaviour:
                         //   enter_mode_none    : default (run script as-is)
-                        //   enter_mode_rerun   : append "vtm.tile.ReRunApplication();" (the "+")
-                        //   enter_mode_split_h : append "vtm.tile.SplitPane(0);"       (the "|")
-                        //   enter_mode_split_v : append "vtm.tile.SplitPane(1);"       (the "-")
+                        //   enter_mode_rerun   : append "vtm.tile.ReRunApplication();"  (the "+")
+                        //   enter_mode_newws   : append "vtm.tile.CreateWorkspace();"   (the "⬒")
+                        //   enter_mode_split_h : append "vtm.tile.SplitPane(0);"        (the "|")
+                        //   enter_mode_split_v : append "vtm.tile.SplitPane(1);"        (the "-")
                         // Clicking the currently-active button cancels it (back to enter_mode_none).
-                        auto enter_mode_ptr = ptr::shared(si32{ 0 }); // 0=none / 1=rerun / 2=split_h / 3=split_v
-                        auto hover_btn_ptr  = ptr::shared(si32{ 0 }); // 0=none / 1/2/3 = which mode button is hovered
+                        auto enter_mode_ptr = ptr::shared(si32{ 0 }); // 0=none / 1=rerun / 2=newws / 3=split_h / 4=split_v
+                        auto hover_btn_ptr  = ptr::shared(si32{ 0 }); // 0=none / 1/2/3/4 = which mode button is hovered
 
                         // Build overlay.
                         auto overlay_ptr = ui::mock::ctor();
@@ -4928,24 +4929,25 @@ namespace netxs::app::tile
                                 // Pickapp-only Enter-mode buttons in the input row.
                                 // Visible only when the session opts into both split and
                                 // replace shortcuts (focus::pickapp path).  Each button is
-                                // 3 cells wide (pad + glyph + pad), three buttons total
-                                // occupy 9 cells anchored to the right edge of the entry
+                                // 3 cells wide (pad + glyph + pad), four buttons total
+                                // occupy 12 cells anchored to the right edge of the entry
                                 // row (just before vsb_x).  Hidden whenever the entry
                                 // would be left with fewer than 4 input cells (responsive
-                                // degradation: all three buttons disappear together).
-                                static constexpr auto enter_btns_w     = si32{ 9 };  // 3 buttons × 3 cells each
-                                static constexpr auto enter_btn_gap    = si32{ 1 };  // gap between input text and buttons
-                                static constexpr auto enter_btns_total = si32{ enter_btns_w + enter_btn_gap }; // = 10
+                                // degradation: all four buttons disappear together).
+                                static constexpr auto enter_btns_w     = si32{ 12 };  // 4 buttons × 3 cells each
+                                static constexpr auto enter_btn_gap    = si32{ 1 };   // gap between input text and buttons
+                                static constexpr auto enter_btns_total = si32{ enter_btns_w + enter_btn_gap }; // = 13
                                 static constexpr auto enter_btn_w      = si32{ 3 };
                                 static constexpr auto enter_min_input  = si32{ 4 };
-                                auto pickapp_caps      = (cmd_flags & command_bar::flags::allow_split)
-                                                      && (cmd_flags & command_bar::flags::allow_replace);
-                                auto enter_btns_show   = pickapp_caps
-                                                      && entry_disp_w >= enter_min_input + enter_btns_total;
-                                auto enter_btns_x0     = dlg_x + dlg_w - 1 - enter_btns_w; // leftmost button column
-                                auto enter_btn_plus_cx = enter_btns_x0 + 1;                // [+] center
-                                auto enter_btn_pipe_cx = enter_btns_x0 + 4;                // [|] center
-                                auto enter_btn_dash_cx = enter_btns_x0 + 7;                // [-] center
+                                auto pickapp_caps       = (cmd_flags & command_bar::flags::allow_split)
+                                                       && (cmd_flags & command_bar::flags::allow_replace);
+                                auto enter_btns_show    = pickapp_caps
+                                                       && entry_disp_w >= enter_min_input + enter_btns_total;
+                                auto enter_btns_x0      = dlg_x + dlg_w - 1 - enter_btns_w; // leftmost button column
+                                auto enter_btn_rerun_cx = enter_btns_x0 + 1;                 // [+] center
+                                auto enter_btn_box_cx   = enter_btns_x0 + 4;                 // [⬒] center
+                                auto enter_btn_pipe_cx  = enter_btns_x0 + 7;                 // [|] center
+                                auto enter_btn_dash_cx  = enter_btns_x0 + 10;                // [-] center
                                 auto entry_disp_w_eff  = enter_btns_show ? entry_disp_w - enter_btns_total
                                                                           : entry_disp_w;
                                 if (h_scroll_off > caret_cp) h_scroll_off = caret_cp;
@@ -5054,9 +5056,10 @@ namespace netxs::app::tile
                                                     });
                                             }
                                         };
-                                        draw_mode_btn(enter_btn_plus_cx, "+", 1); // ReRunApplication
-                                        draw_mode_btn(enter_btn_pipe_cx, "|", 2); // SplitPane(0) horizontal
-                                        draw_mode_btn(enter_btn_dash_cx, "-", 3); // SplitPane(1) vertical
+                                        draw_mode_btn(enter_btn_rerun_cx, "+",            1); // + ReRunApplication
+                                        draw_mode_btn(enter_btn_box_cx,   "\xe2\xac\x92", 2); // ⬒ CreateWorkspace
+                                        draw_mode_btn(enter_btn_pipe_cx,  "|",            3); // SplitPane(0) horizontal
+                                        draw_mode_btn(enter_btn_dash_cx,  "-",            4); // SplitPane(1) vertical
                                     }
                                 }
 
@@ -5221,19 +5224,20 @@ namespace netxs::app::tile
                                 auto new_hover_btn = si32{ 0 };
 
                                 // Pickapp Enter-mode buttons: hit-test the right-anchored
-                                // 9-cell strip on the input row.  Only meaningful when the
+                                // 12-cell strip on the input row.  Only meaningful when the
                                 // session opted into both split and replace shortcuts.
                                 auto pickapp_caps = (cmd_flags & command_bar::flags::allow_split)
                                                  && (cmd_flags & command_bar::flags::allow_replace);
                                 auto enter_btns_show = pickapp_caps
-                                                    && l.entry_disp_w >= 4 + 10;
+                                                    && l.entry_disp_w >= 4 + 13;
                                 if (enter_btns_show && my == l.dlg_y)
                                 {
-                                    auto x0 = l.dlg_x + l.dlg_w - 1 - 9;
+                                    auto x0 = l.dlg_x + l.dlg_w - 1 - 12;
                                     auto rel = mx - x0;
-                                    if (rel >= 0 && rel < 3) new_hover_btn = 1;      // [+]
-                                    else if (rel >= 3 && rel < 6) new_hover_btn = 2; // [|]
-                                    else if (rel >= 6 && rel < 9) new_hover_btn = 3; // [-]
+                                    if      (rel >= 0 && rel < 3)  new_hover_btn = 1; // [+]
+                                    else if (rel >= 3 && rel < 6)  new_hover_btn = 2; // [⬒]
+                                    else if (rel >= 6 && rel < 9)  new_hover_btn = 3; // [|]
+                                    else if (rel >= 9 && rel < 12) new_hover_btn = 4; // [-]
                                 }
 
                                 if (mx == l.vsb_x && my >= l.dlg_y + 2 && my <= l.dlg_y + 2 + l.list_rows)
@@ -5344,15 +5348,16 @@ namespace netxs::app::tile
                                 // never dismiss the overlay.
                                 auto pickapp_caps = (cmd_flags & command_bar::flags::allow_split)
                                                  && (cmd_flags & command_bar::flags::allow_replace);
-                                auto enter_btns_show = pickapp_caps && l.entry_disp_w >= 4 + 10;
+                                auto enter_btns_show = pickapp_caps && l.entry_disp_w >= 4 + 13;
                                 if (enter_btns_show && my == dlg_y)
                                 {
-                                    auto x0 = dlg_x + dlg_w - 1 - 9;
+                                    auto x0 = dlg_x + dlg_w - 1 - 12;
                                     auto rel = mx - x0;
                                     auto clicked = si32{ 0 };
-                                    if      (rel >= 0 && rel < 3) clicked = 1; // [+]
-                                    else if (rel >= 3 && rel < 6) clicked = 2; // [|]
-                                    else if (rel >= 6 && rel < 9) clicked = 3; // [-]
+                                    if      (rel >= 0 && rel < 3)  clicked = 1; // [+]
+                                    else if (rel >= 3 && rel < 6)  clicked = 2; // [⬒]
+                                    else if (rel >= 6 && rel < 9)  clicked = 3; // [|]
+                                    else if (rel >= 9 && rel < 12) clicked = 4; // [-]
                                     if (clicked)
                                     {
                                         *enter_mode_ptr = (*enter_mode_ptr == clicked) ? 0 : clicked;
@@ -5378,11 +5383,15 @@ namespace netxs::app::tile
                                         {
                                             script += "\nvtm.tile.ReRunApplication();";
                                         }
-                                        else if (mode == 2 && (cmd_flags & command_bar::flags::allow_split))
+                                        else if (mode == 2)
+                                        {
+                                            script += "\nvtm.tile.CreateWorkspace();";
+                                        }
+                                        else if (mode == 3 && (cmd_flags & command_bar::flags::allow_split))
                                         {
                                             script += "\nvtm.tile.SplitPane(0);";
                                         }
-                                        else if (mode == 3 && (cmd_flags & command_bar::flags::allow_split))
+                                        else if (mode == 4 && (cmd_flags & command_bar::flags::allow_split))
                                         {
                                             script += "\nvtm.tile.SplitPane(1);";
                                         }
@@ -5679,7 +5688,7 @@ namespace netxs::app::tile
                                 auto edw = std::max(1, dw - 4);
                                 auto pickapp_caps = (cmd_flags & command_bar::flags::allow_split)
                                                  && (cmd_flags & command_bar::flags::allow_replace);
-                                if (pickapp_caps && edw >= 4 + 10) edw -= 10;
+                                if (pickapp_caps && edw >= 4 + 13) edw -= 13;
                                 return edw;
                             };
 
@@ -5827,7 +5836,7 @@ namespace netxs::app::tile
                                 return;
                             }
 
-                            // Tab / Shift+Tab — cycle enter-mode buttons ([+]/[|]/[-]/none).
+                            // Tab / Shift+Tab — cycle enter-mode buttons ([+]/[⬒]/[|]/[-]/none).
                             // Only active in pickapp context (both allow_split and allow_replace
                             // must be set).  No Ctrl/Alt modifier accepted to avoid stealing
                             // common terminal shortcuts.
@@ -5837,16 +5846,16 @@ namespace netxs::app::tile
                             {
                                 auto& mode = *enter_mode_ptr;
                                 if (shift)
-                                    mode = (mode == 0) ? 3 : mode - 1; // 0→3→2→1→0
+                                    mode = (mode == 0) ? 4 : mode - 1; // 0→4→3→2→1→0
                                 else
-                                    mode = (mode + 1) % 4;             // 0→1→2→3→0
+                                    mode = (mode + 1) % 5;             // 0→1→2→3→4→0
                                 if (ovl_ptr) ovl_ptr->base::deface();
                                 gear.set_handled(faux);
                                 return;
                             }
 
                             // Enter — execute selected command and dismiss.  When a
-                            // pickapp Enter-mode button ([+]/[|]/[-]) is currently
+                            // pickapp Enter-mode button ([+]/[⬒]/[|]/[-]) is currently
                             // selected, postfix the corresponding tile script so plain
                             // Enter mirrors the Ctrl+R / Ctrl+V / Ctrl+S shortcuts that
                             // would have produced the same effect via keyboard alone.
@@ -5866,11 +5875,15 @@ namespace netxs::app::tile
                                     {
                                         script += "\nvtm.tile.ReRunApplication();";
                                     }
-                                    else if (mode == 2 && (cmd_flags & command_bar::flags::allow_split))
+                                    else if (mode == 2)
+                                    {
+                                        script += "\nvtm.tile.CreateWorkspace();";
+                                    }
+                                    else if (mode == 3 && (cmd_flags & command_bar::flags::allow_split))
                                     {
                                         script += "\nvtm.tile.SplitPane(0);";
                                     }
-                                    else if (mode == 3 && (cmd_flags & command_bar::flags::allow_split))
+                                    else if (mode == 4 && (cmd_flags & command_bar::flags::allow_split))
                                     {
                                         script += "\nvtm.tile.SplitPane(1);";
                                     }
@@ -5954,7 +5967,31 @@ namespace netxs::app::tile
                                 return;
                             }
 
-                             // Arrow Up / Alt+K — move selection up.
+                            // Ctrl+W — execute selected command and create a new workspace.
+                            if (ctrl && !alt && k == input::key::KeyW
+                             && (cmd_flags & command_bar::flags::allow_split)
+                             && (cmd_flags & command_bar::flags::allow_replace))
+                            {
+                                auto filtered = build_filtered();
+                                if (!filtered.empty() && *sel_idx_ptr < (si32)filtered.size())
+                                {
+                                    auto cmd_idx = filtered[(size_t)*sel_idx_ptr];
+                                    auto script = (*cmd_list)[cmd_idx].script
+                                                + "\nvtm.tile.CreateWorkspace();";
+                                    dismiss_visual();
+                                    dismiss_hook();
+                                    dispatch_script(script, gear);
+                                }
+                                else
+                                {
+                                    dismiss_visual();
+                                    dismiss_hook();
+                                }
+                                gear.set_handled(faux);
+                                return;
+                            }
+
+                            // Arrow Up / Alt+K — move selection up.
                             if (k == input::key::KeyUpArrow
                              || k == input::key::NumpadUpArrow
                              || (ctrl && !alt && k == input::key::KeyP)

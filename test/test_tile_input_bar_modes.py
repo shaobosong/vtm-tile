@@ -4,10 +4,10 @@
 
 """
 End-to-end TUI regression test for the pickapp command-bar Enter-mode
-buttons: [+] [|] [-] anchored to the right side of the input row.
+buttons: [+] [⬒] [|] [-] anchored to the right side of the input row.
 
 Verifies:
-  1. The three buttons render in the input row when the pickapp overlay
+  1. The four buttons render in the input row when the pickapp overlay
      opens (pickapp_caps == allow_split | allow_replace).
   2. Pressing Enter without selecting any mode applies the highlighted
      entry without splitting/rerunning (existing behavior preserved).
@@ -23,7 +23,7 @@ Verifies:
   8. Clicking a list item with an Enter-mode button armed applies the
      same mode suffix as pressing Enter (click-to-pick also respects
      the button selection).
-  9. Tab cycles forward through modes none→[+]→[|]→[-]→none; each
+  9. Tab cycles forward through modes none→[+]→[⬒]→[|]→[-]→none; each
      intermediate Enter fires the expected action.
  10. Shift+Tab cycles backward through the same sequence.
  11. Tab in a non-pickapp command bar (allow_split | allow_replace not
@@ -324,14 +324,15 @@ def fail(msg):
 # ---------------------------------------------------------------------------
 # Pickapp Enter-mode button geometry.
 # With COLS=120, dlg_w_max=60, dlg_w=60, dlg_x=(120-60)/2=30 (0-indexed).
-# enter_btns_x0 = dlg_x + dlg_w - 1 - 9 = 80 (0-indexed).
-# Buttons (0-indexed centers): [+]=81, [|]=84, [-]=87.
-# 1-indexed: [+]=82, [|]=85, [-]=88.
+# enter_btns_x0 = dlg_x + dlg_w - 1 - 12 = 77 (0-indexed).
+# Buttons (0-indexed centers): [+]=78, [⬒]=81, [|]=84, [-]=87.
+# 1-indexed: [+]=79, [⬒]=82, [|]=85, [-]=88.
 # Row: dlg_y = max(0, (30 - 13)/4) = 4 (0-indexed) -> row 5 (1-indexed).
 # ---------------------------------------------------------------------------
-BTN_PLUS_COL = 82
-BTN_PIPE_COL = 85
-BTN_DASH_COL = 88
+BTN_RERUN_COL = 79   # [+] ReRunApplication
+BTN_BOX_COL   = 82   # [⬒] CreateWorkspace
+BTN_PIPE_COL  = 85   # [|] SplitPane(0)
+BTN_DASH_COL  = 88   # [-] SplitPane(1)
 BTN_ROW = 5
 
 
@@ -347,7 +348,7 @@ def open_picker_via_hotkey(s, timeout=2.0):
 # ---------------------------------------------------------------------------
 
 def test_buttons_render_when_picker_opens():
-    print("TEST: pickapp picker renders [+] [|] [-] buttons ... ",
+    print("TEST: pickapp picker renders [+] [⬒] [|] [-] buttons ... ",
           end="", flush=True)
     with VtmTileSession(TILE_ARGS) as s:
         if not s.is_alive():
@@ -357,11 +358,12 @@ def test_buttons_render_when_picker_opens():
         rendered = open_picker_via_hotkey(s)
         if "alpha" not in rendered:
             return fail("picker did not open:\n" + rendered[-1500:])
-        # The 9-cell button strip prints '+', '|', '-' glyphs on the
+        # The 12-cell button strip prints '+', '⬒', '|', '-' glyphs on the
         # input row (each surrounded by single-space padding).
         # Lenient check: each glyph must appear somewhere in the
         # rendered output once the picker is open.
-        for glyph, name in [("+", "plus"), ("|", "pipe"), ("-", "dash")]:
+        for glyph, name in [("+", "rerun/+"), ("\u2b12", "newws/⬒"),
+                             ("|", "pipe"), ("-", "dash")]:
             if glyph not in rendered:
                 return fail(f"glyph '{glyph}' ({name}) not found in picker:\n"
                             + rendered[-1500:])
@@ -480,7 +482,7 @@ def test_plus_button_then_enter_reruns_pane():
         time.sleep(0.3)
 
         # Arm [+] (rerun) and Enter.
-        s.click(BTN_PLUS_COL, BTN_ROW)
+        s.click(BTN_RERUN_COL, BTN_ROW)
         time.sleep(0.2)
         s.write(b"\r")
 
@@ -534,7 +536,7 @@ def test_buttons_hidden_when_dialog_too_narrow():
     print("TEST: buttons hidden when terminal too narrow ... ",
           end="", flush=True)
     # With cols=15: dlg_w = min(60, 15-4) = 11. entry_disp_w = 11-4 = 7.
-    # 7 < 4+9 -> buttons must NOT render.
+    # 7 < 4+13 -> buttons must NOT render.
     with VtmTileSession(TILE_ARGS, cols=15, rows=20) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
@@ -551,7 +553,7 @@ def test_buttons_hidden_when_dialog_too_narrow():
         # strict signal. Be lenient: ensure that the trio together
         # with surrounding spacing pattern (typical "  +    |    -  ")
         # does NOT appear.
-        if " + " in rendered and " | " in rendered and " - " in rendered:
+        if " + " in rendered and " ⬒ " in rendered and " | " in rendered and " - " in rendered:
             return fail("button strip appears at narrow width:\n"
                         + rendered[-1500:])
     print("OK")
@@ -559,7 +561,7 @@ def test_buttons_hidden_when_dialog_too_narrow():
 
 
 def test_tab_forward_cycles_modes_and_enter_splits():
-    print("TEST: Tab cycles none→[+]→[|]→[-]→none, Enter with [|] splits ... ",
+    print("TEST: Tab cycles none→[+]→[⬒]→[|]→[-]→none, Enter with [|] splits ... ",
           end="", flush=True)
     with VtmTileSession(TILE_ARGS) as s:
         if not s.is_alive():
@@ -572,22 +574,22 @@ def test_tab_forward_cycles_modes_and_enter_splits():
         if "alpha" not in rendered:
             return fail("picker did not open")
 
-        # Two Tabs: none → [+] → [|]
-        s.write(b"\x09\x09")   # Tab Tab
+        # Three Tabs: none → [+] → [⬒] → [|]
+        s.write(b"\x09\x09\x09")   # Tab Tab Tab
         time.sleep(0.2)
 
-        # Press Enter — should fire SplitPane(0) (mode 2 = [|]).
+        # Press Enter — should fire SplitPane(0) (mode 3 = [|]).
         s.reset_buffer()
         s.write(b"\r")
         shells = wait_shell_count(2, timeout=6.0)
         if shells is None or old_shell not in shells:
-            return fail(f"expected >=2 shells after Tab×2+Enter; got {shells}")
+            return fail(f"expected >=2 shells after Tab×3+Enter; got {shells}")
     print("OK")
     return True
 
 
 def test_tab_wraps_back_to_none_and_enter_is_plain():
-    print("TEST: four Tabs wrap mode back to none, Enter is plain pick ... ",
+    print("TEST: five Tabs wrap mode back to none, Enter is plain pick ... ",
           end="", flush=True)
     with VtmTileSession(TILE_ARGS) as s:
         if not s.is_alive():
@@ -600,8 +602,8 @@ def test_tab_wraps_back_to_none_and_enter_is_plain():
         if "alpha" not in rendered:
             return fail("picker did not open")
 
-        # Four Tabs: none→[+]→[|]→[-]→none
-        s.write(b"\x09\x09\x09\x09")
+        # Five Tabs: none→[+]→[⬒]→[|]→[-]→none
+        s.write(b"\x09\x09\x09\x09\x09")
         time.sleep(0.2)
 
         # Enter with mode=none → plain pick, no split, old shell survives.
@@ -614,13 +616,13 @@ def test_tab_wraps_back_to_none_and_enter_is_plain():
         applets = all_term_applet_pids()
         shells = shell_pids_under(applets)
         if len(shells) != 1:
-            return fail(f"expected 1 shell after Tab×4+Enter; got {shells}")
+            return fail(f"expected 1 shell after Tab×5+Enter; got {shells}")
     print("OK")
     return True
 
 
 def test_shift_tab_cycles_backward():
-    print("TEST: Shift+Tab cycles [-]→[|]→[+]→none→[-] ... ",
+    print("TEST: Shift+Tab cycles [-]→[|]→[⬒]→[+]→none→[-] ... ",
           end="", flush=True)
     with VtmTileSession(TILE_ARGS) as s:
         if not s.is_alive():
@@ -633,7 +635,7 @@ def test_shift_tab_cycles_backward():
         if "alpha" not in rendered:
             return fail("picker did not open")
 
-        # One Shift+Tab from none → [-] (mode 3 = SplitPane(1)).
+        # One Shift+Tab from none → [-] (mode 4 = SplitPane(1)).
         s.write(b"\x1b[Z")   # Shift+Tab VT sequence
         time.sleep(0.2)
 
@@ -680,6 +682,32 @@ def test_click_item_with_mode_splits_pane():
     return True
 
 
+def test_ctrl_w_creates_workspace():
+    print("TEST: Ctrl+W creates a new workspace with selected entry ... ",
+          end="", flush=True)
+    with VtmTileSession(TILE_ARGS) as s:
+        if not s.is_alive():
+            return fail("vtm-tile did not start")
+        old_shell = find_any_shell(timeout=6.0)
+        if old_shell is None:
+            return fail("no initial shell")
+
+        rendered = open_picker_via_hotkey(s)
+        if "alpha" not in rendered:
+            return fail("picker did not open")
+
+        # Press Ctrl+W — should fire the selected entry's script
+        # followed by vtm.tile.CreateWorkspace(), spawning a new
+        # workspace (and thus a new shell applet).
+        s.reset_buffer()
+        s.write(b"\x17")  # Ctrl+W
+        shells = wait_shell_count(2, timeout=6.0)
+        if shells is None or old_shell not in shells:
+            return fail(f"expected >=2 shells after Ctrl+W; got {shells}")
+    print("OK")
+    return True
+
+
 def main():
     tests = [
         test_buttons_render_when_picker_opens,
@@ -693,6 +721,7 @@ def main():
         test_tab_forward_cycles_modes_and_enter_splits,
         test_tab_wraps_back_to_none_and_enter_is_plain,
         test_shift_tab_cycles_backward,
+        test_ctrl_w_creates_workspace,
     ]
     ok = 0
     for t in tests:
