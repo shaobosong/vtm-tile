@@ -359,6 +359,7 @@ int main(int argc, char* argv[])
                 auto win = os::dtvt::gridsz;
                 userinit.send(client, userid.first, os::dtvt::vtmode, env, cwd, cmd, win);
                 ui::tui_domain().config.swap(config);
+                app::shared::get_tui_config(ui::tui_domain().config, ui::skin::globals());
                 app::shared::splice(client);
                 return 0;
             }
