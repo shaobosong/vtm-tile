@@ -3186,6 +3186,9 @@ namespace netxs::ui
                 boss.on(tier::mouserelease, input::key::MouseHover, memo, [&](hids& gear)
                 {
                     gear.tooltip.set(tooltip_sptr);
+                    auto local_mouse = twod{ gear.coord };
+                    auto boss_size = boss.base::area().size;
+                    tooltip_sptr->set_anchor({ 0, boss_size.y - local_mouse.y });
                 });
                 boss.LISTEN(tier::preview, e2::form::prop::ui::tooltip, utf8, memo)
                 {

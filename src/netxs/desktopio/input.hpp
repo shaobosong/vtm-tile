@@ -1314,7 +1314,9 @@ namespace netxs::input
     {
         text string{};
         ui32 digest{};
-        netxs::sptr<page> page_sptr; // Tooltip render cache for gate.
+        netxs::sptr<page> page_sptr;  // Tooltip render cache for gate.
+        twod anchor_offset{};         // Tooltip anchor: offset from screen mouse coord to tooltip top-left.
+        bool use_anchor{};            // Tooltip anchor: use element-relative positioning when set.
 
         tooltip_t(qiew string = {})
             : string{ string }
@@ -1328,6 +1330,11 @@ namespace netxs::input
             digest++;
             string = utf8;
             page_sptr.reset();
+        }
+        void set_anchor(twod offset)
+        {
+            anchor_offset = offset;
+            use_anchor = true;
         }
         auto get_render_sptr(cell const& tooltip_colors)
         {
@@ -1522,7 +1529,8 @@ namespace netxs::input
                 if (visible && current_sptr)
                 {
                     auto render_sptr = current_sptr->get_render_sptr(tooltip_colors);
-                    auto page_offset = -twod{ 4, render_sptr->size() + 1 };
+                    auto page_offset = current_sptr->use_anchor ? current_sptr->anchor_offset
+                                                                : -twod{ 4, render_sptr->size() + 1 };
                     return std::pair{ render_sptr, page_offset };
                 }
                 else
