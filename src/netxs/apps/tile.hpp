@@ -4797,6 +4797,18 @@ namespace netxs::app::tile
                         // immediately highlighting it on entry (e.g. opened via keyboard shortcut).
                         auto popup_ready_ptr    = ptr::shared(faux);
 
+                        // Pickapp-only "Enter mode" radio buttons in the input row.
+                        // Visible only when the session opts into both split and replace shortcuts
+                        // (currently the focus::pickapp path).  Each button toggles a mutually
+                        // exclusive mode that, while active, rewrites the Enter behaviour:
+                        //   enter_mode_none    : default (run script as-is)
+                        //   enter_mode_rerun   : append "vtm.tile.ReRunApplication();" (the "+")
+                        //   enter_mode_split_h : append "vtm.tile.SplitPane(0);"       (the "|")
+                        //   enter_mode_split_v : append "vtm.tile.SplitPane(1);"       (the "-")
+                        // Clicking the currently-active button cancels it (back to enter_mode_none).
+                        auto enter_mode_ptr = ptr::shared(si32{ 0 }); // 0=none / 1=rerun / 2=split_h / 3=split_v
+                        auto hover_btn_ptr  = ptr::shared(si32{ 0 }); // 0=none / 1/2/3 = which mode button is hovered
+
                         // Build overlay.
                         auto overlay_ptr = ui::mock::ctor();
                         auto overlay_shadow = ptr::shadow(overlay_ptr);
@@ -4842,7 +4854,8 @@ namespace netxs::app::tile
                                  v_scroll_off_ptr, h_scroll_off_ptr,
                                  hover_vsb_ptr, hover_hsb_ptr,
                                  dragging_vsb_ptr, dragging_hsb_ptr,
-                                 list_h_scroll_off_ptr, ovl_id))
+                                 list_h_scroll_off_ptr, ovl_id,
+                                 enter_mode_ptr, hover_btn_ptr, cmd_flags))
                             {
                                 static constexpr auto cb_bg              = command_bar::bg;
                                 static constexpr auto cb_surface         = command_bar::surface;
@@ -4902,12 +4915,37 @@ namespace netxs::app::tile
                                 auto  list_rows         = l.list_rows;
                                 auto  v_scroll_off      = l.v_scroll;
                                 auto  h_scroll_off      = l.h_scroll;
+
+                                // Pickapp-only Enter-mode buttons in the input row.
+                                // Visible only when the session opts into both split and
+                                // replace shortcuts (focus::pickapp path).  Each button is
+                                // 3 cells wide (pad + glyph + pad), three buttons total
+                                // occupy 9 cells anchored to the right edge of the entry
+                                // row (just before vsb_x).  Hidden whenever the entry
+                                // would be left with fewer than 4 input cells (responsive
+                                // degradation: all three buttons disappear together).
+                                static constexpr auto enter_btns_w     = si32{ 9 };  // 3 buttons × 3 cells each
+                                static constexpr auto enter_btn_gap    = si32{ 1 };  // gap between input text and buttons
+                                static constexpr auto enter_btns_total = si32{ enter_btns_w + enter_btn_gap }; // = 10
+                                static constexpr auto enter_btn_w      = si32{ 3 };
+                                static constexpr auto enter_min_input  = si32{ 4 };
+                                auto pickapp_caps      = (cmd_flags & command_bar::flags::allow_split)
+                                                      && (cmd_flags & command_bar::flags::allow_replace);
+                                auto enter_btns_show   = pickapp_caps
+                                                      && entry_disp_w >= enter_min_input + enter_btns_total;
+                                auto enter_btns_x0     = dlg_x + dlg_w - 1 - enter_btns_w; // leftmost button column
+                                auto enter_btn_plus_cx = enter_btns_x0 + 1;                // [+] center
+                                auto enter_btn_pipe_cx = enter_btns_x0 + 4;                // [|] center
+                                auto enter_btn_dash_cx = enter_btns_x0 + 7;                // [-] center
+                                auto entry_disp_w_eff  = enter_btns_show ? entry_disp_w - enter_btns_total
+                                                                          : entry_disp_w;
                                 if (h_scroll_off > caret_cp) h_scroll_off = caret_cp;
-                                if (caret_cp - h_scroll_off >= entry_disp_w)
+                                if (caret_cp - h_scroll_off >= entry_disp_w_eff)
                                 {
-                                    h_scroll_off = caret_cp - entry_disp_w + 1;
+                                    h_scroll_off = caret_cp - entry_disp_w_eff + 1;
                                 }
-                                h_scroll_off = std::clamp(h_scroll_off, si32{ 0 }, l.max_hscroll);
+                                auto max_hscroll_eff = std::max(si32{ 0 }, query_len - entry_disp_w_eff + 1);
+                                h_scroll_off = std::clamp(h_scroll_off, si32{ 0 }, max_hscroll_eff);
                                 *caret_cp_ptr     = caret_cp;
                                 *h_scroll_off_ptr = h_scroll_off;
 
@@ -4958,10 +4996,10 @@ namespace netxs::app::tile
                                     });
                                     // Query text (h-scrolled).
                                     auto q_x = inner_x + 2;
-                                    put_str_skipped(q_x, entry_y, query, cb_text, cb_surface, entry_disp_w, h_scroll_off);
+                                    put_str_skipped(q_x, entry_y, query, cb_text, cb_surface, entry_disp_w_eff, h_scroll_off);
                                     // Block cursor at the visible caret position.
                                     auto cursor_vis_x = caret_cp - h_scroll_off;
-                                    if (cursor_vis_x >= 0 && cursor_vis_x < entry_disp_w)
+                                    if (cursor_vis_x >= 0 && cursor_vis_x < entry_disp_w_eff)
                                     {
                                         parent_canvas.fill(rect{{ q_x + cursor_vis_x, entry_y }, { 1, 1 }}, [=, ovl_id = ovl_id](cell& c)
                                         {
@@ -4969,10 +5007,48 @@ namespace netxs::app::tile
                                             if (c.txt().empty() || c.txt() == " ") c.txt(whitespace);
                                         });
                                     }
-                                    parent_canvas.fill(rect{{ q_x, entry_y }, { entry_disp_w, 1 }}, [=, ovl_id = ovl_id](cell& c)
+                                    parent_canvas.fill(rect{{ q_x, entry_y }, { entry_disp_w_eff, 1 }}, [=, ovl_id = ovl_id](cell& c)
                                     {
                                         c.und(unln::line).unc(0).link(ovl_id);
                                     });
+
+                                    // Pickapp-only Enter-mode buttons: [+] [|] [-] anchored
+                                    // to the right side of the input row.  Each button is
+                                    // a 3-cell hitbox (pad/glyph/pad); the active one is
+                                    // drawn with the command-bar selection background to
+                                    // mirror find-bar's "active radio" appearance.
+                                    if (enter_btns_show)
+                                    {
+                                        auto enter_mode = *enter_mode_ptr;
+                                        auto hover_btn  = *hover_btn_ptr;
+                                        auto draw_mode_btn = [&](si32 center_x, view glyph, si32 mode)
+                                        {
+                                            auto active = enter_mode == mode;
+                                            auto hov    = hover_btn == mode;
+                                            auto bg     = active ? command_bar::sel_bg
+                                                       : hov     ? command_bar::scroll_hover
+                                                       :           command_bar::surface;
+                                            auto fg     = active ? command_bar::sel_fg
+                                                       :           command_bar::text_fg;
+                                            auto sp     = text{ " " };
+                                            auto g      = text{ glyph };
+                                            auto lx     = center_x - 1; // leftmost cell of 3-cell button
+                                            for (auto k = si32{ 0 }; k < enter_btn_w; ++k)
+                                            {
+                                                auto cx = lx + k;
+                                                auto& ch = (k == 1) ? g : sp;
+                                                parent_canvas.fill(rect{{ cx, entry_y }, { 1, 1 }},
+                                                    [=, ovl_id = ovl_id](cell& c)
+                                                    {
+                                                        c.bgc(bg).fgc(fg).txt(ch).link(ovl_id);
+                                                        c.und(unln::none).unc(0);
+                                                    });
+                                            }
+                                        };
+                                        draw_mode_btn(enter_btn_plus_cx, "+", 1); // ReRunApplication
+                                        draw_mode_btn(enter_btn_pipe_cx, "|", 2); // SplitPane(0) horizontal
+                                        draw_mode_btn(enter_btn_dash_cx, "-", 3); // SplitPane(1) vertical
+                                    }
                                 }
 
                                 // Row 1: lower separator ▀ (fg = entry bg, bg = list bg).
@@ -5094,6 +5170,7 @@ namespace netxs::app::tile
                             ovl.on(tier::mouserelease, input::key::MouseMove,
                                 [cmd_list, query_ptr, v_scroll_off_ptr,
                                  hover_row_ptr, hover_vsb_ptr, hover_hsb_ptr,
+                                 hover_btn_ptr, cmd_flags,
                                  list_h_scroll_off_ptr, h_scroll_off_ptr,
                                  sel_idx_ptr, kbd_lock_coord_ptr, popup_ready_ptr,
                                  overlay_shadow](hids& gear)
@@ -5132,6 +5209,23 @@ namespace netxs::app::tile
                                 auto new_hover_row = si32{ -1 };
                                 auto new_hover_vsb = faux;
                                 auto new_hover_hsb = faux;
+                                auto new_hover_btn = si32{ 0 };
+
+                                // Pickapp Enter-mode buttons: hit-test the right-anchored
+                                // 9-cell strip on the input row.  Only meaningful when the
+                                // session opted into both split and replace shortcuts.
+                                auto pickapp_caps = (cmd_flags & command_bar::flags::allow_split)
+                                                 && (cmd_flags & command_bar::flags::allow_replace);
+                                auto enter_btns_show = pickapp_caps
+                                                    && l.entry_disp_w >= 4 + 10;
+                                if (enter_btns_show && my == l.dlg_y)
+                                {
+                                    auto x0 = l.dlg_x + l.dlg_w - 1 - 9;
+                                    auto rel = mx - x0;
+                                    if (rel >= 0 && rel < 3) new_hover_btn = 1;      // [+]
+                                    else if (rel >= 3 && rel < 6) new_hover_btn = 2; // [|]
+                                    else if (rel >= 6 && rel < 9) new_hover_btn = 3; // [-]
+                                }
 
                                 if (mx == l.vsb_x && my >= l.dlg_y + 2 && my <= l.dlg_y + 2 + l.list_rows)
                                 {
@@ -5153,10 +5247,12 @@ namespace netxs::app::tile
 
                                 auto changed = (new_hover_row != *hover_row_ptr)
                                             || (new_hover_vsb != *hover_vsb_ptr)
-                                            || (new_hover_hsb != *hover_hsb_ptr);
+                                            || (new_hover_hsb != *hover_hsb_ptr)
+                                            || (new_hover_btn != *hover_btn_ptr);
                                 *hover_row_ptr = new_hover_row;
                                 *hover_vsb_ptr = new_hover_vsb;
                                 *hover_hsb_ptr = new_hover_hsb;
+                                *hover_btn_ptr = new_hover_btn;
                                 // Update the unified active row when mouse genuinely moves to a list item.
                                 // (The kbd-lock guard above ensures stationary cursors cannot trigger this.)
                                 if (new_hover_row >= 0 && new_hover_row != *sel_idx_ptr)
@@ -5169,12 +5265,13 @@ namespace netxs::app::tile
 
                             // MouseLeave: clear all hover state.
                             ovl.on(tier::mouserelease, input::key::MouseLeave,
-                                [hover_row_ptr, hover_vsb_ptr, hover_hsb_ptr, overlay_shadow](hids& /*gear*/)
+                                [hover_row_ptr, hover_vsb_ptr, hover_hsb_ptr, hover_btn_ptr, overlay_shadow](hids& /*gear*/)
                             {
-                                auto changed = (*hover_row_ptr >= 0) || *hover_vsb_ptr || *hover_hsb_ptr;
+                                auto changed = (*hover_row_ptr >= 0) || *hover_vsb_ptr || *hover_hsb_ptr || (*hover_btn_ptr != 0);
                                 *hover_row_ptr = -1;
                                 *hover_vsb_ptr = faux;
                                 *hover_hsb_ptr = faux;
+                                *hover_btn_ptr = 0;
                                 if (changed)
                                     if (auto p = overlay_shadow.lock()) p->base::deface();
                             });
@@ -5199,6 +5296,7 @@ namespace netxs::app::tile
                                  hover_row_ptr, dragging_vsb_ptr, dragging_hsb_ptr,
                                  dismiss_visual, dismiss_hook, overlay_shadow,
                                  dispatch_script,
+                                 enter_mode_ptr, cmd_flags,
                                  boss_shadow](hids& gear)
                             {
                                 if (*dragging_vsb_ptr || *dragging_hsb_ptr) return; // Drag already handled.
@@ -5231,6 +5329,30 @@ namespace netxs::app::tile
                                 auto mx = (si32)gear.coord.x;
                                 auto my = (si32)gear.coord.y;
 
+                                // Click on a pickapp Enter-mode button — toggle radio state.
+                                // Clicking the already-active button cancels it (back to
+                                // enter_mode_none).  Buttons sit on the input row only and
+                                // never dismiss the overlay.
+                                auto pickapp_caps = (cmd_flags & command_bar::flags::allow_split)
+                                                 && (cmd_flags & command_bar::flags::allow_replace);
+                                auto enter_btns_show = pickapp_caps && l.entry_disp_w >= 4 + 10;
+                                if (enter_btns_show && my == dlg_y)
+                                {
+                                    auto x0 = dlg_x + dlg_w - 1 - 9;
+                                    auto rel = mx - x0;
+                                    auto clicked = si32{ 0 };
+                                    if      (rel >= 0 && rel < 3) clicked = 1; // [+]
+                                    else if (rel >= 3 && rel < 6) clicked = 2; // [|]
+                                    else if (rel >= 6 && rel < 9) clicked = 3; // [-]
+                                    if (clicked)
+                                    {
+                                        *enter_mode_ptr = (*enter_mode_ptr == clicked) ? 0 : clicked;
+                                        ovl_ptr->base::deface();
+                                        gear.dismiss();
+                                        return;
+                                    }
+                                }
+
                                 // Click on a list item — execute its script.
                                 if (!filtered.empty()
                                  && my >= dlg_y + 2 && my < dlg_y + 2 + n_visible
@@ -5242,6 +5364,19 @@ namespace netxs::app::tile
                                     {
                                         auto cmd_idx = filtered[(size_t)fi];
                                         auto script = (*cmd_list)[cmd_idx].script;
+                                        auto mode = *enter_mode_ptr;
+                                        if (mode == 1 && (cmd_flags & command_bar::flags::allow_replace))
+                                        {
+                                            script += "\nvtm.tile.ReRunApplication();";
+                                        }
+                                        else if (mode == 2 && (cmd_flags & command_bar::flags::allow_split))
+                                        {
+                                            script += "\nvtm.tile.SplitPane(0);";
+                                        }
+                                        else if (mode == 3 && (cmd_flags & command_bar::flags::allow_split))
+                                        {
+                                            script += "\nvtm.tile.SplitPane(1);";
+                                        }
                                         dismiss_visual();
                                         dismiss_hook();
                                         dispatch_script(script, gear);
@@ -5486,6 +5621,7 @@ namespace netxs::app::tile
                                kbd_lock_coord_ptr,
                                overlay_shadow, boss_shadow,
                                dispatch_script, cmd_flags,
+                               enter_mode_ptr,
                                dismiss_visual, dismiss_hook, pending_unhook](hids& gear) mutable
                         {
                             if (gear.payload != input::keybd::type::keypress
@@ -5520,12 +5656,22 @@ namespace netxs::app::tile
                             };
 
                             // Helper: compute entry_disp_w from overlay area.
+                            // In pickapp sessions the input row hosts a 9-cell button
+                            // strip on its right side; whenever the strip is wide enough
+                            // to coexist with at least 4 input cells we subtract those
+                            // 9 cells so caret-tracking and h-scroll honor the visible
+                            // input width.  The threshold mirrors the render path's
+                            // responsive-degradation rule.
                             auto get_entry_disp_w = [&]() -> si32
                             {
                                 if (!ovl_ptr) return 60; // Fallback.
                                 auto full_w = ovl_ptr->base::area().size.x;
                                 auto dw = std::min(command_bar::dlg_w_max, full_w - 4);
-                                return std::max(1, dw - 4);
+                                auto edw = std::max(1, dw - 4);
+                                auto pickapp_caps = (cmd_flags & command_bar::flags::allow_split)
+                                                 && (cmd_flags & command_bar::flags::allow_replace);
+                                if (pickapp_caps && edw >= 4 + 10) edw -= 10;
+                                return edw;
                             };
 
                             auto keep_caret_visible = [&]
@@ -5594,8 +5740,9 @@ namespace netxs::app::tile
                             }
 
                             auto k = gear.keybd::generic();
-                            auto ctrl = !!(gear.ctlstat & hids::anyCtrl);
-                            auto alt  = !!(gear.ctlstat & hids::anyAlt);
+                            auto ctrl  = !!(gear.ctlstat & hids::anyCtrl);
+                            auto alt   = !!(gear.ctlstat & hids::anyAlt);
+                            auto shift = !!(gear.ctlstat & hids::anyShift);
 
                             auto move_selection = [&](si32 delta)
                             {
@@ -5671,7 +5818,33 @@ namespace netxs::app::tile
                                 return;
                             }
 
-                            // Enter — execute selected command and dismiss.
+                            // Tab / Shift+Tab — cycle enter-mode buttons ([+]/[|]/[-]/none).
+                            // Only active in pickapp context (both allow_split and allow_replace
+                            // must be set).  No Ctrl/Alt modifier accepted to avoid stealing
+                            // common terminal shortcuts.
+                            if (!ctrl && !alt && k == input::key::Tab
+                             && (cmd_flags & command_bar::flags::allow_split)
+                             && (cmd_flags & command_bar::flags::allow_replace))
+                            {
+                                auto& mode = *enter_mode_ptr;
+                                if (shift)
+                                    mode = (mode == 0) ? 3 : mode - 1; // 0→3→2→1→0
+                                else
+                                    mode = (mode + 1) % 4;             // 0→1→2→3→0
+                                if (ovl_ptr) ovl_ptr->base::deface();
+                                gear.set_handled(faux);
+                                return;
+                            }
+
+                            // Enter — execute selected command and dismiss.  When a
+                            // pickapp Enter-mode button ([+]/[|]/[-]) is currently
+                            // selected, postfix the corresponding tile script so plain
+                            // Enter mirrors the Ctrl+R / Ctrl+V / Ctrl+S shortcuts that
+                            // would have produced the same effect via keyboard alone.
+                            // The mode is honored only when the session is also
+                            // entitled to the underlying shortcut (allow_split for the
+                            // split modes, allow_replace for rerun); otherwise the mode
+                            // is silently ignored, matching the existing shortcut gates.
                             if (k == input::key::KeyEnter || k == input::key::NumpadEnter)
                             {
                                 auto filtered = build_filtered();
@@ -5679,6 +5852,19 @@ namespace netxs::app::tile
                                 {
                                     auto cmd_idx = filtered[(size_t)*sel_idx_ptr];
                                     auto script = (*cmd_list)[cmd_idx].script;
+                                    auto mode = *enter_mode_ptr;
+                                    if (mode == 1 && (cmd_flags & command_bar::flags::allow_replace))
+                                    {
+                                        script += "\nvtm.tile.ReRunApplication();";
+                                    }
+                                    else if (mode == 2 && (cmd_flags & command_bar::flags::allow_split))
+                                    {
+                                        script += "\nvtm.tile.SplitPane(0);";
+                                    }
+                                    else if (mode == 3 && (cmd_flags & command_bar::flags::allow_split))
+                                    {
+                                        script += "\nvtm.tile.SplitPane(1);";
+                                    }
                                     dismiss_visual();
                                     dismiss_hook();
                                     dispatch_script(script, gear);
