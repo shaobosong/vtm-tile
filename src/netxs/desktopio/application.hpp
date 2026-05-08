@@ -807,6 +807,11 @@ namespace netxs::app::shared
                         boss.template shader<tier::anycast>(cell::shaders::color(c1), e2::form::state::keybd::command::close);
                         boss.on(tier::mouserelease, input::key::LeftClick, [&](hids& gear)
                         {
+                            // Focus the pane so its menubar shows active palette during confirmation.
+                            if (auto win_ptr = boss.base::riseup(tier::request, e2::form::prop::window::statesrc))
+                            {
+                                pro::focus::set(win_ptr, gear.id, solo::on);
+                            }
                             auto backup = boss.This(); //todo revise backup
                             boss.base::signal(tier::anycast, e2::form::proceed::quit::one, faux); // fast=faux: Show closing process.
                             gear.break_click_chain();
