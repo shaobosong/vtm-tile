@@ -45,6 +45,76 @@ struct consrv
     { }
     void cleanup(bool io_log)
     {
+        // Fast bounded close path (modeled after Windows Terminal's
+        // ConptyConnection::Close): give a well-behaved shell a brief grace
+        // period to react to the CTRL_CLOSE_EVENT that sighup() already
+        // broadcast, then move on. We do NOT wait for the child to exit.
+        //
+        // Normal case (cmd/PowerShell with no CTRL_CLOSE-swallowing child):
+        // the shell exits in well under detach_deadline ms, so this path
+        // costs near-zero.
+        //
+        // Pathological case (nvim, far manager, ... swallowing CTRL_CLOSE
+        // under PowerShell): the foreground client never detaches and
+        // PowerShell stays blocked on it. Waiting longer doesn't help, so
+        // after the grace period we force-terminate the descendant tree
+        // (so vtm-tile doesn't leave the orphans behind) and stop waiting.
+        // We deliberately avoid locking events.locker: the api server
+        // thread holds it while serving a client's blocking ReadConsole.
+        if (prochndl != os::invalid_fd)
+        {
+            static constexpr auto detach_deadline = 250u; // ms
+            auto rc = ::WaitForSingleObject(prochndl, detach_deadline);
+            if (rc != WAIT_OBJECT_0)
+            {
+                if (io_log) log("%%Detach deadline exceeded; force-terminating stuck child and descendants", prompt::vtty);
+                auto root_pid = (DWORD)proc_pid;
+                auto victims = std::vector<DWORD>{};
+                if (root_pid)
+                {
+                    auto snap = ::CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+                    if (snap != INVALID_HANDLE_VALUE)
+                    {
+                        // Build pid->ppid map.
+                        auto procs = std::vector<std::pair<DWORD, DWORD>>{};
+                        auto pe = PROCESSENTRY32W{ sizeof(PROCESSENTRY32W) };
+                        if (::Process32FirstW(snap, &pe))
+                        {
+                            do { procs.emplace_back(pe.th32ProcessID, pe.th32ParentProcessID); }
+                            while (::Process32NextW(snap, &pe));
+                        }
+                        ::CloseHandle(snap);
+                        // BFS descendants of root_pid.
+                        victims.push_back(root_pid);
+                        for (size_t i = 0; i < victims.size(); ++i)
+                        {
+                            auto cur = victims[i];
+                            for (auto& [pid, ppid] : procs)
+                            {
+                                if (ppid == cur && pid != root_pid
+                                    && std::find(victims.begin(), victims.end(), pid) == victims.end())
+                                {
+                                    victims.push_back(pid);
+                                }
+                            }
+                        }
+                    }
+                    else victims.push_back(root_pid);
+                }
+                // Fire-and-forget TerminateProcess on the whole tree; do not
+                // wait for prochndl afterwards — the waitexit thread's
+                // io::select(prochndl) will return on its own once the
+                // kernel signals the now-terminated process.
+                for (auto pid : victims)
+                {
+                    if (auto h = ::OpenProcess(PROCESS_TERMINATE, FALSE, pid))
+                    {
+                        ::TerminateProcess(h, 1);
+                        ::CloseHandle(h);
+                    }
+                }
+            }
+        }
         if (waitexit.joinable())
         {
             if (io_log) log("%%Process waiter joining %%", prompt::vtty, utf::to_hex_0x(waitexit.get_id()));
@@ -828,8 +898,20 @@ struct impl : consrv
         }
         void stop()
         {
-            if (ostask.joinable()) ostask.join();
-            auto lock = std::unique_lock{ locker };
+            // ostask runs nt::ConsoleTask() against attached clients; if a
+            // client (e.g. nvim) is hung or the call is stuck in the kernel,
+            // ostask.join() would block shutdown forever. Bounded wait +
+            // detach lets vtm exit cleanly.
+            if (ostask.joinable())
+            {
+                auto th = (HANDLE)ostask.native_handle();
+                ::CancelSynchronousIo(th);
+                if (::WaitForSingleObject(th, 200) == WAIT_OBJECT_0) ostask.join();
+                else                                                 ostask.detach();
+            }
+            auto lock = std::unique_lock{ locker, std::try_to_lock };
+            // If locker is contended (server thread mid-api call), proceed
+            // without it: we are tearing down the process anyway.
             closed.exchange(true);
             signal.notify_all();
         }
@@ -5054,7 +5136,21 @@ struct impl : consrv
     }
     si32 wait()
     {
-        allout.wait(faux); //todo set timeout or something to avoid deadlocks (far manager deadlocking here)
+        // Fast close (modeled after Windows Terminal): we do NOT wait for
+        // attached clients to detach — by the time we get here, sighup()
+        // has broadcast CTRL_CLOSE_EVENT and cleanup() has either let the
+        // child exit gracefully (within 500 ms) or force-terminated the
+        // descendant tree. Either way, hanging on `allout` is pointless.
+        //
+        // We avoid taking events.locker anywhere on this path: the api
+        // server thread can hold it indefinitely while serving a client's
+        // blocking ReadConsole, and waiting on it would re-create the
+        // deadlock the original `allout.wait(faux)` produced.
+        if (!allout)
+        {
+            allout.exchange(true);
+            allout.notify_all();
+        }
         auto procstat = sigt{};
         if (::GetExitCodeProcess(prochndl, &procstat) && (procstat == STILL_ACTIVE || procstat == nt::status::control_c_exit))
         {
@@ -5066,12 +5162,24 @@ struct impl : consrv
         }
         os::close(prochndl);
         proc_pid = {};
-        events.stop();
+        // Close condrv so the api server thread's blocking
+        // nt::ioctl(read_io, condrv, ...) returns. Closing the handle from
+        // another thread does NOT cancel synchronous I/O on the issuing
+        // thread, so we additionally call CancelSynchronousIo on the
+        // server thread, give it a brief moment to wind down, then detach
+        // as a last resort so vtm-tile can exit promptly.
         os::close(condrv);
         os::close(refdrv);
+        if (server.joinable())
+        {
+            auto th = (HANDLE)server.native_handle();
+            ::CancelSynchronousIo(th);
+            if (::WaitForSingleObject(th, 200) == WAIT_OBJECT_0) server.join();
+            else                                                 server.detach();
+        }
+        events.stop();
         signal.reset();
         if (window.joinable()) window.join();
-        if (server.joinable()) server.join();
         log(prompt, "Console API server shut down");
         return procstat;
     }

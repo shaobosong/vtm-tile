@@ -20,6 +20,7 @@
     #include <Psapi.h>               // ::GetModuleFileNameEx
     #include <winternl.h>            // ::NtOpenFile
     #include <Sddl.h>                // ::ConvertSidToStringSidA()
+    #include <TlHelp32.h>            // ::CreateToolhelp32Snapshot, PROCESSENTRY32W
     #pragma comment(lib, "User32")
     #pragma comment(lib, "UserEnv")
     #pragma comment(lib, "AdvAPI32") // ::StartService() for arm arch
@@ -4570,11 +4571,6 @@ namespace netxs::os
             {
                 if (stdwrite.joinable())
                 {
-                    //if (attached.exchange(faux)) // Detach child process and forget.
-                    //{
-                    //    writesyn.notify_one(); // Interrupt writing thread.
-                    //    termlink->abort(termlink->stdinput); // Interrupt reading thread.
-                    //}
                     attached.exchange(faux);
                     writesyn.notify_one();
                     if (io_log) log(prompt::vtty, "Writing thread joining", ' ', utf::to_hex_0x(stdwrite.get_id()));
