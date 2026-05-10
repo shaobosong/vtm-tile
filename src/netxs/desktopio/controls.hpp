@@ -2224,12 +2224,21 @@ namespace netxs::ui
                         }
                     };
                 }
-                //todo unify. pro::focus: Set unique focus on left click. Set group focus on Ctrl+LeftClick.
-                if (focus_on_click) boss.on(tier::mouserelease, input::key::LeftClick, memo, [&](hids& gear)
+                //todo unify. pro::focus: solo focus on LeftDown (press), group focus on Ctrl+LeftClick (release).
+                // Solo is on press so the close (×) button keeps LeftClick. The ctrl path must not dismiss LeftDown, otherwise the synthesized LeftClick never reaches the group-toggle handler below.
+                if (focus_on_click)
                 {
-                    if (!gear) return;
-                    if (gear.meta(hids::anyCtrl))
+                    boss.on(tier::mouserelease, input::key::LeftDown, memo, [&](hids& gear)
                     {
+                        if (!gear) return;
+                        if (gear.meta(hids::anyCtrl)) return;
+                        pro::focus::set(boss.This(), gear.id, solo::on);
+                        gear.dismiss();
+                    });
+                    boss.on(tier::mouserelease, input::key::LeftClick, memo, [&](hids& gear)
+                    {
+                        if (!gear) return;
+                        if (!gear.meta(hids::anyCtrl)) return;
                         if (pro::focus::test(boss, gear))
                         {
                             pro::focus::off(boss.This(), gear.id);
@@ -2238,13 +2247,9 @@ namespace netxs::ui
                         {
                             pro::focus::set(boss.This(), gear.id, solo::off);
                         }
-                    }
-                    else
-                    {
-                        pro::focus::set(boss.This(), gear.id, solo::on);
-                    }
-                    gear.dismiss();
-                });
+                        gear.dismiss();
+                    });
+                }
                 // pro::focus: Return focus owner ptr.
                 boss.LISTEN(tier::request, e2::config::plugins::focus::owner, owner_ptr, memo)
                 {

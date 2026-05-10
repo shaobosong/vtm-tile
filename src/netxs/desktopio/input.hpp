@@ -954,6 +954,11 @@ namespace netxs::input
         {
             auto modschanged = m_sys.ctlstat != m.ctlstat;
             m_sys.set(m);
+            if (prime == dot_mx) // First event ever: snap prime to coord so the delta logic below doesn't compute a sentinel-sized step and spuriously start a drag.
+            {
+                prime = m_sys.coordxy;
+                coord = m_sys.coordxy;
+            }
             if (auto prev_count = std::exchange(pressed_count, std::popcount((ui32)m.buttons)); prev_count != pressed_count)
             {
                 if (prev_count < pressed_count) fire(input::key::MouseDown); // Signal down/up with bttn_id=0 in order to update the pressed count for all objects under the event tree.
@@ -1907,13 +1912,16 @@ namespace netxs::input
             mouse::hzwhl = new_hzwhl;
             mouse::cause = new_cause;
             mouse::delta.set(new_delta);
-            mouse::dragged = new_dragged;
             mouse::pressxy = new_click;
-            auto saved_pressed = std::exchange(mouse::pressed, new_button_state); // Save/restore state to avoid double click leaks.
-            auto saved_bttn_id = std::exchange(mouse::bttn_id, new_bttn_id);      //
+            auto saved_dragged = std::exchange(mouse::dragged, new_dragged); // Save/restore: keep replay self-contained so it doesn't mutate the parent's update() state.
+            auto saved_pressed = std::exchange(mouse::pressed, new_button_state);
+            auto saved_bttn_id = std::exchange(mouse::bttn_id, new_bttn_id);
+            auto saved_swift   = mouse::swift;
             pass(tier::mouserelease, boss, owner.base::coor(), true);
             mouse::pressed = saved_pressed;
             mouse::bttn_id = saved_bttn_id;
+            mouse::dragged = saved_dragged;
+            mouse::swift   = saved_swift;
         }
         // hids: Notify about the number of mouse hovers.
         void notify_form_state(base& boss, feed enter_or_leave = feed::none)

@@ -66,4 +66,30 @@ if(Python3_FOUND)
         ENVIRONMENT "VTM_TILE_BINARY=$<TARGET_FILE:vtm-tile>"
         TIMEOUT 300
         LABELS "tui;tile;shutdown;regression")
+
+    # Regression test: pane focus must fire on LeftDown (press), not LeftClick
+    # (release).  Also verifies the × close button still fires on LeftClick.
+    add_test(NAME tile_leftdown_focus_test
+             COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test_tile_leftdown_focus.py")
+    set_tests_properties(tile_leftdown_focus_test PROPERTIES
+        ENVIRONMENT "VTM_TILE_BINARY=$<TARGET_FILE:vtm-tile>"
+        TIMEOUT 300
+        LABELS "tui;tile;focus;regression")
+
+    # Regression test: ctrl+LeftDown toggles pane in/out of the focus group.
+    add_test(NAME tile_ctrl_press_group_test
+             COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test_tile_ctrl_press_group.py")
+    set_tests_properties(tile_ctrl_press_group_test PROPERTIES
+        ENVIRONMENT "VTM_TILE_BINARY=$<TARGET_FILE:vtm-tile>"
+        TIMEOUT 300
+        LABELS "tui;tile;focus;group;regression")
+
+    # Regression test: ctrl+LeftDown on the tile gate menubar defocuses the whole
+    # gate; a second ctrl+LeftDown refocuses it and restores prior pane state.
+    add_test(NAME tile_ctrl_press_menubar_test
+             COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test_tile_ctrl_press_menubar.py")
+    set_tests_properties(tile_ctrl_press_menubar_test PROPERTIES
+        ENVIRONMENT "VTM_TILE_BINARY=$<TARGET_FILE:vtm-tile>"
+        TIMEOUT 300
+        LABELS "tui;tile;focus;gate;regression")
 endif()
