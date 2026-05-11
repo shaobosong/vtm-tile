@@ -1842,7 +1842,7 @@ namespace netxs::app::tile
                             boss.base::riseup(tier::release, e2::form::proceed::attach); // Restore the window before quit.
                             if (boss.count() <= 2 || boss.back() != item_ptr)
                             {
-                                item_ptr->base::signal(tier::release, e2::form::proceed::quit::one, fast);
+                                item_ptr->base::riseup(tier::release, e2::form::proceed::quit::one, fast);
                                 boss.bell::expire(); // Stop riseup: quit has been re-dispatched after maximize restore.
                                 return;
                             }
