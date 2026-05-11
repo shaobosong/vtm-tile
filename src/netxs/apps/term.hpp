@@ -50,26 +50,33 @@ namespace netxs::app::terminal
         };
         boss.LISTEN(tier::release, e2::form::upon::started, root_ptr, -, (appcfg))
         {
-            if (root_ptr) // root_ptr is empty when d_n_d.
+            if (!root_ptr) return; // root_ptr is empty when d_n_d.
+            // Wait until the viewport is at least 2 rows tall before forking
+            // the shell. dtvt applets receive a spawn_size snapshot before
+            // launch(), but the parent tile may still be reflowing and pass a
+            // 1-row bootstrap; the real size arrives shortly after via
+            // syswinsz. Forking the shell at the bootstrap width strands its
+            // first prompt line until a later deform happens to refresh it.
+            auto enqueue_start = [&boss, appcfg]() mutable
             {
-                if (boss.base::size()) // Already laid out (reflow happened before startup broadcast).
+                boss.base::enqueue([&boss, appcfg, backup = boss.This()](auto& /*widget*/) mutable
                 {
-                    boss.base::enqueue([&, appcfg, backup = boss.This()](ui::base& /*widget*/) mutable
-                    {
-                        boss.start_term(appcfg);
-                        backup.reset(); // Backup should dtored under the lock.
-                    });
-                }
-                else // Delay PTY startup until the first post-start layout pass,
-                {    // otherwise the shell sees the temporary bootstrap width.
-                    auto& startup_hook = boss.base::field(hook{});
-                    boss.LISTEN(tier::release, e2::area, new_area, startup_hook, (appcfg))
-                    {
-                        boss.start_term(appcfg);
-                        boss.base::unfield(startup_hook);
-                    };
-                }
+                    boss.start_term(appcfg);
+                    backup.reset(); // Backup should dtored under the lock.
+                });
+            };
+            if (boss.base::size().y > 1)
+            {
+                enqueue_start();
+                return;
             }
+            auto& startup_hook = boss.base::field(hook{});
+            boss.LISTEN(tier::release, e2::area, new_area, startup_hook, (enqueue_start))
+            {
+                if (new_area.size.y < 2) return;
+                enqueue_start();
+                boss.base::unfield(startup_hook);
+            };
         };
         boss.LISTEN(tier::anycast, e2::form::upon::started, root_ptr)
         {
