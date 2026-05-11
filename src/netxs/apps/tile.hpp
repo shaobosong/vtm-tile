@@ -3196,13 +3196,12 @@ namespace netxs::app::tile
                                         auto px = base_x + ws_count * thumb_stride;
                                         if (mx >= px && mx < px + plus_w)
                                         {
-                                            // Resolve the currently selected app, matching CreateWorkspace
-                                            // lua method behavior. The selectapp handler writes
-                                            // "tile.selected" on both the outer tile boss (object) and
-                                            // the active workspace veer. The overlay is attached to the
-                                            // wrapper (cake), so its parent chain does NOT reach `object`
-                                            // or the workspace veer; read the property directly from the
-                                            // currently active workspace veer instead.
+                                            // Resolve the currently selected app. All workspace veers
+                                            // share the same "tile.selected" value (kept in sync by the
+                                            // selectapp/setapp handlers), so reading from the current
+                                            // workspace veer gives the global selection. The overlay's
+                                            // parent chain does not reach the outer tile boss, so we read
+                                            // from the workspace veer directly.
                                             auto selected_override = text{};
                                             if (!workspaces_ptr->empty())
                                             {
@@ -6384,7 +6383,7 @@ namespace netxs::app::tile
                             }
                         });
                     };
-                    boss.LISTEN(tier::preview, app::tile::events::ui::selectapp, request)
+                    boss.LISTEN(tier::preview, app::tile::events::ui::selectapp, request, -, (workspaces_ptr))
                     {
                         auto& gear = request.gear;
                         auto data = get_apps_data(boss);
@@ -6401,12 +6400,12 @@ namespace netxs::app::tile
                             auto new_selected_id = data.ids[index];
                             auto new_label = data.labels[index];
                             boss.base::property("tile.selected") = new_selected_id;
-                            root_veer().base::property("tile.selected") = new_selected_id;
+                            for (auto& ws : *workspaces_ptr) ws->base::property("tile.selected") = new_selected_id;
                             boss.base::broadcast(tier::release, e2::form::prop::any, new_label);
                         }
                         gear.set_handled();
                     };
-                    boss.LISTEN(tier::preview, app::tile::events::ui::setapp, new_id)
+                    boss.LISTEN(tier::preview, app::tile::events::ui::setapp, new_id, -, (workspaces_ptr))
                     {
                         auto data = get_apps_data(boss);
                         auto found = false;
@@ -6422,7 +6421,7 @@ namespace netxs::app::tile
                         }
                         if (!found && data.ids.empty()) return;
                         boss.base::property("tile.selected") = new_id;
-                        root_veer().base::property("tile.selected") = new_id;
+                        for (auto& ws : *workspaces_ptr) ws->base::property("tile.selected") = new_id;
                         boss.base::broadcast(tier::release, e2::form::prop::any, new_label);
                     };
                     boss.LISTEN(tier::preview, app::tile::events::ui::selected_app, state_ptr)
