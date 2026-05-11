@@ -1941,7 +1941,7 @@ namespace netxs::app::tile
                             boss.attach(app);
                             auto root_ptr = what.applet;
                             app->base::broadcast(tier::anycast, e2::form::upon::started, root_ptr);
-                            pro::focus::set(app, gear.id, solo::on);
+                            pro::focus::set(app, gear.id, solo::off);
                         }
                     };
                     //todo unify, demo limits
