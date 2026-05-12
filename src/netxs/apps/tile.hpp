@@ -5346,16 +5346,35 @@ namespace netxs::app::tile
                                     if (auto p = overlay_shadow.lock()) p->base::deface();
                             });
 
-                            // MouseWheel: scroll the command list.
+                            // MouseWheel: scroll the command list vertically, or move
+                            // the HSB thumb horizontally when the cursor is over the HSB track.
                             ovl.on(tier::mouserelease, input::key::MouseWheel,
-                                [cmd_list, query_ptr, v_scroll_off_ptr, overlay_shadow](hids& gear)
+                                [cmd_list, query_ptr, v_scroll_off_ptr, h_scroll_off_ptr,
+                                 list_h_scroll_off_ptr, hover_hsb_ptr, overlay_shadow](hids& gear)
                             {
                                 auto ovl_ptr = overlay_shadow.lock();
                                 if (!ovl_ptr) return;
                                 auto data = command_bar::build_model(*cmd_list, *query_ptr);
-                                auto delta  = gear.whlsi < 0 ? 1 : -1;
-                                auto max_vs = std::max(0, (si32)data.filtered.size() - command_bar::max_items);
-                                *v_scroll_off_ptr = std::clamp(*v_scroll_off_ptr + delta, 0, max_vs);
+                                if (*hover_hsb_ptr)
+                                {
+                                    auto l = command_bar::layout_of(ovl_ptr->base::area().size,
+                                                                     data,
+                                                                     (si32)utf::length(*query_ptr),
+                                                                     *v_scroll_off_ptr,
+                                                                     *h_scroll_off_ptr,
+                                                                     *list_h_scroll_off_ptr);
+                                    if (l.ok && l.has_hsb)
+                                    {
+                                        auto delta = -gear.whlsi * 4;
+                                        *list_h_scroll_off_ptr = std::clamp(l.list_h_scroll + delta, 0, l.max_list_hscroll);
+                                    }
+                                }
+                                else
+                                {
+                                    auto delta  = gear.whlsi < 0 ? 1 : -1;
+                                    auto max_vs = std::max(0, (si32)data.filtered.size() - command_bar::max_items);
+                                    *v_scroll_off_ptr = std::clamp(*v_scroll_off_ptr + delta, 0, max_vs);
+                                }
                                 ovl_ptr->base::deface();
                                 gear.dismiss();
                             });
