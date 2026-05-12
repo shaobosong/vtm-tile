@@ -285,6 +285,34 @@ namespace netxs::app::tile
         return item_ptr;
     }
 
+    // Resolve the focus target for a pane selected from the workspace preview
+    // popup. If the target workspace is currently zoomed, restore the zoom
+    // first so the selected pane becomes visible (unless the selected pane
+    // is the zoom source itself, in which case focus the already-shown zoomed
+    // applet directly). Falls through to get_slot_focus_target otherwise.
+    static auto resolve_focus_target_in_workspace(netxs::sptr<ui::veer> const& ws_veer, ui::sptr const& slot_veer)
+    {
+        if (ws_veer && ws_veer->count() > 2) // Zoomed: subset = [placeholder, layout, zoomed_item].
+        {
+            auto zoomed = ws_veer->base::subset.back();
+            if (zoomed)
+            {
+                auto source_slot = zoomed->base::property<ui::wptr>("zoom.source_slot").lock();
+                if (source_slot && source_slot == slot_veer)
+                {
+                    if (auto fork_ptr = std::dynamic_pointer_cast<ui::fork>(zoomed))
+                    {
+                        if (auto applet = fork_ptr->get(slot::_2)) return applet;
+                    }
+                    return zoomed;
+                }
+            }
+            // Different pane selected — restore (unzoom) so it becomes visible.
+            ws_veer->base::signal(tier::release, e2::form::proceed::attach, ui::sptr{});
+        }
+        return get_slot_focus_target(slot_veer);
+    }
+
     // Property name on the tile boss that stores a resolver mapping a gear id
     // to the currently focused applet inside the active workspace. Installed
     // by the tile boss during construction; consumed by the vtm.terminal Lua
@@ -1756,6 +1784,9 @@ namespace netxs::app::tile
                             {
                                 auto fullscreen_item = boss.back();
                                 auto& fullscreen_inst = *fullscreen_item;
+                                // Remember the source slot so the workspace preview popup can
+                                // render the zoomed pane in its original spatial location.
+                                fullscreen_item->base::template property<wptr>("zoom.source_slot") = boss.This();
                                 pro::focus::set(fullscreen_item, gear.id, solo::on, true);
                                 boss.base::riseup(tier::release, e2::form::proceed::attach, fullscreen_item);
                                 fullscreen_item->LISTEN(tier::release, e2::form::size::restore, p, oneoff)
@@ -2540,6 +2571,48 @@ namespace netxs::app::tile
                 }
             };
 
+            // Helper: drill down from a pane's top item to the actual content widget,
+            // skipping the per-tile title bar (app_window's slot::_1) and any applet-
+            // internal menu bar (a thin fork::Y strip at the top/bottom). Walks through
+            // single-child containers, takes back() of veers, and shortcuts forks where
+            // one side is a small strip (<= 3 cells along the fork axis, or < 25 % of
+            // the fork's span — typical for title bars, menu bars and 1-row scrollbars).
+            // Stops at leaves or balanced forks (real content splits).
+            auto find_content_fn = [](auto& self, sptr widget) -> sptr
+            {
+                if (!widget) return widget;
+                auto& subset = widget->base::subset;
+                if (subset.empty()) return widget;
+                if (auto fork_ptr = std::dynamic_pointer_cast<ui::fork>(widget))
+                {
+                    auto child1 = fork_ptr->get(slot::_1);
+                    auto child2 = fork_ptr->get(slot::_2);
+                    if (child1 && child2)
+                    {
+                        auto orientation = std::get<0>(fork_ptr->get_config());
+                        auto sz1 = (orientation == axis::Y) ? child1->base::area().size.y : child1->base::area().size.x;
+                        auto sz2 = (orientation == axis::Y) ? child2->base::area().size.y : child2->base::area().size.x;
+                        auto total = sz1 + sz2;
+                        if (total > 0)
+                        {
+                            auto minor = std::min(sz1, sz2);
+                            if (minor * 4 < total || minor <= 3)
+                            {
+                                return self(self, sz1 < sz2 ? child2 : child1);
+                            }
+                        }
+                    }
+                    return widget;
+                }
+                if (auto veer_ptr = std::dynamic_pointer_cast<ui::veer>(widget))
+                {
+                    if (auto back = veer_ptr->back()) return self(self, back);
+                    return widget;
+                }
+                if (subset.size() == 1) return self(self, subset.front());
+                return widget;
+            };
+
             // Popup layout constants.
             static constexpr auto popup_ws_thumb_ratio_w = si32{ 5 };   // Thumbnail aspect ratio width.
             static constexpr auto popup_ws_thumb_ratio_h = si32{ 2 };   // Thumbnail aspect ratio height.
@@ -2659,7 +2732,7 @@ namespace netxs::app::tile
                 // and by the `vtm.tile.OpenWorkspacePopup()` Lua method.
                 *open_workspace_popup_fn =
                     [workspaces_ptr, current_ws_index_ptr, switch_workspace, create_workspace,
-                     ws_popup_active, wrapper_shadow, refresh_status_bar_fn, collect_ws_panes_fn, draw_popup_box]
+                     ws_popup_active, wrapper_shadow, refresh_status_bar_fn, collect_ws_panes_fn, find_content_fn, draw_popup_box]
                 {
                     if (*ws_popup_active) return;
                     auto wrapper_ptr = wrapper_shadow.lock();
@@ -2718,7 +2791,7 @@ namespace netxs::app::tile
                             (workspaces_ptr, current_ws_index_ptr, preview_idx_ptr, scroll_off_ptr,
                              hover_ws_ptr, hover_pane_ptr, hover_sb_ptr, dragging_sb_ptr,
                              focus_section_ptr, kbd_pane_idx_ptr,
-                             ovl_id, collect_ws_panes_fn, draw_popup_box))
+                             ovl_id, collect_ws_panes_fn, find_content_fn, draw_popup_box))
                         {
                             auto canvas_area = parent_canvas.area();
                             auto full_w = canvas_area.size.x;
@@ -2940,19 +3013,80 @@ namespace netxs::app::tile
 
                                         // Line-frame border.
                                         auto pin = draw_popup_box(parent_canvas, pr, pbrd, pbg, pfg, ovl_id);
-                                        // Pane label centered in the card.
+                                        // Pane content: render the actual applet into a temp face, then blit
+                                        // truncated top-left into the inner card area. Fall back to a centered
+                                        // label when there is no applet (empty slot/placeholder).
                                         if (pin.size.x >= 1 && pin.size.y >= 1)
                                         {
-                                            auto max_lw = pin.size.x;
-                                            auto short_label = pane.label.substr(0, std::min((si32)pane.label.size(), max_lw));
-                                            auto lx = pin.coor.x + (pin.size.x - (si32)short_label.size()) / 2;
-                                            auto ly = pin.coor.y + pin.size.y / 2;
-                                            for (auto ci = si32{}; ci < (si32)short_label.size(); ci++)
+                                            auto active = sptr{};
+                                            if (auto sv = std::dynamic_pointer_cast<ui::veer>(pane.slot_veer); sv && sv->count() > 1)
                                             {
-                                                parent_canvas.fill(rect{{ lx + ci, ly }, { 1, 1 }}, [=, ch = text(1, short_label[ci])](cell& c)
+                                                active = sv->back();
+                                            }
+                                            // When the workspace is zoomed the pane that was zoomed sits
+                                            // at the workspace veer's top instead of its sub-veer. Render
+                                            // its content in the empty slot it came from so the spatial
+                                            // layout view still shows the applet's actual output.
+                                            if (!active && ws_veer->count() > 2)
+                                            {
+                                                auto zoomed_item = ws_veer->base::subset.back();
+                                                if (zoomed_item)
                                                 {
-                                                    c.bgc(pbg).fgc(pfg).txt(ch).link(ovl_id);
-                                                });
+                                                    auto source_slot = zoomed_item->base::property<wptr>("zoom.source_slot").lock();
+                                                    if (source_slot && source_slot == pane.slot_veer)
+                                                    {
+                                                        active = zoomed_item;
+                                                    }
+                                                }
+                                            }
+                                            auto rendered = faux;
+                                            if (active && active->base::kind() != base::placeholder)
+                                            {
+                                                // Drill past the tile title bar and any applet menu bar
+                                                // to render only the terminal content area.
+                                                auto content = find_content_fn(find_content_fn, active);
+                                                auto content_area = content ? content->base::area() : rect{};
+                                                // dtvt subprocesses launched from the tile typically run an
+                                                // inner vtm (e.g., "vtm-tile -r term") whose menubar lives
+                                                // inside the subprocess bitmap and so can't be removed by
+                                                // structural drill-down. Skip the top row of the snapshot
+                                                // so the preview shows the terminal output instead of the
+                                                // inner menubar (1 row in default slim mode). Applets
+                                                // without a menubar (vtty, raw shells) lose 1 row of
+                                                // content — acceptable for a small preview thumbnail.
+                                                auto top_skip = std::dynamic_pointer_cast<ui::dtvt>(content) ? si32{ 1 } : si32{};
+                                                if (content && content_area.size.x > 0 && content_area.size.y > top_skip)
+                                                {
+                                                    auto snap = ui::face{};
+                                                    snap.size(content_area.size);
+                                                    snap.move_basis(content_area.coor);
+                                                    snap.wipe(cell{}.bgc(pbg).fgc(pfg).txt(whitespace));
+                                                    content->render(snap);
+                                                    if (top_skip > 0)
+                                                    {
+                                                        snap.template crop<true>(twod{ content_area.size.x, content_area.size.y - top_skip });
+                                                    }
+                                                    auto crop_w = std::min(snap.size().x, pin.size.x);
+                                                    auto crop_h = std::min(snap.size().y, pin.size.y);
+                                                    snap.crop(twod{ crop_w, crop_h });
+                                                    snap.move_basis(pin.coor);
+                                                    parent_canvas.fill(snap, [ovl_id](cell& dst, cell const& src) { dst = src; dst.link(ovl_id); });
+                                                    rendered = true;
+                                                }
+                                            }
+                                            if (!rendered)
+                                            {
+                                                auto max_lw = pin.size.x;
+                                                auto short_label = pane.label.substr(0, std::min((si32)pane.label.size(), max_lw));
+                                                auto lx = pin.coor.x + (pin.size.x - (si32)short_label.size()) / 2;
+                                                auto ly = pin.coor.y + pin.size.y / 2;
+                                                for (auto ci = si32{}; ci < (si32)short_label.size(); ci++)
+                                                {
+                                                    parent_canvas.fill(rect{{ lx + ci, ly }, { 1, 1 }}, [=, ch = text(1, short_label[ci])](cell& c)
+                                                    {
+                                                        c.bgc(pbg).fgc(pfg).txt(ch).link(ovl_id);
+                                                    });
+                                                }
                                             }
                                         }
                                         // Pane index badge in top-left corner.
@@ -3272,7 +3406,7 @@ namespace netxs::app::tile
                                             dismiss_visual();
                                             dismiss_hook();
                                             switch_workspace(prev_idx);
-                                            if (auto focus_target = get_slot_focus_target(pane.slot_veer))
+                                            if (auto focus_target = resolve_focus_target_in_workspace(ws_veer, pane.slot_veer))
                                             {
                                                 pro::focus::set(focus_target, gear.id, solo::on);
                                             }
@@ -3538,8 +3672,9 @@ namespace netxs::app::tile
                                     dismiss_hook();
                                     if (idx < workspaces_ptr->size())
                                     {
+                                        auto ws_veer = (*workspaces_ptr)[idx];
                                         switch_workspace(idx);
-                                        if (auto focus_target = get_slot_focus_target(slot_veer))
+                                        if (auto focus_target = resolve_focus_target_in_workspace(ws_veer, slot_veer))
                                         {
                                             pro::focus::set(focus_target, gear.id, solo::on);
                                         }
@@ -3661,8 +3796,9 @@ namespace netxs::app::tile
                                     dismiss_hook();
                                     if (idx < workspaces_ptr->size())
                                     {
+                                        auto ws_veer = (*workspaces_ptr)[idx];
                                         switch_workspace(idx);
-                                        if (auto focus_target = get_slot_focus_target(slot_veer))
+                                        if (auto focus_target = resolve_focus_target_in_workspace(ws_veer, slot_veer))
                                         {
                                             pro::focus::set(focus_target, gear.id, solo::on);
                                         }
