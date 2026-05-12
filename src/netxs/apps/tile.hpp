@@ -5394,6 +5394,15 @@ namespace netxs::app::tile
                                         {
                                             script += "\nvtm.tile.SplitPane(1);";
                                         }
+                                        else if (mode == 0
+                                              && (cmd_flags & command_bar::flags::allow_split)
+                                              && (cmd_flags & command_bar::flags::allow_replace))
+                                        {
+                                            // Pickapp plain-Click: run the app only when a focused empty
+                                            // slot exists; RunApplication is a no-op on applets and when
+                                            // nothing in the tile is focused.
+                                            script += "\nvtm.tile.RunApplication();";
+                                        }
                                         dismiss_visual();
                                         dismiss_hook();
                                         dispatch_script(script, gear);
@@ -5885,6 +5894,15 @@ namespace netxs::app::tile
                                     else if (mode == 4 && (cmd_flags & command_bar::flags::allow_split))
                                     {
                                         script += "\nvtm.tile.SplitPane(1);";
+                                    }
+                                    else if (mode == 0
+                                          && (cmd_flags & command_bar::flags::allow_split)
+                                          && (cmd_flags & command_bar::flags::allow_replace))
+                                    {
+                                        // Pickapp plain-Enter: run the app only when a focused empty
+                                        // slot exists; RunApplication is a no-op on applets and when
+                                        // nothing in the tile is focused.
+                                        script += "\nvtm.tile.RunApplication();";
                                     }
                                     dismiss_visual();
                                     dismiss_hook();
