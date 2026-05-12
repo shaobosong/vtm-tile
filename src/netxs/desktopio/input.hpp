@@ -926,6 +926,7 @@ namespace netxs::input
                 }
             }
         }
+        void reset_click_sequence() { stamp[bttn_id] = {}; }
         void m2_click()
         {
             clicked = 1;

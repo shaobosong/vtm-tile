@@ -823,7 +823,7 @@
         void selection_lclick(hids& gear)
         {
             auto& console = *target;
-            auto go_on = gear.meta(hids::anyCtrl);
+            auto go_on = gear.meta(hids::anyShift);
             if (go_on && console.selection_active())
             {
                 console.selection_follow(gear.coord, go_on);
@@ -834,6 +834,7 @@
         }
         void selection_dblpress(hids& gear)
         {
+            if (gear.meta(hids::anyCtrl)) { gear.reset_click_sequence(); gear.dismiss(); return; }
             seldrag = dragmode::word;
             target->selection_drag_word_start(gear.coord);
             gear.dismiss();
@@ -841,6 +842,7 @@
         }
         void selection_tplpress(hids& gear)
         {
+            if (gear.meta(hids::anyCtrl)) { gear.reset_click_sequence(); gear.dismiss(); return; }
             if (gear.clicked != 3) return;
             seldrag = dragmode::line;
             target->selection_drag_line_start(gear.coord);
@@ -849,6 +851,7 @@
         }
         void selection_dblclk(hids& gear)
         {
+            if (gear.meta(hids::anyCtrl)) { gear.reset_click_sequence(); gear.dismiss(); return; }
             selection_drag_cancel();
             target->selection_byword(gear.coord);
             gear.dismiss();
@@ -856,6 +859,7 @@
         }
         void selection_tplclk(hids& gear)
         {
+            if (gear.meta(hids::anyCtrl)) { gear.reset_click_sequence(); gear.dismiss(); return; }
             selection_drag_cancel();
             if (gear.clicked == 3) target->selection_byline(gear.coord);
             else if (gear.clicked >= 4) target->selection_selall();
@@ -891,9 +895,10 @@
                 base::deface();
                 return;
             }
+            if (gear.meta(hids::anyCtrl)) { gear.dismiss(); return; }
             auto& console = *target;
             auto boxed = selalt ^ !!gear.meta(hids::anyAlt);
-            auto go_on = gear.meta(hids::anyCtrl);
+            auto go_on = gear.meta(hids::anyShift);
             console.selection_follow(gear.click, go_on);
             if (go_on) console.selection_extend(gear.click, boxed);
             else       console.selection_create(gear.click, boxed);
