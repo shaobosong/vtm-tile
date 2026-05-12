@@ -2258,7 +2258,8 @@ namespace netxs::app::tile
                                 [confirm_block] // on_cancel
                                 {
                                     *confirm_block = faux;
-                                });
+                                },
+                                app::shared::confirm_text_window_close);
                         }
                     };
                 });
@@ -3789,6 +3790,23 @@ namespace netxs::app::tile
                     auto script_list = config.settings::take_ptr_list_for_name("script");
                     auto bindings = input::bindings::load(config, script_list);
                     input::bindings::keybind(boss, bindings);
+                    // Wraps a destructive action in the close-confirmation dialog when
+                    // /config/tile/confirm_close is set; runs the action immediately otherwise.
+                    // texts selects the scenario wording (see app::shared::confirm_text_*).
+                    auto maybe_confirm = [wrapper_shadow, confirm_close, confirm_block](app::shared::confirm_dialog_text const& texts, auto on_confirm)
+                    {
+                        if (confirm_close && !*confirm_block)
+                        if (auto wrapper_ptr = wrapper_shadow.lock())
+                        {
+                            *confirm_block = true;
+                            app::shared::show_close_confirmation(*wrapper_ptr,
+                                [confirm_block, on_confirm] { *confirm_block = faux; on_confirm(); },
+                                [confirm_block] { *confirm_block = faux; },
+                                texts);
+                            return;
+                        }
+                        on_confirm();
+                    };
                     boss.base::add_methods(basename::tile,
                     {
                         { methods::FocusNextPaneOrGrip, [&]
@@ -3862,11 +3880,18 @@ namespace netxs::app::tile
                                                                 boss.base::signal(tier::preview, app::tile::events::ui::create, gear);
                                                             });
                                                         }},
-                        { methods::ReRunApplication,    [&]
+                        { methods::ReRunApplication,    [&, maybe_confirm]
                                                         {
-                                                            luafx.run_with_gear([&](auto& gear)
+                                                            luafx.run_with_gear([&, maybe_confirm](auto& gear)
                                                             {
-                                                                boss.base::signal(tier::preview, app::tile::events::ui::rerun, gear);
+                                                                maybe_confirm(app::shared::confirm_text_rerun_application,
+                                                                    [&boss, gear_id = gear.id]
+                                                                    {
+                                                                        if (auto gear_ptr = boss.base::template getref<hids>(gear_id))
+                                                                        {
+                                                                            boss.base::signal(tier::preview, app::tile::events::ui::rerun, *gear_ptr);
+                                                                        }
+                                                                    });
                                                             });
                                                         }},
                         { methods::SelectApplication,   [&]
@@ -3942,18 +3967,32 @@ namespace netxs::app::tile
                                                                 boss.base::signal(tier::preview, app::tile::events::ui::zoom, gear);
                                                             });
                                                         }},
-                        { methods::ClosePane,           [&]
+                        { methods::ClosePane,           [&, maybe_confirm]
                                                         {
-                                                            luafx.run_with_gear([&](auto& gear)
+                                                            luafx.run_with_gear([&, maybe_confirm](auto& gear)
                                                             {
-                                                                boss.base::signal(tier::preview, app::tile::events::ui::close, gear);
+                                                                maybe_confirm(app::shared::confirm_text_close_pane,
+                                                                    [&boss, gear_id = gear.id]
+                                                                    {
+                                                                        if (auto gear_ptr = boss.base::template getref<hids>(gear_id))
+                                                                        {
+                                                                            boss.base::signal(tier::preview, app::tile::events::ui::close, *gear_ptr);
+                                                                        }
+                                                                    });
                                                             });
                                                         }},
-                        { methods::CloseSlot,           [&]
+                        { methods::CloseSlot,           [&, maybe_confirm]
                                                         {
-                                                            luafx.run_with_gear([&](auto& gear)
+                                                            luafx.run_with_gear([&, maybe_confirm](auto& gear)
                                                             {
-                                                                boss.base::signal(tier::preview, app::tile::events::ui::closeslot, gear);
+                                                                maybe_confirm(app::shared::confirm_text_close_slot,
+                                                                    [&boss, gear_id = gear.id]
+                                                                    {
+                                                                        if (auto gear_ptr = boss.base::template getref<hids>(gear_id))
+                                                                        {
+                                                                            boss.base::signal(tier::preview, app::tile::events::ui::closeslot, *gear_ptr);
+                                                                        }
+                                                                    });
                                                             });
                                                         }},
                         { methods::SetMenuColor,        [&, menu_data]
@@ -3990,18 +4029,36 @@ namespace netxs::app::tile
                                                                 boss.base::signal(tier::preview, app::tile::events::ui::focus::pickapp, gear);
                                                             });
                                                         }},
-                        { methods::Disconnect,          [&]
+                        { methods::Disconnect,          [&, maybe_confirm]
                                                         {
-                                                            luafx.run_with_gear([&](auto& gear)
+                                                            luafx.run_with_gear([&, maybe_confirm](auto& gear)
                                                             {
-                                                                gear.owner.base::signal(tier::preview, e2::conio::quit);
+                                                                maybe_confirm(app::shared::confirm_text_disconnect,
+                                                                    [&boss, gear_id = gear.id]
+                                                                    {
+                                                                        if (auto gear_ptr = boss.base::template getref<hids>(gear_id))
+                                                                        {
+                                                                            gear_ptr->owner.base::signal(tier::preview, e2::conio::quit);
+                                                                        }
+                                                                    });
                                                             });
                                                         }},
-                        { methods::Shutdown,            [&]
+                        { methods::Shutdown,            [&, maybe_confirm]
                                                         {
-                                                            luafx.run_with_gear([&](auto& gear)
+                                                            luafx.run_with_gear([&, maybe_confirm](auto& gear)
                                                             {
-                                                                gear.owner.base::signal(tier::general, e2::shutdown, utf::concat(prompt::tile, "Shutdown on signal"));
+                                                                maybe_confirm(app::shared::confirm_text_shutdown,
+                                                                    [&boss, gear_id = gear.id]
+                                                                    {
+                                                                        if (auto gear_ptr = boss.base::template getref<hids>(gear_id))
+                                                                        {
+                                                                            gear_ptr->owner.base::signal(tier::general, e2::shutdown, utf::concat(prompt::tile, "Shutdown on signal"));
+                                                                        }
+                                                                        else
+                                                                        {
+                                                                            boss.base::signal(tier::general, e2::shutdown, utf::concat(prompt::tile, "Shutdown on signal"));
+                                                                        }
+                                                                    });
                                                             });
                                                         }},
                         { methods::CreateWorkspace,     [&, create_workspace]
@@ -4010,11 +4067,12 @@ namespace netxs::app::tile
                                                             auto new_idx = create_workspace(selected_override);
                                                             luafx.set_return((si32)new_idx);
                                                         }},
-                        { methods::DestroyWorkspace,    [&, destroy_workspace, current_ws_index_ptr]
+                        { methods::DestroyWorkspace,    [&, destroy_workspace, current_ws_index_ptr, maybe_confirm]
                                                         {
                                                             auto idx = luafx.get_args_or(1, si32{ -1 });
                                                             if (idx < 0) idx = (si32)*current_ws_index_ptr;
-                                                            destroy_workspace((size_t)idx);
+                                                            maybe_confirm(app::shared::confirm_text_destroy_workspace,
+                                                                [destroy_workspace, idx] { destroy_workspace((size_t)idx); });
                                                         }},
                         { methods::SwitchWorkspace,     [&, switch_workspace]
                                                         {

@@ -48,10 +48,32 @@ namespace netxs::app::shared
             gear.dismiss();
         });
     };
+    // confirm_dialog_text: Text content for a confirmation dialog.  Pass one of
+    // the scenario presets below (confirm_text_*) to show_close_confirmation, or
+    // construct a custom instance.  Long messages wrap; button labels are
+    // centered within a fixed 18-column button cell.
+    struct confirm_dialog_text
+    {
+        text message       = "Confirm closing this window?";
+        text confirm_label = "Confirm";
+        text cancel_label  = "Cancel";
+    };
+    // Scenario presets.  Use these at call sites so wording stays consistent.
+    inline const auto confirm_text_window_close      = confirm_dialog_text{ "Confirm closing this window?",     "Confirm",    "Cancel" };
+    inline const auto confirm_text_close_pane        = confirm_dialog_text{ "Close the focused pane?",          "Close",      "Cancel" };
+    inline const auto confirm_text_close_slot        = confirm_dialog_text{ "Close the focused pane and remove this slot?", "Close",      "Cancel" };
+    inline const auto confirm_text_shutdown          = confirm_dialog_text{ "Shut down all panes and exit?",    "Shutdown",   "Cancel" };
+    inline const auto confirm_text_destroy_workspace = confirm_dialog_text{ "Destroy the current workspace?",   "Destroy",    "Cancel" };
+    inline const auto confirm_text_rerun_application = confirm_dialog_text{ "Restart the focused application?", "Restart",    "Cancel" };
+    inline const auto confirm_text_disconnect        = confirm_dialog_text{ "Disconnect from this session?",    "Disconnect", "Cancel" };
     // show_close_confirmation: Display a centered MessageBox dialog overlay
-    // asking the user to confirm window close. Attach the overlay to the
+    // asking the user to confirm a destructive action. Attach the overlay to the
     // specified cake parent. on_confirm is called when the user accepts.
-    static void show_close_confirmation(ui::base& parent, std::function<void()> on_confirm, std::function<void()> on_cancel = {})
+    // texts selects the message and button labels; defaults to window_close.
+    static void show_close_confirmation(ui::base& parent,
+                                        std::function<void()> on_confirm,
+                                        std::function<void()> on_cancel = {},
+                                        confirm_dialog_text const& texts = confirm_text_window_close)
     {
         // Guard: don't show multiple dialogs at once.
         auto& dialog_active = parent.base::property("msgbox.active", faux);
@@ -255,7 +277,7 @@ namespace netxs::app::shared
         dialog->attach(slot::_1,
                 ui::item::ctor(ansi::wrp(wrap::on)
                     .fgc(0xffcdd6f4)
-                    .add("Confirm closing this window?")))
+                    .add(texts.message)))
             ->flexible();
 
         // Button bar (fixed 1 row).
@@ -278,8 +300,23 @@ namespace netxs::app::shared
         // re-paint would replace the rendered text with whitespace.
         auto active_brush = cell{}.fgc(btn_active_fg).bgc(btn_active_bg);
 
+        // Center button labels within the 18-column button cell (inner width
+        // 38 minus the 2-column grip, split between two buttons).
+        auto pad_label = [](view label) -> text
+        {
+            static constexpr auto width = si32{ 18 };
+            auto len = (si32)utf::length(label);
+            if (len >= width) return text{ label };
+            auto total = width - len;
+            auto left  = total / 2;
+            auto right = total - left;
+            return text(left, ' ').append(label).append(right, ' ');
+        };
+        auto confirm_label_padded = pad_label(texts.confirm_label);
+        auto cancel_label_padded  = pad_label(texts.cancel_label);
+
         // [ Confirm ] button.
-        auto confirm_btn = buttons->attach(slot::_1, ui::item::ctor(ansi::fgc(btn_idle_fg).add("     Confirm      ")))
+        auto confirm_btn = buttons->attach(slot::_1, ui::item::ctor(ansi::fgc(btn_idle_fg).add(confirm_label_padded)))
             ->active(btn_idle_fg, btn_idle_bg)
             ->invoke([dismiss_visual, dismiss_hook, on_confirm, selected_idx, refresh_buttons, active_brush](auto& boss)
             {
@@ -321,7 +358,7 @@ namespace netxs::app::shared
         *confirm_shadow = ptr::shadow(confirm_btn);
 
         // [ Cancel ] button.
-        auto cancel_btn = buttons->attach(slot::_2, ui::item::ctor(ansi::fgc(btn_idle_fg).add("      Cancel      ")))
+        auto cancel_btn = buttons->attach(slot::_2, ui::item::ctor(ansi::fgc(btn_idle_fg).add(cancel_label_padded)))
             ->active(btn_idle_fg, btn_idle_bg)
             ->invoke([dismiss_visual, dismiss_hook, on_cancel, selected_idx, refresh_buttons, active_brush](auto& boss)
             {
