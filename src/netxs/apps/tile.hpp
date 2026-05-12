@@ -2490,7 +2490,11 @@ namespace netxs::app::tile
             {
                 auto veer = std::dynamic_pointer_cast<ui::veer>(veer_ptr);
                 if (!veer || veer->count() == 0) return;
-                auto item = veer->back();
+                // A zoomed (maximized) pane is stacked on top of the workspace veer
+                // (count > 2). The preview must always show the underlying spatial
+                // layout, so skip the topmost item in that case.
+                auto item = veer->count() > 2 ? *std::prev(veer->base::subset.end(), 2)
+                                              : veer->back();
                 if (!item) return;
                 auto cidx = h_par * 2 + v_par;
 
