@@ -240,6 +240,7 @@ R"==(
                 <item label="Select All Panes"   tooltip=/Ns/Tile/SelectAllPanes/tooltip script=TileSelectAllPanes/>
                 <item label="Zoom Pane"          tooltip=/Ns/Tile/ZoomPane/tooltip       script=TileZoomPane/>
                 <item label="Close Pane"         tooltip=/Ns/Tile/ClosePane/tooltip      script=TileClosePane/>
+                <item label="Close Slot"         tooltip=/Ns/Tile/CloseSlot/tooltip      script=TileCloseSlot/>
             </group>
             <group label="app" item*>
                 <item label="Run Application"       tooltip=/Ns/Tile/RunApplication/tooltip             script=TileRunApplication/>
@@ -816,6 +817,7 @@ R"==(
             <SetManagerTitle    tooltip=" Set tiling window manager title using clipboard data "/>
             <ZoomPane           tooltip=" Zoom active application "                             />
             <ClosePane          tooltip=" Close active application "                            />
+            <CloseSlot          tooltip=" Close active application and empty slot "             />
             <Disconnect         tooltip=" Disconnect tile manager "                             />
             <Shutdown           tooltip=" Shutdown tile manager "                               />
             <CreateWorkspace    tooltip=" Create a new workspace and switch to it "             />
@@ -1432,6 +1434,7 @@ R"==(
     <TileSetManagerTitle   ="vtm.tile.SetTitle();"/>               <!-- Set tiling window manager title using clipboard data. -->
     <TileZoomPane          ="vtm.tile.ZoomPane();"/>               <!-- Zoom active application. -->
     <TileClosePane         ="vtm.tile.ClosePane();"/>              <!-- Close active application. -->
+    <TileCloseSlot         ="vtm.tile.CloseSlot();"/>              <!-- Close active application and empty slot. -->
     <TileDisconnect        ="vtm.tile.Disconnect();"/>             <!-- Disconnect tile manager. -->
     <TileShutdown          ="vtm.tile.Shutdown();"/>               <!-- Shutdown tile manager. -->
     <TileCreateWorkspace   ="vtm.tile.CreateWorkspace();"/>        <!-- Create a new workspace and switch to it. -->
