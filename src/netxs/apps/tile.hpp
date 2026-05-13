@@ -530,6 +530,29 @@ namespace netxs::app::tile
         return res;
     }
 
+    // Stashes the focused pane's tracked cwd into "tile.pending_cwd" on the
+    // tile boss when /config/terminal/cwd is enabled. Consumed and cleared by
+    // the launch path that builds the next app's eccc. Called from the Lua
+    // action handlers (SplitPane, ReRunApplication, CreateWorkspace) BEFORE
+    // they signal the launch -- ReRunApplication in particular needs the
+    // capture to happen while the outgoing pane's tracked_cwd is still alive.
+    // When the gate is off, or the focused pane has no tracked cwd (cwdsync
+    // disabled / no shell OSC), the pending stash is cleared and the launch
+    // falls back to the inherited cwd.
+    static auto capture_pending_pane_cwd(ui::base& boss, netxs::id_t gear_id)
+    {
+        boss.base::property("tile.pending_cwd").clear();
+        auto& indexer = ui::tui_domain();
+        if (!indexer.config.settings::take("/config/terminal/cwd", faux)) return;
+        auto& resolver = boss.base::template property<terminal_proxy_resolver_t>(terminal_proxy_resolver_field);
+        if (!resolver) return;
+        auto applet_ptr = resolver(gear_id);
+        if (!applet_ptr) return;
+        auto& tracked = applet_ptr->base::property("pane.tracked_cwd");
+        if (tracked.empty()) return;
+        boss.base::property("tile.pending_cwd") = tracked;
+    }
+
     namespace events = netxs::events::userland::tile;
 
     using ui::sptr;
@@ -1406,6 +1429,19 @@ namespace netxs::app::tile
                                 boss.base::signal(tier::anycast, e2::form::prop::cwd, path);
                             };
                         };
+                        // Track the latest cwd reported by this pane's inner applet so the
+                        // tile actions (SplitPane/CreateWorkspace/ReRunApplication) can launch
+                        // the next app starting from the focused pane's working directory.
+                        // Path is sourced from the cwdsync stream (shell-side OSC), so when
+                        // cwdsync is disabled this property stays empty and launches fall back
+                        // to the default cwd.
+                        boss.LISTEN(tier::preview, e2::form::prop::cwd, path, -, (applet_wptr = ptr::shadow(what.applet)))
+                        {
+                            if (auto applet_ptr = applet_wptr.lock())
+                            {
+                                applet_ptr->base::property("pane.tracked_cwd") = path;
+                            }
+                        };
                     })
                     ->branch(slot::_1, ui::postfx<cell::shaders::contrast>::ctor()
                         ->upload(what.applet->base::property("applet.header"))
@@ -1924,16 +1960,44 @@ namespace netxs::app::tile
                             auto& config = indexer.config;
                             auto tile_app_context = config.settings::push_context("/config/tile/app");
                             auto default_selected_id = config.settings::take("/config/tile/app/selected", "term"s);
-                            // Try to find tile.selected property by traversing up the parent chain
+                            // Try to find tile.selected property by traversing up the parent chain.
+                            // Read-and-clear tile.pending_cwd along the way: it lives on the same
+                            // tile-applet ancestor as tile.selected and is set by the action
+                            // handlers (SplitPane/ReRunApplication) to inherit the focused pane's
+                            // cwd into the next launch.  Consumed once: every createby starts from
+                            // a clean slate so subsequent empty-slot launches don't pick up stale
+                            // stashes.
+                            // Traverse up the parent chain for tile.selected and tile.pending_cwd.
+                            // The pending_cwd stash is set by the action handlers (SplitPane,
+                            // ReRunApplication) when /config/terminal/cwd is on, inheriting the
+                            // focused pane's cwd into the next launch. Consumed once: every
+                            // createby starts from a clean slate so subsequent empty-slot launches
+                            // don't pick up stale stashes.
                             text selected_id = default_selected_id;
+                            text pending_cwd;
+                            auto selected_id_resolved = faux;
+                            auto pending_cwd_resolved = faux;
                             auto current_ptr = boss.base::This();
-                            while (current_ptr)
+                            while (current_ptr && (!selected_id_resolved || !pending_cwd_resolved))
                             {
-                                auto& prop = current_ptr->base::property("tile.selected");
-                                if (!prop.empty())
+                                if (!selected_id_resolved)
                                 {
-                                    selected_id = prop;
-                                    break;
+                                    auto& sel_prop = current_ptr->base::property("tile.selected");
+                                    if (!sel_prop.empty())
+                                    {
+                                        selected_id = sel_prop;
+                                        selected_id_resolved = true;
+                                    }
+                                }
+                                if (!pending_cwd_resolved)
+                                {
+                                    auto& cwd_prop = current_ptr->base::property("tile.pending_cwd");
+                                    if (!cwd_prop.empty())
+                                    {
+                                        pending_cwd = cwd_prop;
+                                        cwd_prop.clear();
+                                        pending_cwd_resolved = true;
+                                    }
                                 }
                                 auto parent = current_ptr->base::parent();
                                 if (!parent || parent == current_ptr) break;
@@ -1960,6 +2024,7 @@ namespace netxs::app::tile
                             if (cmd.empty()) cmd = "$0 -r term";
                             if (menuid.empty()) menuid = selected_id;
                             auto appcfg = eccc{ .cmd = cmd };
+                            if (!pending_cwd.empty()) appcfg.cwd = pending_cwd;
                             expand_appcfg(appcfg);
                             auto applet = app::shared::builder(app_type)(appcfg, config);
                             set_pane_title(applet, title);
@@ -1987,7 +2052,7 @@ namespace netxs::app::tile
             slot_ptr->attach(empty_slot(slot_ptr, focus_history_ptr));
             return slot_ptr;
         };
-        auto parse_data = [](auto&& parse_data, view& utf8, auto min_ratio, auto grip_bindings_ptr, auto focus_history_ptr, auto confirm_block = netxs::sptr<bool>{}, text selected_id_override = {}) -> netxs::sptr<ui::veer>
+        auto parse_data = [](auto&& parse_data, view& utf8, auto min_ratio, auto grip_bindings_ptr, auto focus_history_ptr, auto confirm_block = netxs::sptr<bool>{}, text selected_id_override = {}, text cwd_override = {}) -> netxs::sptr<ui::veer>
         {
             auto slot_ptr = node_veer(node_veer, min_ratio, grip_bindings_ptr, focus_history_ptr, confirm_block);
             utf::trim_front(utf8, ", ");
@@ -2019,6 +2084,7 @@ namespace netxs::app::tile
                 if (cmd.empty()) cmd = "$0 -r term";
                 if (menuid.empty()) menuid = selected_id;
                 auto appcfg = eccc{ .cmd = cmd };
+                if (!cwd_override.empty()) appcfg.cwd = cwd_override;
                 expand_appcfg(appcfg);
                 auto applet = app::shared::builder(app_type)(appcfg, config);
                 set_pane_title(applet, title);
@@ -2311,11 +2377,13 @@ namespace netxs::app::tile
             auto open_workspace_popup_fn = ptr::shared(std::function<void()>{[]{}}); // Opens the workspace preview popup (Win+Tab style); set when the status bar is built.
 
             // Factory: build a workspace root veer (parse_data result) with the root-fullscreen-attach listener.
-            auto make_workspace_veer = [grip_bindings_ptr, focus_histories_ptr, confirm_block](view param_view, text selected_id_override = {}) -> netxs::sptr<ui::veer>
+            // cwd_override (when non-empty) is consumed by parse_data's empty-utf8 branch and applied to the
+            // initial app's eccc.cwd when the selected /config/tile/app/item declares cwd=true.
+            auto make_workspace_veer = [grip_bindings_ptr, focus_histories_ptr, confirm_block](view param_view, text selected_id_override = {}, text cwd_override = {}) -> netxs::sptr<ui::veer>
             {
                 auto focus_history_ptr = ptr::shared(focus_history_t{});
                 focus_histories_ptr->push_back(focus_history_ptr);
-                auto veer = parse_data(parse_data, param_view, ui::fork::min_ratio, grip_bindings_ptr, focus_history_ptr, confirm_block, selected_id_override);
+                auto veer = parse_data(parse_data, param_view, ui::fork::min_ratio, grip_bindings_ptr, focus_history_ptr, confirm_block, selected_id_override, cwd_override);
                 veer->invoke([](auto& boss)
                 {
                     boss.LISTEN(tier::release, e2::form::proceed::attach, fullscreen_item)
@@ -2408,10 +2476,12 @@ namespace netxs::app::tile
             };
 
             // Create a new empty workspace and switch to it. Returns the new index, or max() on failure.
-            auto create_workspace = [workspaces_ptr, make_workspace_veer, switch_workspace](text selected_id_override = {}) -> size_t
+            // cwd_override (when non-empty) is plumbed through to parse_data and applied to the initial
+            // app's eccc.cwd when the selected /config/tile/app/item declares cwd=true.
+            auto create_workspace = [workspaces_ptr, make_workspace_veer, switch_workspace](text selected_id_override = {}, text cwd_override = {}) -> size_t
             {
                 if (workspaces_ptr->size() >= ws_max_count) return std::numeric_limits<size_t>::max();
-                auto new_ws = make_workspace_veer(view{}, selected_id_override);
+                auto new_ws = make_workspace_veer(view{}, selected_id_override, cwd_override);
                 if (!selected_id_override.empty())
                 {
                     new_ws->base::property("tile.selected") = selected_id_override;
@@ -4030,6 +4100,10 @@ namespace netxs::app::tile
                                                         {
                                                             luafx.run_with_gear([&, maybe_confirm](auto& gear)
                                                             {
+                                                                // Capture the outgoing pane's cwd now, while its tracked_cwd
+                                                                // property is still alive. Stash is consumed by the createby
+                                                                // standalone branch when it builds the replacement applet.
+                                                                capture_pending_pane_cwd(boss, gear.id);
                                                                 maybe_confirm(app::shared::confirm_text_rerun_application,
                                                                     [&boss, gear_id = gear.id]
                                                                     {
@@ -4074,6 +4148,11 @@ namespace netxs::app::tile
                                                             luafx.run_with_gear([&](auto& gear)
                                                             {
                                                                 auto dir = luafx.get_args_or(1, si32{ 1 });
+                                                                // Stash the focused pane's cwd for the new empty slot's
+                                                                // createby launch (the existing pane is kept alive on the
+                                                                // other side of the split, but capturing here keeps the
+                                                                // launch path uniform with ReRunApplication).
+                                                                capture_pending_pane_cwd(boss, gear.id);
                                                                 dir > 0 ? boss.base::signal(tier::preview, app::tile::events::ui::split::vt, gear)
                                                                         : boss.base::signal(tier::preview, app::tile::events::ui::split::hz, gear);
                                                             });
@@ -4209,8 +4288,21 @@ namespace netxs::app::tile
                                                         }},
                         { methods::CreateWorkspace,     [&, create_workspace]
                                                         {
+                                                            // Capture the currently focused pane's cwd before the new
+                                                            // workspace is built, so the initial app in the new workspace
+                                                            // can inherit it.  Clear unconditionally first to drop any
+                                                            // stale stash when no gear is available (programmatic call).
+                                                            boss.base::property("tile.pending_cwd").clear();
+                                                            luafx.run_with_gear_wo_return([&](auto& gear)
+                                                            {
+                                                                capture_pending_pane_cwd(boss, gear.id);
+                                                            });
                                                             auto selected_override = text{ boss.base::property("tile.selected") };
-                                                            auto new_idx = create_workspace(selected_override);
+                                                            // Consume-and-clear: the new workspace owns the stash here,
+                                                            // so subsequent createby launches don't re-apply it.
+                                                            auto cwd_override = text{ boss.base::property("tile.pending_cwd") };
+                                                            boss.base::property("tile.pending_cwd").clear();
+                                                            auto new_idx = create_workspace(selected_override, cwd_override);
                                                             luafx.set_return((si32)new_idx);
                                                         }},
                         { methods::DestroyWorkspace,    [&, destroy_workspace, current_ws_index_ptr, maybe_confirm]

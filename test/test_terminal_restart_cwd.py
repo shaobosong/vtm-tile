@@ -159,7 +159,7 @@ def make_overlay_config(restart_cwd_enabled):
     flag = "true" if restart_cwd_enabled else "false"
     return (
         "<config>"
-        f"<terminal><restart_cwd={flag}/><confirm_close=false/></terminal>"
+        f"<terminal><cwd={flag}/><confirm_close=false/></terminal>"
         "<events><terminal>"
         '<script=TerminalRestart on="Alt+Shift+R"/>'
         "</terminal></events>"

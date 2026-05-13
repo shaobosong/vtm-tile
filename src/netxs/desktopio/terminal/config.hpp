@@ -13,7 +13,7 @@
             si32 def_margin;
             si32 def_border;
             si32 def_atexit;
-            bool def_restart_cwd; // term: Use child's current working directory when restarting the session.
+            bool def_cwd; // term: Use child's current working directory when restarting the session, and inherit it on tile SplitPane/CreateWorkspace/ReRunApplication.
             cell def_curclr;
             argb def_fcolor;
             argb def_bcolor;
@@ -100,7 +100,7 @@
                 def_io_log =             config.settings::take("/config/debug/logs",        faux);
                 allow_logs =             true; // Disallowed for dtty.
                 def_atexit =             config.settings::take("/config/terminal/atexit",                     commands::atexit::smart, atexit_options);
-                def_restart_cwd =        config.settings::take("/config/terminal/restart_cwd",                faux);
+                def_cwd =                config.settings::take("/config/terminal/cwd",                        faux);
                 def_fcolor =             config.settings::take("/config/terminal/colors/default/fgc",         argb{ whitelt });
                 def_bcolor =             config.settings::take("/config/terminal/colors/default/bgc",         argb{ blackdk });
                 def_filler =             config.settings::take("/config/terminal/colors/bground",             argb{ argb::default_color });

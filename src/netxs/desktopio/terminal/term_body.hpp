@@ -54,6 +54,8 @@
                                          //       match within last_find_query, or 0 when
                                          //       no match is active.
         si32       last_find_total{ 0 }; // term: Cached total-match count for last_find_query.
+        time       last_cwd_poll{};      // term: Timestamp of last child-cwd poll for the tile cwd-inherit feature.
+        text       last_polled_cwd;      // term: Last child cwd seen by the poller; used to suppress duplicate riseups.
         vtty       ipccon; // term: IPC connector. Should be destroyed first.
 
         // term: Place rectangle block to the scrollback buffer.
@@ -1354,12 +1356,12 @@
         }
         void restart()
         {
-            // If the user opted into restart_cwd, capture the child's current
+            // If /config/terminal/cwd is true, capture the child's current
             // working directory NOW (before the child receives SIGHUP and the
             // /proc/<pid>/cwd entry / Windows PEB go away) and stash it for
             // start_term() to consume on the next launch. We only set it on
             // success; on failure start_term() falls back to the original cwd.
-            if (defcfg.def_restart_cwd && ipccon.termlink)
+            if (defcfg.def_cwd && ipccon.termlink)
             {
                 auto pid = ipccon.termlink->child_pid();
                 if (pid)
@@ -2142,6 +2144,33 @@
                         base::region = new_area;
                     }
                     base::deface();
+                }
+                // Periodically poll the child shell's cwd and publish it via the
+                // e2::form::prop::cwd riseup so the outer tile applet's per-pane
+                // cwd tracker can stash it for SplitPane / CreateWorkspace /
+                // ReRunApplication. This complements the shell-side cwdsync OSC
+                // stream: shells that don't emit OSC 9;9 (e.g., Windows PowerShell
+                // without a custom prompt that emits it) still publish their cwd
+                // here as long as their process CWD reflects the user's location
+                // (cmd.exe always; PowerShell with [Environment]::CurrentDirectory
+                // synced in the prompt function). Throttled because cwd_of() walks
+                // the PEB on Windows / reads /proc on Linux on every call.
+                if (defcfg.def_cwd && ipccon.termlink)
+                {
+                    constexpr auto poll_interval = std::chrono::milliseconds{ 250 };
+                    if (timestamp - last_cwd_poll >= poll_interval)
+                    {
+                        last_cwd_poll = timestamp;
+                        if (auto pid = ipccon.termlink->child_pid())
+                        {
+                            auto child_cwd = os::process::cwd_of(pid);
+                            if (child_cwd.size() && child_cwd != last_polled_cwd)
+                            {
+                                last_polled_cwd = child_cwd;
+                                base::riseup(tier::preview, e2::form::prop::cwd, child_cwd);
+                            }
+                        }
+                    }
                 }
             };
             LISTEN(tier::release, ui::e2::command::request::inputfields, inputfield_request)

@@ -236,9 +236,14 @@ namespace netxs::app::terminal
                 };
                 boss.LISTEN(tier::preview, e2::form::prop::cwd, path)
                 {
+                    // Always pass the riseup through so outer consumers (e.g., the tile
+                    // applet's per-pane cwd tracker that lets cwd=true items launch from
+                    // the focused pane's directory) can observe the OSC9;9 stream. The
+                    // cwd_sync flag still gates the inner term's own bookkeeping and the
+                    // command echo loop at the anycast listener below.
+                    boss.bell::passover();
                     if (cwd_sync)
                     {
-                        boss.bell::passover();
                         cwd_path = path;
                     }
                 };
