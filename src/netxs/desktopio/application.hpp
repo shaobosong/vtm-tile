@@ -75,6 +75,33 @@ namespace netxs::app::shared
                                         std::function<void()> on_cancel = {},
                                         confirm_dialog_text const& texts = confirm_text_window_close)
     {
+        // Dialog card layout — referenced by both the layout setup below and
+        // the hit-test in the overlay MouseMove handler. Keep these in sync.
+        //
+        //   ████████████████████████████████████████████  row 0  ┐ pad_t = 1
+        //   ███Confirm closing this window?█████████████  row 1 ─┤
+        //   ████████████████████████████████████████████  row 2 ─┤ inner 38 × 3
+        //   ███     Confirm      ██      Cancel      ███  row 3 ─┤ button row
+        //   ████████████████████████████████████████████  row 4  ┘ pad_b = 1
+        //        └ pad_l = 3                         pad_r = 3 ┘
+        //
+        static constexpr auto dialog_w   = si32{ 44 };
+        static constexpr auto dialog_h   = si32{ 5 };
+        static constexpr auto pad_l      = si32{ 3 };
+        static constexpr auto pad_r      = si32{ 3 };
+        static constexpr auto pad_t      = si32{ 1 };
+        static constexpr auto pad_b      = si32{ 1 };
+        static constexpr auto btn_grip   = si32{ 2 };
+        static constexpr auto btn_row_h  = si32{ 1 };
+        static constexpr auto btn_w      = (dialog_w - pad_l - pad_r - btn_grip) / 2; // 18
+        // Button row y-offset within the dialog card.
+        static constexpr auto btn_row_y  = dialog_h - pad_b - btn_row_h;              //  3
+        // X-ranges of each button within the dialog card: [x0, x1).
+        static constexpr auto confirm_x0 = pad_l;                                     //  3
+        static constexpr auto confirm_x1 = confirm_x0 + btn_w;                        // 21
+        static constexpr auto cancel_x0  = confirm_x1 + btn_grip;                     // 23
+        static constexpr auto cancel_x1  = cancel_x0 + btn_w;                         // 41
+
         // Guard: don't show multiple dialogs at once.
         auto& dialog_active = parent.base::property("msgbox.active", faux);
         if (dialog_active) return;
@@ -96,10 +123,21 @@ namespace netxs::app::shared
         // generated synchronously).
         auto pending_unhook = ptr::shared(faux);
         // Shared selection cursor for the button bar.  0 = Confirm (default),
-        // 1 = Cancel.  Driven by both Tab (keyboard) and MouseEnter (mouse);
-        // hover and keyboard switch instantly without conflicting (mirrors
-        // the workspace popup design — the most recent input wins).
+        // 1 = Cancel.  Driven by both Tab (keyboard) and mouse hover (via the
+        // overlay MouseMove handler installed below); the most recent input
+        // wins.
         auto selected_idx = ptr::shared(si32{ 0 });
+        // Hover gate (same pattern as the workspace popup, tile.hpp). The
+        // gate emits a per-frame fire(MouseMove) (see console.hpp) so that
+        // the first MouseMove the overlay receives reflects the cursor
+        // position from BEFORE the dialog opened — using it would let a
+        // pre-resting cursor immediately yank selected_idx away from the
+        // keyboard default. popup_ready_ptr discards that initial event;
+        // last_coord_ptr then suppresses the per-frame echo while the
+        // cursor stays put, so keyboard navigation isn't snapped back by a
+        // stationary cursor still hovering over a button.
+        auto popup_ready_ptr = ptr::shared(faux);
+        auto last_coord_ptr  = ptr::shared(twod{});
         // Weak refs to both button items for redraws when selection changes.
         // Populated once the buttons are attached below.
         auto confirm_shadow = ptr::shared(netxs::wptr<ui::base>{});
@@ -226,6 +264,47 @@ namespace netxs::app::shared
             }
         };
 
+        // Centralized hover handler (mirrors workspace popup's MouseMove
+        // dispatch, tile.hpp). Owns all mouse-driven updates to
+        // selected_idx so the gate logic lives in one place instead of
+        // racing redirect_mouse_focus → MouseEnter on individual buttons.
+        // Hit-test is computed from the overlay size and the dialog_*
+        // layout constants defined at the top of this function.
+        overlay_ptr->invoke([popup_ready_ptr, last_coord_ptr, selected_idx, refresh_buttons, overlay_shadow](auto& ovl)
+        {
+            ovl.on(tier::mouserelease, input::key::MouseMove,
+                [popup_ready_ptr, last_coord_ptr, selected_idx, refresh_buttons, overlay_shadow](hids& gear)
+            {
+                if (!*popup_ready_ptr)
+                {
+                    *popup_ready_ptr = true;
+                    *last_coord_ptr  = gear.coord;
+                    return;
+                }
+                if (gear.coord == *last_coord_ptr) return; // Stationary cursor echo — suppress so keyboard wins.
+                *last_coord_ptr = gear.coord;
+
+                auto ovl_ptr = overlay_shadow.lock();
+                if (!ovl_ptr) return;
+                auto full = ovl_ptr->base::area().size;
+                auto dx = (full.x - dialog_w) / 2; // Dialog top-left in overlay coords.
+                auto dy = (full.y - dialog_h) / 2;
+                auto mx = (si32)gear.coord.x - dx;
+                auto my = (si32)gear.coord.y - dy;
+                auto new_sel = *selected_idx;
+                if (my == btn_row_y)
+                {
+                    if      (mx >= confirm_x0 && mx < confirm_x1) new_sel = 0;
+                    else if (mx >= cancel_x0  && mx < cancel_x1)  new_sel = 1;
+                }
+                if (new_sel != *selected_idx)
+                {
+                    *selected_idx = new_sel;
+                    refresh_buttons();
+                }
+            });
+        });
+
         // Layer 1: Dimming scrim (click outside → cancel).
         overlay_ptr->attach(ui::mock::ctor())
             ->invoke([dismiss_visual, dismiss_hook, on_cancel](auto& boss)
@@ -250,20 +329,12 @@ namespace netxs::app::shared
                 });
             });
 
-        // Layer 2: Centered dialog card (Tokyo Night palette).
-        //
-        // ████████████████████████████████████████████  row 1
-        // ███Confirm closing this window?█████████████  row 2  message
-        // ████████████████████████████████████████████  row 3
-        // ███     Confirm      ██      Cancel      ███  row 4  buttons
-        // ████████████████████████████████████████████  row 5
-        //
-        // Outer 44 × 5, setpad(l=3 r=3 t=1 b=1) → inner 38 × 3.
-        // slot_1 (message) : 3 rows   slot_2 (buttons) : 1 row.
-        //
+        // Layer 2: Centered dialog card (Tokyo Night palette). Geometry is
+        // governed by the dialog_* constants at the top of this function;
+        // see the ascii diagram there.
         auto dialog = overlay_ptr->attach(ui::fork::ctor(axis::Y))
             ->alignment({ snap::center, snap::center })
-            ->limits({ 44, 5 }, { 44, 5 }) /* This a suggested, not forceable value (42) in cross-axis. */
+            ->limits({ dialog_w, dialog_h }, { dialog_w, dialog_h })
             ->invoke([](auto& boss)
             {
                 // Reset every attribute in the dialog rect before colors()
@@ -277,7 +348,7 @@ namespace netxs::app::shared
                 };
             })
             ->colors(argb{ 0xffc0caf5 }, argb{ 0xff1a1b26 })
-            ->setpad({ 3, 3, 1, 1 });
+            ->setpad({ pad_l, pad_r, pad_t, pad_b });
 
         // Message label — flexible keeps full slot width.
         // No alignment() here: the Y-fork inform() bug yields zero-size
@@ -292,9 +363,10 @@ namespace netxs::app::shared
                     .add(texts.message)))
             ->flexible();
 
-        // Button bar (fixed 1 row).
-        auto buttons = dialog->attach(slot::_2, ui::fork::ctor(axis::X, 2))
-            ->limits({ -1, 1 }, { -1, 1 });
+        // Button bar (fixed btn_row_h tall, split into two btn_w halves by a
+        // btn_grip-column grip).
+        auto buttons = dialog->attach(slot::_2, ui::fork::ctor(axis::X, btn_grip))
+            ->limits({ -1, btn_row_h }, { -1, btn_row_h });
 
         // Button color scheme — matches the command search bar's vertical
         // scrollbar thumb:
@@ -312,14 +384,12 @@ namespace netxs::app::shared
         // re-paint would replace the rendered text with whitespace.
         auto active_brush = cell{}.fgc(btn_active_fg).bgc(btn_active_bg);
 
-        // Center button labels within the 18-column button cell (inner width
-        // 38 minus the 2-column grip, split between two buttons).
+        // Center button labels within the btn_w-column button cell.
         auto pad_label = [](view label) -> text
         {
-            static constexpr auto width = si32{ 18 };
             auto len = (si32)utf::length(label);
-            if (len >= width) return text{ label };
-            auto total = width - len;
+            if (len >= btn_w) return text{ label };
+            auto total = btn_w - len;
             auto left  = total / 2;
             auto right = total - left;
             return text(left, ' ').append(label).append(right, ' ');
@@ -330,13 +400,13 @@ namespace netxs::app::shared
         // [ Confirm ] button.
         auto confirm_btn = buttons->attach(slot::_1, ui::item::ctor(ansi::fgc(btn_idle_fg).add(confirm_label_padded)))
             ->active(btn_idle_fg, btn_idle_bg)
-            ->invoke([dismiss_visual, dismiss_hook, on_confirm, selected_idx, refresh_buttons, active_brush](auto& boss)
+            ->invoke([dismiss_visual, dismiss_hook, on_confirm, selected_idx, active_brush](auto& boss)
             {
                 // Render-time highlight: paint the active palette on top of
                 // the idle one when this button is the current selection.
-                // Both Tab (keyboard) and MouseEnter (mouse) update
-                // *selected_idx, so the highlight follows whichever input
-                // arrived last (mirrors the workspace popup design).
+                // selected_idx is driven by Tab (keyboard) and by the
+                // overlay MouseMove handler (mouse hover); whichever input
+                // arrived last wins.
                 //
                 // We listen on the foreground render pass (e2::render::any)
                 // rather than the background pass, so that the active brush
@@ -351,14 +421,6 @@ namespace netxs::app::shared
                         parent_canvas.fill(cell::shaders::fusefull(active_brush));
                     }
                 };
-                boss.on(tier::mouserelease, input::key::MouseEnter, [selected_idx, refresh_buttons](hids& /*gear*/)
-                {
-                    if (*selected_idx != 0)
-                    {
-                        *selected_idx = 0;
-                        refresh_buttons();
-                    }
-                });
                 boss.on(tier::mouserelease, input::key::LeftClick, [&, dismiss_visual, dismiss_hook, on_confirm](hids& gear)
                 {
                     dismiss_visual();
@@ -372,7 +434,7 @@ namespace netxs::app::shared
         // [ Cancel ] button.
         auto cancel_btn = buttons->attach(slot::_2, ui::item::ctor(ansi::fgc(btn_idle_fg).add(cancel_label_padded)))
             ->active(btn_idle_fg, btn_idle_bg)
-            ->invoke([dismiss_visual, dismiss_hook, on_cancel, selected_idx, refresh_buttons, active_brush](auto& boss)
+            ->invoke([dismiss_visual, dismiss_hook, on_cancel, selected_idx, active_brush](auto& boss)
             {
                 boss.LISTEN(tier::release, e2::render::any, parent_canvas, -, (selected_idx, active_brush))
                 {
@@ -381,14 +443,6 @@ namespace netxs::app::shared
                         parent_canvas.fill(cell::shaders::fusefull(active_brush));
                     }
                 };
-                boss.on(tier::mouserelease, input::key::MouseEnter, [selected_idx, refresh_buttons](hids& /*gear*/)
-                {
-                    if (*selected_idx != 1)
-                    {
-                        *selected_idx = 1;
-                        refresh_buttons();
-                    }
-                });
                 boss.on(tier::mouserelease, input::key::LeftClick, [&, dismiss_visual, dismiss_hook, on_cancel](hids& gear)
                 {
                     dismiss_visual();
