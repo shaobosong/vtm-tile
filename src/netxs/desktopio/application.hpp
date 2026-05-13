@@ -78,29 +78,39 @@ namespace netxs::app::shared
         // Dialog card layout — referenced by both the layout setup below and
         // the hit-test in the overlay MouseMove handler. Keep these in sync.
         //
-        //   ████████████████████████████████████████████  row 0  ┐ pad_t = 1
-        //   ███Confirm closing this window?█████████████  row 1 ─┤
-        //   ████████████████████████████████████████████  row 2 ─┤ inner 38 × 3
-        //   ███     Confirm      ██      Cancel      ███  row 3 ─┤ button row
-        //   ████████████████████████████████████████████  row 4  ┘ pad_b = 1
-        //        └ pad_l = 3                         pad_r = 3 ┘
+        //   ████████████████████████████████████████████  ┐ pad_t = 1
+        //   ███Confirm closing this window?█████████████ ─┤ message (msg_h rows, wraps if long)
+        //   ████████████████████████████████████████████ ─┤ gap_h = 1 (always)
+        //   ███     Confirm      ██      Cancel      ███ ─┤ button row (btn_row_h = 1)
+        //   ████████████████████████████████████████████  ┘ pad_b = 1
+        //    └ pad_l = 3                    pad_r = 3 ┘
         //
         static constexpr auto dialog_w   = si32{ 44 };
-        static constexpr auto dialog_h   = si32{ 5 };
         static constexpr auto pad_l      = si32{ 3 };
         static constexpr auto pad_r      = si32{ 3 };
         static constexpr auto pad_t      = si32{ 1 };
         static constexpr auto pad_b      = si32{ 1 };
+        static constexpr auto gap_h      = si32{ 1 }; // Always-on vertical gap between message and buttons.
         static constexpr auto btn_grip   = si32{ 2 };
         static constexpr auto btn_row_h  = si32{ 1 };
         static constexpr auto btn_w      = (dialog_w - pad_l - pad_r - btn_grip) / 2; // 18
-        // Button row y-offset within the dialog card.
-        static constexpr auto btn_row_y  = dialog_h - pad_b - btn_row_h;              //  3
+        static constexpr auto inner_w    = dialog_w - pad_l - pad_r;                  // 38
         // X-ranges of each button within the dialog card: [x0, x1).
         static constexpr auto confirm_x0 = pad_l;                                     //  3
         static constexpr auto confirm_x1 = confirm_x0 + btn_w;                        // 21
         static constexpr auto cancel_x0  = confirm_x1 + btn_grip;                     // 23
         static constexpr auto cancel_x1  = cancel_x0 + btn_w;                         // 41
+
+        // Runtime: dialog height grows with the wrapped message so the gap
+        // between message and buttons stays exactly gap_h regardless of
+        // how many rows the message wraps to. utf::length-over-inner_w is
+        // an upper bound on the row count for char-wrap and is accurate
+        // for the predefined messages in this header.
+        auto msg_chars = (si32)utf::length(texts.message);
+        auto msg_h     = std::max(si32{ 1 }, (msg_chars + inner_w - 1) / inner_w);
+        auto dialog_h  = pad_t + msg_h + gap_h + btn_row_h + pad_b;
+        // Button row y-offset within the dialog card.
+        auto btn_row_y = pad_t + msg_h + gap_h;
 
         // Guard: don't show multiple dialogs at once.
         auto& dialog_active = parent.base::property("msgbox.active", faux);
@@ -270,10 +280,10 @@ namespace netxs::app::shared
         // racing redirect_mouse_focus → MouseEnter on individual buttons.
         // Hit-test is computed from the overlay size and the dialog_*
         // layout constants defined at the top of this function.
-        overlay_ptr->invoke([popup_ready_ptr, last_coord_ptr, selected_idx, refresh_buttons, overlay_shadow](auto& ovl)
+        overlay_ptr->invoke([popup_ready_ptr, last_coord_ptr, selected_idx, refresh_buttons, overlay_shadow, dialog_h, btn_row_y](auto& ovl)
         {
             ovl.on(tier::mouserelease, input::key::MouseMove,
-                [popup_ready_ptr, last_coord_ptr, selected_idx, refresh_buttons, overlay_shadow](hids& gear)
+                [popup_ready_ptr, last_coord_ptr, selected_idx, refresh_buttons, overlay_shadow, dialog_h, btn_row_y](hids& gear)
             {
                 if (!*popup_ready_ptr)
                 {
@@ -363,10 +373,13 @@ namespace netxs::app::shared
                     .add(texts.message)))
             ->flexible();
 
-        // Button bar (fixed btn_row_h tall, split into two btn_w halves by a
-        // btn_grip-column grip).
+        // Button bar: outer takes btn_row_h + gap_h rows, with gap_h rows
+        // of top padding so the actual buttons sit on the bottom row and a
+        // gap_h-tall empty strip separates them from the (possibly wrapped)
+        // message above.
         auto buttons = dialog->attach(slot::_2, ui::fork::ctor(axis::X, btn_grip))
-            ->limits({ -1, btn_row_h }, { -1, btn_row_h });
+            ->limits({ -1, btn_row_h + gap_h }, { -1, btn_row_h + gap_h })
+            ->setpad({ 0, 0, gap_h, 0 });
 
         // Button color scheme — matches the command search bar's vertical
         // scrollbar thumb:
