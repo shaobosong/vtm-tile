@@ -614,6 +614,12 @@ namespace netxs::app::terminal
                 auto y0 = box.coor.y;
                 auto w  = box.size.x;
 
+                // Reset every attribute in the bar rect so style bits
+                // (italic/bold/underline/blink/reverse/strike/overline,
+                // hyperlink, pict refs, grapheme remnants) from the underlying
+                // terminal content cannot bleed through the find-bar overlay.
+                canvas.fill(box, [](cell& c) { c.wipe(); });
+
                 // Frame background = terminal's current default bg color, so
                 // the rounded-corner frame blends with whatever the running
                 // shell has set via SGR.  Fallback to col_bg if the terminal

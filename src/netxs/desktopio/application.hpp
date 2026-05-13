@@ -264,6 +264,18 @@ namespace netxs::app::shared
         auto dialog = overlay_ptr->attach(ui::fork::ctor(axis::Y))
             ->alignment({ snap::center, snap::center })
             ->limits({ 44, 5 }, { 44, 5 }) /* This a suggested, not forceable value (42) in cross-axis. */
+            ->invoke([](auto& boss)
+            {
+                // Reset every attribute in the dialog rect before colors()
+                // paints the bg. Without this, fusefull would blend the dialog
+                // colors over whatever style bits (italic/bold/underline/etc.)
+                // the dimmed underlying content already carried — those style
+                // bits would bleed through the confirm dialog card.
+                boss.LISTEN(tier::release, e2::render::background::any, parent_canvas, -)
+                {
+                    parent_canvas.fill(cell::shaders::wipe);
+                };
+            })
             ->colors(argb{ 0xffc0caf5 }, argb{ 0xff1a1b26 })
             ->setpad({ 3, 3, 1, 1 });
 

@@ -2663,6 +2663,9 @@ namespace netxs::app::tile
             // Helper: draw a Unicode line-frame box and return the interior rect.
             auto draw_popup_box = [](auto& canvas, rect box, argb brd, argb bg, argb fg, auto link) -> rect
             {
+                // Reset every attribute in the box rect so style bits from the
+                // dimmed underlying content cannot bleed through the popup box.
+                canvas.fill(box, [](cell& c) { c.wipe(); });
                 if (box.size.x < 2 || box.size.y < 2)
                 {
                     canvas.fill(box, [=](cell& c)
@@ -2813,9 +2816,12 @@ namespace netxs::app::tile
                             auto bot_y = full_h - bot_h;
 
                             // --- Bottom section: workspace switcher. ---
-                            // Background fill for bottom bar.
+                            // Background fill for bottom bar. Wipe first so style
+                            // bits from the dimmed underlying content cannot bleed
+                            // through the switcher row.
                             parent_canvas.fill(rect{{ 0, bot_y }, { full_w, bot_h }}, [ovl_id](cell& c)
                             {
+                                c.wipe();
                                 c.bgc(popup_bar_bg).fgc(popup_bar_bg).txt(whitespace).link(ovl_id);
                             });
 
@@ -5169,6 +5175,16 @@ namespace netxs::app::tile
                                 {
                                     command_bar::put_highlighted(parent_canvas, ovl_id, x, y, str, fg, match_fg, bg, max_cells, query, skip_cps);
                                 };
+
+                                // Reset every attribute in the dialog rect so style bits
+                                // (italic/bold/underline/blink/reverse/strike/overline,
+                                // hyperlink, pict refs, grapheme remnants) from the
+                                // underlying terminal content cannot bleed through the
+                                // command-bar overlay.
+                                parent_canvas.fill(rect{{ dlg_x, dlg_y }, { dlg_w, dlg_h }}, [](cell& c)
+                                {
+                                    c.wipe();
+                                });
 
                                 // Fill dialog background.
                                 parent_canvas.fill(rect{{ dlg_x, dlg_y }, { dlg_w, dlg_h }}, [=, ovl_id = ovl_id](cell& c)
