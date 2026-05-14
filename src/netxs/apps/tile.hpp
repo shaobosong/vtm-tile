@@ -4118,14 +4118,23 @@ namespace netxs::app::tile
                                                                 // property is still alive. Stash is consumed by the createby
                                                                 // standalone branch when it builds the replacement applet.
                                                                 capture_pending_pane_cwd(boss, gear.id);
-                                                                maybe_confirm(app::shared::confirm_text_rerun_application,
-                                                                    [&boss, gear_id = gear.id]
+                                                                // Empty slots have no applet state to lose, so the
+                                                                // confirmation dialog is skipped when the focused
+                                                                // target is empty (matches the closepane path).
+                                                                auto has_applet = faux;
+                                                                foreach(gear.id, [&](auto&, si32 item_type, auto)
+                                                                {
+                                                                    if (item_type == item_type::applet) has_applet = true;
+                                                                });
+                                                                auto run_rerun = [&boss, gear_id = gear.id]
+                                                                {
+                                                                    if (auto gear_ptr = boss.base::template getref<hids>(gear_id))
                                                                     {
-                                                                        if (auto gear_ptr = boss.base::template getref<hids>(gear_id))
-                                                                        {
-                                                                            boss.base::signal(tier::preview, app::tile::events::ui::rerun, *gear_ptr);
-                                                                        }
-                                                                    });
+                                                                        boss.base::signal(tier::preview, app::tile::events::ui::rerun, *gear_ptr);
+                                                                    }
+                                                                };
+                                                                if (has_applet) maybe_confirm(app::shared::confirm_text_rerun_application, run_rerun);
+                                                                else            run_rerun();
                                                             });
                                                         }},
                         { methods::SelectApplication,   [&]
