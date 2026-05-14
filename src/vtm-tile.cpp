@@ -8,8 +8,228 @@
 
 using namespace netxs;
 
-enum class type { client, server, daemon, logmon, runapp, config };
+enum class type { client, server, daemon, logmon, runapp, config, sessions };
 enum class code { noaccess, noserver, nodaemon, nosrvlog, interfer, errormsg };
+
+namespace tile_session_reg
+{
+    namespace fs = std::filesystem;
+
+    auto registry_dir()
+    {
+        return os::path::home / ".config" / "vtm" / "sessions";
+    }
+    auto pid_alive(ui32 pid) -> bool
+    {
+        if (!pid) return faux;
+        #if defined(_WIN32)
+            auto h = ::OpenProcess(SYNCHRONIZE, FALSE, (DWORD)pid);
+            if (h)
+            {
+                ::CloseHandle(h);
+                return true;
+            }
+            return faux;
+        #else
+            if (::kill((pid_t)pid, 0) == 0) return true;
+            return errno == EPERM; // Process exists but signaling is denied.
+        #endif
+    }
+    auto json_escape(view s)
+    {
+        auto out = text{};
+        out.reserve(s.size() + 2);
+        out.push_back('"');
+        for (auto c : s)
+        {
+                 if (c == '"')  out += "\\\"";
+            else if (c == '\\') out += "\\\\";
+            else if (c == '\n') out += "\\n";
+            else if (c == '\r') out += "\\r";
+            else if (c == '\t') out += "\\t";
+            else if ((unsigned char)c >= 0x20) out.push_back(c);
+        }
+        out.push_back('"');
+        return out;
+    }
+    auto parse_field(view body, view key) -> text
+    {
+        auto qkey = text{ "\"" } + text{ key } + text{ "\"" };
+        auto pos = body.find(qkey);
+        if (pos == view::npos) return {};
+        pos += qkey.size();
+        while (pos < body.size() && (body[pos] == ' ' || body[pos] == ':' || body[pos] == '\t')) pos++;
+        if (pos >= body.size()) return {};
+        auto out = text{};
+        if (body[pos] == '"')
+        {
+            ++pos;
+            while (pos < body.size() && body[pos] != '"')
+            {
+                if (body[pos] == '\\' && pos + 1 < body.size())
+                {
+                    auto c = body[pos + 1];
+                         if (c == 'n')  out.push_back('\n');
+                    else if (c == 'r')  out.push_back('\r');
+                    else if (c == 't')  out.push_back('\t');
+                    else                out.push_back(c);
+                    pos += 2;
+                }
+                else
+                {
+                    out.push_back(body[pos]);
+                    ++pos;
+                }
+            }
+        }
+        else
+        {
+            while (pos < body.size() && body[pos] != ',' && body[pos] != '\n' && body[pos] != '\r' && body[pos] != '}')
+            {
+                if (body[pos] != ' ' && body[pos] != '\t') out.push_back(body[pos]);
+                ++pos;
+            }
+        }
+        return out;
+    }
+    auto epoch_ms_now()
+    {
+        return (ui64)std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::system_clock::now().time_since_epoch()).count();
+    }
+    auto write(view pipe, view user, view cwd, view params)
+    {
+        auto dir = registry_dir();
+        auto ec = std::error_code{};
+        fs::create_directories(dir, ec);
+        auto path = dir / (text{ pipe } + ".json");
+        auto body = text{};
+        body += "{\n";
+        body += "  \"pipe\": "    + json_escape(pipe)                            + ",\n";
+        body += "  \"pid\": "     + std::to_string(os::process::id.first)        + ",\n";
+        body += "  \"user\": "    + json_escape(user)                            + ",\n";
+        body += "  \"started\": " + std::to_string(epoch_ms_now())               + ",\n";
+        body += "  \"cwd\": "     + json_escape(cwd)                             + ",\n";
+        body += "  \"params\": "  + json_escape(params)                          +  "\n";
+        body += "}\n";
+        auto out = std::ofstream{ path, std::ios::binary | std::ios::trunc };
+        if (out) out.write(body.data(), (std::streamsize)body.size());
+        return path;
+    }
+    auto erase(fs::path const& path)
+    {
+        auto ec = std::error_code{};
+        fs::remove(path, ec);
+    }
+    struct scoped
+    {
+        fs::path path;
+        scoped(view pipe, view user, view cwd, view params)
+            : path{ write(pipe, user, cwd, params) }
+        { }
+        ~scoped() { erase(path); }
+        scoped(scoped const&) = delete;
+        scoped& operator=(scoped const&) = delete;
+    };
+    struct entry
+    {
+        text pipe;
+        ui32 pid;
+        text user;
+        ui64 started;
+        text cwd;
+        text params;
+    };
+    auto load_for_user(view current_user) -> std::vector<entry>
+    {
+        auto out = std::vector<entry>{};
+        auto dir = registry_dir();
+        auto ec = std::error_code{};
+        if (!fs::exists(dir, ec)) return out;
+        for (auto& it : fs::directory_iterator(dir, ec))
+        {
+            if (ec) break;
+            if (!it.is_regular_file()) continue;
+            if (it.path().extension() != ".json") continue;
+            auto in = std::ifstream{ it.path(), std::ios::binary };
+            if (!in) continue;
+            auto body = text{ std::istreambuf_iterator<char>{ in }, std::istreambuf_iterator<char>{} };
+            auto pid_str = parse_field(body, "pid");
+            if (pid_str.empty())
+            {
+                remove(it.path());
+                continue;
+            }
+            auto pid = (ui32)std::strtoul(pid_str.c_str(), nullptr, 10);
+            if (!pid_alive(pid))
+            {
+                remove(it.path());
+                continue;
+            }
+            auto user = parse_field(body, "user");
+            if (current_user.size() && user != current_user) continue;
+            auto e = entry{};
+            e.pipe    = parse_field(body, "pipe");
+            e.pid     = pid;
+            e.user    = user;
+            e.started = (ui64)std::strtoull(parse_field(body, "started").c_str(), nullptr, 10);
+            e.cwd     = parse_field(body, "cwd");
+            e.params  = parse_field(body, "params");
+            if (e.pipe.empty()) e.pipe = it.path().stem().string();
+            out.push_back(std::move(e));
+        }
+        std::sort(out.begin(), out.end(), [](auto& a, auto& b){ return a.started < b.started; });
+        return out;
+    }
+    auto format_uptime(ui64 started)
+    {
+        auto now = epoch_ms_now();
+        auto secs = now > started ? (now - started) / 1000 : (ui64)0;
+        auto d = secs / 86400; secs %= 86400;
+        auto h = secs /  3600; secs %=  3600;
+        auto m = secs /    60;
+        auto s = secs %    60;
+        auto buf = std::array<char, 32>{};
+        if (d) std::snprintf(buf.data(), buf.size(), "%llud%02llu:%02llu:%02llu",
+                             (unsigned long long)d, (unsigned long long)h, (unsigned long long)m, (unsigned long long)s);
+        else   std::snprintf(buf.data(), buf.size(),       "%02llu:%02llu:%02llu",
+                             (unsigned long long)h, (unsigned long long)m, (unsigned long long)s);
+        return text{ buf.data() };
+    }
+    auto pin_id(view pipe)
+    {
+        constexpr auto suffix = view{ "-tile" };
+        return pipe.ends_with(suffix) ? text{ pipe.substr(0, pipe.size() - suffix.size()) }
+                                      : text{ pipe };
+    }
+    auto render_table(std::vector<entry> const& entries)
+    {
+        if (entries.empty()) return text{ "No tile sessions found.\n" };
+        auto headers = std::array<text, 4>{ "ID", "PID", "UPTIME", "CWD" };
+        auto widths  = std::array<size_t, 4>{ headers[0].size(), headers[1].size(), headers[2].size(), headers[3].size() };
+        auto rows    = std::vector<std::array<text, 4>>{};
+        rows.reserve(entries.size());
+        for (auto& e : entries)
+        {
+            auto row = std::array<text, 4>{ pin_id(e.pipe), std::to_string(e.pid), format_uptime(e.started), e.cwd };
+            for (auto i = 0u; i < row.size(); ++i) widths[i] = std::max(widths[i], row[i].size());
+            rows.push_back(std::move(row));
+        }
+        auto out = text{};
+        auto emit = [&](std::array<text, 4> const& r)
+        {
+            for (auto i = 0u; i < r.size(); ++i)
+            {
+                out += r[i];
+                if (i + 1 < r.size()) out.append(widths[i] - r[i].size() + 2, ' ');
+            }
+            out.push_back('\n');
+        };
+        emit(headers);
+        for (auto& r : rows) emit(r);
+        return out;
+    }
+}
 
 int main(int argc, char* argv[])
 {
@@ -84,6 +304,10 @@ int main(int argc, char* argv[])
         {
             whoami = type::config;
         }
+        else if (getopt.match("--list-sessions"))
+        {
+            whoami = type::sessions;
+        }
         else if (getopt.match("-c", "--config"))
         {
             cliopt = getopt.next();
@@ -106,6 +330,7 @@ int main(int argc, char* argv[])
                 "\n    vtm-tile [ -c <file> ][ -q ][ -p <id> ][ -s | -d | -m ][ -x <cmds> ]"
                 "\n    vtm-tile [ -c <file> ][ -q ][ -r [ <type> ]][ <args...> ]"
                 "\n    vtm-tile [ -c <file> ]  -l"
+                "\n    vtm-tile --list-sessions"
                 "\n    vtm-tile -v | -?"
                 "\n"
                 "\n  Options:"
@@ -115,6 +340,7 @@ int main(int argc, char* argv[])
                 "\n    -h, -?, --help       Print command-line options."
                 "\n    -v, --version        Print version."
                 "\n    -l, --listconfig     Print configuration."
+                "\n    --list-sessions      Print active tile sessions for the current user."
                 "\n    -q, --quiet          Disable logging."
                 "\n    -x, --script <cmds>  Specifies script commands."
                 "\n    -c, --config <file>  Specifies a settings file to load or plain xml-data to overlay."
@@ -201,6 +427,12 @@ int main(int argc, char* argv[])
         auto config = xml::settings{};
         app::shared::load::settings(config, cliopt, true);
         log(prompt::resultant_settings, "\n", config);
+    }
+    else if (whoami == type::sessions)
+    {
+        netxs::logger::wipe();
+        auto entries = tile_session_reg::load_for_user(userid.first);
+        log<faux>(tile_session_reg::render_table(entries));
     }
     else if (whoami == type::logmon)
     {
@@ -406,6 +638,8 @@ int main(int argc, char* argv[])
         indexer.config.swap(config);
 
         auto tile_session = app::tile::hall(server, { .cmd = params });
+
+        auto registry = tile_session_reg::scoped{ prefix, userid.first, os::env::cwd(), params };
 
         log("%%Tile session started"
             "\n      user: %userid%"
