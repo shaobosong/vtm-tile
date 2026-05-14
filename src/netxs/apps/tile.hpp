@@ -2375,6 +2375,14 @@ namespace netxs::app::tile
             auto previous_ws_index_ptr = ptr::shared(size_t{ 0 });
             auto refresh_status_bar_fn = ptr::shared(std::function<void()>{[]{}});
             auto open_workspace_popup_fn = ptr::shared(std::function<void()>{[]{}}); // Opens the workspace preview popup (Win+Tab style); set when the status bar is built.
+            // Resolves the focused pane's tracked cwd for a given gear, mirroring
+            // capture_pending_pane_cwd but returning the value directly (no
+            // tile.pending_cwd round-trip). Used by the workspace popup "+" button,
+            // which builds the new workspace at the C++ level without going through
+            // the Lua CreateWorkspace handler. Wired up inside object->invoke (where
+            // boss and the terminal_proxy_resolver are available); defaults to a
+            // no-op so callers fired before the wire-up still get empty text.
+            auto pane_cwd_resolver_fn = ptr::shared(std::function<text(id_t)>{[](id_t){ return text{}; }});
 
             // Factory: build a workspace root veer (parse_data result) with the root-fullscreen-attach listener.
             // cwd_override (when non-empty) is consumed by parse_data's empty-utf8 branch and applied to the
@@ -2805,7 +2813,8 @@ namespace netxs::app::tile
                 // and by the `vtm.tile.OpenWorkspacePopup()` Lua method.
                 *open_workspace_popup_fn =
                     [workspaces_ptr, current_ws_index_ptr, switch_workspace, create_workspace,
-                     ws_popup_active, wrapper_shadow, refresh_status_bar_fn, collect_ws_panes_fn, find_content_fn, draw_popup_box]
+                     ws_popup_active, wrapper_shadow, refresh_status_bar_fn, collect_ws_panes_fn, find_content_fn, draw_popup_box,
+                     pane_cwd_resolver_fn]
                 {
                     if (*ws_popup_active) return;
                     auto wrapper_ptr = wrapper_shadow.lock();
@@ -3361,6 +3370,7 @@ namespace netxs::app::tile
                             [workspaces_ptr, current_ws_index_ptr, switch_workspace, create_workspace,
                              preview_idx_ptr, scroll_off_ptr, hover_ws_ptr, hover_pane_ptr,
                              dismiss_visual, dismiss_hook, refresh_status_bar_fn, collect_ws_panes_fn,
+                             pane_cwd_resolver_fn,
                              overlay_shadow](hids& gear)
                         {
                             auto ovl_ptr = overlay_shadow.lock();
@@ -3428,9 +3438,13 @@ namespace netxs::app::tile
                                                     if (!prop.empty()) selected_override = prop;
                                                 }
                                             }
+                                            // Capture the focused pane's cwd (gated by /config/terminal/cwd)
+                                            // so the new workspace's initial app inherits it, mirroring the
+                                            // methods::CreateWorkspace Lua handler.
+                                            auto cwd_override = (*pane_cwd_resolver_fn)(gear.id);
                                             dismiss_visual();
                                             dismiss_hook();
-                                            create_workspace(selected_override);
+                                            create_workspace(selected_override, cwd_override);
                                             (*refresh_status_bar_fn)();
                                             gear.dismiss();
                                             return;
@@ -4374,6 +4388,23 @@ namespace netxs::app::tile
                         }
                         if (!slot_ptr) return {};
                         return get_slot_focus_target(slot_ptr);
+                    };
+
+                    // Wire up the popup-side cwd resolver. The workspace popup
+                    // "+" button creates a workspace directly (no Lua hop), so
+                    // it can't use capture_pending_pane_cwd / tile.pending_cwd
+                    // the way the methods::CreateWorkspace handler does. This
+                    // resolver mirrors that capture logic but returns the cwd
+                    // as text for the popup to forward to create_workspace.
+                    *pane_cwd_resolver_fn = [&boss](id_t gear_id) -> text
+                    {
+                        auto& indexer = ui::tui_domain();
+                        if (!indexer.config.settings::take("/config/terminal/cwd", faux)) return {};
+                        auto& resolver = boss.base::template property<terminal_proxy_resolver_t>(terminal_proxy_resolver_field);
+                        if (!resolver) return {};
+                        auto applet_ptr = resolver(gear_id);
+                        if (!applet_ptr) return {};
+                        return text{ applet_ptr->base::property("pane.tracked_cwd") };
                     };
 
                     // Install the broadcaster consumed by the vtm.terminal Lua
