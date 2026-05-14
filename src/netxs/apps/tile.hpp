@@ -4196,14 +4196,23 @@ namespace netxs::app::tile
                                                         {
                                                             luafx.run_with_gear([&, maybe_confirm](auto& gear)
                                                             {
-                                                                maybe_confirm(app::shared::confirm_text_close_pane,
-                                                                    [&boss, gear_id = gear.id]
+                                                                // Empty slots have no applet state to lose, so the
+                                                                // confirmation dialog is skipped when the focused
+                                                                // target is empty (matches the closeslot path).
+                                                                auto has_applet = faux;
+                                                                foreach(gear.id, [&](auto&, si32 item_type, auto)
+                                                                {
+                                                                    if (item_type == item_type::applet) has_applet = true;
+                                                                });
+                                                                auto run_close = [&boss, gear_id = gear.id]
+                                                                {
+                                                                    if (auto gear_ptr = boss.base::template getref<hids>(gear_id))
                                                                     {
-                                                                        if (auto gear_ptr = boss.base::template getref<hids>(gear_id))
-                                                                        {
-                                                                            boss.base::signal(tier::preview, app::tile::events::ui::close, *gear_ptr);
-                                                                        }
-                                                                    });
+                                                                        boss.base::signal(tier::preview, app::tile::events::ui::close, *gear_ptr);
+                                                                    }
+                                                                };
+                                                                if (has_applet) maybe_confirm(app::shared::confirm_text_close_pane, run_close);
+                                                                else            run_close();
                                                             });
                                                         }},
                         { methods::CloseSlot,           [&, maybe_confirm]
