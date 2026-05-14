@@ -14,7 +14,7 @@ int main(int argc, char* argv[])
     auto getopt = os::process::args{ argc, argv };
     while (getopt)
     {
-        if (getopt.match("-l", "--listconfig"))
+        if (getopt.match("--list-config"))
         {
             cfonly = true;
         }
@@ -57,13 +57,13 @@ int main(int argc, char* argv[])
         log("\n"
             "\n  Syntax:"
             "\n"
-            "\n    " + os::process::binary<true>() + " [ -c <file> ][ -l ]"
+            "\n    " + os::process::binary<true>() + " [ -c <file> ][ --list-config ]"
             "\n"
             "\n  Options:"
             "\n"
             "\n    No arguments         Run application."
             "\n    -c, --config <file>  Specifies the settings file to load."
-            "\n    -l, --listconfig     Print configuration."
+            "\n    --list-config        Print configuration."
             "\n");
     }
     else if (cfonly)

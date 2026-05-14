@@ -300,7 +300,7 @@ int main(int argc, char* argv[])
         {
             netxs::logger::enabled(faux);
         }
-        else if (getopt.match("-l", "--listconfig"))
+        else if (getopt.match("--list-config"))
         {
             whoami = type::config;
         }
@@ -329,7 +329,7 @@ int main(int argc, char* argv[])
                 "\n"
                 "\n    vtm-tile [ -c <file> ][ -q ][ -p <id> ][ -s | -d | -m ][ -x <cmds> ]"
                 "\n    vtm-tile [ -c <file> ][ -q ][ -r [ <type> ]][ <args...> ]"
-                "\n    vtm-tile [ -c <file> ]  -l"
+                "\n    vtm-tile [ -c <file> ]  --list-config"
                 "\n    vtm-tile --list-sessions"
                 "\n    vtm-tile -v | -?"
                 "\n"
@@ -339,7 +339,7 @@ int main(int argc, char* argv[])
                 "\n"
                 "\n    -h, -?, --help       Print command-line options."
                 "\n    -v, --version        Print version."
-                "\n    -l, --listconfig     Print configuration."
+                "\n    --list-config        Print configuration."
                 "\n    --list-sessions      Print active tile sessions for the current user."
                 "\n    -q, --quiet          Disable logging."
                 "\n    -x, --script <cmds>  Specifies script commands."

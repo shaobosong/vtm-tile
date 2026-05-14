@@ -89,7 +89,7 @@ int main(int argc, char* argv[])
         {
             netxs::logger::enabled(faux);
         }
-        else if (getopt.match("-l", "--listconfig"))
+        else if (getopt.match("--list-config"))
         {
             whoami = type::config;
         }
@@ -144,7 +144,7 @@ int main(int argc, char* argv[])
                 "\n    vtm [ -c <file> ][ -q ][ -p <id> ][ -s | -d | -m ][ -x <cmds> ]"
                 "\n    vtm [ -c <file> ][ -q ][ -p <id> ][ -s | -d ][ -r tile ][ <args...> ]"
                 "\n    vtm [ -c <file> ][ -q ][ -t | -g ][ -r [ <type> ]][ <args...> ]"
-                "\n    vtm [ -c <file> ]  -l"
+                "\n    vtm [ -c <file> ]  --list-config"
                 #if defined(__linux__) && !defined(__ANDROID__)
                 "\n    vtm -i | -u | -a [mode] | -v | -?"
                 #else
@@ -159,7 +159,7 @@ int main(int argc, char* argv[])
                 "\n"
                 "\n    -h, -?, --help       Print command-line options."
                 "\n    -v, --version        Print version."
-                "\n    -l, --listconfig     Print configuration."
+                "\n    --list-config        Print configuration."
                 "\n    -i, --install        Perform system-wide installation."
                 #if defined(_WIN32)
                 " Allow Desktop Server to run in Session 0."
