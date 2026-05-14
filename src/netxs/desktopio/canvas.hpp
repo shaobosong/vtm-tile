@@ -2425,15 +2425,33 @@ namespace netxs
             {
                 clrs color;
                 body style;
-                constexpr mimic_t(cell const& brush)
+                si32 factor;
+                constexpr mimic_t(cell const& brush, si32 factor = 0)
                     : color{ brush.uv },
-                      style{ brush.st }
+                      style{ brush.st },
+                      factor{ factor }
                 { }
+                constexpr mimic_t(clrs color, body style, si32 factor)
+                    : color{ color },
+                      style{ style },
+                      factor{ factor }
+                { }
+                template<class T>
+                inline auto operator [] (T param) const
+                {
+                    return mimic_t{ color, style, param };
+                }
                 template<class D>
                 inline void operator () (D& dst) const
                 {
                     dst.uv = color;
                     dst.st.meta(style);
+                    if (factor > 1) // Darken on press (hover_count > 1) so it works on dark/saturated colors too.
+                    {
+                        auto k = (byte)std::clamp(64 * (factor - 1), 0, 0xFF);
+                        dst.uv.bg.shadow(k);
+                        dst.uv.fg.shadow(k);
+                    }
                 }
                 template<class D, class S>
                 inline void operator () (D& dst, S& src) const
