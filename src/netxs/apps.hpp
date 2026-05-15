@@ -539,15 +539,25 @@ namespace netxs::app::shared
                 });
             return window_ptr;
         };
+        auto title_arg = [](text const& title)
+        {
+            // Encode the configured title as an extra argv token so the dtvt
+            // child can stash it in its own eccc and use it as the non-empty
+            // title fallback (see w_tracking::set in trackers/window.hpp).
+            if (title.empty()) return ""s;
+            auto out = " --title "s;
+            utf::quote(title, out, '\"');
+            return out;
+        };
         auto build_vtty = [](eccc appcfg, settings& config)
         {
-            auto args = os::process::binary() + " -r vtty " + appcfg.cmd;
+            auto args = os::process::binary() + title_arg(appcfg.title) + " -r vtty " + appcfg.cmd;
             std::swap(appcfg.cmd, args);
             return build_dtvt(appcfg, config);
         };
         auto build_term = [](eccc appcfg, settings& config)
         {
-            auto args = os::process::binary() + " -r term " + appcfg.cmd;
+            auto args = os::process::binary() + title_arg(appcfg.title) + " -r term " + appcfg.cmd;
             std::swap(appcfg.cmd, args);
             return build_dtvt(appcfg, config);
         };

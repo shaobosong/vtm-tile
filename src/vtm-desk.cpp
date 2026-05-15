@@ -18,6 +18,7 @@ int main(int argc, char* argv[])
     auto errmsg = text{};
     auto vtpipe = text{};
     auto script = text{};
+    auto title  = text{}; // Initial title supplied by the parent vtm via --title (used as a non-empty fallback for the dtvt-child's terminal).
     auto system = faux;
     auto getopt = os::process::args{ argc, argv };
     if (getopt.starts("ssh"))
@@ -115,6 +116,10 @@ int main(int argc, char* argv[])
                 break;
             }
         }
+        else if (getopt.match("-t", "--title"))
+        {
+            title = getopt.next();
+        }
         #if defined(__linux__) && !defined(__ANDROID__)
         else if (getopt.match("-a", "--mouse"))
         {
@@ -137,7 +142,7 @@ int main(int argc, char* argv[])
                 "\n  Command-line options syntax:"
                 "\n"
                 "\n    vtm-desk [ -c <file> ][ -q ][ -p <id> ][ -s | -d | -m ][ -x <cmds> ]"
-                "\n    vtm-desk [ -c <file> ][ -q ][ -t | -g ][ -r [ <type> ]][ <args...> ]"
+                "\n    vtm-desk [ -c <file> ][ -q ][ -t <title> ][ -r [ <type> ]][ <args...> ]"
                 "\n    vtm-desk [ -c <file> ]  --list-config"
                 #if defined(__linux__) && !defined(__ANDROID__)
                 "\n    vtm-desk -i | -u | -a [mode] | -v | -?"
@@ -173,11 +178,12 @@ int main(int argc, char* argv[])
                 "\n    -s, --server         Run Desktop Server."
                 "\n    -d, --daemon         Run Desktop Server in background."
                 "\n    -m, --monitor        Run Log Monitor."
+                "\n    -t, --title <title>  Set initial title for the applet."
+                "\n    --env <var=val>      Set environment variable."
+                "\n    --cwd <path>         Set current working directory."
                 "\n    -r, --, --run        Run desktop applet standalone."
                 "\n    <type>               Desktop applet to run."
                 "\n    <args...>            Desktop applet arguments."
-                "\n    --env <var=val>      Set environment variable."
-                "\n    --cwd <path>         Set current working directory."
                 "\n"
                 "\n    Desktop applet             │ Type │ Arguments"
                 "\n    ───────────────────────────┼──────┼─────────────────────────────────────────────────"
@@ -376,7 +382,7 @@ int main(int argc, char* argv[])
         log("%appname% %version%", apname, app::shared::version);
         auto coor = params.find(' ') + 1; // npos+1=0
         params = params.substr(coor ? coor : params.size());
-        app::shared::start(params, aptype);
+        app::shared::start(params, aptype, title);
     }
     else
     {

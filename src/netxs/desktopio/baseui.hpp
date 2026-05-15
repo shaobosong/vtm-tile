@@ -48,6 +48,7 @@ namespace netxs
         text cwd{}; // eccc: Current working directory.
         text cmd{}; // eccc: Command line to run.
         text cfg{}; // eccc: Configuration patch.
+        text title{}; // eccc: Configured pane/applet title used as a non-empty title fallback when the application has not produced one yet.
         twod win{}; // eccc: Console window size.
         id_t gear_id{}; // eccc: Gear id.
     };

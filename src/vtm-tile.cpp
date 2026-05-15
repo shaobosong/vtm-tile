@@ -239,6 +239,7 @@ int main(int argc, char* argv[])
     auto errmsg = text{};
     auto vtpipe = text{};
     auto script = text{};
+    auto title  = text{};
     auto system = faux;
     auto getopt = os::process::args{ argc, argv };
     while (getopt)
@@ -317,6 +318,10 @@ int main(int argc, char* argv[])
                 break;
             }
         }
+        else if (getopt.match("-t", "--title"))
+        {
+            title = getopt.next();
+        }
         else if (getopt.match("-?", "-h", "--help"))
         {
             os::dtvt::initialize();
@@ -328,7 +333,7 @@ int main(int argc, char* argv[])
                 "\n  Command-line options syntax:"
                 "\n"
                 "\n    vtm-tile [ -c <file> ][ -q ][ -p <id> ][ -s | -d | -m ][ -x <cmds> ]"
-                "\n    vtm-tile [ -c <file> ][ -q ][ -r [ <type> ]][ <args...> ]"
+                "\n    vtm-tile [ -c <file> ][ -q ][ -t <title> ][ -r [ <type> ]][ <args...> ]"
                 "\n    vtm-tile [ -c <file> ]  --list-config"
                 "\n    vtm-tile --list-sessions"
                 "\n    vtm-tile -v | -?"
@@ -348,11 +353,12 @@ int main(int argc, char* argv[])
                 "\n    -s, --server         Run Tile Server."
                 "\n    -d, --daemon         Run Tile Server in background."
                 "\n    -m, --monitor        Run Log Monitor."
+                "\n    -t, --title <title>  Set initial title for the applet."
+                "\n    --env <var=val>      Set environment variable."
+                "\n    --cwd <path>         Set current working directory."
                 "\n    -r, --, --run        Run applet standalone."
                 "\n    <type>               Applet to run (vtty, term, dtvt, dtty)."
                 "\n    <args...>            Applet arguments."
-                "\n    --env <var=val>      Set environment variable."
-                "\n    --cwd <path>         Set current working directory."
                 "\n"
                 "\n    Applet                     │ Type │ Arguments"
                 "\n    ───────────────────────────┼──────┼─────────────────────────────────────────────────"
@@ -552,7 +558,7 @@ int main(int argc, char* argv[])
         log("%appname% %version%", apname, app::shared::version);
         auto coor = params.find(' ') + 1; // npos+1=0
         params = params.substr(coor ? coor : params.size());
-        app::shared::start(params, aptype);
+        app::shared::start(params, aptype, title);
     }
     else
     {

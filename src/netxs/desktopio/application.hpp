@@ -1439,7 +1439,7 @@ namespace netxs::app::shared
         os::dtvt::flagsz.notify_all();
         os::tty::splice(client);
     }
-    static void start(text cmd, text aclass)
+    static void start(text cmd, text aclass, text title = {})
     {
         //todo revise
         auto [client, server] = os::ipc::xlink();
@@ -1455,7 +1455,7 @@ namespace netxs::app::shared
         auto& gate = *gate_ptr;
         gate.base::resize(os::dtvt::gridsz);
         gate.base::signal(tier::general, e2::config::fps, ui::skin::globals().maxfps);
-        auto appcfg = eccc{ .cmd = cmd };
+        auto appcfg = eccc{ .cmd = cmd, .title = title };
         auto applet_ptr = app::shared::builder(aclass)(appcfg, config);
         auto& applet = *applet_ptr;
         applet.base::kind(base::reflow_root);

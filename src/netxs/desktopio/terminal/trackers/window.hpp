@@ -29,7 +29,8 @@
             // w_tracking: Set terminal window property.
             void set(text const& property, qiew txt = {})
             {
-                if (txt.empty()) txt = owner.appcfg.cmd; // Deny empty titles.
+                // Deny empty titles: prefer the configured pane title, fall back to the launch command.
+                if (txt.empty()) txt = owner.appcfg.title.empty() ? owner.appcfg.cmd : owner.appcfg.title;
                 owner.target->flush();
                 if (property == ansi::osc_label_title)
                 {
