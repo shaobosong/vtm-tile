@@ -6168,6 +6168,51 @@ namespace netxs::app::tile
                                 if (ovl_ptr) ovl_ptr->base::deface();
                             };
 
+                            // PageUp/PageDown: scroll the visible window by one page while
+                            // keeping the selection's relative position within the window
+                            // stable. When the list is already at the top/bottom edge the
+                            // viewport can't move, so snap the selection to the first/last
+                            // item instead.
+                            auto page_selection = [&](si32 dir) // -1 = up, +1 = down.
+                            {
+                                *kbd_lock_coord_ptr = gear.coord;
+                                auto filtered = build_filtered();
+                                if (filtered.empty())
+                                {
+                                    if (ovl_ptr) ovl_ptr->base::deface();
+                                    return;
+                                }
+                                auto total   = (si32)filtered.size();
+                                auto page    = command_bar::max_items;
+                                auto cur_sel = *sel_idx_ptr;
+                                auto cur_off = *v_scroll_off_ptr;
+                                auto rel     = cur_sel - cur_off; // Row offset inside viewport.
+                                auto max_off = std::max(si32{ 0 }, total - page);
+                                si32 new_off = cur_off;
+                                si32 new_sel = cur_sel;
+                                if (dir < 0)
+                                {
+                                    if (cur_off == 0) new_sel = 0; // Already at top.
+                                    else
+                                    {
+                                        new_off = std::max(si32{ 0 }, cur_off - page);
+                                        new_sel = std::clamp(new_off + rel, si32{ 0 }, total - 1);
+                                    }
+                                }
+                                else
+                                {
+                                    if (cur_off >= max_off) new_sel = total - 1; // Already at bottom.
+                                    else
+                                    {
+                                        new_off = std::min(max_off, cur_off + page);
+                                        new_sel = std::clamp(new_off + rel, si32{ 0 }, total - 1);
+                                    }
+                                }
+                                *sel_idx_ptr      = new_sel;
+                                *v_scroll_off_ptr = new_off;
+                                if (ovl_ptr) ovl_ptr->base::deface();
+                            };
+
                             auto total_cp = [&] { return command_bar::cp_len(*query_ptr); };
                             auto is_ws_cp = [&](si32 cp) -> bool
                             {
@@ -6404,18 +6449,18 @@ namespace netxs::app::tile
                                 return;
                             }
 
-                            // PageUp — move selection up by one page.
+                            // PageUp — scroll one page up, preserve relative selection row.
                             if (k == input::key::KeyPageUp || k == input::key::NumpadPageUp)
                             {
-                                move_selection(-command_bar::max_items);
+                                page_selection(-1);
                                 gear.set_handled(faux);
                                 return;
                             }
 
-                            // PageDown — move selection down by one page.
+                            // PageDown — scroll one page down, preserve relative selection row.
                             if (k == input::key::KeyPageDown || k == input::key::NumpadPageDown)
                             {
-                                move_selection(command_bar::max_items);
+                                page_selection(+1);
                                 gear.set_handled(faux);
                                 return;
                             }
