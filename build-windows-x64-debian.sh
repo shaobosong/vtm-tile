@@ -11,6 +11,11 @@ MSVC_WINE_REPO_DIR=${MSVC_WINE_REPO_DIR:-"$BUILD_DIR/msvc-wine-src"}
 MSVC_WINE_REPOSITORY=${MSVC_WINE_REPOSITORY:-https://github.com/mstorsjo/msvc-wine.git}
 MSVC_ROOT=${MSVC_ROOT:-"$MSVC_WINE_DATA_ROOT/msvc"}
 MSVC_CACHE_DIR=${MSVC_CACHE_DIR:-"$MSVC_WINE_DATA_ROOT/cache"}
+# MSVC 14.51 (VS 18 preview) currently ICEs in this codebase
+# (msc1.cpp:1672 on calc.hpp under /Zc:preprocessor). Pin to a known-good
+# stable toolset: 17.14 -> 14.44.
+MSVC_VERSION_PIN=${MSVC_VERSION_PIN:-17.14}
+MSVC_TOOLSET_PREFIX=${MSVC_TOOLSET_PREFIX:-14.44}
 
 VCPKG_ROOT=${VCPKG_ROOT:-"$BUILD_DIR/vcpkg"}
 VCPKG_REPOSITORY=${VCPKG_REPOSITORY:-https://github.com/microsoft/vcpkg.git}
@@ -164,16 +169,39 @@ if ! flock -n 9; then
     exit 1
 fi
 
+# Wine daemons spawned during the build (wineserver, services.exe, explorer,
+# etc.) inherit fd 9 and would keep $LOCK_FILE locked after this script exits.
+# Tear them down on EXIT so a subsequent run can re-acquire the lock.
+cleanup_wine() {
+    WINEPREFIX="$WINEPREFIX_DIR" wineserver -k >/dev/null 2>&1 || true
+}
+trap cleanup_wine EXIT
+
 ensure_debian_build_deps
 
 ensure_git_checkout "$MSVC_WINE_REPOSITORY" "$MSVC_WINE_REPO_DIR"
 
+needs_msvc_install=0
 if [ ! -x "$MSVC_ROOT/bin/x64/cl" ]; then
+    needs_msvc_install=1
+elif [ -n "$MSVC_TOOLSET_PREFIX" ] \
+    && ! ls -1 "$MSVC_ROOT/vc/tools/msvc/" 2>/dev/null \
+        | grep -q "^${MSVC_TOOLSET_PREFIX}\."; then
+    echo "Installed MSVC toolset does not match required prefix ${MSVC_TOOLSET_PREFIX}; reinstalling." >&2
+    rm -rf "$MSVC_ROOT"
+    # Old binaries/libs were linked against the previous toolset; force a
+    # clean rebuild of vcpkg ports and CMake configure on next steps.
+    rm -rf "$VCPKG_INSTALL_ROOT" "$BUILD_DIR/CMakeCache.txt" "$BUILD_DIR/CMakeFiles"
+    needs_msvc_install=1
+fi
+
+if [ "$needs_msvc_install" = "1" ]; then
     mkdir -p "$MSVC_ROOT" "$MSVC_CACHE_DIR" "$WINEPREFIX_DIR" "$XDG_RUNTIME_DIR"
     WINEPREFIX="$WINEPREFIX_DIR" wineboot --init >/dev/null 2>&1 || true
     python3 "$MSVC_WINE_REPO_DIR/vsdownload.py" \
         --accept-license \
         --architecture x64 \
+        --msvc-version "$MSVC_VERSION_PIN" \
         --cache "$MSVC_CACHE_DIR" \
         --dest "$MSVC_ROOT"
     XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" WINEPREFIX="$WINEPREFIX_DIR" \
@@ -225,4 +253,6 @@ fi
 cmake --build "$BUILD_DIR" -v
 
 echo "Build complete:"
-echo "  $BUILD_DIR/vtm.exe"
+for exe in "$BUILD_DIR"/*.exe; do
+    [ -f "$exe" ] && echo "  $exe"
+done
