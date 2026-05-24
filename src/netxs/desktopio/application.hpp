@@ -796,6 +796,17 @@ namespace netxs::app::shared
 
     namespace menu
     {
+        // Menu item kind. Set via the XML "type" attribute on each <item>.
+        //   button   (default): clickable label that runs its <script> bindings on left-click.
+        //   dropdown          : clickable label that opens a popup listing its nested
+        //                       <item> children below the trigger. Each child is itself
+        //                       a menu::item (so dropdowns may nest recursively).
+        enum class kind : si32
+        {
+            button,
+            dropdown,
+        };
+
         struct item
         {
             bool alive{};
@@ -803,12 +814,523 @@ namespace netxs::app::shared
             text tooltip{};
             cell hover{};
             cell focus{};
+            kind type{ kind::button };
+            std::vector<item> children;            // Populated only when type == kind::dropdown.
             input::bindings::vector bindings;
         };
 
         using action_map_t = utf::unordered_map<text, std::function<void(ui::item&, menu::item&)>>;
         using link = std::tuple<item, std::function<void(ui::item&, item&)>>;
         using list = std::list<link>;
+
+        // Parse the "type" attribute string into a menu::kind value.
+        // Unknown values fall back to kind::button so misconfiguration is non-fatal.
+        static auto parse_kind(view s) -> kind
+        {
+            return s == "dropdown" ? kind::dropdown : kind::button;
+        }
+
+        // Per-popup shared state. Held in a shared_ptr so the popup's render /
+        // mouse handlers, its child submenu's handlers, and the surrounding
+        // dismiss chain can all reach the same instance.
+        //
+        // Layout (root-first, all attached to host_ptr):
+        //   [backdrop, root_popup, submenu_1, submenu_2, ...]
+        // The backdrop is a transparent overlay that links every canvas cell
+        // to itself and catches LeftClicks that miss every popup, dismissing
+        // the whole chain. The keybd hook intercepts Esc on the host with
+        // the same dismiss effect.
+        struct popup_chain
+        {
+            ui::sptr host_ptr;                            // overlay attach point
+            netxs::wptr<ui::base> host_shadow;
+            netxs::wptr<ui::base> trigger_shadow;         // root trigger (menu-bar button)
+            netxs::wptr<ui::base> backdrop;               // transparent click-catcher
+            std::vector<netxs::wptr<ui::base>> overlays;  // open popups, root-first
+            netxs::sptr<hook> kbd_hook;                   // Esc interceptor on host
+        };
+        using popup_chain_ptr = netxs::sptr<popup_chain>;
+
+        // Process-wide slot for the currently open popup chain. The
+        // menu bar is a single, shared piece of UI: at most one
+        // dropdown should be open across all triggers. Tracking the
+        // active chain here lets a click on another menu-bar button
+        // dismiss the existing dropdown while still letting that
+        // button receive its own click (event passthrough: the
+        // backdrop no longer claims menu-bar cells, so the button's
+        // own LeftClick handler fires; if it is itself a dropdown
+        // trigger, open_dropdown_popup uses this slot to close the
+        // previous chain before opening its own).
+        //
+        // Held by sptr (not weak_ptr) because the chain's own
+        // dismissal callbacks may run synchronously during the
+        // dismiss-then-open transition; holding by value keeps the
+        // chain object alive across that window.
+        static auto& active_chain_slot()
+        {
+            static popup_chain_ptr s_chain;
+            return s_chain;
+        }
+
+        // Dismiss the entire popup chain: detach every open overlay, the
+        // backdrop, and the Esc keyboard interceptor, then mark the host
+        // dirty so it repaints clean.
+        static auto dismiss_dropdown_chain(popup_chain_ptr chain) -> void
+        {
+            if (!chain) return;
+            for (auto& wp : chain->overlays)
+            {
+                if (auto p = wp.lock()) p->base::detach();
+            }
+            chain->overlays.clear();
+            if (auto b = chain->backdrop.lock()) b->base::detach();
+            chain->backdrop = {};
+            if (chain->kbd_hook) chain->kbd_hook->reset();
+            chain->kbd_hook.reset();
+            if (auto t = chain->trigger_shadow.lock())
+            {
+                t->base::property("menu.dropdown.open", faux) = faux;
+            }
+            if (auto h = chain->host_shadow.lock()) h->base::deface();
+            // Clear the active-chain slot if it points at us, so the
+            // next open_dropdown_popup sees no stale active chain.
+            if (active_chain_slot() == chain) active_chain_slot().reset();
+        }
+
+        // Forward decl: a popup's row click may recursively open a submenu.
+        static auto _attach_popup_overlay(popup_chain_ptr chain, twod top_left,
+                                          std::vector<menu::item> const& items) -> netxs::wptr<ui::base>;
+
+        // Compute the painted (width, height) of a popup listing `items`.
+        // Used both by the popup itself when sizing its render area, and
+        // by the parent click handler to decide left-vs-right placement
+        // of a submenu before it is attached (so the submenu never
+        // overlaps the parent popup when there is no room on the right).
+        static auto _popup_dimensions(std::vector<menu::item> const& items) -> twod
+        {
+            auto has_submenus = false;
+            for (auto& c : items) if (!c.children.empty()) { has_submenus = true; break; }
+            auto popup_w = si32{ 12 };
+            for (auto& c : items)
+            {
+                auto w = (si32)utf::length(c.label) + 2 + (has_submenus ? 2 : 0);
+                if (w > popup_w) popup_w = w;
+            }
+            return twod{ popup_w, (si32)items.size() };
+        }
+
+        // Open a dropdown popup anchored to the bottom of `trigger`, listing
+        // `items` as clickable rows. Each row may itself carry children — in
+        // which case it renders with a chevron `›` indicator and clicking it
+        // opens a submenu popup to its right, building a cascading menu (see
+        // menu_system_architecture_design.md §4 Cascading Layer).
+        //
+        // Patterned after the command_bar overlay in app::tile (see
+        // netxs/apps/tile.hpp):
+        //   - attaches a ui::mock overlay to the applet's wrapper cake;
+        //   - paints rows via the overlay's e2::render::any callback;
+        //   - hover follows MouseMove; LeftClick on a leaf dispatches the
+        //     row's script via luafx and dismisses the whole chain; clicking
+        //     a submenu trigger row opens the submenu without dismissing.
+        // The popup auto-flips above the trigger if there isn't room below.
+        static auto open_dropdown_popup(ui::item& trigger, std::vector<menu::item> const& items) -> void
+        {
+            if (items.empty()) return;
+            // Event-passthrough handshake on the menu bar:
+            //
+            //  - If THIS trigger already has its chain open (popup_open
+            //    is true), the user is re-clicking the same button:
+            //    treat that as "toggle off" and dismiss the chain.
+            //    With the backdrop no longer claiming menu-bar cells,
+            //    the re-click reaches the trigger again instead of
+            //    being intercepted by the backdrop, so this branch
+            //    preserves the dismiss-on-re-click UX.
+            //
+            //  - If a DIFFERENT trigger's chain is open, the user just
+            //    clicked another menu-bar button while the old
+            //    dropdown was still visible. Close that chain first,
+            //    then fall through to open this trigger's chain.
+            //    The new click also reaches this trigger normally
+            //    (the backdrop didn't claim its cell), so the user
+            //    gets "close old + open new" from a single click.
+            auto& popup_open = trigger.base::property("menu.dropdown.open", faux);
+            if (popup_open)
+            {
+                if (auto active = active_chain_slot()) dismiss_dropdown_chain(active);
+                return;
+            }
+            if (auto active = active_chain_slot()) dismiss_dropdown_chain(active);
+            // Locate the applet's wrapper cake as the overlay host. The
+            // applet root is normally tagged kind() == base::reflow_root
+            // (see app::shared::start()), but the standalone vtm-tile
+            // session path (app::tile::hall) doesn't set this marker,
+            // so the reflow_root walk would fail there. Fall back to the
+            // second-to-topmost ancestor (the applet/window cake that
+            // sits just below the gate-style root). Walking all the way
+            // to the gate itself would replace the existing applet
+            // subtree on attach (the gate renders only the last attached
+            // child), making the menu bar disappear.
+            auto host_ptr = ui::sptr{};
+            {
+                auto walk = ui::sptr{ trigger.This() };
+                auto last_below_root = walk;
+                while (walk)
+                {
+                    if (walk->base::kind() == ui::base::reflow_root)
+                    {
+                        host_ptr = walk;
+                        break;
+                    }
+                    auto p = walk->base::parent();
+                    if (!p) break; // walk is the topmost; we want last_below_root.
+                    last_below_root = walk;
+                    walk = p;
+                }
+                if (!host_ptr) host_ptr = last_below_root;
+            }
+            if (!host_ptr || host_ptr.get() == static_cast<ui::base*>(&trigger)) return;
+            // Compute trigger's absolute coord relative to host by accumulating
+            // base::region.coor up the parent chain.
+            auto anchor = twod{};
+            for (auto walk = ui::sptr{ trigger.This() }; walk && walk != host_ptr; walk = walk->base::parent())
+            {
+                anchor += walk->base::region.coor;
+            }
+            auto trigger_h = trigger.base::region.size.y;
+
+            auto chain = ptr::shared<popup_chain>();
+            chain->host_ptr = host_ptr;
+            chain->host_shadow = ptr::shadow(host_ptr);
+            chain->trigger_shadow = ptr::shadow(ui::sptr{ trigger.This() });
+            chain->kbd_hook = ptr::shared<hook>();
+            popup_open = true;
+            active_chain_slot() = chain;
+
+            // Attach the backdrop FIRST so it sits beneath every popup
+            // in the cake's child order. Its render callback links
+            // canvas cells OUTSIDE the menu bar's row range to itself
+            // so clicks there dismiss the chain via the backdrop's
+            // LeftClick handler. Cells INSIDE the menu bar row are
+            // deliberately left with the menu-bar buttons' own links
+            // — this is the event-passthrough surface: hovers and
+            // clicks on those cells reach the menu-bar buttons, so
+            // the buttons keep their xlight hover feedback and a
+            // click on another trigger fires that trigger's own
+            // LeftClick handler (which re-enters open_dropdown_popup
+            // and dismisses the previous chain via active_chain_slot).
+            // Popup overlays attached AFTER the backdrop overwrite
+            // the link on their own cells, so the backdrop only
+            // receives clicks that miss all popups AND miss the
+            // menu bar.
+            auto backdrop_ptr = ui::mock::ctor();
+            chain->backdrop = ptr::shadow(backdrop_ptr);
+            auto menubar_y0 = anchor.y;
+            auto menubar_y1 = anchor.y + trigger_h;
+            backdrop_ptr->invoke([&](auto& bd)
+            {
+                auto bd_id = bd.bell::id;
+                bd.LISTEN(tier::release, e2::render::any, parent_canvas, -,
+                          (bd_id, menubar_y0, menubar_y1))
+                {
+                    auto area = parent_canvas.area();
+                    if (menubar_y0 > 0)
+                    {
+                        parent_canvas.fill(
+                            rect{{ 0, 0 }, { area.size.x, menubar_y0 }},
+                            [bd_id](cell& c) { c.link(bd_id); });
+                    }
+                    if (menubar_y1 < area.size.y)
+                    {
+                        parent_canvas.fill(
+                            rect{{ 0, menubar_y1 },
+                                 { area.size.x, area.size.y - menubar_y1 }},
+                            [bd_id](cell& c) { c.link(bd_id); });
+                    }
+                };
+                bd.on(tier::mouserelease, input::key::LeftClick,
+                    [chain](hids& gear)
+                    {
+                        dismiss_dropdown_chain(chain);
+                        gear.dismiss();
+                    });
+            });
+            host_ptr->attach(backdrop_ptr);
+
+            // Esc on the host dismisses the whole chain too.
+            host_ptr->bell::submit(tier::preview, input::events::keybd::any, *chain->kbd_hook)
+                = [chain](hids& gear)
+                {
+                    if (gear.payload != input::keybd::type::keypress
+                        || gear.keystat != input::key::pressed
+                        || gear.keybd::handled)
+                    {
+                        return;
+                    }
+                    if (gear.keybd::generic() == input::key::Esc)
+                    {
+                        dismiss_dropdown_chain(chain);
+                        gear.set_handled(faux);
+                    }
+                };
+
+            _attach_popup_overlay(chain, twod{ anchor.x, anchor.y + trigger_h }, items);
+        }
+
+        // Attach a single popup overlay anchored at `top_left`, listing `items`.
+        // Each call appends its overlay to `chain->overlays`; row handlers
+        // recursively call back into this function for submenus, and any leaf
+        // click tears down the whole chain via dismiss_dropdown_chain.
+        static auto _attach_popup_overlay(popup_chain_ptr chain, twod top_left,
+                                          std::vector<menu::item> const& items) -> netxs::wptr<ui::base>
+        {
+            if (items.empty() || !chain || !chain->host_ptr) return {};
+            // Geometry: width = max label width + 2 padding cells. When ANY
+            // row carries children, reserve 2 extra cells at the right edge
+            // of every row for the chevron indicator (visual alignment +
+            // so leaf labels don't get truncated next to chevron-bearing
+            // rows in the same popup). Centralised in _popup_dimensions so
+            // the caller can pre-compute submenu size for non-overlap
+            // placement.
+            auto has_submenus = false;
+            for (auto& c : items) if (!c.children.empty()) { has_submenus = true; break; }
+            auto dim = _popup_dimensions(items);
+            auto popup_w = dim.x;
+            auto popup_h = dim.y;
+
+            // Depth of this overlay in the cascading chain (0 = root popup
+            // attached directly under the menu-bar trigger; 1 = first
+            // submenu opened to its right; etc.). Captured BEFORE push_back
+            // so it reflects this overlay's own level. Used to compute a
+            // progressively darker background per submenu level, giving
+            // clearer visual feedback as the user descends the cascade.
+            auto depth = (si32)chain->overlays.size();
+
+            auto overlay_ptr = ui::mock::ctor();
+            auto overlay_shadow = ptr::shadow(overlay_ptr);
+
+            overlay_ptr->invoke([&](auto& ovl)
+            {
+                auto ovl_id = ovl.bell::id;
+                auto hover_row_ptr = ptr::shared(si32{ -1 });
+                // Painted position (recomputed every render so it tracks resize / flip).
+                auto popup_px_ptr = ptr::shared(si32{ top_left.x });
+                auto popup_py_ptr = ptr::shared(si32{ top_left.y });
+                // Index of the row whose submenu is currently open under this
+                // popup (-1 = none). Used by both hover and click logic so the
+                // submenu opens/closes atomically as the user moves the cursor
+                // across rows.
+                auto child_submenu_row_ptr = ptr::shared(si32{ -1 });
+
+                ovl.LISTEN(tier::release, e2::render::any, parent_canvas, -,
+                    (items, top_left, popup_w, popup_h, has_submenus, hover_row_ptr,
+                     popup_px_ptr, popup_py_ptr, ovl_id, depth))
+                {
+                    auto hover_row = *hover_row_ptr;
+                    auto area = parent_canvas.area();
+                    auto px = top_left.x;
+                    auto py = top_left.y;
+                    // Clip to canvas; if no room below, slide left/up.
+                    if (px + popup_w > area.size.x) px = std::max(0, area.size.x - popup_w);
+                    if (py + popup_h > area.size.y) py = std::max(0, area.size.y - popup_h);
+                    if (px < 0) px = 0;
+                    if (py < 0) py = 0;
+                    *popup_px_ptr = px;
+                    *popup_py_ptr = py;
+                    // Per-level palette. Each submenu level subtracts a
+                    // fixed amount from every RGB channel of the root
+                    // popup's background, so deeper levels are visibly
+                    // darker than their parent. Hover brightens the
+                    // level's bg by a small amount; the foreground stays
+                    // constant so labels remain equally legible whether
+                    // a row is hovered or not.
+                    auto darken = std::min(depth * 8, 40);
+                    auto level_r = std::max(0, 0x31 - darken);
+                    auto level_g = std::max(0, 0x32 - darken);
+                    auto level_b = std::max(0, 0x44 - darken);
+                    auto level_bg = 0xFF000000u
+                                  | ((ui32)level_r << 16)
+                                  | ((ui32)level_g << 8)
+                                  | (ui32)level_b;
+                    auto hover_bg = 0xFF000000u
+                                  | ((ui32)std::min(255, level_r + 24) << 16)
+                                  | ((ui32)std::min(255, level_g + 24) << 8)
+                                  | (ui32)std::min(255, level_b + 24);
+                    auto row_fg = 0xFFCDD6F4u;
+                    for (auto i = si32{ 0 }; i < popup_h; ++i)
+                    {
+                        auto active = (i == hover_row);
+                        auto bg = active ? hover_bg : level_bg;
+                        auto fg = row_fg;
+                        parent_canvas.fill(rect{{ px, py + i }, { popup_w, 1 }}, [=](cell& c)
+                        {
+                            c.wipe();
+                            c.bgc(bg).fgc(fg).txt(whitespace).link(ovl_id);
+                        });
+                        auto& label = items[(size_t)i].label;
+                        // Reserve trailing 2 cells for the chevron when any
+                        // row in this popup has children (the popup width
+                        // budget already accounts for this).
+                        auto right_reserve = has_submenus ? si32{ 2 } : si32{ 0 };
+                        auto wx = px + 1;
+                        auto max_wx = px + popup_w - 1 - right_reserve;
+                        auto off = size_t{ 0 };
+                        while (off < label.size() && wx < max_wx)
+                        {
+                            auto uc = (unsigned char)label[off];
+                            auto len = uc < 0x80           ? size_t{ 1 }
+                                     : (uc & 0xE0) == 0xC0 ? size_t{ 2 }
+                                     : (uc & 0xF0) == 0xE0 ? size_t{ 3 }
+                                     :                       size_t{ 4 };
+                            len = std::min(len, label.size() - off);
+                            auto ch = label.substr(off, len);
+                            parent_canvas.fill(rect{{ wx, py + i }, { 1, 1 }}, [=](cell& c)
+                            {
+                                c.bgc(bg).fgc(fg).txt(ch).link(ovl_id);
+                            });
+                            off += len;
+                            ++wx;
+                        }
+                        // Chevron indicator for submenu trigger rows.
+                        if (!items[(size_t)i].children.empty())
+                        {
+                            auto chx = px + popup_w - 2;
+                            parent_canvas.fill(rect{{ chx, py + i }, { 1, 1 }}, [=](cell& c)
+                            {
+                                c.bgc(bg).fgc(fg).txt("▸").link(ovl_id);
+                            });
+                        }
+                    }
+                };
+                // open_submenu_for_row(idx): if idx is a submenu trigger and
+                // not already open, close any existing child submenu of this
+                // popup and attach a fresh one anchored at (right_of_parent,
+                // parent_row + idx). If idx is -1 or a leaf row, just closes
+                // any open child. Shared by hover (MouseMove) and click logic
+                // so the submenu opens immediately when the cursor lands on
+                // a chevron row.
+                auto open_submenu_for_row = [items, popup_px_ptr, popup_py_ptr,
+                                              popup_w = popup_w,
+                                              chain, overlay_shadow,
+                                              child_submenu_row_ptr](si32 idx)
+                {
+                    auto& current = *child_submenu_row_ptr;
+                    if (current == idx) return; // already in desired state
+                    // Close any open child + everything deeper in the chain
+                    // that descends from us.
+                    if (auto self_ptr = overlay_shadow.lock())
+                    {
+                        auto& overlays = chain->overlays;
+                        auto it = std::find_if(overlays.begin(), overlays.end(),
+                            [self_ptr](auto& w) { return w.lock() == self_ptr; });
+                        if (it != overlays.end())
+                        {
+                            auto next = std::next(it);
+                            while (next != overlays.end())
+                            {
+                                if (auto p = next->lock()) p->base::detach();
+                                next = overlays.erase(next);
+                            }
+                        }
+                    }
+                    current = -1;
+                    if (idx < 0 || idx >= (si32)items.size()) return;
+                    if (items[(size_t)idx].children.empty()) return;
+                    // Decide submenu placement: prefer RIGHT of the parent;
+                    // FLIP to LEFT if right would overflow the host. Parent
+                    // and submenu rects are mutually exclusive — no overlap.
+                    auto sub_dim = _popup_dimensions(items[(size_t)idx].children);
+                    auto px = *popup_px_ptr;
+                    auto py = *popup_py_ptr;
+                    auto sub_x_right = px + popup_w;
+                    auto sub_x_left  = px - sub_dim.x;
+                    auto host_w = chain->host_ptr
+                        ? chain->host_ptr->base::region.size.x
+                        : si32{ 0 };
+                    auto sub_x = sub_x_right;
+                    if (sub_x_right + sub_dim.x > host_w && sub_x_left >= 0)
+                    {
+                        sub_x = sub_x_left;
+                    }
+                    _attach_popup_overlay(chain,
+                        twod{ sub_x, py + idx },
+                        items[(size_t)idx].children);
+                    current = idx;
+                };
+
+                ovl.on(tier::mouserelease, input::key::MouseMove,
+                    [&ovl, hover_row_ptr, popup_px_ptr, popup_py_ptr,
+                     popup_w = popup_w, popup_h = popup_h,
+                     open_submenu_for_row](hids& gear)
+                    {
+                        auto px = *popup_px_ptr;
+                        auto py = *popup_py_ptr;
+                        auto mx = (si32)gear.coord.x;
+                        auto my = (si32)gear.coord.y;
+                        auto new_hover = si32{ -1 };
+                        if (mx >= px && mx < px + popup_w && my >= py && my < py + popup_h)
+                        {
+                            new_hover = my - py;
+                        }
+                        if (*hover_row_ptr != new_hover)
+                        {
+                            *hover_row_ptr = new_hover;
+                            // Hover opens submenu (no delay). For leaf rows
+                            // the helper just closes any currently-open child.
+                            open_submenu_for_row(new_hover);
+                            ovl.base::deface();
+                        }
+                    });
+                ovl.on(tier::mouserelease, input::key::LeftClick,
+                    [items, popup_px_ptr, popup_py_ptr,
+                     popup_w = popup_w, popup_h = popup_h,
+                     chain, open_submenu_for_row](hids& gear)
+                    {
+                        auto px = *popup_px_ptr;
+                        auto py = *popup_py_ptr;
+                        auto mx = (si32)gear.coord.x;
+                        auto my = (si32)gear.coord.y;
+                        if (mx >= px && mx < px + popup_w && my >= py && my < py + popup_h)
+                        {
+                            auto idx = my - py;
+                            if (idx >= 0 && idx < (si32)items.size())
+                            {
+                                auto& item = items[(size_t)idx];
+                                if (!item.children.empty())
+                                {
+                                    // Submenu trigger: ensure the submenu is
+                                    // open (hover normally already opened it
+                                    // but a fast click may arrive first).
+                                    open_submenu_for_row(idx);
+                                    gear.dismiss();
+                                    return;
+                                }
+                                // Leaf row: dispatch the row's script (if any)
+                                // through the root trigger's luafx context,
+                                // then tear down the whole chain.
+                                if (auto tr = chain->trigger_shadow.lock())
+                                {
+                                    auto& luafx = tr->bell::indexer.luafx;
+                                    luafx.set_gear(gear);
+                                    for (auto& b : item.bindings)
+                                    {
+                                        if (b.script_ptr && b.script_ptr->second.size())
+                                        {
+                                            luafx.run_script(*tr, b.script_ptr->second);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        dismiss_dropdown_chain(chain);
+                        gear.dismiss();
+                    });
+            });
+
+            chain->host_ptr->attach(overlay_ptr);
+            chain->host_ptr->base::deface();
+            chain->overlays.push_back(overlay_shadow);
+            return overlay_shadow;
+        }
 
         static auto mini(bool autohide, bool slimsize, si32 custom, list menu_items) // Menu bar (shrinkable on right-click).
         {
@@ -843,6 +1365,36 @@ namespace netxs::app::shared
                     ->setpad({ 0, 0, !slimsize, !slimsize })
                     ->invoke([&](auto& boss) // Store shared ptr to the menu item config.
                     {
+                        // Chain-dismiss prelude. Fires BEFORE the
+                        // button's own LeftClick handler so any open
+                        // dropdown chain is torn down by the time the
+                        // button's action runs. Without this, only
+                        // dropdown-trigger clicks dismissed via
+                        // open_dropdown_popup's active_chain_slot
+                        // path; clicks on non-dropdown menu-bar
+                        // buttons (close/min/max, or any item with
+                        // <script> bindings) would fire their action
+                        // while leaving the previous dropdown visible.
+                        //
+                        // If this button IS the active chain's
+                        // trigger, the prelude does NOTHING so
+                        // open_dropdown_popup's own toggle-off path
+                        // (popup_open=true branch) can dismiss the
+                        // chain itself — otherwise we would dismiss
+                        // here, clear popup_open, and the trigger
+                        // handler would then immediately re-open the
+                        // chain (flash close-then-open).
+                        boss.on(tier::mouserelease, input::key::LeftClick,
+                            [&boss](hids& /*gear*/)
+                            {
+                                auto active = menu::active_chain_slot();
+                                if (!active) return;
+                                if (auto trigger_lock = active->trigger_shadow.lock())
+                                {
+                                    if (trigger_lock.get() == static_cast<ui::base*>(&boss)) return;
+                                }
+                                menu::dismiss_dropdown_chain(active);
+                            });
                         auto& item_props = boss.base::field(std::move(props));
                         setup(boss, item_props);
                     });
@@ -1051,6 +1603,115 @@ namespace netxs::app::shared
             auto slimsize = config.settings::take("slim"    , true);
             return mini(autohide, slimsize, 0, menu_items);
         };
+        // Parse one <item> XML node into a (menu::item, setup) link.
+        // Recurses for type="dropdown": every nested <item> beneath the dropdown
+        // is parsed into item.children (which are themselves menu::items, so
+        // sub-dropdowns nest naturally to any depth).
+        //
+        // The returned setup function differs by kind:
+        //   button   - installs script keybindings (LeftClick runs scripts).
+        //   dropdown - skips script keybindings (children own their scripts);
+        //              installs a LeftClick that opens a popup of children.
+        //              The popup overlay rendering follows the command_bar
+        //              pattern in app::tile (see netxs/apps/tile.hpp) and is
+        //              attached by the application wrapper on demand. Until
+        //              the wrapper subscribes, the click is a visible no-op.
+        static auto load_item(settings& config, auto menuitem_ptr) -> link
+        {
+            auto item = menu::item{};
+            auto menuitem_context = config.settings::push_context(menuitem_ptr);
+            auto script_list = config.settings::take_ptr_list_of(menuitem_ptr, "script");
+            auto classname_list = config.settings::take_value_list_of(menuitem_ptr, "id");
+            auto type_str = config.settings::take_value_from(menuitem_ptr, "type", "button"s);
+            item.type    = menu::parse_kind(type_str);
+            item.label   = config.settings::take_value_from(menuitem_ptr, "label", " "s);
+            item.tooltip = config.settings::take_value_from(menuitem_ptr, "tooltip", ""s);
+            if (auto color = config.settings::take("hover/bgc", ui32{ 0 })) item.hover.bgc(color);
+            if (auto color = config.settings::take("hover/fgc", ui32{ 0 })) item.hover.fgc(color);
+            if (item.type == menu::kind::dropdown)
+            {
+                // Dropdowns don't bind their own scripts; their children do.
+                // "alive" reflects whether the dropdown has any children to show.
+                auto child_ptr_list = config.settings::take_ptr_list_of(menuitem_ptr, "item");
+                for (auto child_ptr : child_ptr_list)
+                {
+                    auto [child_item, /*child_setup*/_] = load_item(config, child_ptr);
+                    item.children.push_back(std::move(child_item));
+                }
+                item.alive = !item.children.empty();
+            }
+            else
+            {
+                item.alive = script_list.size();
+                item.bindings = input::bindings::load(config, script_list);
+            }
+            auto add_lua_methods = [](ui::item& boss)
+            {
+                auto& luafx = boss.bell::indexer.luafx;
+                boss.base::add_methods(basename::item,
+                {
+                    { "Label",      [&]
+                                    {
+                                        auto args_count = luafx.args_count();
+                                        if (args_count) // Set label.
+                                        {
+                                            auto new_label = luafx.get_args_or(1, "label"s);
+                                            boss.set(new_label);
+                                            luafx.set_return();
+                                        }
+                                        else // Get label.
+                                        {
+                                            auto current_label = boss.get();
+                                            luafx.set_return(current_label);
+                                        }
+                                    }},
+                    { "Tooltip",    [&]
+                                    {
+                                        auto args_count = luafx.args_count();
+                                        if (args_count) // Set tooltip.
+                                        {
+                                            auto new_tooltip = luafx.get_args_or(1, ""s);
+                                            boss.base::signal(tier::preview, e2::form::prop::ui::tooltip, new_tooltip);
+                                            luafx.set_return();
+                                        }
+                                        else // Get tooltip.
+                                        {
+                                            auto current_tooltip = boss.base::signal(tier::request, e2::form::prop::ui::tooltip);
+                                            luafx.set_return(current_tooltip);
+                                        }
+                                    }},
+                    { "Deface",     [&]
+                                    {
+                                        boss.base::deface();
+                                        luafx.set_return();
+                                    }},
+                });
+            };
+            auto setup = [classname_list = std::move(classname_list),
+                          add_lua_methods](ui::item& boss, menu::item& item)
+            {
+                for (auto& classname : classname_list)
+                {
+                    boss.bell::indexer.add_base_class(classname, boss);
+                }
+                add_lua_methods(boss);
+                if (item.type == menu::kind::dropdown)
+                {
+                    // Open a popup of children anchored below the trigger on
+                    // left-click. See menu::open_dropdown_popup for details.
+                    boss.on(tier::mouserelease, input::key::LeftClick, [&boss, &item](hids& gear)
+                    {
+                        menu::open_dropdown_popup(boss, item.children);
+                        gear.dismiss();
+                    });
+                }
+                else
+                {
+                    input::bindings::keybind(boss, item.bindings);
+                }
+            };
+            return { std::move(item), std::move(setup) };
+        }
         const auto load = [](settings& config)
         {
             auto list = menu::list{};
@@ -1058,65 +1719,7 @@ namespace netxs::app::shared
             auto menuitem_ptr_list = config.settings::take_ptr_list_for_name("item");
             for (auto menuitem_ptr : menuitem_ptr_list)
             {
-                auto item = menu::item{};
-                auto menuitem_context = config.settings::push_context(menuitem_ptr); //todo revise
-                auto script_list = config.settings::take_ptr_list_of(menuitem_ptr, "script");
-                item.alive = script_list.size();
-                item.bindings = input::bindings::load(config, script_list);
-                auto classname_list = config.settings::take_value_list_of(menuitem_ptr, "id");
-                item.label   = config.settings::take_value_from(menuitem_ptr, "label", " "s);
-                item.tooltip = config.settings::take_value_from(menuitem_ptr, "tooltip", ""s);
-                if (auto color = config.settings::take("hover/bgc", ui32{ 0 })) item.hover.bgc(color);
-                if (auto color = config.settings::take("hover/fgc", ui32{ 0 })) item.hover.fgc(color);
-                auto setup = [classname_list = std::move(classname_list)](ui::item& boss, menu::item& item)
-                {
-                    auto& luafx = boss.bell::indexer.luafx;
-                    for (auto& classname : classname_list)
-                    {
-                        boss.bell::indexer.add_base_class(classname, boss);
-                    }
-                    input::bindings::keybind(boss, item.bindings);
-                    boss.base::add_methods(basename::item,
-                    {
-                        { "Label",      [&]
-                                        {
-                                            auto args_count = luafx.args_count();
-                                            if (args_count) // Set label.
-                                            {
-                                                auto new_label = luafx.get_args_or(1, "label"s);
-                                                boss.set(new_label);
-                                                luafx.set_return();
-                                            }
-                                            else // Get label.
-                                            {
-                                                auto current_label = boss.get();
-                                                luafx.set_return(current_label);
-                                            }
-                                        }},
-                        { "Tooltip",    [&]
-                                        {
-                                            
-                                            auto args_count = luafx.args_count();
-                                            if (args_count) // Set tooltip.
-                                            {
-                                                auto new_tooltip = luafx.get_args_or(1, ""s);
-                                                boss.base::signal(tier::preview, e2::form::prop::ui::tooltip, new_tooltip);
-                                                luafx.set_return();
-                                            }
-                                            else // Get tooltip.
-                                            {
-                                                auto current_tooltip = boss.base::signal(tier::request, e2::form::prop::ui::tooltip);
-                                                luafx.set_return(current_tooltip);
-                                            }
-                                        }},
-                        { "Deface",     [&]
-                                        {
-                                            boss.base::deface();
-                                            luafx.set_return();
-                                        }},
-                    });
-                };
-                list.push_back({ item, setup });
+                list.push_back(load_item(config, menuitem_ptr));
             }
             return menu::create(config, list);
         };

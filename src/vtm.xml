@@ -187,7 +187,7 @@ R"==(
         </colors>
         <border=0/>  <!-- Width of the left and right border of the terminal window. -->
         <tablen=8/>  <!-- Tab length. -->
-        <menu item*>
+        <menu item*>  <!-- Each <item> defaults to type="button". Set type="dropdown" to open a popup list of nested <item> children below the trigger on left-click. Nested <item type="dropdown"> items render with a chevron '>' and cascade as submenus to the right. -->
             <autohide=/Menu/Defaults/autohide/>
             <slim=/Menu/Defaults/slim/>
             <item=/Menu/Buttons/AlwaysOnTop/>
@@ -200,6 +200,18 @@ R"==(
             <item=/Menu/Buttons/ClearScrollback/>
             <item=/Menu/Buttons/Restart/>
             <item=/Menu/Buttons/FindBar/>
+            <item type="dropdown" label="  Edit  " tooltip=" Edit menu " item*>  <!-- Multi-level dropdown demo: leaf rows run their script, submenu rows (type="dropdown") cascade to the right. -->
+                <item label="  Clear Scrollback  " tooltip=" Clear terminal scrollback "    script=OnLeftClick|TerminalClearScrollback/>
+                <item type="dropdown" label="  Find  " tooltip=" Find submenu " item*>  <!-- Nested submenu: opens to the right of 'Edit', anchored on this row. -->
+                    <item label="  Toggle Find Bar  " tooltip=" Toggle the terminal find-bar " script=OnLeftClick|TerminalFindBarToggle/>
+                    <item label="  Find Previous    " tooltip=" Go to previous match "         script=OnLeftClick|TerminalFindPrev/>
+                    <item label="  Find Next        " tooltip=" Go to next match "             script=OnLeftClick|TerminalFindNext/>
+                </item>
+                <item type="dropdown" label="  Session  " tooltip=" Session submenu " item*>
+                    <item label="  Restart           " tooltip=" Restart the terminal session " script=OnLeftClick|TerminalRestart/>
+                    <item label="  Clear Scrollback  " tooltip=" Clear terminal scrollback "    script=OnLeftClick|TerminalClearScrollback/>
+                </item>
+            </item>
         </menu>
         <selection>
             <mode=/Terminal/selection/mode/>  <!-- Clipboard copy format: "text" | "ansi" | "rich" | "html" | "protected" | "none". -->
