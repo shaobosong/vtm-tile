@@ -840,6 +840,37 @@ namespace netxs::app::shared
         // to itself and catches LeftClicks that miss every popup, dismissing
         // the whole chain. The keybd hook intercepts Esc on the host with
         // the same dismiss effect.
+        // Per-popup keyboard-navigation state. One entry per attached
+        // overlay, aligned 1:1 with popup_chain::overlays. The deepest
+        // entry (navs.back()) is the popup that receives keyboard
+        // navigation (Up/Down/Left/Right/Enter and shortcut letters)
+        // — typing a key dispatches through the back() entry's
+        // callbacks. Captured by value to keep the popup's items
+        // and operations reachable from the host-level kbd_hook
+        // (the lambdas inside the overlay close over local state
+        // that the hook itself does not have access to).
+        struct popup_nav
+        {
+            std::vector<menu::item> items;
+            netxs::sptr<si32> selected_row;
+            std::function<void(si32 idx)> open_submenu;
+            std::function<void(si32 idx, hids& gear)> activate_row;
+            std::function<void()> request_deface;
+            // Mouse-coord lock for keyboard/mouse priority. Each
+            // popup keeps an sptr<twod> initialised to a sentinel
+            // (-32768, -32768). When a keyboard action fires the
+            // hook stamps the current gear.coord here. The popup's
+            // MouseMove handler then ignores events whose coord
+            // still equals this stamp, so a stationary cursor
+            // resting on a row cannot pull the highlighted
+            // selection back after Up/Down moved it elsewhere.
+            // A MouseMove at any DIFFERENT coord clears the stamp
+            // (sets it back to sentinel) and resumes normal hover
+            // updates — i.e. the moment the user actually moves
+            // the mouse, mouse hover takes over again.
+            netxs::sptr<twod> kbd_lock_coord;
+        };
+
         struct popup_chain
         {
             ui::sptr host_ptr;                            // overlay attach point
@@ -848,6 +879,7 @@ namespace netxs::app::shared
             netxs::wptr<ui::base> backdrop;               // transparent click-catcher
             std::vector<netxs::wptr<ui::base>> overlays;  // open popups, root-first
             netxs::sptr<hook> kbd_hook;                   // Esc interceptor on host
+            std::vector<popup_nav> navs;                  // per-overlay kbd nav state
         };
         using popup_chain_ptr = netxs::sptr<popup_chain>;
 
@@ -883,6 +915,7 @@ namespace netxs::app::shared
                 if (auto p = wp.lock()) p->base::detach();
             }
             chain->overlays.clear();
+            chain->navs.clear();
             if (auto b = chain->backdrop.lock()) b->base::detach();
             chain->backdrop = {};
             if (chain->kbd_hook) chain->kbd_hook->reset();
@@ -901,6 +934,60 @@ namespace netxs::app::shared
         static auto _attach_popup_overlay(popup_chain_ptr chain, twod top_left,
                                           std::vector<menu::item> const& items) -> netxs::wptr<ui::base>;
 
+        // Byte position of the shortcut '&' marker in `s` (the '&'
+        // character followed by an ASCII alphabetic key letter), or
+        // text::npos if no shortcut is encoded. Only the FIRST '&'
+        // followed by [A-Za-z] is treated as a marker; other '&'
+        // characters render literally.
+        static auto label_shortcut_pos(text const& s) -> size_t
+        {
+            auto pos = s.find('&');
+            while (pos != text::npos && pos + 1 < s.size())
+            {
+                auto next = s[pos + 1];
+                if ((next >= 'A' && next <= 'Z') || (next >= 'a' && next <= 'z')) return pos;
+                pos = s.find('&', pos + 1);
+            }
+            return text::npos;
+        }
+
+        // Lowercase shortcut letter encoded in `s`, or 0 if none.
+        static auto label_shortcut_char(text const& s) -> char
+        {
+            auto pos = label_shortcut_pos(s);
+            if (pos == text::npos) return 0;
+            return (char)std::tolower((unsigned char)s[pos + 1]);
+        }
+
+        // Visible width in cells of `s` after stripping the shortcut
+        // '&' marker (one '&' marker = -1 cell vs utf::length).
+        static auto label_display_length(text const& s) -> si32
+        {
+            auto len = (si32)utf::length(s);
+            if (label_shortcut_pos(s) != text::npos) len -= 1;
+            return len;
+        }
+
+        // Render `s` for paint surfaces that consume ANSI/SGR
+        // (ui::item / para). The shortcut '&' marker is removed
+        // and the following letter is wrapped in SGR 4 / 24
+        // (underline on/off), so menu-bar buttons display the
+        // shortcut letter underlined exactly like popup rows. If
+        // `s` has no '&' shortcut marker it is returned unchanged.
+        static auto label_styled_ansi(text const& s) -> text
+        {
+            auto pos = label_shortcut_pos(s);
+            if (pos == text::npos) return s;
+            auto out = text{};
+            out.reserve(s.size() + 8);
+            out.append(s, 0, pos);              // bytes before '&'
+            out.append("\x1b[4m");              // underline ON
+            out.push_back(s[pos + 1]);          // shortcut letter
+            out.append("\x1b[24m");             // underline OFF
+            out.append(s, pos + 2, text::npos); // remainder
+            return out;
+        }
+
         // Compute the painted (width, height) of a popup listing `items`.
         // Used both by the popup itself when sizing its render area, and
         // by the parent click handler to decide left-vs-right placement
@@ -913,7 +1000,7 @@ namespace netxs::app::shared
             auto popup_w = si32{ 12 };
             for (auto& c : items)
             {
-                auto w = (si32)utf::length(c.label) + 2 + (has_submenus ? 2 : 0);
+                auto w = label_display_length(c.label) + 2 + (has_submenus ? 2 : 0);
                 if (w > popup_w) popup_w = w;
             }
             return twod{ popup_w, (si32)items.size() };
@@ -1056,7 +1143,29 @@ namespace netxs::app::shared
             });
             host_ptr->attach(backdrop_ptr);
 
-            // Esc on the host dismisses the whole chain too.
+            // Keyboard handler on the host. Fires at preview tier so
+            // it runs BEFORE the focused element (typically a terminal
+            // pane) receives the keypress. Every keypress is swallowed
+            // (set_handled) while the chain is open — this prevents
+            // arrow keys / printable characters from leaking into the
+            // focused widget and producing typed input behind the
+            // open menu. Recognised keys drive navigation:
+            //   Esc                 -> dismiss the chain.
+            //   Up / Down           -> move selection in current popup
+            //                          (wraps; -1 'no selection' wakes
+            //                          up at the first/last row).
+            //   Right               -> open the selected row's submenu
+            //                          (no-op for leaf rows) and focus
+            //                          its first row.
+            //   Left                -> close current popup, returning
+            //                          focus to its parent. No-op at
+            //                          the root popup.
+            //   Enter               -> activate a leaf row's script, or
+            //                          open+focus a submenu trigger.
+            //   Letter (a-z, A-Z)   -> '&Label' shortcut. Find the
+            //                          current popup's row whose label
+            //                          encodes that letter; submenus
+            //                          open+focus, leaves activate.
             host_ptr->bell::submit(tier::preview, input::events::keybd::any, *chain->kbd_hook)
                 = [chain](hids& gear)
                 {
@@ -1066,11 +1175,135 @@ namespace netxs::app::shared
                     {
                         return;
                     }
-                    if (gear.keybd::generic() == input::key::Esc)
+                    auto gen = gear.keybd::generic();
+                    if (gen == input::key::Esc)
                     {
                         dismiss_dropdown_chain(chain);
                         gear.set_handled(faux);
+                        return;
                     }
+                    if (chain->navs.empty())
+                    {
+                        // No popup attached yet — still swallow so the
+                        // event doesn't bleed through during the brief
+                        // open transition.
+                        gear.set_handled(faux);
+                        return;
+                    }
+                    auto& top = chain->navs.back();
+                    auto sel = *top.selected_row;
+                    auto count = (si32)top.items.size();
+                    // Echo-suppression stamp: capture the current
+                    // mouse coord so the popup's MouseMove handler
+                    // skips identical-coord events that fire as a
+                    // side effect of repaint or focus changes after
+                    // this keyboard action. The lock is per-popup;
+                    // we stamp both the top popup (where the
+                    // selection just moved) and the new top after
+                    // open_submenu pushes a child popup.
+                    auto stamp_lock = [&gear](popup_nav& nav)
+                    {
+                        if (nav.kbd_lock_coord) *nav.kbd_lock_coord = gear.coord;
+                    };
+                    auto open_and_focus = [&](si32 idx)
+                    {
+                        auto pre = chain->navs.size();
+                        top.open_submenu(idx);
+                        if (chain->navs.size() > pre)
+                        {
+                            *chain->navs.back().selected_row = 0;
+                            chain->navs.back().request_deface();
+                            stamp_lock(chain->navs.back());
+                        }
+                    };
+                    if (gen == input::key::KeyDownArrow)
+                    {
+                        if (count > 0)
+                        {
+                            sel = (sel < 0) ? 0 : (sel + 1) % count;
+                            *top.selected_row = sel;
+                            top.request_deface();
+                            stamp_lock(top);
+                        }
+                        gear.set_handled(faux);
+                        return;
+                    }
+                    if (gen == input::key::KeyUpArrow)
+                    {
+                        if (count > 0)
+                        {
+                            sel = (sel < 0) ? count - 1 : (sel - 1 + count) % count;
+                            *top.selected_row = sel;
+                            top.request_deface();
+                            stamp_lock(top);
+                        }
+                        gear.set_handled(faux);
+                        return;
+                    }
+                    if (gen == input::key::KeyRightArrow)
+                    {
+                        if (sel >= 0 && sel < count
+                            && !top.items[(size_t)sel].children.empty())
+                        {
+                            open_and_focus(sel);
+                        }
+                        stamp_lock(top);
+                        gear.set_handled(faux);
+                        return;
+                    }
+                    if (gen == input::key::KeyLeftArrow)
+                    {
+                        if (chain->navs.size() > 1)
+                        {
+                            auto& parent = chain->navs[chain->navs.size() - 2];
+                            parent.open_submenu(-1);
+                            // After Left the parent is the new top.
+                            if (!chain->navs.empty()) stamp_lock(chain->navs.back());
+                        }
+                        gear.set_handled(faux);
+                        return;
+                    }
+                    if (gen == input::key::KeyEnter)
+                    {
+                        if (sel >= 0 && sel < count)
+                        {
+                            if (!top.items[(size_t)sel].children.empty()) open_and_focus(sel);
+                            else                                          top.activate_row(sel, gear);
+                        }
+                        stamp_lock(top);
+                        gear.set_handled(faux);
+                        return;
+                    }
+                    // '&'-shortcut letter matching against the current
+                    // popup's items. Scan for the first row whose
+                    // shortcut letter matches the typed character
+                    // (case-insensitive); submenu triggers open and
+                    // focus, leaves dispatch their script.
+                    if (!gear.keybd::cluster.empty())
+                    {
+                        auto first = (unsigned char)gear.keybd::cluster.front();
+                        if ((first >= 'A' && first <= 'Z') || (first >= 'a' && first <= 'z'))
+                        {
+                            auto target = (char)std::tolower(first);
+                            for (auto i = si32{ 0 }; i < count; ++i)
+                            {
+                                if (label_shortcut_char(top.items[(size_t)i].label) == target)
+                                {
+                                    *top.selected_row = i;
+                                    top.request_deface();
+                                    stamp_lock(top);
+                                    if (!top.items[(size_t)i].children.empty()) open_and_focus(i);
+                                    else                                        top.activate_row(i, gear);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    // Any other key (function keys, Tab, unmatched
+                    // letters, etc.) is swallowed so the dropdown
+                    // remains the exclusive consumer of keyboard
+                    // input while it is open.
+                    gear.set_handled(faux);
                 };
 
             _attach_popup_overlay(chain, twod{ anchor.x, anchor.y + trigger_h }, items);
@@ -1120,6 +1353,10 @@ namespace netxs::app::shared
                 // submenu opens/closes atomically as the user moves the cursor
                 // across rows.
                 auto child_submenu_row_ptr = ptr::shared(si32{ -1 });
+                // Echo-suppression coord for the mouse hover handler;
+                // see popup_nav::kbd_lock_coord. Sentinel == "no lock,
+                // process every MouseMove normally".
+                auto kbd_lock_coord_ptr = ptr::shared(twod{ -32768, -32768 });
 
                 ovl.LISTEN(tier::release, e2::render::any, parent_canvas, -,
                     (items, top_left, popup_w, popup_h, has_submenus, hover_row_ptr,
@@ -1174,8 +1411,19 @@ namespace netxs::app::shared
                         auto wx = px + 1;
                         auto max_wx = px + popup_w - 1 - right_reserve;
                         auto off = size_t{ 0 };
+                        // '&'-shortcut handling: skip the '&' marker
+                        // byte itself and underline the character that
+                        // follows it. label_shortcut_pos returns the
+                        // byte index of the '&' (or npos when no
+                        // shortcut is encoded in this label).
+                        auto sc_pos = label_shortcut_pos(label);
                         while (off < label.size() && wx < max_wx)
                         {
+                            if (off == sc_pos)
+                            {
+                                off += 1;
+                                continue;
+                            }
                             auto uc = (unsigned char)label[off];
                             auto len = uc < 0x80           ? size_t{ 1 }
                                      : (uc & 0xE0) == 0xC0 ? size_t{ 2 }
@@ -1183,9 +1431,11 @@ namespace netxs::app::shared
                                      :                       size_t{ 4 };
                             len = std::min(len, label.size() - off);
                             auto ch = label.substr(off, len);
+                            auto is_shortcut_char = (sc_pos != text::npos && off == sc_pos + 1);
                             parent_canvas.fill(rect{{ wx, py + i }, { 1, 1 }}, [=](cell& c)
                             {
                                 c.bgc(bg).fgc(fg).txt(ch).link(ovl_id);
+                                if (is_shortcut_char) c.und(unln::line);
                             });
                             off += len;
                             ++wx;
@@ -1224,11 +1474,21 @@ namespace netxs::app::shared
                             [self_ptr](auto& w) { return w.lock() == self_ptr; });
                         if (it != overlays.end())
                         {
+                            auto self_idx = (size_t)std::distance(overlays.begin(), it);
                             auto next = std::next(it);
                             while (next != overlays.end())
                             {
                                 if (auto p = next->lock()) p->base::detach();
                                 next = overlays.erase(next);
+                            }
+                            // Prune the popup_nav entries that paired
+                            // with the now-detached child overlays so
+                            // keyboard navigation always targets the
+                            // deepest popup (navs.back()).
+                            if (self_idx + 1 < chain->navs.size())
+                            {
+                                chain->navs.erase(chain->navs.begin() + self_idx + 1,
+                                                  chain->navs.end());
                             }
                         }
                     }
@@ -1260,8 +1520,22 @@ namespace netxs::app::shared
                 ovl.on(tier::mouserelease, input::key::MouseMove,
                     [&ovl, hover_row_ptr, popup_px_ptr, popup_py_ptr,
                      popup_w = popup_w, popup_h = popup_h,
-                     open_submenu_for_row](hids& gear)
+                     open_submenu_for_row, kbd_lock_coord_ptr](hids& gear)
                     {
+                        // Keyboard/mouse priority lock (pattern borrowed
+                        // from the tile.hpp workspace-switcher popup).
+                        // When a keyboard action fires it stamps the
+                        // current gear.coord here. While subsequent
+                        // MouseMove events report the same coord we
+                        // treat them as echoes and skip the hover
+                        // update, so a stationary cursor cannot drag
+                        // the highlighted selection back to itself
+                        // immediately after Up/Down moved it. As soon
+                        // as the cursor lands on a different cell we
+                        // drop the lock and resume normal processing.
+                        if (gear.coord == *kbd_lock_coord_ptr) return;
+                        *kbd_lock_coord_ptr = twod{ -32768, -32768 };
+
                         auto px = *popup_px_ptr;
                         auto py = *popup_py_ptr;
                         auto mx = (si32)gear.coord.x;
@@ -1280,10 +1554,35 @@ namespace netxs::app::shared
                             ovl.base::deface();
                         }
                     });
+                // Run the row's <script> bindings (if any) through the
+                // root trigger's luafx context, then tear down the
+                // whole chain. Shared by mouse left-click on a leaf
+                // row and keyboard Enter / shortcut-letter activation,
+                // so both paths funnel through the same dispatch.
+                auto activate_leaf = [items, chain](si32 idx, hids& gear)
+                {
+                    if (idx < 0 || idx >= (si32)items.size()) return;
+                    auto& item = items[(size_t)idx];
+                    if (!item.children.empty()) return;
+                    if (auto tr = chain->trigger_shadow.lock())
+                    {
+                        auto& luafx = tr->bell::indexer.luafx;
+                        luafx.set_gear(gear);
+                        for (auto& b : item.bindings)
+                        {
+                            if (b.script_ptr && b.script_ptr->second.size())
+                            {
+                                luafx.run_script(*tr, b.script_ptr->second);
+                            }
+                        }
+                    }
+                    dismiss_dropdown_chain(chain);
+                };
+
                 ovl.on(tier::mouserelease, input::key::LeftClick,
                     [items, popup_px_ptr, popup_py_ptr,
                      popup_w = popup_w, popup_h = popup_h,
-                     chain, open_submenu_for_row](hids& gear)
+                     chain, open_submenu_for_row, activate_leaf](hids& gear)
                     {
                         auto px = *popup_px_ptr;
                         auto py = *popup_py_ptr;
@@ -1304,26 +1603,32 @@ namespace netxs::app::shared
                                     gear.dismiss();
                                     return;
                                 }
-                                // Leaf row: dispatch the row's script (if any)
-                                // through the root trigger's luafx context,
-                                // then tear down the whole chain.
-                                if (auto tr = chain->trigger_shadow.lock())
-                                {
-                                    auto& luafx = tr->bell::indexer.luafx;
-                                    luafx.set_gear(gear);
-                                    for (auto& b : item.bindings)
-                                    {
-                                        if (b.script_ptr && b.script_ptr->second.size())
-                                        {
-                                            luafx.run_script(*tr, b.script_ptr->second);
-                                        }
-                                    }
-                                }
+                                activate_leaf(idx, gear);
+                                gear.dismiss();
+                                return;
                             }
                         }
                         dismiss_dropdown_chain(chain);
                         gear.dismiss();
                     });
+
+                // Publish this popup's nav state for the host-level
+                // kbd_hook. The shared hover_row_ptr doubles as the
+                // keyboard "selected row" cursor — both the mouse
+                // hover handler and the kbd hook mutate the same
+                // sptr, so visual feedback stays unified regardless
+                // of which input modality moved the highlight.
+                popup_nav nav;
+                nav.items = items;
+                nav.selected_row = hover_row_ptr;
+                nav.open_submenu = open_submenu_for_row;
+                nav.activate_row = activate_leaf;
+                nav.request_deface = [overlay_shadow]()
+                {
+                    if (auto p = overlay_shadow.lock()) p->base::deface();
+                };
+                nav.kbd_lock_coord = kbd_lock_coord_ptr;
+                chain->navs.push_back(std::move(nav));
             });
 
             chain->host_ptr->attach(overlay_ptr);
@@ -1354,7 +1659,12 @@ namespace netxs::app::shared
                 auto& label = props.label;
                 auto& tooltip = props.tooltip;
                 auto& hover = props.hover;
-                auto button = ui::item::ctor(label)->drawdots();
+                // '&Label' shortcut decoration: pass an ANSI-styled
+                // string so the underlying ui::item / para renderer
+                // displays the shortcut letter underlined and elides
+                // the '&' marker byte (matching the popup-row paint
+                // path).
+                auto button = ui::item::ctor(label_styled_ansi(label))->drawdots();
                 button->active(); // Always active for tooltips.
                 if (alive)
                 {

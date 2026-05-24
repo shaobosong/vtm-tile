@@ -264,6 +264,68 @@ PT_BUTTON_TILE_CONFIG = (
 PT_BUTTON_TILE_ARGS = ["-c", PT_BUTTON_TILE_CONFIG]
 
 
+# Keyboard-navigation / '&Label' shortcut fixture. The trigger uses
+# '&Test' (T underlined, '&' suppressed). Children exercise:
+#   - leaf with '&F' shortcut    -> activates via 'f'
+#   - leaf with '&R' shortcut    -> activates via 'r'
+#   - submenu with '&u' shortcut -> opens via 'u' (or Right arrow)
+#
+# vtm wraps the shortcut letter in CSI 4 m / CSI 24 m (underline
+# on/off), so the rendered label's raw byte stream is split at the
+# shortcut character — e.g. '&Find item' becomes the byte sequence
+# '\x1b[4mF\x1b[24mind item'. The literal "Find item" string is NOT
+# contiguous in raw bytes, so find_marker_position is fed the TAIL
+# of each label (everything after the shortcut letter), which is.
+# The stripped-buffer rendering ("Find item" intact) is used for
+# presence assertions.
+KB_TRIGGER_RAW    = "  [&Test]  "
+KB_TRIGGER_TAIL   = "est]"            # raw-buffer marker (after T's SGR)
+KB_TRIGGER_RENDER = "[Test]"
+KB_LEAF_FIND_RAW    = "&Find item"
+KB_LEAF_FIND_TAIL   = "ind item"
+KB_LEAF_FIND_RENDER = "Find item"
+KB_LEAF_REPL_RAW    = "&Replace item"
+KB_LEAF_REPL_TAIL   = "eplace item"
+KB_LEAF_REPL_RENDER = "Replace item"
+KB_SUB_RAW    = "S&ubmenu item"      # 'u' is underlined
+KB_SUB_TAIL   = "bmenu item"
+KB_SUB_RENDER = "Submenu item"
+KB_GRAND_RAW    = "&Grand item"
+KB_GRAND_TAIL   = "rand item"
+KB_GRAND_RENDER = "Grand item"
+
+KB_TILE_CONFIG = (
+    "<config>"
+        "<tile>"
+            "<confirm_close=0/>"
+            '<app selected="term">'
+                "<item*/>"
+                '<item id="term" label="term" type="dtvt"'
+                ' cmd="$0 -c \'<config><terminal><menu item*></menu></terminal></config>\' -r term"/>'
+            "</app>"
+            "<menu item*>"
+                f'<item type="dropdown" label="{KB_TRIGGER_RAW}" tooltip=" t " item*>'
+                    f'<item label="{KB_LEAF_FIND_RAW}" tooltip=" f " script=\'OnLeftClick|\'/>'
+                    f'<item label="{KB_LEAF_REPL_RAW}" tooltip=" r " script=\'OnLeftClick|\'/>'
+                    f'<item type="dropdown" label="{KB_SUB_RAW}" tooltip=" s " item*>'
+                        f'<item label="{KB_GRAND_RAW}" tooltip=" g " script=\'OnLeftClick|\'/>'
+                    "</item>"
+                "</menu>"
+            "</tile>"
+        "</config>"
+)
+KB_TILE_ARGS = ["-c", KB_TILE_CONFIG]
+
+# Raw byte sequences for navigation keys. SGR mouse handles mouse; for
+# keyboard, vtm-tile speaks standard ANSI CSI sequences as a terminal
+# would. Arrow keys are CSI A/B/C/D; Enter is CR.
+KEY_UP    = b"\x1b[A"
+KEY_DOWN  = b"\x1b[B"
+KEY_RIGHT = b"\x1b[C"
+KEY_LEFT  = b"\x1b[D"
+KEY_ENTER = b"\r"
+
+
 def kill_all_vtm():
     subprocess.run(["pkill", "-9", "-x", "vtm-tile"], capture_output=True)
     deadline = time.time() + 3.0
@@ -699,11 +761,13 @@ def test_nested_dropdown_submenu_opens_to_the_right():
         # right column bound.
         raw = strip_ansi(s._screen_buf).decode("utf-8", errors="replace")
         # Lines are stripped of CSI/SGR, but column positions don't
-        # survive strip_ansi cleanly; we just confirm a '>' chevron
-        # was emitted in the dialog area. The menubar trigger label
-        # already contains '[', not '>', so '>' is novel to the popup.
-        if ">" not in raw:
-            return fail("no chevron '>' emitted for the submenu trigger row")
+        # survive strip_ansi cleanly; we just confirm a '▸' chevron
+        # was emitted in the dialog area. The chevron glyph is not
+        # used anywhere else in the rendered surface, so its
+        # presence is a sufficient marker for submenu-trigger
+        # decoration.
+        if "▸" not in raw:
+            return fail("no chevron '▸' emitted for the submenu trigger row")
 
         # 4) Click the submenu trigger row (NestSub1). Don't reset the
         # buffer here: the parent popup won't be repainted (it's
@@ -1500,6 +1564,482 @@ def test_click_non_dropdown_button_dismisses_open_chain():
         return True
 
 
+def _open_kb_popup(s):
+    """Open the [Test] dropdown and return (trigger_row, trigger_col)
+    derived from the 'est]' tail marker. Helper for all keyboard-nav
+    tests below."""
+    s.snapshot(timeout=2.0)
+    coords = find_marker_position(s._screen_buf, KB_TRIGGER_TAIL)
+    if coords is None:
+        return None
+    trigger_row, trigger_col = coords
+    # 'est]' starts at trigger_col; the [Test] label begins one cell
+    # earlier (the underlined T, which is split out by SGR in raw),
+    # but any column within the trigger button works for the click.
+    s.reset_buffer()
+    s.click(trigger_col + 1, trigger_row)
+    s.snapshot(timeout=1.5)
+    return (trigger_row, trigger_col)
+
+
+def test_amp_label_strips_marker_and_underlines_shortcut():
+    """The "&Label" syntax must (a) render with the '&' marker
+    elided and (b) the following letter painted with an SGR
+    underline. Verified on both the menu-bar trigger and a popup
+    row label by inspecting the stripped vs raw paint streams.
+    """
+    print("TEST: '&Label' strips marker, underlines shortcut ... ",
+          end="", flush=True)
+    with VtmTileSession(KB_TILE_ARGS) as s:
+        if not s.is_alive():
+            return fail("vtm-tile did not start")
+        s.snapshot(timeout=2.0)
+        stripped = strip_ansi(s._screen_buf).decode("utf-8", errors="replace")
+
+        # Menu-bar trigger renders as "[Test]" (the '&' was stripped).
+        if KB_TRIGGER_RENDER not in stripped:
+            return fail(
+                f"menu-bar trigger missing from stripped paint — "
+                f"expected to find rendered '{KB_TRIGGER_RENDER}'"
+            )
+
+        # The raw paint stream must contain the underline-on SGR
+        # (CSI 4 m) immediately before the T of the rendered trigger,
+        # followed shortly by CSI 24 m and the rest of the label.
+        # Pattern: '\x1b[4m' '<T>' '\x1b[' ... '24' ... 'm' 'est]'.
+        # We assert on the literal '\x1b[4mT' fragment AND on a
+        # '24' SGR appearing before 'est]' in the same row.
+        idx = s._screen_buf.rfind(b"est]")
+        if idx < 0:
+            return fail("trigger tail 'est]' not found in raw buffer")
+        window = s._screen_buf[max(0, idx - 80):idx]
+        if b"\x1b[4m" not in window and b";4m" not in window and b";4;" not in window:
+            return fail(
+                "no underline-on SGR (CSI 4) emitted before "
+                "trigger letter — '&Label' underline missing on menu bar"
+            )
+
+        # Now open the dropdown and verify the popup row picks up
+        # the same treatment on its leaf labels.
+        if _open_kb_popup(s) is None:
+            return fail("could not locate trigger via 'est]' tail")
+        rendered = strip_ansi(s._screen_buf).decode("utf-8", errors="replace")
+        if KB_LEAF_FIND_RENDER not in rendered:
+            return fail(
+                f"popup row '{KB_LEAF_FIND_RENDER}' missing from "
+                f"stripped paint — '&'-stripping broken on popup row"
+            )
+        # The raw should NOT contain the literal "&Find" — '&' must
+        # be elided on every render path.
+        if b"&Find" in s._screen_buf[idx:]:
+            return fail("rendered popup row still contains the '&' marker byte")
+        # And an underline SGR must surround the F.
+        f_idx = s._screen_buf.rfind(b"ind item")
+        if f_idx < 0:
+            return fail("popup row tail 'ind item' not found in raw buffer")
+        window2 = s._screen_buf[max(0, f_idx - 80):f_idx]
+        if b"\x1b[4m" not in window2 and b";4m" not in window2 and b";4;" not in window2:
+            return fail(
+                "no underline-on SGR emitted before popup row shortcut "
+                "letter — '&'-underline broken on popup rows"
+            )
+
+        if not s.is_alive():
+            return fail("vtm-tile crashed during '&'-syntax test")
+        if not s.normal_exit():
+            return fail("vtm-tile did not exit cleanly")
+        print("PASS")
+        return True
+
+
+def test_keyboard_down_up_arrows_select_rows():
+    """Press Down/Up while the popup is open and verify the
+    selected row's background shifts to hover_bg, matching the
+    visual feedback the mouse hover produces. Wraps at the
+    bottom (Down past the last row → first row) and the top
+    (Up from no-selection → last row).
+    """
+    print("TEST: kbd Down/Up arrows select rows ... ",
+          end="", flush=True)
+    with VtmTileSession(KB_TILE_ARGS) as s:
+        if not s.is_alive():
+            return fail("vtm-tile did not start")
+        if _open_kb_popup(s) is None:
+            return fail("could not open [Test] dropdown")
+
+        # Press Down: first row (Find item) should become selected.
+        s.write(KEY_DOWN)
+        time.sleep(0.3)
+        s.snapshot(timeout=1.5)
+        first_bg = find_bg_rgb_before_marker(s._screen_buf, KB_LEAF_FIND_TAIL)
+        if first_bg is None:
+            return fail("could not read bg for first popup row")
+        # Hover bg at depth 0 is (73, 74, 92).
+        if first_bg != (73, 74, 92):
+            return fail(
+                f"after one Down arrow, first row bg is {first_bg} "
+                f"— expected (73, 74, 92) (hover at depth 0)"
+            )
+
+        # Press Down again: second row (Replace item) selected.
+        s.write(KEY_DOWN)
+        time.sleep(0.3)
+        s.snapshot(timeout=1.5)
+        second_bg = find_bg_rgb_before_marker(s._screen_buf, KB_LEAF_REPL_TAIL)
+        if second_bg != (73, 74, 92):
+            return fail(
+                f"after two Downs, second row bg is {second_bg} "
+                f"— expected (73, 74, 92) (selection didn't advance)"
+            )
+
+        # Press Up: back to first row.
+        s.write(KEY_UP)
+        time.sleep(0.3)
+        s.snapshot(timeout=1.5)
+        first_bg2 = find_bg_rgb_before_marker(s._screen_buf, KB_LEAF_FIND_TAIL)
+        if first_bg2 != (73, 74, 92):
+            return fail(
+                f"after Down/Down/Up, first row bg is {first_bg2} "
+                f"— expected the selection to step back to (73, 74, 92)"
+            )
+
+        if not s.is_alive():
+            return fail("vtm-tile crashed during arrow-nav test")
+        if not s.normal_exit():
+            return fail("vtm-tile did not exit cleanly")
+        print("PASS")
+        return True
+
+
+def test_keyboard_right_arrow_opens_submenu_and_focuses_first_row():
+    """Right arrow on a submenu trigger row must (1) open the
+    submenu and (2) move keyboard focus into the submenu with its
+    first row pre-selected.
+    """
+    print("TEST: kbd Right arrow opens submenu, focuses first row ... ",
+          end="", flush=True)
+    with VtmTileSession(KB_TILE_ARGS) as s:
+        if not s.is_alive():
+            return fail("vtm-tile did not start")
+        if _open_kb_popup(s) is None:
+            return fail("could not open [Test] dropdown")
+        # Down 3 times to land on the submenu (Submenu item, 3rd row).
+        s.write(KEY_DOWN)
+        s.write(KEY_DOWN)
+        s.write(KEY_DOWN)
+        time.sleep(0.3)
+        s.snapshot(timeout=1.5)
+        # Press Right: open the submenu.
+        s.write(KEY_RIGHT)
+        time.sleep(0.4)
+        rendered = s.snapshot(timeout=1.5)
+        if KB_GRAND_RENDER not in rendered:
+            return fail(
+                f"submenu row '{KB_GRAND_RENDER}' did not appear after "
+                f"Right arrow — submenu did not open via keyboard"
+            )
+        # The submenu's first row should be pre-selected; depth-1
+        # hover bg is (65, 66, 84) = level1 base (41,42,60) + 24 each.
+        grand_bg = find_bg_rgb_before_marker(s._screen_buf, KB_GRAND_TAIL)
+        if grand_bg != (65, 66, 84):
+            return fail(
+                f"submenu's first row bg is {grand_bg} — expected "
+                f"(65, 66, 84) (depth-1 hover, first row auto-selected)"
+            )
+
+        if not s.is_alive():
+            return fail("vtm-tile crashed during Right-arrow test")
+        if not s.normal_exit():
+            return fail("vtm-tile did not exit cleanly")
+        print("PASS")
+        return True
+
+
+def test_keyboard_left_arrow_closes_submenu_returns_to_parent():
+    """Left arrow inside a submenu must close that submenu and
+    return keyboard focus to the parent popup. Verified by
+    pressing Left after opening a submenu, then pressing Down
+    in the parent and confirming a parent row becomes selected
+    (depth-0 hover bg) — which is only possible if focus
+    returned to the parent navigation level.
+    """
+    print("TEST: kbd Left arrow closes submenu, returns to parent ... ",
+          end="", flush=True)
+    with VtmTileSession(KB_TILE_ARGS) as s:
+        if not s.is_alive():
+            return fail("vtm-tile did not start")
+        if _open_kb_popup(s) is None:
+            return fail("could not open [Test] dropdown")
+        # Navigate to and open submenu.
+        for _ in range(3):
+            s.write(KEY_DOWN)
+        s.write(KEY_RIGHT)
+        time.sleep(0.4)
+        s.snapshot(timeout=1.5)
+
+        # Now press Left to close the submenu.
+        s.write(KEY_LEFT)
+        time.sleep(0.4)
+        s.snapshot(timeout=1.5)
+
+        # Press Down: should land in parent popup (selection wraps,
+        # or stays at the submenu-trigger row). Either way, a parent
+        # row's bg must take the depth-0 hover color.
+        s.write(KEY_DOWN)
+        time.sleep(0.3)
+        s.snapshot(timeout=1.5)
+        # We can't predict which exact parent row is selected (the
+        # selected_row may have been left at the Submenu row when
+        # we opened it, so Down advances to NestLeafY/Find/etc.).
+        # Just confirm SOME depth-0 hover bg shows up against one of
+        # the parent rows we can match.
+        candidates = [KB_LEAF_FIND_TAIL, KB_LEAF_REPL_TAIL, KB_SUB_TAIL]
+        bgs = [find_bg_rgb_before_marker(s._screen_buf, m) for m in candidates]
+        if not any(bg == (73, 74, 92) for bg in bgs):
+            return fail(
+                f"after Left+Down, no parent row carries depth-0 "
+                f"hover bg (73,74,92); saw bgs={bgs} — Left arrow "
+                f"may not have returned focus to the parent popup"
+            )
+
+        if not s.is_alive():
+            return fail("vtm-tile crashed during Left-arrow test")
+        if not s.normal_exit():
+            return fail("vtm-tile did not exit cleanly")
+        print("PASS")
+        return True
+
+
+def test_keyboard_enter_activates_leaf_and_dismisses_chain():
+    """Enter on a selected leaf row dispatches the row's action
+    and tears down the chain. Verified by re-clicking the trigger
+    after Enter and confirming the popup re-opens (which can only
+    happen if active_chain_slot was cleared by the dismiss path).
+    """
+    print("TEST: kbd Enter activates leaf, dismisses chain ... ",
+          end="", flush=True)
+    with VtmTileSession(KB_TILE_ARGS) as s:
+        if not s.is_alive():
+            return fail("vtm-tile did not start")
+        coords = _open_kb_popup(s)
+        if coords is None:
+            return fail("could not open [Test] dropdown")
+        trigger_row, trigger_col = coords
+
+        # Select first row (Find item) and press Enter.
+        s.write(KEY_DOWN)
+        time.sleep(0.2)
+        s.write(KEY_ENTER)
+        time.sleep(0.4)
+        s.snapshot(timeout=1.5)
+
+        # Re-click trigger to confirm chain was torn down.
+        s.reset_buffer()
+        s.click(trigger_col + 1, trigger_row)
+        rendered2 = s.snapshot(timeout=1.5)
+        if KB_LEAF_FIND_RENDER not in rendered2:
+            return fail(
+                "popup did not re-open after Enter+re-click — Enter "
+                "likely failed to dismiss the chain (open-guard left set)"
+            )
+
+        if not s.is_alive():
+            return fail("vtm-tile crashed during Enter test")
+        if not s.normal_exit():
+            return fail("vtm-tile did not exit cleanly")
+        print("PASS")
+        return True
+
+
+def test_keyboard_shortcut_letter_activates_matching_row():
+    """Pressing a letter that matches a row's '&'-shortcut letter
+    activates that row (leaf → dispatch + dismiss; submenu →
+    open + focus). Verified with 'f' (matches '&Find item').
+    """
+    print("TEST: kbd shortcut letter activates matching row ... ",
+          end="", flush=True)
+    with VtmTileSession(KB_TILE_ARGS) as s:
+        if not s.is_alive():
+            return fail("vtm-tile did not start")
+        coords = _open_kb_popup(s)
+        if coords is None:
+            return fail("could not open [Test] dropdown")
+        trigger_row, trigger_col = coords
+
+        # Press 'f' (matches '&F' on Find item).
+        s.write(b"f")
+        time.sleep(0.4)
+        s.snapshot(timeout=1.5)
+
+        # Confirm chain dismissed: re-click trigger and verify the
+        # popup re-opens.
+        s.reset_buffer()
+        s.click(trigger_col + 1, trigger_row)
+        rendered = s.snapshot(timeout=1.5)
+        if KB_LEAF_FIND_RENDER not in rendered:
+            return fail(
+                "popup did not re-open after 'f' shortcut + re-click — "
+                "shortcut likely did not activate the matching row"
+            )
+
+        # Also test submenu shortcut: 'u' opens Submenu item, focuses
+        # its first row.
+        s.write(b"u")
+        time.sleep(0.4)
+        rendered2 = s.snapshot(timeout=1.5)
+        if KB_GRAND_RENDER not in rendered2:
+            return fail(
+                f"submenu row '{KB_GRAND_RENDER}' did not appear after "
+                f"pressing 'u' — submenu shortcut did not open"
+            )
+
+        if not s.is_alive():
+            return fail("vtm-tile crashed during shortcut letter test")
+        if not s.normal_exit():
+            return fail("vtm-tile did not exit cleanly")
+        print("PASS")
+        return True
+
+
+def test_keyboard_nav_is_independent_of_mouse_hover():
+    """Regression for the manual report: with the mouse hovering
+    over a popup row, pressing Down was forcibly pulled back to
+    the mouse-hovered row because every popup repaint refired the
+    MouseMove handler at the unchanged cursor coord, which
+    overwrote the keyboard-set selection. The fix (mirroring the
+    tile.hpp workspace-switcher pattern) stamps the gear.coord
+    into a per-popup kbd_lock_coord on every keyboard action and
+    skips MouseMove events whose coord still matches the stamp.
+
+    Sequence:
+      1. Hover the mouse over the first popup row. Confirm bg
+         shifts to the depth-0 hover color (73, 74, 92).
+      2. Press Down. Confirm the SECOND row now carries the
+         hover color and the first row reverted to the base bg
+         (49, 50, 68). Without the lock, the stationary cursor
+         would echo a MouseMove that pulls selection back to
+         the first row.
+      3. Move the mouse to the first row again (different coord
+         from the stamped lock would reset; here we move to a
+         second-row offset to be unambiguous) — mouse hover
+         takes over once the cursor genuinely changes cell.
+    """
+    print("TEST: kbd nav independent of stationary mouse hover ... ",
+          end="", flush=True)
+    with VtmTileSession(KB_TILE_ARGS) as s:
+        if not s.is_alive():
+            return fail("vtm-tile did not start")
+        if _open_kb_popup(s) is None:
+            return fail("could not open [Test] dropdown")
+
+        first_pos = find_marker_position(s._screen_buf, KB_LEAF_FIND_TAIL)
+        if first_pos is None:
+            return fail("could not locate first popup row")
+        first_row, first_col = first_pos
+
+        # 1) Hover first row.
+        s.hover(first_col, first_row)
+        time.sleep(0.3)
+        s.snapshot(timeout=1.0)
+        first_bg = find_bg_rgb_before_marker(s._screen_buf, KB_LEAF_FIND_TAIL)
+        if first_bg != (73, 74, 92):
+            return fail(
+                f"mouse hover failed to highlight first row "
+                f"(bg={first_bg}, expected (73,74,92))"
+            )
+
+        # 2) Press Down. Keyboard must override the stationary
+        # mouse hover and advance to the second row.
+        s.write(KEY_DOWN)
+        time.sleep(0.4)
+        s.snapshot(timeout=1.0)
+        first_bg2 = find_bg_rgb_before_marker(s._screen_buf, KB_LEAF_FIND_TAIL)
+        second_bg = find_bg_rgb_before_marker(s._screen_buf, KB_LEAF_REPL_TAIL)
+        if second_bg != (73, 74, 92):
+            return fail(
+                f"after Down with mouse stationary, second row bg "
+                f"is {second_bg} — expected (73,74,92). The keyboard "
+                f"selection was pulled back by the stationary mouse "
+                f"hover (kbd_lock_coord lock is not working)"
+            )
+        if first_bg2 == (73, 74, 92):
+            return fail(
+                f"after Down, the mouse-hovered first row still "
+                f"carries the hover bg — selection did not advance "
+                f"cleanly off the stationary cursor's row"
+            )
+
+        # 3) A real mouse move (different coord) must release the
+        # lock and let mouse hover take over again.
+        second_pos = find_marker_position(s._screen_buf, KB_LEAF_REPL_TAIL)
+        if second_pos is None:
+            return fail("could not locate second popup row")
+        second_row, second_col = second_pos
+        # Move to a clearly different cell on the first row.
+        s.hover(first_col + 2, first_row)
+        time.sleep(0.3)
+        s.snapshot(timeout=1.0)
+        first_bg3 = find_bg_rgb_before_marker(s._screen_buf, KB_LEAF_FIND_TAIL)
+        if first_bg3 != (73, 74, 92):
+            return fail(
+                f"after a real mouse move, first row bg is {first_bg3} "
+                f"— expected (73,74,92). The kbd_lock_coord did not "
+                f"release on a genuine cursor move"
+            )
+
+        if not s.is_alive():
+            return fail("vtm-tile crashed during kbd/mouse independence test")
+        if not s.normal_exit():
+            return fail("vtm-tile did not exit cleanly")
+        print("PASS")
+        return True
+
+
+def test_keyboard_does_not_pass_through_to_terminal():
+    """While the dropdown is open, keystrokes must NOT reach the
+    focused terminal pane underneath. We open the popup, type a
+    unique 4-letter string of letters that match no shortcut in
+    the current popup ('z','x','c','v'), dismiss with Esc, then
+    confirm none of those bytes appear in the post-Esc paint as
+    shell echo (the test terminal pane runs the user's shell,
+    which by default echoes typed characters when keyboard
+    events reach it).
+    """
+    print("TEST: kbd events do not pass through to terminal ... ",
+          end="", flush=True)
+    with VtmTileSession(KB_TILE_ARGS, settle_delay=2.0) as s:
+        if not s.is_alive():
+            return fail("vtm-tile did not start")
+        if _open_kb_popup(s) is None:
+            return fail("could not open [Test] dropdown")
+
+        # Reset and type the unique sentinel string while popup open.
+        s.reset_buffer()
+        for ch in b"zxcv":
+            s.write(bytes([ch]))
+            time.sleep(0.05)
+        s.write(b"\x1b")  # Esc dismisses the chain
+        time.sleep(0.5)
+        rendered = s.snapshot(timeout=1.5)
+
+        # None of the typed letters should appear on screen as shell
+        # echo. The chain's kbd_hook swallows the bytes; the shell
+        # therefore receives nothing and echoes nothing.
+        if "zxcv" in rendered:
+            return fail(
+                "the sentinel string 'zxcv' appeared on screen after "
+                "the popup was open during typing — keyboard events "
+                "passed through to the terminal pane"
+            )
+
+        if not s.is_alive():
+            return fail("vtm-tile crashed during passthrough test")
+        if not s.normal_exit():
+            return fail("vtm-tile did not exit cleanly")
+        print("PASS")
+        return True
+
+
 if __name__ == "__main__":
     if not os.path.isfile(VTM_TILE_BINARY):
         print(f"ERROR: vtm-tile binary not found at {VTM_TILE_BINARY}")
@@ -1557,6 +2097,38 @@ if __name__ == "__main__":
             kill_all_vtm()
             time.sleep(0.5)
             ok = test_click_non_dropdown_button_dismisses_open_chain()
+        if ok:
+            kill_all_vtm()
+            time.sleep(0.5)
+            ok = test_amp_label_strips_marker_and_underlines_shortcut()
+        if ok:
+            kill_all_vtm()
+            time.sleep(0.5)
+            ok = test_keyboard_down_up_arrows_select_rows()
+        if ok:
+            kill_all_vtm()
+            time.sleep(0.5)
+            ok = test_keyboard_right_arrow_opens_submenu_and_focuses_first_row()
+        if ok:
+            kill_all_vtm()
+            time.sleep(0.5)
+            ok = test_keyboard_left_arrow_closes_submenu_returns_to_parent()
+        if ok:
+            kill_all_vtm()
+            time.sleep(0.5)
+            ok = test_keyboard_enter_activates_leaf_and_dismisses_chain()
+        if ok:
+            kill_all_vtm()
+            time.sleep(0.5)
+            ok = test_keyboard_shortcut_letter_activates_matching_row()
+        if ok:
+            kill_all_vtm()
+            time.sleep(0.5)
+            ok = test_keyboard_nav_is_independent_of_mouse_hover()
+        if ok:
+            kill_all_vtm()
+            time.sleep(0.5)
+            ok = test_keyboard_does_not_pass_through_to_terminal()
     finally:
         kill_all_vtm()
     sys.exit(0 if ok else 1)
