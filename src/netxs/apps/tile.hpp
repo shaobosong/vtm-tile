@@ -2294,6 +2294,12 @@ namespace netxs::app::tile
             // Flags for the upcoming command-bar session (consumed alongside pending_cmd_list_ptr).
             // Callers set these bits before firing focus::commandbar to opt-in to extra shortcuts.
             auto pending_cmd_flags_ptr = ptr::shared(si32{ command_bar::flags::none });
+            // Initial Enter-mode for the upcoming command-bar session (pickapp path only).
+            // 0=none (run script as-is), 1=rerun (+), 2=newws (⬒), 3=split_h (|), 4=split_v (-).
+            // Consumed and reset by the focus::commandbar listener. Modes are still gated by
+            // cmd_flags (allow_split/allow_replace), so an out-of-range or unsupported value
+            // simply falls back to the default Enter behaviour.
+            auto pending_enter_mode_ptr = ptr::shared(si32{ 0 });
             auto [menu_block, cover, menu_data] = menu::load(config);
             object->attach(slot::_1, menu_block);
             menu_data->active()
@@ -4267,8 +4273,27 @@ namespace netxs::app::tile
                                                                 boss.base::signal(tier::preview, app::tile::events::ui::focus::commandbar, gear);
                                                             });
                                                         }},
-                        { methods::PickApplication,      [&]
+                        { methods::PickApplication,      [&, pending_enter_mode_ptr]
                                                         {
+                                                            // Optional first argument: name of the default Enter-mode to
+                                                            // arm on the picker (the button that would otherwise be clicked
+                                                            // before pressing Enter). Accepted (case-insensitive):
+                                                            //   ""     -> 0 (run selected entry as-is)
+                                                            //   "+"    -> 1 (append ReRunApplication)
+                                                            //   "⬒"    -> 2 (append CreateWorkspace)
+                                                            //   "|"    -> 3 (append SplitPane(0))
+                                                            //   "-"    -> 4 (append SplitPane(1))
+                                                            // Unknown values fall back to 0. Modes still require the
+                                                            // matching cmd_flags bits (allow_split/allow_replace) which the
+                                                            // pickapp path always sets, so all four are honored here.
+                                                            auto mode_arg = luafx.get_args_or(1, text{});
+                                                            auto mode_key = utf::to_lower(text{ mode_arg });
+                                                            auto enter_mode = si32{ 0 };
+                                                            if      (mode_key == "+") enter_mode = 1;
+                                                            else if (mode_key == "⬒") enter_mode = 2;
+                                                            else if (mode_key == "|") enter_mode = 3;
+                                                            else if (mode_key == "-") enter_mode = 4;
+                                                            *pending_enter_mode_ptr = enter_mode;
                                                             luafx.run_with_gear([&](auto& gear)
                                                             {
                                                                 boss.base::signal(tier::preview, app::tile::events::ui::focus::pickapp, gear);
@@ -5095,7 +5120,7 @@ namespace netxs::app::tile
 
                         gear.set_handled();
                     };
-                    boss.LISTEN(tier::preview, app::tile::events::ui::focus::commandbar, gear, -, (command_bar_active, pending_cmd_list_ptr, pending_cmd_flags_ptr, wrapper_shadow = ptr::shadow(wrapper)))
+                    boss.LISTEN(tier::preview, app::tile::events::ui::focus::commandbar, gear, -, (command_bar_active, pending_cmd_list_ptr, pending_cmd_flags_ptr, pending_enter_mode_ptr, wrapper_shadow = ptr::shadow(wrapper)))
                     {
                         if (*command_bar_active) { gear.set_handled(); return; }
                         auto wrapper_ptr = wrapper_shadow.lock();
@@ -5108,6 +5133,8 @@ namespace netxs::app::tile
                         *pending_cmd_list_ptr = {};
                         auto cmd_flags = *pending_cmd_flags_ptr;
                         *pending_cmd_flags_ptr = command_bar::flags::none;
+                        auto initial_enter_mode = *pending_enter_mode_ptr;
+                        *pending_enter_mode_ptr = 0;
                         if (cmd_list->empty()) return;
 
                         *command_bar_active = true;
@@ -5148,7 +5175,16 @@ namespace netxs::app::tile
                         //   enter_mode_split_h : append "vtm.tile.SplitPane(0);"        (the "|")
                         //   enter_mode_split_v : append "vtm.tile.SplitPane(1);"        (the "-")
                         // Clicking the currently-active button cancels it (back to enter_mode_none).
-                        auto enter_mode_ptr = ptr::shared(si32{ 0 }); // 0=none / 1=rerun / 2=newws / 3=split_h / 4=split_v
+                        // The initial value comes from pending_enter_mode_ptr (set by callers like
+                        // vtm.tile.PickApplication("Rerun")); it is clamped to 0 when the session
+                        // didn't opt into the matching cmd_flags bit so the picker doesn't render
+                        // with a button armed that the user cannot actually trigger.
+                        auto initial_mode = initial_enter_mode;
+                        if      (initial_mode == 1 && !(cmd_flags & command_bar::flags::allow_replace)) initial_mode = 0;
+                        else if (initial_mode == 3 && !(cmd_flags & command_bar::flags::allow_split))   initial_mode = 0;
+                        else if (initial_mode == 4 && !(cmd_flags & command_bar::flags::allow_split))   initial_mode = 0;
+                        else if (initial_mode < 0 || initial_mode > 4)                                  initial_mode = 0;
+                        auto enter_mode_ptr = ptr::shared(si32{ initial_mode }); // 0=none / 1=rerun / 2=newws / 3=split_h / 4=split_v
                         auto hover_btn_ptr  = ptr::shared(si32{ 0 }); // 0=none / 1/2/3/4 = which mode button is hovered
 
                         // Build overlay.
