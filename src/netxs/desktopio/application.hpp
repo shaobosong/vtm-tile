@@ -849,11 +849,19 @@ namespace netxs::app::shared
         // dismiss chain can all reach the same instance.
         //
         // Layout (root-first, all attached to host_ptr):
-        //   [backdrop, root_popup, submenu_1, submenu_2, ...]
-        // The backdrop is a transparent overlay that links every canvas cell
-        // to itself and catches LeftClicks that miss every popup, dismissing
-        // the whole chain. The keybd hook intercepts Esc on the host with
-        // the same dismiss effect.
+        //   [root_popup, submenu_1, submenu_2, ...]
+        // Outside the popup overlays, no link override is installed: cells
+        // outside the popups retain whatever links the underlying applet
+        // content and menu-bar buttons rendered there, so mouse events on
+        // those cells (hover, click, scroll, drag) reach the underlying
+        // widgets directly — the "event passthrough" surface covers the
+        // entire host area, not just the menu-bar row. To still dismiss
+        // the chain on outside clicks, a tier::mousepreview hook on the
+        // host (chain->mouse_hook) observes button-press events without
+        // consuming them, tears down the chain when the cursor lands
+        // outside both the popup rects and the menu-bar row, and lets the
+        // event continue to its natural target. The kbd hook intercepts
+        // Esc on the host with the same dismiss effect.
         // Per-popup keyboard-navigation state. One entry per attached
         // overlay, aligned 1:1 with popup_chain::overlays. The deepest
         // entry (navs.back()) is the popup that receives keyboard
@@ -883,6 +891,11 @@ namespace netxs::app::shared
             // updates — i.e. the moment the user actually moves
             // the mouse, mouse hover takes over again.
             netxs::sptr<twod> kbd_lock_coord;
+            // Painted area of this popup in host coordinates, updated by the
+            // popup's render handler each frame (so it tracks flip/resize).
+            // Read by chain->mouse_hook to skip dismissal when an outside
+            // click would actually land on a popup row.
+            netxs::sptr<rect> painted_rect;
         };
 
         struct popup_chain
@@ -890,9 +903,9 @@ namespace netxs::app::shared
             ui::sptr host_ptr;                            // overlay attach point
             netxs::wptr<ui::base> host_shadow;
             netxs::wptr<ui::base> trigger_shadow;         // root trigger (menu-bar button)
-            netxs::wptr<ui::base> backdrop;               // transparent click-catcher
             std::vector<netxs::wptr<ui::base>> overlays;  // open popups, root-first
             netxs::sptr<hook> kbd_hook;                   // Esc interceptor on host
+            netxs::sptr<hook> mouse_hook;                 // outside-click dismisser on host
             std::vector<popup_nav> navs;                  // per-overlay kbd nav state
             si32 padding{ 1 };                            // horizontal cell padding per item
         };
@@ -903,9 +916,9 @@ namespace netxs::app::shared
         // dropdown should be open across all triggers. Tracking the
         // active chain here lets a click on another menu-bar button
         // dismiss the existing dropdown while still letting that
-        // button receive its own click (event passthrough: the
-        // backdrop no longer claims menu-bar cells, so the button's
-        // own LeftClick handler fires; if it is itself a dropdown
+        // button receive its own click (event passthrough: no host
+        // overlay claims menu-bar cells, so the button's own
+        // LeftClick handler fires; if it is itself a dropdown
         // trigger, open_dropdown_popup uses this slot to close the
         // previous chain before opening its own).
         //
@@ -919,9 +932,9 @@ namespace netxs::app::shared
             return s_chain;
         }
 
-        // Dismiss the entire popup chain: detach every open overlay, the
-        // backdrop, and the Esc keyboard interceptor, then mark the host
-        // dirty so it repaints clean.
+        // Dismiss the entire popup chain: detach every open overlay, drop the
+        // host-level Esc keyboard interceptor and outside-click mouse
+        // interceptor, then mark the host dirty so it repaints clean.
         static auto dismiss_dropdown_chain(popup_chain_ptr chain) -> void
         {
             if (!chain) return;
@@ -931,10 +944,10 @@ namespace netxs::app::shared
             }
             chain->overlays.clear();
             chain->navs.clear();
-            if (auto b = chain->backdrop.lock()) b->base::detach();
-            chain->backdrop = {};
             if (chain->kbd_hook) chain->kbd_hook->reset();
             chain->kbd_hook.reset();
+            if (chain->mouse_hook) chain->mouse_hook->reset();
+            chain->mouse_hook.reset();
             if (auto t = chain->trigger_shadow.lock())
             {
                 t->base::property("menu.dropdown.open", faux) = faux;
@@ -1108,6 +1121,7 @@ namespace netxs::app::shared
             chain->host_shadow = ptr::shadow(host_ptr);
             chain->trigger_shadow = ptr::shadow(ui::sptr{ trigger.This() });
             chain->kbd_hook = ptr::shared<hook>();
+            chain->mouse_hook = ptr::shared<hook>();
             // Inherit the horizontal padding configured on the
             // trigger button so popup rows match the menu-bar
             // appearance. mini()/makeitem stamps this property on
@@ -1117,55 +1131,79 @@ namespace netxs::app::shared
             popup_open = true;
             active_chain_slot() = chain;
 
-            // Attach the backdrop FIRST so it sits beneath every popup
-            // in the cake's child order. Its render callback links
-            // canvas cells OUTSIDE the menu bar's row range to itself
-            // so clicks there dismiss the chain via the backdrop's
-            // LeftClick handler. Cells INSIDE the menu bar row are
-            // deliberately left with the menu-bar buttons' own links
-            // — this is the event-passthrough surface: hovers and
-            // clicks on those cells reach the menu-bar buttons, so
-            // the buttons keep their xlight hover feedback and a
-            // click on another trigger fires that trigger's own
-            // LeftClick handler (which re-enters open_dropdown_popup
-            // and dismisses the previous chain via active_chain_slot).
-            // Popup overlays attached AFTER the backdrop overwrite
-            // the link on their own cells, so the backdrop only
-            // receives clicks that miss all popups AND miss the
-            // menu bar.
-            auto backdrop_ptr = ui::mock::ctor();
-            chain->backdrop = ptr::shadow(backdrop_ptr);
-            auto menubar_y0 = anchor.y;
-            auto menubar_y1 = anchor.y + trigger_h;
-            backdrop_ptr->invoke([&](auto& bd)
-            {
-                auto bd_id = bd.bell::id;
-                bd.LISTEN(tier::release, e2::render::any, parent_canvas, -,
-                          (bd_id, menubar_y0, menubar_y1))
+            // Rect of the trigger that owns this chain, in host coords.
+            // Used by the mouse_hook to recognise re-clicks on the same
+            // trigger so they reach the trigger's own LeftClick handler
+            // unmodified (which toggles the chain off via the
+            // popup_open=true branch above). Without this carve-out,
+            // dismissing in preview tier would clear popup_open BEFORE
+            // the trigger handler runs, and the trigger would
+            // immediately re-open the chain (flash close-then-open).
+            auto own_trigger_rect = rect{ anchor, trigger.base::region.size };
+            // Mouse-event interceptor on the host. Fires at mousepreview
+            // tier so it runs BEFORE the targeted widget receives the
+            // event, but it does NOT consume the event — so every mouse
+            // event in non-popup, non-own-trigger areas reaches the
+            // underlying widgets directly. Hovers, scrolls, drags, and
+            // clicks all flow through to whatever cell the cursor is
+            // over, just as if the dropdown weren't open.
+            //
+            // The hook's only job is dismissal: when the user presses a
+            // mouse button on something OUTSIDE every popup rect AND
+            // OUTSIDE the own trigger's rect, the chain tears down. The
+            // press event continues to its natural target (terminal
+            // pane, taskbar, another menu-bar button, an empty menu-bar
+            // cell, etc.), so the user gets the expected
+            // "close menu + click underlying widget" gesture from a
+            // single press.
+            //
+            // Other menu-bar triggers ARE valid dismiss targets: the
+            // chain tears down here, then the new trigger's own
+            // LeftClick handler runs naturally — for a dropdown trigger
+            // that opens its own chain; for a plain button that runs
+            // its script. Empty menu-bar cells (the strip between
+            // buttons) likewise dismiss the chain, matching desktop
+            // convention that clicking the menu bar's blank area
+            // closes any open menu.
+            //
+            // Coords inside any popup overlay's painted_rect are also
+            // skipped: those clicks go to the popup's row handlers
+            // (activate leaf, open submenu, etc.) which manage the
+            // chain lifecycle themselves.
+            host_ptr->on(tier::mousepreview, input::key::MouseAny, *chain->mouse_hook,
+                [chain, own_trigger_rect](hids& gear)
                 {
-                    auto area = parent_canvas.area();
-                    if (menubar_y0 > 0)
+                    auto cause = gear.cause;
+                    // Only button-press / click events dismiss. Move,
+                    // scroll, enter/leave, hover, and drag events fall
+                    // through silently so they reach the underlying
+                    // widget without disturbing the open chain.
+                    if (cause != input::key::LeftClick
+                     && cause != input::key::RightClick
+                     && cause != input::key::MiddleClick
+                     && cause != input::key::LeftDown
+                     && cause != input::key::RightDown
+                     && cause != input::key::MiddleDown)
                     {
-                        parent_canvas.fill(
-                            rect{{ 0, 0 }, { area.size.x, menubar_y0 }},
-                            [bd_id](cell& c) { c.link(bd_id); });
+                        return;
                     }
-                    if (menubar_y1 < area.size.y)
+                    auto coord = twod{ (si32)gear.coord.x, (si32)gear.coord.y };
+                    // Own trigger: let its own handler toggle the chain off.
+                    if (own_trigger_rect.hittest(coord)) return;
+                    // Inside any open popup: the popup's own handler will run.
+                    for (auto& nav : chain->navs)
                     {
-                        parent_canvas.fill(
-                            rect{{ 0, menubar_y1 },
-                                 { area.size.x, area.size.y - menubar_y1 }},
-                            [bd_id](cell& c) { c.link(bd_id); });
+                        if (nav.painted_rect && nav.painted_rect->hittest(coord))
+                        {
+                            return;
+                        }
                     }
-                };
-                bd.on(tier::mouserelease, input::key::LeftClick,
-                    [chain](hids& gear)
-                    {
-                        dismiss_dropdown_chain(chain);
-                        gear.dismiss();
-                    });
-            });
-            host_ptr->attach(backdrop_ptr);
+                    // Outside everything: dismiss the chain WITHOUT consuming
+                    // the event, so it still reaches whatever widget is at
+                    // this coord (terminal pane, sibling menu-bar button,
+                    // empty menu-bar cell, scrollbar, taskbar, etc.).
+                    dismiss_dropdown_chain(chain);
+                });
 
             // Keyboard handler on the host. Fires at preview tier so
             // it runs BEFORE the focused element (typically a terminal
@@ -1417,6 +1455,13 @@ namespace netxs::app::shared
                 // Painted position (recomputed every render so it tracks resize / flip).
                 auto popup_px_ptr = ptr::shared(si32{ top_left.x });
                 auto popup_py_ptr = ptr::shared(si32{ top_left.y });
+                // Painted rect of this popup in host coords. Updated each
+                // render so chain->mouse_hook can hit-test mouse coords
+                // against the live position (post-clip, post-flip).
+                // Initialised to an empty rect so the very first mouse
+                // event before the popup's first render does not falsely
+                // claim coords as "inside this popup".
+                auto painted_rect_ptr = ptr::shared(rect{});
                 // Index of the row whose submenu is currently open under this
                 // popup (-1 = none). Used by both hover and click logic so the
                 // submenu opens/closes atomically as the user moves the cursor
@@ -1429,7 +1474,7 @@ namespace netxs::app::shared
 
                 ovl.LISTEN(tier::release, e2::render::any, parent_canvas, -,
                     (items, top_left, popup_w, popup_h, has_submenus, hover_row_ptr,
-                     popup_px_ptr, popup_py_ptr, ovl_id, depth, padding))
+                     popup_px_ptr, popup_py_ptr, painted_rect_ptr, ovl_id, depth, padding))
                 {
                     auto hover_row = *hover_row_ptr;
                     auto area = parent_canvas.area();
@@ -1442,6 +1487,7 @@ namespace netxs::app::shared
                     if (py < 0) py = 0;
                     *popup_px_ptr = px;
                     *popup_py_ptr = py;
+                    *painted_rect_ptr = rect{ { px, py }, { popup_w, popup_h } };
                     // Per-level palette. Each submenu level subtracts a
                     // fixed amount from every RGB channel of the root
                     // popup's background, so deeper levels are visibly
@@ -1730,6 +1776,7 @@ namespace netxs::app::shared
                     if (auto p = overlay_shadow.lock()) p->base::deface();
                 };
                 nav.kbd_lock_coord = kbd_lock_coord_ptr;
+                nav.painted_rect = painted_rect_ptr;
                 chain->navs.push_back(std::move(nav));
             });
 

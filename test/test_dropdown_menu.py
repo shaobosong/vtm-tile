@@ -1594,6 +1594,91 @@ def test_click_non_dropdown_button_dismisses_open_chain():
         return True
 
 
+def test_click_empty_menubar_area_dismisses_chain():
+    """Clicking on a non-button area of the menu bar (the empty
+    horizontal strip between the menu items and the control buttons)
+    must dismiss the open dropdown chain.
+
+    This is the standard desktop convention: the menu bar's blank
+    area is a valid dismiss target, not a dead zone. It also
+    confirms the host-level mousepreview hook fires for menu-bar Y
+    coords that fall outside the chain's own trigger rect — only
+    the own trigger is carved out (so its re-click can toggle off
+    via its own handler); every other menu-bar cell is a dismiss
+    target like the rest of the host area.
+
+    Verifies by:
+      1. Opening the [NEST] dropdown so NestLeafX is visible.
+      2. Clicking at a column that is inside the menu-bar row but
+         well outside [NEST]'s rect and well left of the right-edge
+         control buttons (min/max/close), i.e. an empty cell of the
+         menu strip itself.
+      3. Re-clicking [NEST] and confirming the popup re-opens —
+         only possible if the chain dismissed and menu.dropdown.open
+         was cleared by dismiss_dropdown_chain.
+    """
+    print("TEST: click empty menu-bar area dismisses chain ... ",
+          end="", flush=True)
+    with VtmTileSession(NEST_TILE_ARGS) as s:
+        if not s.is_alive():
+            return fail("vtm-tile did not start")
+        s.snapshot(timeout=2.0)
+
+        coords = find_marker_position(s._screen_buf, "[NEST]")
+        if coords is None:
+            return fail("trigger '[NEST]' not found")
+        trigger_row, trigger_col = coords
+
+        # 1) Open the dropdown.
+        s.reset_buffer()
+        s.click(trigger_col + 2, trigger_row)
+        rendered = s.snapshot(timeout=1.5)
+        if NEST_LEAF_X not in rendered:
+            return fail("[NEST] dropdown did not open on first click")
+
+        # 2) Click an empty cell in the menu-bar row. NEST_TRIGGER_LABEL
+        # is 10 cells wide and the only menu item in NEST_TILE_CONFIG,
+        # so any column well past trigger_col + 10 and well before the
+        # right-edge control buttons (which the macstyle=false layout
+        # puts at columns COLS-3 .. COLS-1) is guaranteed blank menu-bar
+        # space. Pick the screen midpoint to stay clear of both ends.
+        empty_col = COLS // 2
+        if empty_col <= trigger_col + 10:
+            return fail(
+                f"empty-cell column {empty_col} would collide with the "
+                f"[NEST] trigger at col {trigger_col} — geometry "
+                f"assumption broken, the screen may be too narrow"
+            )
+        s.click(empty_col, trigger_row)
+        time.sleep(0.3)
+        s.snapshot(timeout=1.5)
+
+        # 3) Re-click [NEST]. If the empty-area click properly
+        # dismissed the chain (and dismiss_dropdown_chain cleared
+        # the open-guard), the dropdown re-opens cleanly; if not,
+        # open_dropdown_popup returns early at the popup_open check
+        # and NEST_LEAF_X is missing from the new paint.
+        s.reset_buffer()
+        s.click(trigger_col + 2, trigger_row)
+        rendered2 = s.snapshot(timeout=1.5)
+        if NEST_LEAF_X not in rendered2:
+            return fail(
+                "after clicking an empty menu-bar cell while the "
+                "dropdown was open, re-clicking [NEST] did not "
+                "re-open the dropdown — the empty-area click did "
+                "not dismiss the open chain (regression: host "
+                "mousepreview hook is not treating non-own-trigger "
+                "menu-bar cells as dismiss targets)"
+            )
+
+        if not s.is_alive():
+            return fail("vtm-tile crashed during empty-menubar-click test")
+        if not s.normal_exit():
+            return fail("vtm-tile did not exit cleanly")
+        print(f"PASS (trigger_col={trigger_col}, empty_col={empty_col})")
+        return True
+
+
 def _open_kb_popup(s):
     """Open the [Test] dropdown and return (trigger_row, trigger_col)
     derived from the 'est]' tail marker. Helper for all keyboard-nav
@@ -2198,6 +2283,10 @@ if __name__ == "__main__":
             kill_all_vtm()
             time.sleep(0.5)
             ok = test_click_non_dropdown_button_dismisses_open_chain()
+        if ok:
+            kill_all_vtm()
+            time.sleep(0.5)
+            ok = test_click_empty_menubar_area_dismisses_chain()
         if ok:
             kill_all_vtm()
             time.sleep(0.5)
