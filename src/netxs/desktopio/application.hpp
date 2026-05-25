@@ -801,10 +801,14 @@ namespace netxs::app::shared
         //   dropdown          : clickable label that opens a popup listing its nested
         //                       <item> children below the trigger. Each child is itself
         //                       a menu::item (so dropdowns may nest recursively).
+        //   separator         : non-interactive horizontal rule rendered as a row of
+        //                       '─' characters spanning the popup width. Skipped by
+        //                       mouse hover and keyboard navigation.
         enum class kind : si32
         {
             button,
             dropdown,
+            separator,
         };
 
         struct item
@@ -827,7 +831,17 @@ namespace netxs::app::shared
         // Unknown values fall back to kind::button so misconfiguration is non-fatal.
         static auto parse_kind(view s) -> kind
         {
-            return s == "dropdown" ? kind::dropdown : kind::button;
+            if (s == "dropdown")  return kind::dropdown;
+            if (s == "separator") return kind::separator;
+            return kind::button;
+        }
+
+        // True for items that participate in mouse hover, keyboard
+        // navigation, and click activation. Separators are decorative
+        // dividers and are skipped by all input handling.
+        static auto is_selectable(menu::item const& it) -> bool
+        {
+            return it.type != menu::kind::separator;
         }
 
         // Per-popup shared state. Held in a shared_ptr so the popup's render /
@@ -1003,6 +1017,7 @@ namespace netxs::app::shared
             auto popup_w = si32{ 12 };
             for (auto& c : items)
             {
+                if (!is_selectable(c)) continue; // Separators don't drive width.
                 auto w = label_display_length(c.label) + 2 * padding + (has_submenus ? 2 : 0);
                 if (w > popup_w) popup_w = w;
             }
@@ -1214,6 +1229,26 @@ namespace netxs::app::shared
                     auto& top = chain->navs.back();
                     auto sel = *top.selected_row;
                     auto count = (si32)top.items.size();
+                    // Step `from` by `dir` (+1 / -1) and return the
+                    // next selectable index, wrapping around. Returns
+                    // -1 if the popup has no selectable rows at all
+                    // (e.g. an all-separator config). `from` may be
+                    // -1 to mean "no current selection" — in that
+                    // case the first step lands on index 0 (or
+                    // count-1 for dir=-1).
+                    auto step_selectable = [&top, count](si32 from, si32 dir) -> si32
+                    {
+                        if (count <= 0) return -1;
+                        auto start = (from < 0)
+                            ? (dir > 0 ? count - 1 : 0)
+                            : from;
+                        for (auto step = si32{ 1 }; step <= count; ++step)
+                        {
+                            auto i = ((start + dir * step) % count + count) % count;
+                            if (is_selectable(top.items[(size_t)i])) return i;
+                        }
+                        return -1;
+                    };
                     // Echo-suppression stamp: capture the current
                     // mouse coord so the popup's MouseMove handler
                     // skips identical-coord events that fire as a
@@ -1232,17 +1267,27 @@ namespace netxs::app::shared
                         top.open_submenu(idx);
                         if (chain->navs.size() > pre)
                         {
-                            *chain->navs.back().selected_row = 0;
-                            chain->navs.back().request_deface();
-                            stamp_lock(chain->navs.back());
+                            // Land on the first selectable row of the
+                            // freshly opened submenu — skip leading
+                            // separators so the highlight never starts
+                            // on a divider.
+                            auto& child = chain->navs.back();
+                            auto first_sel = si32{ -1 };
+                            for (auto i = si32{ 0 }; i < (si32)child.items.size(); ++i)
+                            {
+                                if (is_selectable(child.items[(size_t)i])) { first_sel = i; break; }
+                            }
+                            *child.selected_row = first_sel;
+                            child.request_deface();
+                            stamp_lock(child);
                         }
                     };
                     if (gen == input::key::KeyDownArrow)
                     {
-                        if (count > 0)
+                        auto next = step_selectable(sel, +1);
+                        if (next >= 0)
                         {
-                            sel = (sel < 0) ? 0 : (sel + 1) % count;
-                            *top.selected_row = sel;
+                            *top.selected_row = next;
                             top.request_deface();
                             stamp_lock(top);
                         }
@@ -1251,10 +1296,10 @@ namespace netxs::app::shared
                     }
                     if (gen == input::key::KeyUpArrow)
                     {
-                        if (count > 0)
+                        auto next = step_selectable(sel, -1);
+                        if (next >= 0)
                         {
-                            sel = (sel < 0) ? count - 1 : (sel - 1 + count) % count;
-                            *top.selected_row = sel;
+                            *top.selected_row = next;
                             top.request_deface();
                             stamp_lock(top);
                         }
@@ -1264,6 +1309,7 @@ namespace netxs::app::shared
                     if (gen == input::key::KeyRightArrow)
                     {
                         if (sel >= 0 && sel < count
+                            && is_selectable(top.items[(size_t)sel])
                             && !top.items[(size_t)sel].children.empty())
                         {
                             open_and_focus(sel);
@@ -1286,7 +1332,8 @@ namespace netxs::app::shared
                     }
                     if (gen == input::key::KeyEnter)
                     {
-                        if (sel >= 0 && sel < count)
+                        if (sel >= 0 && sel < count
+                            && is_selectable(top.items[(size_t)sel]))
                         {
                             if (!top.items[(size_t)sel].children.empty()) open_and_focus(sel);
                             else                                          top.activate_row(sel, gear);
@@ -1417,6 +1464,23 @@ namespace netxs::app::shared
                     auto row_fg = 0xFFCDD6F4u;
                     for (auto i = si32{ 0 }; i < popup_h; ++i)
                     {
+                        auto& row_item = items[(size_t)i];
+                        // Separator rows: fill the full popup width with '─'
+                        // glyphs at the level background. Never highlighted
+                        // (hover/keyboard skip them) and never linked to the
+                        // overlay's hit-test id, so the row is also inert to
+                        // mouse clicks landing directly on the line.
+                        if (!is_selectable(row_item))
+                        {
+                            auto bg = level_bg;
+                            auto fg = row_fg;
+                            parent_canvas.fill(rect{{ px, py + i }, { popup_w, 1 }}, [=](cell& c)
+                            {
+                                c.wipe();
+                                c.bgc(bg).fgc(fg).txt("\xE2\x94\x80").link(ovl_id);
+                            });
+                            continue;
+                        }
                         auto active = (i == hover_row);
                         auto bg = active ? hover_bg : level_bg;
                         auto fg = row_fg;
@@ -1425,7 +1489,7 @@ namespace netxs::app::shared
                             c.wipe();
                             c.bgc(bg).fgc(fg).txt(whitespace).link(ovl_id);
                         });
-                        auto& label = items[(size_t)i].label;
+                        auto& label = row_item.label;
                         // Reserve trailing 2 cells for the chevron when any
                         // row in this popup has children (the popup width
                         // budget already accounts for this).
@@ -1540,7 +1604,7 @@ namespace netxs::app::shared
                 };
 
                 ovl.on(tier::mouserelease, input::key::MouseMove,
-                    [&ovl, hover_row_ptr, popup_px_ptr, popup_py_ptr,
+                    [&ovl, items, hover_row_ptr, popup_px_ptr, popup_py_ptr,
                      popup_w = popup_w, popup_h = popup_h,
                      open_submenu_for_row, kbd_lock_coord_ptr](hids& gear)
                     {
@@ -1565,7 +1629,15 @@ namespace netxs::app::shared
                         auto new_hover = si32{ -1 };
                         if (mx >= px && mx < px + popup_w && my >= py && my < py + popup_h)
                         {
-                            new_hover = my - py;
+                            auto row = my - py;
+                            // Separator rows are inert: cursor passing over
+                            // them clears the highlight instead of selecting
+                            // the divider line.
+                            if (row >= 0 && row < (si32)items.size()
+                                && is_selectable(items[(size_t)row]))
+                            {
+                                new_hover = row;
+                            }
                         }
                         if (*hover_row_ptr != new_hover)
                         {
@@ -1616,6 +1688,14 @@ namespace netxs::app::shared
                             if (idx >= 0 && idx < (si32)items.size())
                             {
                                 auto& item = items[(size_t)idx];
+                                // Clicks on a separator row are swallowed
+                                // (the popup stays open) — the divider has
+                                // no action and shouldn't dismiss the menu.
+                                if (!is_selectable(item))
+                                {
+                                    gear.dismiss();
+                                    return;
+                                }
                                 if (!item.children.empty())
                                 {
                                     // Submenu trigger: ensure the submenu is
@@ -1981,6 +2061,14 @@ namespace netxs::app::shared
                     item.children.push_back(std::move(child_item));
                 }
                 item.alive = !item.children.empty();
+            }
+            else if (item.type == menu::kind::separator)
+            {
+                // Separators carry no label, tooltip, scripts, or
+                // children — they're a render-only divider inside a
+                // dropdown popup.
+                item.alive = true;
+                item.label.clear();
             }
             else
             {

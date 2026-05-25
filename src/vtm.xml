@@ -187,7 +187,7 @@ R"==(
         </colors>
         <border=0/>  <!-- Width of the left and right border of the terminal window. -->
         <tablen=8/>  <!-- Tab length. -->
-        <menu item*>  <!-- Each <item> defaults to type="button". Set type="dropdown" to open a popup list of nested <item> children below the trigger on left-click. Nested <item type="dropdown"> items render with a chevron '>' and cascade as submenus to the right. -->
+        <menu item*>  <!-- Each <item> defaults to type="button". Set type="dropdown" to open a popup list of nested <item> children below the trigger on left-click. Nested <item type="dropdown"> items render with a chevron '>' and cascade as submenus to the right. type="separator" renders a non-interactive horizontal '─' divider inside a dropdown popup; it is skipped by mouse hover and keyboard navigation. -->
             <autohide=/Menu/Defaults/autohide/>
             <slim=/Menu/Defaults/slim/>
             <padding=/Menu/Defaults/padding/>
@@ -203,6 +203,7 @@ R"==(
             <item=/Menu/Buttons/FindBar/>
             <item type="dropdown" label="Edit" tooltip=" Edit menu " item*>  <!-- Multi-level dropdown demo: leaf rows run their script, submenu rows (type="dropdown") cascade to the right. -->
                 <item label="Clear Scrollback" tooltip=" Clear terminal scrollback "    script=OnLeftClick|TerminalClearScrollback/>
+                <item type="separator"/>  <!-- Non-interactive '─' divider; skipped by mouse hover and keyboard navigation. -->
                 <item type="dropdown" label="Find" tooltip=" Find submenu " item*>  <!-- Nested submenu: opens to the right of 'Edit', anchored on this row. -->
                     <item label="Toggle Find Bar" tooltip=" Toggle the terminal find-bar " script=OnLeftClick|TerminalFindBarToggle/>
                     <item label="Find Previous" tooltip=" Go to previous match "         script=OnLeftClick|TerminalFindPrev/>
