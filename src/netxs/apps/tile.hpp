@@ -1586,11 +1586,13 @@ namespace netxs::app::tile
             auto c1 = danger_color;
 
             using namespace app::shared;
-            auto [menu_block, cover, menu_data] = menu::mini(true, faux, 1, 1,
+            auto& indexer = ui::tui_domain();
+            auto padding = std::max(0, indexer.config.settings::take("/config/tile/menu/padding", si32{ 1 }));
+            auto [menu_block, cover, menu_data] = menu::mini(true, faux, padding, 1,
             menu::list
             {
-                { menu::item{ .alive = true, .label = "  +  ", .tooltip = " Launch application instance.                            \n"
-                                                                          " The app to run can be set by RightClick on the taskbar. " },
+                { menu::item{ .alive = true, .label = "+", .tooltip = " Launch application instance.                            \n"
+                                                                      " The app to run can be set by RightClick on the taskbar. " },
                 [](auto& boss, auto& /*item*/)
                 {
                     boss.on(tier::mouserelease, input::key::LeftClick, [&](hids& gear)
@@ -1600,7 +1602,7 @@ namespace netxs::app::tile
                         gear.dismiss(true);
                     });
                 }},
-                { menu::item{ .alive = true, .label = " [|] ", .tooltip = " Split horizontally " },
+                { menu::item{ .alive = true, .label = "|", .tooltip = " Split horizontally " },
                 [](auto& boss, auto& /*item*/)
                 {
                     boss.on(tier::mouserelease, input::key::LeftClick, [&](hids& gear)
@@ -1609,7 +1611,7 @@ namespace netxs::app::tile
                         gear.dismiss(true);
                     });
                 }},
-                { menu::item{ .alive = true, .label = " [─] ", .tooltip = " Split vertically " },
+                { menu::item{ .alive = true, .label = "─", .tooltip = " Split vertically " },
                 [](auto& boss, auto& /*item*/)
                 {
                     boss.on(tier::mouserelease, input::key::LeftClick, [&](hids& gear)
@@ -1618,7 +1620,7 @@ namespace netxs::app::tile
                         gear.dismiss(true);
                     });
                 }},
-                { menu::item{ .alive = true, .label = "  ×  ", .tooltip = " Delete pane ", .hover = c1 },
+                { menu::item{ .alive = true, .label = "×", .tooltip = " Delete pane ", .hover = c1 },
                 [](auto& boss, auto& /*item*/)
                 {
                     boss.on(tier::mouserelease, input::key::LeftClick, [&](hids& gear)
