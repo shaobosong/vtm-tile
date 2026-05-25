@@ -1179,9 +1179,21 @@ namespace netxs::app::shared
                 = [chain](hids& gear)
                 {
                     if (gear.payload != input::keybd::type::keypress
-                        || gear.keystat != input::key::pressed
                         || gear.keybd::handled)
                     {
+                        return;
+                    }
+                    // Swallow every key-release and key-repeat we don't act
+                    // on — without this, holding an arrow / letter / Enter
+                    // emits key::repeated events that fall past this early
+                    // return and bleed into the focused pane underneath the
+                    // open dropdown. Repeats for navigation keys are treated
+                    // as fresh presses below so holding Up/Down keeps moving
+                    // the selection.
+                    if (gear.keystat != input::key::pressed
+                        && gear.keystat != input::key::repeated)
+                    {
+                        gear.set_handled(faux);
                         return;
                     }
                     auto gen = gear.keybd::generic();
