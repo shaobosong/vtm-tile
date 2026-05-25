@@ -590,7 +590,7 @@ namespace netxs::app::shared
             auto object = window_ptr->attach(ui::fork::ctor(axis::Y))
                                 ->colors(whitelt, 0);
             auto ver = ansi::fgc(b1).add("  ▀▄").fgc().add(skin::globals().NsTextbasedDesktopEnvironment);
-            auto [menu_block, cover, menu_data] = menu::mini(faux, faux, 1,
+            auto [menu_block, cover, menu_data] = menu::mini(faux, faux, 1, 1,
             menu::list
             {
                 { menu::item{ .alive = faux, .label = ver },

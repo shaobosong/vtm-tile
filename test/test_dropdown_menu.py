@@ -145,31 +145,31 @@ NEST_TILE_ARGS = ["-c", NEST_TILE_CONFIG]
 
 
 # Flip-left test fixture. Geometry (chosen so the flip kicks in
-# deterministically; numbers verified empirically against vtm-tile's
-# menu layout, which reserves ~18 cells on the right for the three
-# control buttons (×, _, [])):
+# deterministically). Each menu-bar button now receives 1 cell of
+# horizontal padding on each side from the <menu><padding=1/></menu>
+# default, so labels render 2 cells wider than their text content:
 #
-#   screen width      = FLIP_COLS = 46
-#   ctrl buttons      = ~18 cells on the right
-#   menu scrllist     = 46 - 18 = 28 cells available
-#   padding label     = 17 cells ("  <pad-pad-pad>  ")
-#   [NEST] label      = 10 cells ("  [NEST]  ")
-#   padding+trigger   = 27 cells → fits scrllist
+#   screen width      = FLIP_COLS = 54
+#   ctrl buttons      = 3 × (5 + 2 pad) = 21 cells on the right
+#   menu scrllist     = 54 - 21 = 33 cells available
+#   spacer label      = 19 vis + 2 pad = 21 cells ("  <pad-pad-pad-X>  ")
+#   [NEST] label      = 10 vis + 2 pad = 12 cells ("  [NEST]  ")
+#   spacer + trigger  = 33 cells → fits scrllist exactly
 #
-# So the [NEST] button starts at column 17.
-#   parent popup_w    = max child label + 2 padding + 2 chevron-reserve
-#                     = NestLeafX(9) + 4 = 13
-#   parent right edge = 17 + 13 = 30
-#   submenu items     = FLIP_GRAND_A/B (15 chars each, no chevron)
-#   submenu popup_w   = 15 + 2 = 17
-#   sub_x_right       = 30 ; sub_x_right + 17 = 47 > 46 → overflow
-#   → flip to LEFT: sub_x = 17 - 17 = 0 (fits, with non-negative px)
-# After the flip the submenu occupies columns 0..16 and the parent
-# 17..29 — strictly non-overlapping with a clean boundary at col 17.
-FLIP_COLS = 46
-FLIP_SPACER_LABEL = "  <pad-pad-pad>  "  # 17 cells
-FLIP_GRAND_A = "GrandLeafA-WIDE"         # 15 chars
-FLIP_GRAND_B = "GrandLeafB-WIDE"         # 15 chars
+# So the [NEST] button starts at column 21.
+#   parent popup_w    = max child label + 2*padding + 2 chevron-reserve
+#                     = NestLeafX(9) + 2 + 2 = 13
+#   parent right edge = 21 + 13 = 34
+#   submenu items     = FLIP_GRAND_A/B (19 chars each, no chevron)
+#   submenu popup_w   = 19 + 2 = 21
+#   sub_x_right       = 34 ; sub_x_right + 21 = 55 > 54 → overflow
+#   → flip to LEFT: sub_x = 21 - 21 = 0 (fits, sub_x_left == 0)
+# After the flip the submenu occupies columns 0..20 and the parent
+# 21..33 — strictly non-overlapping with a clean boundary at col 21.
+FLIP_COLS = 54
+FLIP_SPACER_LABEL = "  <pad-pad-pad-X>  "  # 19 cells
+FLIP_GRAND_A = "GrandLeafA-WIDE-EXT"        # 19 chars
+FLIP_GRAND_B = "GrandLeafB-WIDE-EXT"        # 19 chars
 FLIP_TILE_CONFIG = (
     "<config>"
         "<tile>"
@@ -324,6 +324,36 @@ KEY_DOWN  = b"\x1b[B"
 KEY_RIGHT = b"\x1b[C"
 KEY_LEFT  = b"\x1b[D"
 KEY_ENTER = b"\r"
+
+
+# Custom-padding fixture. Drives a single-leaf dropdown with the
+# menu-level <padding=3/> override. Renders one menu-bar trigger
+# "[PAD]" (5 visible chars + 4 surrounding spaces from the label
+# itself) and one popup row "PadLeaf". The test asserts that the
+# popup row's first painted column reflects the configured 3-cell
+# horizontal padding rather than the default 1.
+PAD_TRIGGER_RAW   = "[PAD]"           # 5 visible chars
+PAD_TRIGGER_TAIL  = "PAD]"            # raw marker (no shortcut)
+PAD_LEAF_RAW      = "PadLeaf"         # 7 visible chars
+PAD_TILE_CONFIG = (
+    "<config>"
+        "<tile>"
+            "<confirm_close=0/>"
+            '<app selected="term">'
+                "<item*/>"
+                '<item id="term" label="term" type="dtvt"'
+                ' cmd="$0 -c \'<config><terminal><menu item*></menu></terminal></config>\' -r term"/>'
+            "</app>"
+            "<menu item*>"
+                "<padding=3/>"
+                f'<item type="dropdown" label="{PAD_TRIGGER_RAW}" tooltip=" p " item*>'
+                    f'<item label="{PAD_LEAF_RAW}" tooltip=" leaf " script=\'OnLeftClick|\'/>'
+                "</item>"
+            "</menu>"
+        "</tile>"
+    "</config>"
+)
+PAD_TILE_ARGS = ["-c", PAD_TILE_CONFIG]
 
 
 def kill_all_vtm():
@@ -2040,6 +2070,77 @@ def test_keyboard_does_not_pass_through_to_terminal():
         return True
 
 
+def test_menu_padding_config_controls_horizontal_cell_padding():
+    """The <menu><padding=N/></menu> config controls how many blank
+    cells flank every item on both sides — applied to menu-bar
+    buttons and dropdown popup rows alike.
+
+    With <padding=3/>:
+      - The popup row's first label cell sits 3 columns to the
+        right of the popup's left edge. The popup's left edge
+        equals the trigger's left edge (anchor.x), so the row's
+        first label cell column == trigger_col + 3.
+      - The popup width is wider by 2*(3-1) = 4 cells vs the
+        default padding=1.
+    """
+    print("TEST: <menu padding=N> controls item horizontal padding ... ",
+          end="", flush=True)
+    with VtmTileSession(PAD_TILE_ARGS) as s:
+        if not s.is_alive():
+            return fail("vtm-tile did not start")
+        s.snapshot(timeout=2.0)
+        trigger_pos = find_marker_position(s._screen_buf, PAD_TRIGGER_TAIL)
+        if trigger_pos is None:
+            return fail(
+                "trigger '[PAD]' was not painted — the <padding=3/> "
+                "config may have broken menu-bar layout entirely"
+            )
+        trigger_row, trigger_tail_col = trigger_pos
+        # PAD_TRIGGER_TAIL='PAD]' sits 1 cell after the '[' of the
+        # label, so the trigger label's left edge ([) is at
+        # trigger_tail_col - 1. With padding=3 wrapped around the
+        # label, the BUTTON's left edge is at (label_left - 3).
+        button_left = trigger_tail_col - 1 - 3
+
+        # Open the dropdown by clicking the trigger.
+        s.reset_buffer()
+        s.click(trigger_tail_col, trigger_row)
+        s.snapshot(timeout=1.5)
+        leaf_pos = find_marker_position(s._screen_buf, PAD_LEAF_RAW)
+        if leaf_pos is None:
+            return fail(
+                f"popup row '{PAD_LEAF_RAW}' did not paint after "
+                f"clicking the trigger"
+            )
+        leaf_row, leaf_col = leaf_pos
+        if leaf_row <= trigger_row:
+            return fail(
+                f"popup row painted at row {leaf_row}; expected it "
+                f"to appear BELOW the trigger row {trigger_row}"
+            )
+
+        # The popup anchors at the button's left edge. With
+        # padding=3 the first label cell sits at button_left + 3.
+        expected_leaf_col = button_left + 3
+        if leaf_col != expected_leaf_col:
+            return fail(
+                f"popup row painted at col {leaf_col}; expected "
+                f"col {expected_leaf_col} (button_left={button_left} "
+                f"+ padding=3). The <padding=3/> config was not "
+                f"applied to popup row rendering."
+            )
+
+        if not s.is_alive():
+            return fail("vtm-tile crashed during padding-config test")
+        if not s.normal_exit():
+            return fail("vtm-tile did not exit cleanly")
+        print(
+            f"PASS (button_left={button_left}, leaf_col={leaf_col}, "
+            f"padding=3)"
+        )
+        return True
+
+
 if __name__ == "__main__":
     if not os.path.isfile(VTM_TILE_BINARY):
         print(f"ERROR: vtm-tile binary not found at {VTM_TILE_BINARY}")
@@ -2129,6 +2230,10 @@ if __name__ == "__main__":
             kill_all_vtm()
             time.sleep(0.5)
             ok = test_keyboard_does_not_pass_through_to_terminal()
+        if ok:
+            kill_all_vtm()
+            time.sleep(0.5)
+            ok = test_menu_padding_config_controls_horizontal_cell_padding()
     finally:
         kill_all_vtm()
     sys.exit(0 if ok else 1)

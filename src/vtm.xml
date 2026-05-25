@@ -190,6 +190,7 @@ R"==(
         <menu item*>  <!-- Each <item> defaults to type="button". Set type="dropdown" to open a popup list of nested <item> children below the trigger on left-click. Nested <item type="dropdown"> items render with a chevron '>' and cascade as submenus to the right. -->
             <autohide=/Menu/Defaults/autohide/>
             <slim=/Menu/Defaults/slim/>
+            <padding=/Menu/Defaults/padding/>
             <item=/Menu/Buttons/AlwaysOnTop/>
             <item=/Menu/Buttons/FindPrev/>
             <item=/Menu/Buttons/FindNext/>
@@ -200,16 +201,16 @@ R"==(
             <item=/Menu/Buttons/ClearScrollback/>
             <item=/Menu/Buttons/Restart/>
             <item=/Menu/Buttons/FindBar/>
-            <item type="dropdown" label="  Edit  " tooltip=" Edit menu " item*>  <!-- Multi-level dropdown demo: leaf rows run their script, submenu rows (type="dropdown") cascade to the right. -->
-                <item label="  Clear Scrollback  " tooltip=" Clear terminal scrollback "    script=OnLeftClick|TerminalClearScrollback/>
-                <item type="dropdown" label="  Find  " tooltip=" Find submenu " item*>  <!-- Nested submenu: opens to the right of 'Edit', anchored on this row. -->
-                    <item label="  Toggle Find Bar  " tooltip=" Toggle the terminal find-bar " script=OnLeftClick|TerminalFindBarToggle/>
-                    <item label="  Find Previous    " tooltip=" Go to previous match "         script=OnLeftClick|TerminalFindPrev/>
-                    <item label="  Find Next        " tooltip=" Go to next match "             script=OnLeftClick|TerminalFindNext/>
+            <item type="dropdown" label="Edit" tooltip=" Edit menu " item*>  <!-- Multi-level dropdown demo: leaf rows run their script, submenu rows (type="dropdown") cascade to the right. -->
+                <item label="Clear Scrollback" tooltip=" Clear terminal scrollback "    script=OnLeftClick|TerminalClearScrollback/>
+                <item type="dropdown" label="Find" tooltip=" Find submenu " item*>  <!-- Nested submenu: opens to the right of 'Edit', anchored on this row. -->
+                    <item label="Toggle Find Bar" tooltip=" Toggle the terminal find-bar " script=OnLeftClick|TerminalFindBarToggle/>
+                    <item label="Find Previous" tooltip=" Go to previous match "         script=OnLeftClick|TerminalFindPrev/>
+                    <item label="Find Next" tooltip=" Go to next match "             script=OnLeftClick|TerminalFindNext/>
                 </item>
-                <item type="dropdown" label="  Session  " tooltip=" Session submenu " item*>
-                    <item label="  Restart           " tooltip=" Restart the terminal session " script=OnLeftClick|TerminalRestart/>
-                    <item label="  Clear Scrollback  " tooltip=" Clear terminal scrollback "    script=OnLeftClick|TerminalClearScrollback/>
+                <item type="dropdown" label="Session" tooltip=" Session submenu " item*>
+                    <item label="Restart" tooltip=" Restart the terminal session " script=OnLeftClick|TerminalRestart/>
+                    <item label="Clear Scrollback" tooltip=" Clear terminal scrollback "    script=OnLeftClick|TerminalClearScrollback/>
                 </item>
             </item>
         </menu>
@@ -340,56 +341,45 @@ R"==(
         <menu item*>
             <autohide=/Menu/Defaults/autohide/>
             <slim=/Menu/Defaults/slim/>
+            <padding=/Menu/Defaults/padding/>
             <item tooltip=/Ns/Tile/OpenWorkspacePopup/tooltip>
                 <script=OnLeftClick|TileOpenWorkspacePopup/>
                 <script>
                     <on="release: e2::form::upon::started" source="tile"/>
                     <on="release: e2::form::prop::any"/>
-                    vtm.item.Label("  WS: " .. tostring(vtm.tile.CurrentWorkspace()) .. "  ")
+                    vtm.item.Label("WS: " .. tostring(vtm.tile.CurrentWorkspace()))
                     vtm.item.Deface()
                 </script>
             </item>
             <item tooltip=/Ns/Tile/SelectApplication/tooltip>
                 <script=OnLeftClick|TilePickApplication/>
-                <script=OnRightClick|TileSelectApplicationReverse/>
                 <script>
                     <on="release: e2::form::upon::started" source="tile"/>
                     <on="release: e2::form::prop::any"/>
                     local app_label = vtm.tile.SelectedApp()
-                    vtm.item.Label(app_label == "" and "  App  " or "  App: " .. app_label .. "  ")
+                    vtm.item.Label(app_label == "" and "App" or "App: " .. app_label)
                     vtm.item.Deface()
                 </script>
             </item>
             <item=/Menu/Buttons/AlwaysOnTop/>
-            <item label="  <  " tooltip=/Ns/Tile/FocusPrevPane/tooltip      script=OnLeftClick|TileFocusPrevPane/>
-            <item label="  >  " tooltip=/Ns/Tile/FocusNextPane/tooltip      script=OnLeftClick|TileFocusNextPane/>
-            <item tooltip=/Ns/Tile/SelectApplication/tooltip>
-                <script=OnLeftClick|TileSelectApplication/>
-                <script=OnRightClick|TileSelectApplicationReverse/>
-                <script>
-                    <on="release: e2::form::upon::started" source="tile"/>
-                    <on="release: e2::form::prop::any"/>
-                    local app_label = vtm.tile.SelectedApp()
-                    vtm.item.Label(app_label == "" and "  " or "  " .. app_label .. "  ")
-                    vtm.item.Deface()
-                </script>
-            </item>
-            <item label="  ⣿  " tooltip=/Ns/Tile/SelectAllPanes/tooltip     script=OnLeftClick|TileSelectAllPanes/>
-            <item label="  +  " tooltip=/Ns/Tile/RunApplication/tooltip     script=OnLeftClick|TileRunApplication/>
-            <item label="  ×  " tooltip=/Ns/Tile/ClosePane/tooltip          script=OnLeftClick|TileClosePane/>
-            <item label="  [|]  " tooltip=/Ns/Tile/SplitHorizontally/tooltip  script=OnLeftClick|TileSplitHorizontally/>
-            <item label="  [―]  " tooltip=/Ns/Tile/SplitVertically/tooltip    script=OnLeftClick|TileSplitVertically/>
-            <item label="  >|<  " tooltip=/Ns/Tile/EqualizeSplitRatio/tooltip script=OnLeftClick|TileEqualizeSplitRatio/>
-            <item label="  <->  " tooltip=/Ns/Tile/SwapPanes/tooltip          script=OnLeftClick|TileSwapPanes/>
-            <item label="  -/-  " tooltip=/Ns/Tile/SplitOrientation/tooltip   script=OnLeftClick|TileSplitOrientation/>
-            <item label="  =D-  " tooltip=/Ns/Tile/Disconnect/tooltip         script=OnLeftClick|TileDisconnect>
+            <item label="<"   tooltip=/Ns/Tile/FocusPrevPane/tooltip      script=OnLeftClick|TileFocusPrevPane/>
+            <item label=">"   tooltip=/Ns/Tile/FocusNextPane/tooltip      script=OnLeftClick|TileFocusNextPane/>
+            <item label="⣿"   tooltip=/Ns/Tile/SelectAllPanes/tooltip     script=OnLeftClick|TileSelectAllPanes/>
+            <item label="+"   tooltip=/Ns/Tile/RunApplication/tooltip     script=OnLeftClick|TileRunApplication/>
+            <item label="×"   tooltip=/Ns/Tile/ClosePane/tooltip          script=OnLeftClick|TileClosePane/>
+            <item label="[|]" tooltip=/Ns/Tile/SplitHorizontally/tooltip  script=OnLeftClick|TileSplitHorizontally/>
+            <item label="[―]" tooltip=/Ns/Tile/SplitVertically/tooltip    script=OnLeftClick|TileSplitVertically/>
+            <item label=">|<" tooltip=/Ns/Tile/EqualizeSplitRatio/tooltip script=OnLeftClick|TileEqualizeSplitRatio/>
+            <item label="<->" tooltip=/Ns/Tile/SwapPanes/tooltip          script=OnLeftClick|TileSwapPanes/>
+            <item label="-/-" tooltip=/Ns/Tile/SplitOrientation/tooltip   script=OnLeftClick|TileSplitOrientation/>
+            <item label="=D-" tooltip=/Ns/Tile/Disconnect/tooltip         script=OnLeftClick|TileDisconnect>
                 <hover fgc="0xFFFFFFFF" bgc="0xFFFF8700"/>
             </item>
-            <!-- <item label="  #  " tooltip=/Ns/Tile/SetManagerTitle/tooltip    script=OnLeftClick|TileSetManagerTitle/> -->
-            <!-- <item label="  <  "   tooltip=" Focus the previous pane or the split grip " script=OnLeftClick|TileFocusPrev    /> -->
-            <!-- <item label="  >  "   tooltip=" Focus the next pane or the split grip "     script=OnLeftClick|TileFocusNext    /> -->
-            <!-- <item label="  <-  "  tooltip=" Focus the previous pane "                   script=OnLeftClick|TileFocusPrevPane/> -->
-            <!-- <item label="  ->  "  tooltip=" Focus the next pane "                       script=OnLeftClick|TileFocusNextPane/> -->
+            <!-- <item label="#" tooltip=/Ns/Tile/SetManagerTitle/tooltip    script=OnLeftClick|TileSetManagerTitle/> -->
+            <!-- <item label="<"   tooltip=" Focus the previous pane or the split grip " script=OnLeftClick|TileFocusPrev    /> -->
+            <!-- <item label=">"   tooltip=" Focus the next pane or the split grip "     script=OnLeftClick|TileFocusNext    /> -->
+            <!-- <item label="<-"  tooltip=" Focus the previous pane "                   script=OnLeftClick|TileFocusPrevPane/> -->
+            <!-- <item label="->"  tooltip=" Focus the next pane "                       script=OnLeftClick|TileFocusNextPane/> -->
         </menu>
         <confirm_close=true/>  <!-- Show a confirmation dialog when the close button is clicked. -->
     </tile>
@@ -584,6 +574,7 @@ R"==(
     <Defaults>
         <autohide=false/>  <!-- Auto hide window menu items on mouse leave. -->
         <slim=true/>       <!-- Make the window menu one cell high (slim=true) or three cells high (slim=false). -->
+        <padding=2/>
     </Defaults>
     <Buttons>
         <AlwaysOnTop script=OnLeftClick|AlwaysOnTopApplet> <!-- The default event source is the parent object, i.e. source="item" (aka vtm.item). -->
@@ -596,8 +587,8 @@ R"==(
                 vtm.item.Deface()
             </script>
         </AlwaysOnTop>
-        <FindPrev label="  <  " script=OnLeftClick|TerminalFindPrev tooltip=/Ns/FindPrev/tooltip/>
-        <FindNext label="  >  " script=OnLeftClick|TerminalFindNext tooltip=/Ns/FindNext/tooltip/>
+        <FindPrev label="<" script=OnLeftClick|TerminalFindPrev tooltip=/Ns/FindPrev/tooltip/>
+        <FindNext label=">" script=OnLeftClick|TerminalFindNext tooltip=/Ns/FindNext/tooltip/>
         <ExclusiveKeyboard script=OnLeftClick|ExclusiveKeyboardMode>
             <script>
                 <on="release: e2::form::upon::started"  source="applet"/>
@@ -731,12 +722,12 @@ R"==(
             </SF>
         </Info>
         <AlwaysOnTop>
-            <on  label="\e[2:247;38:2:0:255:0m▀\e[2:239m \e[m" tooltip=" AlwaysOnTop on "/>
-            <off label="  "                                    tooltip=" AlwaysOnTop off "/>
+            <on  label="\e[2:247;38:2:0:255:0m▀\e[2:239m\e[m" tooltip=" AlwaysOnTop on "/>
+            <off label=" "                                    tooltip=" AlwaysOnTop off "/>
         </AlwaysOnTop>
-        <ClearScrollback label="  Clear  "   tooltip=" Clear scrollback "/>
-        <Restart         label="  Restart  " tooltip=" Restart current terminal session "/>
-        <FindBar         label="  Search  "  tooltip=" Toggle the terminal find-bar "/>
+        <ClearScrollback label="Clear"   tooltip=" Clear scrollback "/>
+        <Restart         label="Restart" tooltip=" Restart current terminal session "/>
+        <FindBar         label="Search"  tooltip=" Toggle the terminal find-bar "/>
 )==" // MSVC2022: C2026 String too big, trailing characters truncated.
 R"==(
         <Taskbar>
@@ -887,19 +878,19 @@ R"==(
                        "   Exclusive keyboard mode allows keystrokes ""\n"
                        "   to be passed through without processing   "
             </tooltip_body>
-            <on  label="\e[2:247m \e[2:231;38:2:0:255:0m Exclusive \e[2:239m \e[m" state="     ON" tooltip=tooltip_body/>
-            <off label="  Exclusive  "                                             state="    OFF" tooltip=tooltip_body/>
+            <on  label="\e[2:247m\e[2:231;38:2:0:255:0mExclusive\e[2:239m\e[m" state="     ON" tooltip=tooltip_body/>
+            <off label="Exclusive"                                             state="    OFF" tooltip=tooltip_body/>
         </ExclusiveKeyboard>
         <NoWrapMode>
-            <on  label="\e[2:247m  \e[2:231;38:2:0:255:0mNoWrap\e[2:239m  \e[m" tooltip=" \e[1mText line wrapping mode\e[m  \n Text wrapping off        "/>
-            <off label=                               "  NoWrap  "              tooltip=" \e[1mText line wrapping mode\e[m  \n Text wrapping on         "/>
+            <on  label="\e[2:247m\e[2:231;38:2:0:255:0mNoWrap\e[2:239m\e[m" tooltip=" \e[1mText line wrapping mode\e[m  \n Text wrapping off        "/>
+            <off label=                               "NoWrap"              tooltip=" \e[1mText line wrapping mode\e[m  \n Text wrapping on         "/>
         </NoWrapMode>
         <ClipboardFormat tooltip=" Clipboard format ">
-                <textonly label=  "\e[38:2:0:255:0m  Plaintext  \e[m"/>
-                <ansitext label="\e[38:2:255:255:0m  ANSI-text  \e[m"/>
-                <htmltext label="\e[38:2:0:255:255m  HTML-code  \e[m"/>
-                <safetext label="\e[38:2:0:255:255m  Protected  \e[m"/>
-                <disabled label=                  "  Clipboard  "/>
+                <textonly label=  "\e[38:2:0:255:0mPlaintext\e[m"/>
+                <ansitext label="\e[38:2:255:255:0mANSI-text\e[m"/>
+                <htmltext label="\e[38:2:0:255:255mHTML-code\e[m"/>
+                <safetext label="\e[38:2:0:255:255mProtected\e[m"/>
+                <disabled label=                  "Clipboard"/>
                 <richtext>
                     <label>
                         "\e[38:2:109:231:237m  ""R"
@@ -919,8 +910,8 @@ R"==(
                 "\e[1m"" Console logging        ""\e[m\n"
                        " Use Logs to see output "
             </tooltip>
-            <on  label="\e[2:247m \e[2:231;38:2:0:255:0m Log \e[2:239m \e[m"/>
-            <off label="  Log  "/>
+            <on  label="\e[2:247m\e[2:231;38:2:0:255:0mLog\e[2:239m\e[m"/>
+            <off label="Log"/>
         </StdioLog>
         <MinimizeWindow tooltip=" Minimize "/>
         <MaximizeWindow tooltip=" Maximize "/>

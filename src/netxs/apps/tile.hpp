@@ -1586,7 +1586,7 @@ namespace netxs::app::tile
             auto c1 = danger_color;
 
             using namespace app::shared;
-            auto [menu_block, cover, menu_data] = menu::mini(true, faux, 1,
+            auto [menu_block, cover, menu_data] = menu::mini(true, faux, 1, 1,
             menu::list
             {
                 { menu::item{ .alive = true, .label = "  +  ", .tooltip = " Launch application instance.                            \n"

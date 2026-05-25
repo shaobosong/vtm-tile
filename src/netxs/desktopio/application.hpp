@@ -880,6 +880,7 @@ namespace netxs::app::shared
             std::vector<netxs::wptr<ui::base>> overlays;  // open popups, root-first
             netxs::sptr<hook> kbd_hook;                   // Esc interceptor on host
             std::vector<popup_nav> navs;                  // per-overlay kbd nav state
+            si32 padding{ 1 };                            // horizontal cell padding per item
         };
         using popup_chain_ptr = netxs::sptr<popup_chain>;
 
@@ -993,14 +994,16 @@ namespace netxs::app::shared
         // by the parent click handler to decide left-vs-right placement
         // of a submenu before it is attached (so the submenu never
         // overlaps the parent popup when there is no room on the right).
-        static auto _popup_dimensions(std::vector<menu::item> const& items) -> twod
+        // `padding` is the horizontal padding cell count on EACH side of
+        // an item (driven by the <menu><padding=N/></menu> config).
+        static auto _popup_dimensions(std::vector<menu::item> const& items, si32 padding) -> twod
         {
             auto has_submenus = false;
             for (auto& c : items) if (!c.children.empty()) { has_submenus = true; break; }
             auto popup_w = si32{ 12 };
             for (auto& c : items)
             {
-                auto w = label_display_length(c.label) + 2 + (has_submenus ? 2 : 0);
+                auto w = label_display_length(c.label) + 2 * padding + (has_submenus ? 2 : 0);
                 if (w > popup_w) popup_w = w;
             }
             return twod{ popup_w, (si32)items.size() };
@@ -1090,6 +1093,12 @@ namespace netxs::app::shared
             chain->host_shadow = ptr::shadow(host_ptr);
             chain->trigger_shadow = ptr::shadow(ui::sptr{ trigger.This() });
             chain->kbd_hook = ptr::shared<hook>();
+            // Inherit the horizontal padding configured on the
+            // trigger button so popup rows match the menu-bar
+            // appearance. mini()/makeitem stamps this property on
+            // every menu-bar button from the <menu><padding=N/></menu>
+            // config (default 1).
+            chain->padding = std::max(0, trigger.base::property("menu.padding", si32{ 1 }));
             popup_open = true;
             active_chain_slot() = chain;
 
@@ -1326,7 +1335,8 @@ namespace netxs::app::shared
             // placement.
             auto has_submenus = false;
             for (auto& c : items) if (!c.children.empty()) { has_submenus = true; break; }
-            auto dim = _popup_dimensions(items);
+            auto padding = chain->padding;
+            auto dim = _popup_dimensions(items, padding);
             auto popup_w = dim.x;
             auto popup_h = dim.y;
 
@@ -1360,7 +1370,7 @@ namespace netxs::app::shared
 
                 ovl.LISTEN(tier::release, e2::render::any, parent_canvas, -,
                     (items, top_left, popup_w, popup_h, has_submenus, hover_row_ptr,
-                     popup_px_ptr, popup_py_ptr, ovl_id, depth))
+                     popup_px_ptr, popup_py_ptr, ovl_id, depth, padding))
                 {
                     auto hover_row = *hover_row_ptr;
                     auto area = parent_canvas.area();
@@ -1408,8 +1418,8 @@ namespace netxs::app::shared
                         // row in this popup has children (the popup width
                         // budget already accounts for this).
                         auto right_reserve = has_submenus ? si32{ 2 } : si32{ 0 };
-                        auto wx = px + 1;
-                        auto max_wx = px + popup_w - 1 - right_reserve;
+                        auto wx = px + padding;
+                        auto max_wx = px + popup_w - padding - right_reserve;
                         auto off = size_t{ 0 };
                         // '&'-shortcut handling: skip the '&' marker
                         // byte itself and underline the character that
@@ -1498,7 +1508,7 @@ namespace netxs::app::shared
                     // Decide submenu placement: prefer RIGHT of the parent;
                     // FLIP to LEFT if right would overflow the host. Parent
                     // and submenu rects are mutually exclusive — no overlap.
-                    auto sub_dim = _popup_dimensions(items[(size_t)idx].children);
+                    auto sub_dim = _popup_dimensions(items[(size_t)idx].children, chain->padding);
                     auto px = *popup_px_ptr;
                     auto py = *popup_py_ptr;
                     auto sub_x_right = px + popup_w;
@@ -1637,7 +1647,7 @@ namespace netxs::app::shared
             return overlay_shadow;
         }
 
-        static auto mini(bool autohide, bool slimsize, si32 custom, list menu_items) // Menu bar (shrinkable on right-click).
+        static auto mini(bool autohide, bool slimsize, si32 padding, si32 custom, list menu_items) // Menu bar (shrinkable on right-click).
         {
             //auto highlight_color = skin::color(tone::highlight);
             auto danger_color    = skin::color(tone::danger);
@@ -1672,9 +1682,15 @@ namespace netxs::app::shared
                     else             button->shader(cell::shaders::xlight,       e2::form::state::hover);
                 }
                 button->template plugin<pro::notes>(tooltip)
-                    ->setpad({ 0, 0, !slimsize, !slimsize })
-                    ->invoke([&](auto& boss) // Store shared ptr to the menu item config.
+                    ->setpad({ padding, padding, !slimsize, !slimsize })
+                    ->invoke([&, padding](auto& boss) // Store shared ptr to the menu item config.
                     {
+                        // Publish the menu's horizontal padding on this
+                        // button so open_dropdown_popup can read it
+                        // when the trigger fires and propagate it to
+                        // the popup chain (so popup rows pad to match
+                        // the menu-bar buttons).
+                        boss.base::property("menu.padding", si32{ 1 }) = padding;
                         // Chain-dismiss prelude. Fires BEFORE the
                         // button's own LeftClick handler so any open
                         // dropdown chain is torn down by the time the
@@ -1727,7 +1743,7 @@ namespace netxs::app::shared
             {
                 auto control = std::vector<link>
                 {
-                    { menu::item{ .alive = true, .label = "  —  ", .tooltip = skin::globals().NsMinimizeWindow_tooltip },//, .hover = c2 }, //todo too funky
+                    { menu::item{ .alive = true, .label = "—", .tooltip = skin::globals().NsMinimizeWindow_tooltip },//, .hover = c2 }, //todo too funky
                     [](auto& boss, auto& /*item*/)
                     {
                         boss.on(tier::mouserelease, input::key::LeftClick, [&](hids& gear)
@@ -1737,15 +1753,15 @@ namespace netxs::app::shared
                             gear.dismiss();
                         });
                     }},
-                    { menu::item{ .alive = true, .label = "  □  ", .tooltip = skin::globals().NsMaximizeWindow_tooltip },//, .hover = c6 },
+                    { menu::item{ .alive = true, .label = "□", .tooltip = skin::globals().NsMaximizeWindow_tooltip },//, .hover = c6 },
                     [](auto& boss, auto& /*item*/)
                     {
                         auto sync = [](auto& boss, auto state)
                         {
                             auto restore = state == winstate::maximized
                                         || state == winstate::fullscreen;
-                            auto label = restore ? "  ▣  "sv
-                                                 : "  □  "sv;
+                            auto label = restore ? "▣"sv
+                                                 : "□"sv;
                             if (boss.get() != label)
                             {
                                 boss.set(label);
@@ -1779,7 +1795,7 @@ namespace netxs::app::shared
                             gear.dismiss();
                         });
                     }},
-                    { menu::item{ .alive = true, .label = "  ×  ", .tooltip = skin::globals().NsCloseWindow_tooltip, .hover = c1 },
+                    { menu::item{ .alive = true, .label = "×", .tooltip = skin::globals().NsCloseWindow_tooltip, .hover = c1 },
                     [c1](auto& boss, auto& /*item*/)
                     {
                         boss.template shader<tier::anycast>(cell::shaders::color(c1), e2::form::state::keybd::command::close);
@@ -1911,7 +1927,11 @@ namespace netxs::app::shared
             auto menu_context = config.settings::push_context("menu/");
             auto autohide = config.settings::take("autohide", faux);
             auto slimsize = config.settings::take("slim"    , true);
-            return mini(autohide, slimsize, 0, menu_items);
+            // <menu><padding=N/></menu>: horizontal cell padding on
+            // each side of every item, applied to both menu-bar
+            // buttons and dropdown popup rows. Default 1.
+            auto padding  = std::max(0, config.settings::take("padding", si32{ 1 }));
+            return mini(autohide, slimsize, padding, 0, menu_items);
         };
         // Parse one <item> XML node into a (menu::item, setup) link.
         // Recurses for type="dropdown": every nested <item> beneath the dropdown
