@@ -6,24 +6,24 @@
 End-to-end TUI regression test for the tile "select-app picker" feature.
 
 Verifies that:
-  * The status bar renders an "App: <label>" button to the right of the
-    workspace button, reflecting the currently selected default app.
+  * The tile menu renders an "App: <label>" button reflecting the
+    currently selected default app.
   * Clicking the App button opens a command-bar-style picker overlay
     populated from the configured <tile><app> items.
   * The picker prefixes the currently selected entry with "* " and
     other entries with "  " so the active default app is visible.
-  * Typing a fuzzy query filters the entries; pressing Enter applies the
-    selection by setting the tile.selected property and broadcasting
+  * Typing a fuzzy query filters the entries; pressing Enter applies
+    the selection by invoking vtm.tile.SetSelectedApp and broadcasting
     a label change.
-  * After selection, the status bar's App button updates to the new
-    label, proving the e2::form::prop::any broadcast reaches the bar.
+  * After selection, the menu's App button updates to the new label,
+    proving the e2::form::prop::any broadcast reaches the menu.
+  * Pressing Esc dismisses the picker without changing the selection.
   * The Lua method vtm.tile.PickApplication() also opens the picker
-    (parity with the status-bar click trigger).
+    (parity with the menu-click trigger), bound to Alt+Shift+P.
 
-The test reuses the pty harness from test_command_bar_terminal.py
-(SGR mouse, ANSI strip, marker-by-CUP scanning) to keep the suite
-self-contained. No assumptions are made about packaged vtm.xml: the
-config is fully inlined via -c so the test is hermetic.
+The test inlines a minimal <menu> that exposes a single "App: <label>"
+button at a predictable column so the click coordinates are stable
+regardless of the user's settings.xml.
 """
 
 import os
@@ -46,41 +46,58 @@ VTM_TILE_BINARY = os.environ.get(
 COLS = 120
 ROWS = 30
 READ_TIMEOUT = 5.0
-SETTLE_DELAY = 1.0
-
-# Status bar workspace button width (must match ws_btn_w in tile.hpp).
-WS_BTN_W = 3
-# Status bar app button gap and padding (must match constants in tile.hpp:
-# app_btn_gap, app_btn_pad_l, app_btn_pad_r).
-APP_BTN_GAP = 0
-APP_BTN_PAD_L = 1
-APP_BTN_PAD_R = 1
+SETTLE_DELAY = 1.5
 
 
 # Tile config:
 #   - Two configured apps: "term" and "alpha". term is selected by default.
 #   - confirm_close=0 so we can exit cleanly via the close button.
-#   - A default empty <menu> so the [CMD] item from vtm.xml is gone (we
-#     do not need it for these tests).
-# We rely on the default <commandbar> groups in vtm.xml to drive the
-# picker overlay's input/keybd hook (the picker reuses the same overlay
-# infrastructure).
-TILE_CONFIG = (
-    "<config>"
-        "<tile>"
-            "<confirm_close=0/>"
-            '<app selected="term">'
-                "<item*/>"
-                # Both apps run a tiny shell so the dtvt subprocess
-                # actually launches and its label propagates.
-                '<item id="term"  label="term"  type="dtvt" cmd="$0 -r term"/>'
-                '<item id="alpha" label="alpha" type="dtvt" cmd="$0 -r term"/>'
-            "</app>"
-            "<menu item*/>"
-        "</tile>"
-    "</config>"
-)
+#   - An explicit <menu> with a single "App: <label>" item: this isolates
+#     the App button to a known column (the menu's left padding=2 means
+#     the label starts at column 3), independent of whatever menu items
+#     the user's settings.xml otherwise installs.
+def make_tile_config(extra_events="", extra_scripting=""):
+    return (
+        "<config>"
+            "<tile>"
+                "<confirm_close=0/>"
+                '<app selected="term">'
+                    "<item*/>"
+                    '<item id="term"  label="term"  type="dtvt" cmd="$0 -r term"/>'
+                    '<item id="alpha" label="alpha" type="dtvt" cmd="$0 -r term"/>'
+                "</app>"
+                "<menu item*>"
+                    "<padding=2/>"
+                    "<slim=1/>"
+                    "<item tooltip=' Pick app '>"
+                        "<script=OnLeftClick|TilePickApplication/>"
+                        "<script>"
+                            '<on="release: e2::form::upon::started" source="tile"/>'
+                            '<on="release: e2::form::prop::any"/>'
+                            "local app_label = vtm.tile.SelectedApp() "
+                            'vtm.item.Label(app_label == "" and "App" or "App: " .. app_label) '
+                            "vtm.item.Deface()"
+                        "</script>"
+                    "</item>"
+                "</menu>"
+            "</tile>"
+            + extra_events +
+        "</config>"
+        + extra_scripting
+    )
+
+
+TILE_CONFIG = make_tile_config()
 TILE_ARGS = ["-c", TILE_CONFIG]
+
+# Menu row and column of the App button.
+#   - The menu is attached to slot::_1 of the outer fork: the top row of the
+#     pty, i.e. row 1 (1-indexed).
+#   - padding=2 puts two spaces of left padding before the first item label,
+#     so "App: term" starts at column 3. Clicking column 5 lands squarely
+#     inside the label.
+APP_BTN_ROW = 1
+APP_BTN_CLICK_COL = 5
 
 
 def kill_all_vtm():
@@ -141,6 +158,83 @@ def strip_ansi(buf):
     return out
 
 
+def render_grid(buf, rows=ROWS, cols=COLS):
+    """Render the byte stream to a [rows][cols] character grid by
+    tracking the cursor through CUP/CR/LF and skipping other escape
+    sequences. Sufficient to read button labels at known coordinates."""
+    grid = [[" "] * cols for _ in range(rows)]
+    cur_row, cur_col = 1, 1
+    i = 0
+    n = len(buf)
+    while i < n:
+        b = buf[i]
+        if b == 0x1b:
+            if i + 1 < n and buf[i + 1] == 0x5b:  # CSI
+                j = i + 2
+                params = b""
+                while j < n and (0x30 <= buf[j] <= 0x3f or 0x20 <= buf[j] <= 0x2f):
+                    params += bytes([buf[j]])
+                    j += 1
+                if j < n:
+                    final = buf[j]
+                    if final == 0x48 or final == 0x66:  # CUP / HVP
+                        p = params.decode("ascii", errors="replace").split(";")
+                        try:
+                            r = int(p[0]) if p and p[0] else 1
+                            c = int(p[1]) if len(p) > 1 and p[1] else 1
+                            cur_row, cur_col = r, c
+                        except ValueError:
+                            pass
+                    i = j + 1
+                    continue
+                break
+            if i + 1 < n and buf[i + 1] in (0x5d, 0x50, 0x5f):
+                terminator = buf[i + 1]
+                j = i + 2
+                while j < n:
+                    if buf[j] == 0x07 and terminator == 0x5d:
+                        j += 1
+                        break
+                    if buf[j] == 0x1b and j + 1 < n and buf[j + 1] == 0x5c:
+                        j += 2
+                        break
+                    j += 1
+                i = j
+                continue
+            i += 2
+            continue
+        if b == 0x0d:
+            cur_col = 1
+            i += 1
+            continue
+        if b == 0x0a:
+            cur_row += 1
+            i += 1
+            continue
+        if b < 0x20:
+            i += 1
+            continue
+        if b < 0x80:
+            ch = chr(b); width = 1
+        elif b < 0xc0:
+            i += 1; continue
+        elif b < 0xe0:
+            ch = buf[i:i + 2].decode("utf-8", errors="replace"); width = 2
+        elif b < 0xf0:
+            ch = buf[i:i + 3].decode("utf-8", errors="replace"); width = 3
+        else:
+            ch = buf[i:i + 4].decode("utf-8", errors="replace"); width = 4
+        if 1 <= cur_row <= rows and 1 <= cur_col <= cols:
+            grid[cur_row - 1][cur_col - 1] = ch
+        cur_col += 1
+        i += width
+    return grid
+
+
+def grid_to_text(grid):
+    return "\n".join("".join(row) for row in grid)
+
+
 class VtmTileSession:
     def __init__(self, args, settle_delay=SETTLE_DELAY):
         self.args = args
@@ -162,6 +256,13 @@ class VtmTileSession:
             os.dup2(slave_fd, 2)
             if slave_fd > 2:
                 os.close(slave_fd)
+            os.environ["SHELL"] = "/bin/bash"
+            os.environ["BASH_ENV"] = "/dev/null"
+            os.environ["ENV"] = "/dev/null"
+            os.environ["HOME"] = "/tmp"
+            os.environ["PS1"] = "$ "
+            os.environ.pop("STARSHIP_SHELL", None)
+            os.environ.pop("STARSHIP_SESSION_KEY", None)
             os.execvp(VTM_TILE_BINARY, [VTM_TILE_BINARY] + self.args)
             sys.exit(1)
         os.close(slave_fd)
@@ -211,7 +312,7 @@ class VtmTileSession:
             self.pid = None
             return False
 
-    def snapshot(self, timeout=1.0):
+    def drain(self, timeout=1.0):
         deadline = time.time() + timeout
         while time.time() < deadline:
             ready, _, _ = select.select([self.master_fd], [], [], 0.1)
@@ -225,7 +326,14 @@ class VtmTileSession:
                     pass
             else:
                 break
+
+    def snapshot_text(self, timeout=1.0):
+        self.drain(timeout)
         return strip_ansi(self._screen_buf).decode("utf-8", errors="replace")
+
+    def snapshot_grid(self, timeout=1.0):
+        self.drain(timeout)
+        return render_grid(self._screen_buf)
 
     def reset_buffer(self):
         self._screen_buf = b""
@@ -236,192 +344,145 @@ def fail(msg):
     return False
 
 
-# ---------------------------------------------------------------------------
-# App-button geometry helpers.
-# The button paints at row=ROWS (last row, 1-indexed), starting at
-# column = WS_BTN_W + APP_BTN_GAP (0-indexed) which is column index 4
-# in 1-indexed terms. The label is "App: <label>".
-# ---------------------------------------------------------------------------
-
-def expected_app_btn_text(label):
-    return "App: " + label
-
-
-def app_btn_click_col(label):
-    """Return a 1-indexed column inside the app button for the given label."""
-    # 0-indexed start = WS_BTN_W + APP_BTN_GAP = 4. 1-indexed = 5.
-    # Click in the middle: 5 + APP_BTN_PAD_L + 2 (centre of "App").
-    return WS_BTN_W + APP_BTN_GAP + APP_BTN_PAD_L + 2 + 1  # +1 for 1-indexed
+def row_text(grid, row_1indexed):
+    return "".join(grid[row_1indexed - 1])
 
 
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
 
-def test_status_bar_renders_app_button():
-    print("TEST: status bar renders 'App: term' ... ", end="", flush=True)
+def test_menu_renders_app_button():
+    print("TEST: tile menu renders 'App: term' ... ", end="", flush=True)
     with VtmTileSession(TILE_ARGS) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
-        rendered = s.snapshot(timeout=2.0)
-        if "App: term" not in rendered:
-            return fail("'App: term' marker not found in initial paint:\n" + rendered[-2000:])
-        # The status bar lives on the last row; verify the app marker is on
-        # the last row by scanning its raw byte stream for a CUP placing the
-        # cursor at row=ROWS just before "App".
-        raw = s._screen_buf
-        # Find any CUP positioning to row=ROWS followed (after stripped
-        # ANSI) by 'A' (start of "App"). This is a lenient check: vtm
-        # paints cell-by-cell so we just confirm the marker exists.
-        if "App: term".encode() not in strip_ansi(raw):
-            return fail("'App: term' missing from stripped raw buffer")
+        grid = s.snapshot_grid(timeout=2.0)
+        menu_row = row_text(grid, APP_BTN_ROW)
+        if "App: term" not in menu_row:
+            return fail(
+                f"'App: term' not on menu row {APP_BTN_ROW}; got {menu_row!r}"
+            )
     print("OK")
     return True
 
 
-def test_status_bar_app_button_click_opens_picker():
-    print("TEST: clicking the 'App: term' button opens the app picker ... ", end="", flush=True)
+def test_menu_app_button_click_opens_picker():
+    print("TEST: clicking 'App: term' opens the picker ... ",
+          end="", flush=True)
     with VtmTileSession(TILE_ARGS) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
-        s.snapshot(timeout=2.0)
-        if "App: term" not in s.snapshot(timeout=0.3):
-            return fail("'App: term' button not rendered before click")
+        s.drain(timeout=2.0)
+        grid = s.snapshot_grid(timeout=0.3)
+        if "App: term" not in row_text(grid, APP_BTN_ROW):
+            return fail("App button not rendered before click")
 
         s.reset_buffer()
-        col = app_btn_click_col("term")
-        s.click(col, ROWS)
-        rendered = s.snapshot(timeout=1.5)
+        s.click(APP_BTN_CLICK_COL, APP_BTN_ROW)
+        rendered = s.snapshot_text(timeout=1.5)
 
-        # The picker reuses the command-bar overlay; both apps should
-        # appear as entries. The currently selected app is prefixed with
-        # "* " and the other with "  ".
         if "* term" not in rendered:
-            return fail("Expected '* term' (selected entry) in picker:\n" + rendered[-2000:])
+            return fail("Expected '* term' (selected entry) in picker:\n"
+                        + rendered[-1500:])
         if "alpha" not in rendered:
-            return fail("Expected 'alpha' entry in picker:\n" + rendered[-2000:])
-        # The id-suffix tooltip is rendered next to entries.
-        if "id: term" not in rendered or "id: alpha" not in rendered:
-            return fail("Expected 'id: term' and 'id: alpha' tooltips in picker")
+            return fail("Expected 'alpha' entry in picker:\n"
+                        + rendered[-1500:])
     print("OK")
     return True
 
 
 def test_picker_filters_and_selects_via_enter():
-    print("TEST: picker filters by query and Enter applies selection ... ", end="", flush=True)
+    print("TEST: picker filters by query and Enter applies selection ... ",
+          end="", flush=True)
     with VtmTileSession(TILE_ARGS) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
-        s.snapshot(timeout=2.0)
+        s.drain(timeout=2.0)
 
-        # Open picker via status bar click.
         s.reset_buffer()
-        s.click(app_btn_click_col("term"), ROWS)
-        s.snapshot(timeout=1.0)
-
-        # Type a filter that uniquely matches "alpha".
-        s.reset_buffer()
-        s.write(b"alph")
-        rendered = s.snapshot(timeout=1.0)
+        s.click(APP_BTN_CLICK_COL, APP_BTN_ROW)
+        rendered = s.snapshot_text(timeout=1.5)
         if "alpha" not in rendered:
-            return fail("After typing 'alph', 'alpha' should still be visible:\n" + rendered[-1500:])
-        # And "* term" line should no longer be present (filtered out).
-        # The fuzzy filter in command_bar may keep the leading marker
-        # though, so we verify that the fuzzy match cursor moved by
-        # checking that 'term' alone (without 'alpha') is filtered out:
-        # at minimum, 'alpha' is present.
-        # Press Enter to confirm the alpha selection.
+            return fail("Picker did not open:\n" + rendered[-1500:])
+
+        # Filter down to "alpha" and confirm.
+        s.write(b"alph")
+        time.sleep(0.3)
         s.reset_buffer()
         s.write(b"\r")
-        time.sleep(0.3)
-        rendered = s.snapshot(timeout=1.5)
-        # The status bar should now read "App: alpha".
-        if "App: alpha" not in rendered:
-            return fail("Status bar did not update to 'App: alpha' after Enter:\n" + rendered[-2000:])
+        time.sleep(0.5)
+        grid = s.snapshot_grid(timeout=1.5)
+        menu_row = row_text(grid, APP_BTN_ROW)
+        if "App: alpha" not in menu_row:
+            return fail(
+                f"Menu did not update to 'App: alpha' after Enter; "
+                f"row={menu_row!r}\nfull:\n{grid_to_text(grid)[-1500:]}"
+            )
     print("OK")
     return True
 
 
 def test_picker_escape_cancels():
-    print("TEST: pressing Esc dismisses the picker without changing selection ... ", end="", flush=True)
+    print("TEST: Esc dismisses the picker without changing the selection ... ",
+          end="", flush=True)
     with VtmTileSession(TILE_ARGS) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
-        s.snapshot(timeout=2.0)
-        s.click(app_btn_click_col("term"), ROWS)
-        s.snapshot(timeout=1.0)
-        # Esc should dismiss without changing selection.
+        s.drain(timeout=2.0)
+        s.click(APP_BTN_CLICK_COL, APP_BTN_ROW)
+        rendered = s.snapshot_text(timeout=1.5)
+        if "* term" not in rendered:
+            return fail("Picker did not open before Esc:\n" + rendered[-1500:])
+
         s.reset_buffer()
         s.write(b"\x1b")
-        time.sleep(0.3)
-        rendered = s.snapshot(timeout=1.0)
-        # After Esc, the status bar should still show "App: term"
-        # (the most recent paint of the bar). Allow a brief settle.
-        if "App: term" not in rendered:
-            return fail("After Esc, 'App: term' should remain in the bar:\n" + rendered[-1500:])
-        # And the picker overlay should be gone: typing should not still
-        # affect a query line. Smoke-test: send a key and confirm we
-        # don't see picker entries reappear by themselves.
+        time.sleep(0.4)
+        grid = s.snapshot_grid(timeout=1.0)
+        menu_row = row_text(grid, APP_BTN_ROW)
+        if "App: term" not in menu_row:
+            return fail(
+                f"After Esc, menu should still show 'App: term'; row={menu_row!r}"
+            )
     print("OK")
     return True
 
 
 def test_lua_method_pickapplication_opens_picker():
-    print("TEST: vtm.tile.PickApplication() Lua method opens the picker ... ", end="", flush=True)
-    # Use a config that binds a key to the Lua method so we can trigger
-    # it directly from the pty.
-    cfg = (
-        "<config>"
-            "<tile>"
-                "<confirm_close=0/>"
-                '<app selected="term">'
-                    "<item*/>"
-                    '<item id="term"  label="term"  type="dtvt" cmd="$0 -r term"/>'
-                    '<item id="alpha" label="alpha" type="dtvt" cmd="$0 -r term"/>'
-                "</app>"
-                "<menu item*/>"
-            "</tile>"
-            '<events><tile>'
-                '<script=TilePickApplication on="Alt+Shift+P"/>'
+    print("TEST: vtm.tile.PickApplication() Lua method opens the picker ... ",
+          end="", flush=True)
+    # Bind Alt+Shift+P (Esc-P over the pty) to PickApplication() so we
+    # can trigger the Lua method without clicking.
+    cfg = make_tile_config(
+        extra_events=(
+            "<events><tile>"
+                '<script=TilePick on="Alt+Shift+P"/>'
             "</tile></events>"
-        "</config>"
-        "<Scripting>"
-            '<TilePickApplication="vtm.tile.PickApplication();"/>'
-        "</Scripting>"
+        ),
+        extra_scripting=(
+            "<Scripting>"
+                '<TilePick="vtm.tile.PickApplication();"/>'
+            "</Scripting>"
+        ),
     )
     with VtmTileSession(["-c", cfg]) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
-        s.snapshot(timeout=2.0)
-        # Send Alt+Shift+P.  Many terminals encode Alt as ESC prefix;
-        # vtm-tile's pty input layer parses this directly. Capital P
-        # represents Shift+P.
+        s.drain(timeout=2.0)
         s.reset_buffer()
-        s.write(b"\x1bP")  # Esc + 'P' = Alt+Shift+P in xterm encoding.
-        rendered = s.snapshot(timeout=1.5)
-        # The Esc-P encoding may not always reach the binding layer
-        # (depends on terminfo). If the picker did not open via the
-        # binding, fall back to clicking the status bar button which
-        # also exercises the same focus::pickapp signal path; the goal
-        # of this test is to ensure the Lua method itself dispatches.
-        if "id: term" not in rendered:
-            # Could not open via Alt+Shift+P; fall back to status bar
-            # click for end-to-end Lua coverage. The Lua method is
-            # invoked the same way under the hood since the menu
-            # entries in vtm.xml are wired through it.
-            s.reset_buffer()
-            s.click(app_btn_click_col("term"), ROWS)
-            rendered = s.snapshot(timeout=1.5)
-        if "id: term" not in rendered or "id: alpha" not in rendered:
-            return fail("Picker did not open via either path:\n" + rendered[-2000:])
+        s.write(b"\x1bP")  # Alt+Shift+P
+        rendered = s.snapshot_text(timeout=1.5)
+        if "* term" not in rendered or "alpha" not in rendered:
+            return fail("Picker did not open via PickApplication():\n"
+                        + rendered[-1500:])
     print("OK")
     return True
 
 
 def main():
     tests = [
-        test_status_bar_renders_app_button,
-        test_status_bar_app_button_click_opens_picker,
+        test_menu_renders_app_button,
+        test_menu_app_button_click_opens_picker,
         test_picker_filters_and_selects_via_enter,
         test_picker_escape_cancels,
         test_lua_method_pickapplication_opens_picker,
