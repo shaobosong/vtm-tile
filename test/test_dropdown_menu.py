@@ -2226,103 +2226,68 @@ def test_menu_padding_config_controls_horizontal_cell_padding():
         return True
 
 
-if __name__ == "__main__":
+TESTS = [
+    test_dropdown_menu_item_loads_from_xml_and_opens_popup,
+    test_dropdown_menu_keeps_menubar_visible_with_log_repaint,
+    test_nested_dropdown_submenu_opens_to_the_right,
+    test_nested_dropdown_submenu_flips_left_when_no_room_on_right,
+    test_nested_dropdown_submenu_opens_on_hover_no_click,
+    test_dropdown_esc_dismisses_chain,
+    test_dropdown_outside_click_dismisses_chain,
+    test_nested_dropdown_leaf_click_dismisses_chain,
+    test_submenu_background_progressively_darker,
+    test_hover_brightens_bg_keeps_fg_unchanged,
+    test_click_another_trigger_closes_current_and_opens_new,
+    test_hover_another_trigger_shows_hover_feedback,
+    test_click_non_dropdown_button_dismisses_open_chain,
+    test_click_empty_menubar_area_dismisses_chain,
+    test_amp_label_strips_marker_and_underlines_shortcut,
+    test_keyboard_down_up_arrows_select_rows,
+    test_keyboard_right_arrow_opens_submenu_and_focuses_first_row,
+    test_keyboard_left_arrow_closes_submenu_returns_to_parent,
+    test_keyboard_enter_activates_leaf_and_dismisses_chain,
+    test_keyboard_shortcut_letter_activates_matching_row,
+    test_keyboard_nav_is_independent_of_mouse_hover,
+    test_keyboard_does_not_pass_through_to_terminal,
+    test_menu_padding_config_controls_horizontal_cell_padding,
+]
+
+
+def main():
     if not os.path.isfile(VTM_TILE_BINARY):
         print(f"ERROR: vtm-tile binary not found at {VTM_TILE_BINARY}")
         print("Set VTM_TILE_BINARY env var or build vtm-tile first.")
-        sys.exit(2)
+        return 1
+
     kill_all_vtm()
-    ok = True
-    try:
-        ok = test_dropdown_menu_item_loads_from_xml_and_opens_popup()
-        if ok:
+
+    passed = 0
+    failed = 0
+
+    for test in TESTS:
+        try:
+            result = test()
+            if result:
+                passed += 1
+            else:
+                failed += 1
+        except Exception as e:
+            print(f"ERROR: {test.__name__}: {e}")
+            import traceback
+            traceback.print_exc()
+            failed += 1
+        finally:
             kill_all_vtm()
             time.sleep(0.5)
-            ok = test_dropdown_menu_keeps_menubar_visible_with_log_repaint()
-        if ok:
-            kill_all_vtm()
-            time.sleep(0.5)
-            ok = test_nested_dropdown_submenu_opens_to_the_right()
-        if ok:
-            kill_all_vtm()
-            time.sleep(0.5)
-            ok = test_nested_dropdown_submenu_flips_left_when_no_room_on_right()
-        if ok:
-            kill_all_vtm()
-            time.sleep(0.5)
-            ok = test_nested_dropdown_submenu_opens_on_hover_no_click()
-        if ok:
-            kill_all_vtm()
-            time.sleep(0.5)
-            ok = test_dropdown_esc_dismisses_chain()
-        if ok:
-            kill_all_vtm()
-            time.sleep(0.5)
-            ok = test_dropdown_outside_click_dismisses_chain()
-        if ok:
-            kill_all_vtm()
-            time.sleep(0.5)
-            ok = test_nested_dropdown_leaf_click_dismisses_chain()
-        if ok:
-            kill_all_vtm()
-            time.sleep(0.5)
-            ok = test_submenu_background_progressively_darker()
-        if ok:
-            kill_all_vtm()
-            time.sleep(0.5)
-            ok = test_hover_brightens_bg_keeps_fg_unchanged()
-        if ok:
-            kill_all_vtm()
-            time.sleep(0.5)
-            ok = test_click_another_trigger_closes_current_and_opens_new()
-        if ok:
-            kill_all_vtm()
-            time.sleep(0.5)
-            ok = test_hover_another_trigger_shows_hover_feedback()
-        if ok:
-            kill_all_vtm()
-            time.sleep(0.5)
-            ok = test_click_non_dropdown_button_dismisses_open_chain()
-        if ok:
-            kill_all_vtm()
-            time.sleep(0.5)
-            ok = test_click_empty_menubar_area_dismisses_chain()
-        if ok:
-            kill_all_vtm()
-            time.sleep(0.5)
-            ok = test_amp_label_strips_marker_and_underlines_shortcut()
-        if ok:
-            kill_all_vtm()
-            time.sleep(0.5)
-            ok = test_keyboard_down_up_arrows_select_rows()
-        if ok:
-            kill_all_vtm()
-            time.sleep(0.5)
-            ok = test_keyboard_right_arrow_opens_submenu_and_focuses_first_row()
-        if ok:
-            kill_all_vtm()
-            time.sleep(0.5)
-            ok = test_keyboard_left_arrow_closes_submenu_returns_to_parent()
-        if ok:
-            kill_all_vtm()
-            time.sleep(0.5)
-            ok = test_keyboard_enter_activates_leaf_and_dismisses_chain()
-        if ok:
-            kill_all_vtm()
-            time.sleep(0.5)
-            ok = test_keyboard_shortcut_letter_activates_matching_row()
-        if ok:
-            kill_all_vtm()
-            time.sleep(0.5)
-            ok = test_keyboard_nav_is_independent_of_mouse_hover()
-        if ok:
-            kill_all_vtm()
-            time.sleep(0.5)
-            ok = test_keyboard_does_not_pass_through_to_terminal()
-        if ok:
-            kill_all_vtm()
-            time.sleep(0.5)
-            ok = test_menu_padding_config_controls_horizontal_cell_padding()
-    finally:
-        kill_all_vtm()
+
+    total = passed + failed
+    print(f"\n{'='*60}")
+    print(f"Results: {passed}/{total} passed, {failed} failed")
+    print(f"{'='*60}")
+
+    return 0 if failed == 0 else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
     sys.exit(0 if ok else 1)

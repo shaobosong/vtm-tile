@@ -1803,6 +1803,42 @@ def test_popup_top_section_label_key_selects_pane():
 # Main
 # ---------------------------------------------------------------------------
 
+TESTS = [
+    test_workspace_starts_with_one,
+    test_create_workspace,
+    test_destroy_workspace,
+    test_destroy_last_workspace_exits,
+    test_workspace_close_button_still_works,
+    test_create_multiple_workspaces,
+    test_split_in_workspace,
+    test_next_workspace,
+    test_prev_workspace,
+    test_last_workspace,
+    test_next_prev_single_workspace,
+    test_next_prev_after_destroy,
+    test_switch_workspace_by_index,
+    test_switch_workspace_out_of_range,
+    test_create_workspace_uses_selected_app,
+    test_select_app_then_create_multiple_workspaces,
+    test_create_workspace_default_app_without_selection,
+    test_lastpane_within_single_workspace,
+    test_lastpane_isolated_across_workspaces,
+    test_lastpane_after_workspace_destroy,
+    test_lastpane_no_history_in_new_workspace,
+    test_lastpane_three_workspaces,
+    test_popup_open_and_dismiss_click,
+    test_popup_switch_workspace,
+    test_popup_create_workspace_via_plus,
+    test_popup_reopen_after_dismiss,
+    test_popup_switch_then_operations,
+    test_popup_keyboard_navigation_bottom,
+    test_popup_tab_toggle_sections,
+    test_popup_tab_enter_focuses_pane,
+    test_popup_tab_toggle_no_panes,
+    test_popup_top_section_label_key_selects_pane,
+]
+
+
 def main():
     if not os.path.isfile(VTM_TILE_BINARY):
         print(f"ERROR: vtm-tile binary not found at {VTM_TILE_BINARY}")
@@ -1811,45 +1847,10 @@ def main():
 
     kill_all_vtm()
 
-    tests = [
-        test_workspace_starts_with_one,
-        test_create_workspace,
-        test_destroy_workspace,
-        test_destroy_last_workspace_exits,
-        test_workspace_close_button_still_works,
-        test_create_multiple_workspaces,
-        test_split_in_workspace,
-        test_next_workspace,
-        test_prev_workspace,
-        test_last_workspace,
-        test_next_prev_single_workspace,
-        test_next_prev_after_destroy,
-        test_switch_workspace_by_index,
-        test_switch_workspace_out_of_range,
-        test_create_workspace_uses_selected_app,
-        test_select_app_then_create_multiple_workspaces,
-        test_create_workspace_default_app_without_selection,
-        test_lastpane_within_single_workspace,
-        test_lastpane_isolated_across_workspaces,
-        test_lastpane_after_workspace_destroy,
-        test_lastpane_no_history_in_new_workspace,
-        test_lastpane_three_workspaces,
-        test_popup_open_and_dismiss_click,
-        test_popup_switch_workspace,
-        test_popup_create_workspace_via_plus,
-        test_popup_reopen_after_dismiss,
-        test_popup_switch_then_operations,
-        test_popup_keyboard_navigation_bottom,
-        test_popup_tab_toggle_sections,
-        test_popup_tab_enter_focuses_pane,
-        test_popup_tab_toggle_no_panes,
-        test_popup_top_section_label_key_selects_pane,
-    ]
-
     passed = 0
     failed = 0
 
-    for test in tests:
+    for test in TESTS:
         try:
             result = test()
             if result:

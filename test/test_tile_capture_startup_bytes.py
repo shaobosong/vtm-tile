@@ -310,14 +310,44 @@ def test_capture_startup_bytes():
         return True
 
 
-if __name__ == "__main__":
+TESTS = [
+    test_capture_startup_bytes,
+]
+
+
+def main():
     if not os.path.isfile(VTM_TILE_BINARY):
         print(f"ERROR: vtm-tile binary not found at {VTM_TILE_BINARY}")
         print("Set VTM_TILE_BINARY env var or build vtm-tile first.")
-        sys.exit(2)
+        return 1
+
     kill_all_vtm()
-    try:
-        ok = test_capture_startup_bytes()
-    finally:
-        kill_all_vtm()
-    sys.exit(0 if ok else 1)
+
+    passed = 0
+    failed = 0
+
+    for test in TESTS:
+        try:
+            result = test()
+            if result:
+                passed += 1
+            else:
+                failed += 1
+        except Exception as e:
+            print(f"ERROR: {test.__name__}: {e}")
+            import traceback
+            traceback.print_exc()
+            failed += 1
+        finally:
+            kill_all_vtm()
+
+    total = passed + failed
+    print(f"\n{'='*60}")
+    print(f"Results: {passed}/{total} passed, {failed} failed")
+    print(f"{'='*60}")
+
+    return 0 if failed == 0 else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

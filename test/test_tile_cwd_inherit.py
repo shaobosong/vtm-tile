@@ -425,36 +425,69 @@ def _scenario_negative(action_name, trigger, source_label, advance):
     return True
 
 
+_ACTIONS = [
+    ("SplitPane", "trigger_split"),
+    ("ReRunApplication", "trigger_rerun"),
+    ("CreateWorkspace", "trigger_create_workspace"),
+]
+_SOURCES = [
+    ("OSC9;9", "_advance_via_osc"),
+    ("cd-poll", "_advance_via_cd"),
+]
+
+
+def _make_scenario(scenario_fn, action_name, trigger_name, source_label, advance_name):
+    def _test():
+        return scenario_fn(action_name,
+                           globals()[trigger_name],
+                           source_label,
+                           globals()[advance_name])
+    _test.__name__ = (
+        f"test_{scenario_fn.__name__.lstrip('_')}_"
+        f"{action_name}_{source_label}".replace(";", "").replace("-", "_")
+    )
+    _test.__doc__ = f"{scenario_fn.__name__}: {action_name} via {source_label}"
+    return _test
+
+
+TESTS = (
+    [_make_scenario(_scenario_positive, a, fn, sl, adv)
+     for a, fn in _ACTIONS for sl, adv in _SOURCES]
+    + [_make_scenario(_scenario_negative, a, fn, sl, adv)
+       for a, fn in _ACTIONS for sl, adv in _SOURCES]
+)
+
+
 def main():
     if not os.path.exists(VTM_TILE_BINARY):
         print(f"vtm-tile binary not found: {VTM_TILE_BINARY}")
-        return 2
+        return 1
 
     kill_all_vtm()
-    results = []
-    actions = [
-        ("SplitPane", trigger_split),
-        ("ReRunApplication", trigger_rerun),
-        ("CreateWorkspace", trigger_create_workspace),
-    ]
-    sources = [
-        ("OSC9;9", _advance_via_osc),
-        ("cd-poll", _advance_via_cd),
-    ]
-    try:
-        for name, fn in actions:
-            for src_label, advance in sources:
-                results.append(_scenario_positive(name, fn, src_label, advance))
-                kill_all_vtm()
-        for name, fn in actions:
-            for src_label, advance in sources:
-                results.append(_scenario_negative(name, fn, src_label, advance))
-                kill_all_vtm()
-    finally:
-        kill_all_vtm()
 
-    failed = sum(1 for r in results if not r)
-    print(f"\n{len(results) - failed}/{len(results)} tests passed.")
+    passed = 0
+    failed = 0
+
+    for test in TESTS:
+        try:
+            result = test()
+            if result:
+                passed += 1
+            else:
+                failed += 1
+        except Exception as e:
+            print(f"ERROR: {test.__name__}: {e}")
+            import traceback
+            traceback.print_exc()
+            failed += 1
+        finally:
+            kill_all_vtm()
+
+    total = passed + failed
+    print(f"\n{'='*60}")
+    print(f"Results: {passed}/{total} passed, {failed} failed")
+    print(f"{'='*60}")
+
     return 0 if failed == 0 else 1
 
 

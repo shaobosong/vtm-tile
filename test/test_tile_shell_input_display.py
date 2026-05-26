@@ -165,7 +165,7 @@ def reconstruct_screen(raw_buf, rows=ROWS, cols=COLS):
     return ["".join(row).rstrip() for row in grid]
 
 
-def run_test(extra_args, label):
+def _run_test_impl(extra_args, label):
     print(f"TEST [{label}]: type '{TEST_STRING}' ... ", end="", flush=True)
     master_fd, slave_fd = pty.openpty()
     set_winsize(master_fd, ROWS, COLS)
@@ -253,16 +253,53 @@ def run_test(extra_args, label):
         kill_all_vtm()
 
 
+def test_shell_input_display_default():
+    """Verify ASCII keystrokes echo correctly under default vtm-tile startup."""
+    return _run_test_impl([], "vtm-tile")
+
+
+def test_shell_input_display_dash_r_term():
+    """Verify ASCII keystrokes echo correctly under `vtm-tile -r term`."""
+    return _run_test_impl(["-r", "term"], "vtm-tile -r term")
+
+
+TESTS = [
+    test_shell_input_display_default,
+    test_shell_input_display_dash_r_term,
+]
+
+
 def main():
+    if not os.path.isfile(VTM_TILE_BINARY):
+        print(f"ERROR: vtm-tile binary not found at {VTM_TILE_BINARY}")
+        return 1
+
     kill_all_vtm()
-    results = []
-    results.append(run_test([], "vtm-tile"))
-    results.append(run_test(["-r", "term"], "vtm-tile -r term"))
-    if all(results):
-        print("ALL PASS")
-        return 0
-    print("FAILURES")
-    return 1
+
+    passed = 0
+    failed = 0
+
+    for test in TESTS:
+        try:
+            result = test()
+            if result:
+                passed += 1
+            else:
+                failed += 1
+        except Exception as e:
+            print(f"ERROR: {test.__name__}: {e}")
+            import traceback
+            traceback.print_exc()
+            failed += 1
+        finally:
+            kill_all_vtm()
+
+    total = passed + failed
+    print(f"\n{'='*60}")
+    print(f"Results: {passed}/{total} passed, {failed} failed")
+    print(f"{'='*60}")
+
+    return 0 if failed == 0 else 1
 
 
 if __name__ == "__main__":

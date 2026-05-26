@@ -401,6 +401,19 @@ def test_close_button_functional():
 # Main
 # ---------------------------------------------------------------------------
 
+def _make_position_test(w):
+    def _test():
+        return test_close_button_position_at_width(w)
+    _test.__name__ = f"test_close_button_position_at_width_{w}"
+    _test.__doc__ = f"Verify × position at COLS={w}"
+    return _test
+
+
+TESTS = [_make_position_test(w) for w in TEST_WIDTHS] + [
+    test_close_button_functional,
+]
+
+
 def main():
     if not os.path.isfile(VTM_DESK_BINARY):
         print(f"ERROR: vtm-desk binary not found at {VTM_DESK_BINARY}")
@@ -409,18 +422,9 @@ def main():
 
     kill_all_vtm()
 
-    tests = []
-
-    # Position tests at each supported width: × at 1-indexed COLS - 2.
-    for w in TEST_WIDTHS:
-        tests.append(lambda w=w: test_close_button_position_at_width(w))
-
-    # Functional click test.
-    tests.append(test_close_button_functional)
-
     passed = 0
     failed = 0
-    for test in tests:
+    for test in TESTS:
         try:
             result = test()
             if result:

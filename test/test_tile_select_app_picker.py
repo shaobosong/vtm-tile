@@ -479,27 +479,43 @@ def test_lua_method_pickapplication_opens_picker():
     return True
 
 
+TESTS = [
+    test_menu_renders_app_button,
+    test_menu_app_button_click_opens_picker,
+    test_picker_filters_and_selects_via_enter,
+    test_picker_escape_cancels,
+    test_lua_method_pickapplication_opens_picker,
+]
+
+
 def main():
-    tests = [
-        test_menu_renders_app_button,
-        test_menu_app_button_click_opens_picker,
-        test_picker_filters_and_selects_via_enter,
-        test_picker_escape_cancels,
-        test_lua_method_pickapplication_opens_picker,
-    ]
-    ok = 0
-    for t in tests:
+    kill_all_vtm()
+
+    passed = 0
+    failed = 0
+
+    for test in TESTS:
         try:
-            if t():
-                ok += 1
+            result = test()
+            if result:
+                passed += 1
+            else:
+                failed += 1
         except Exception as e:
-            print(f"FAIL - exception: {e!r}")
+            print(f"ERROR: {test.__name__}: {e}")
+            import traceback
+            traceback.print_exc()
+            failed += 1
         finally:
             kill_all_vtm()
-    total = len(tests)
-    print(f"\n{ok}/{total} tests passed")
-    sys.exit(0 if ok == total else 1)
+
+    total = passed + failed
+    print(f"\n{'='*60}")
+    print(f"Results: {passed}/{total} passed, {failed} failed")
+    print(f"{'='*60}")
+
+    return 0 if failed == 0 else 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -1650,56 +1650,58 @@ def test_tab_toggles_direction_twice_restores_default():
         return True
 
 
+TESTS = [
+    test_f3_toggles_bar,
+    test_bar_right_aligned_with_margin,
+    test_esc_closes_bar,
+    test_typing_shows_in_input,
+    test_close_button_click_closes_bar,
+    test_backspace_removes_char,
+    test_long_input_horizontal_scroll,
+    test_keys_do_not_leak_to_shell,
+    test_f3_opens_bar,
+    test_counter_column_is_inside_bar,
+    test_counter_initial_is_zero_padded,
+    test_counter_updates_on_typing,
+    test_default_direction_is_down,
+    test_up_button_click_switches_direction,
+    test_enter_does_not_close_bar,
+    test_empty_query_resets_counter,
+    test_close_bar_clears_counter_state,
+    test_arrow_keys_navigate_matches,
+    test_format_counter_contract,
+    test_counter_width_is_fixed_for_high_totals,
+    # clear-query button tests
+    test_clear_button_column_is_inside_input,
+    test_clear_button_appears_when_typing,
+    test_clear_button_absent_with_empty_query,
+    test_clear_button_click_clears_query,
+    test_clear_button_disappears_after_backspace,
+    # underline-style input strip tests (tile.hpp-style)
+    test_input_strip_uses_underline_attribute,
+    test_clear_button_shares_underline_with_input,
+    # responsive layout tests (priority-based control hiding when narrow)
+    test_bar_renders_at_full_width,
+    test_bar_drops_dir_buttons_when_narrow,
+    test_bar_renders_at_minimum_width,
+    test_typing_works_at_narrow_width,
+    test_close_button_works_at_narrow_width,
+    # Tab key: toggle active navigation direction (↑ ↔ ↓)
+    test_tab_toggles_direction_no_crash,
+    test_tab_active_bg_appears_on_toggle,
+    test_tab_does_not_leak_to_shell,
+    test_tab_toggles_direction_twice_restores_default,
+]
+
+
 def main():
     if not os.path.isfile(VTM_DESK_BINARY):
         print(f"ERROR: vtm-desk binary not found at {VTM_DESK_BINARY}")
         return 1
     kill_all_vtm()
-    tests = [
-        test_f3_toggles_bar,
-        test_bar_right_aligned_with_margin,
-        test_esc_closes_bar,
-        test_typing_shows_in_input,
-        test_close_button_click_closes_bar,
-        test_backspace_removes_char,
-        test_long_input_horizontal_scroll,
-        test_keys_do_not_leak_to_shell,
-        test_f3_opens_bar,
-        test_counter_column_is_inside_bar,
-        test_counter_initial_is_zero_padded,
-        test_counter_updates_on_typing,
-        test_default_direction_is_down,
-        test_up_button_click_switches_direction,
-        test_enter_does_not_close_bar,
-        test_empty_query_resets_counter,
-        test_close_bar_clears_counter_state,
-        test_arrow_keys_navigate_matches,
-        test_format_counter_contract,
-        test_counter_width_is_fixed_for_high_totals,
-        # clear-query button tests
-        test_clear_button_column_is_inside_input,
-        test_clear_button_appears_when_typing,
-        test_clear_button_absent_with_empty_query,
-        test_clear_button_click_clears_query,
-        test_clear_button_disappears_after_backspace,
-        # underline-style input strip tests (tile.hpp-style)
-        test_input_strip_uses_underline_attribute,
-        test_clear_button_shares_underline_with_input,
-        # responsive layout tests (priority-based control hiding when narrow)
-        test_bar_renders_at_full_width,
-        test_bar_drops_dir_buttons_when_narrow,
-        test_bar_renders_at_minimum_width,
-        test_typing_works_at_narrow_width,
-        test_close_button_works_at_narrow_width,
-        # Tab key: toggle active navigation direction (↑ ↔ ↓)
-        test_tab_toggles_direction_no_crash,
-        test_tab_active_bg_appears_on_toggle,
-        test_tab_does_not_leak_to_shell,
-        test_tab_toggles_direction_twice_restores_default,
-    ]
     passed = 0
     failed = 0
-    for t in tests:
+    for t in TESTS:
         try:
             if t():
                 passed += 1

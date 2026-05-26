@@ -474,28 +474,44 @@ def test_unknown_mode_falls_back_to_default():
     return True
 
 
+TESTS = [
+    test_no_argument_keeps_default_mode,
+    test_splith_arg_enter_splits_pane,
+    test_splitv_arg_enter_splits_pane,
+    test_rerun_arg_enter_reruns_pane,
+    test_workspace_arg_enter_creates_workspace,
+    test_unknown_mode_falls_back_to_default,
+]
+
+
 def main():
-    tests = [
-        test_no_argument_keeps_default_mode,
-        test_splith_arg_enter_splits_pane,
-        test_splitv_arg_enter_splits_pane,
-        test_rerun_arg_enter_reruns_pane,
-        test_workspace_arg_enter_creates_workspace,
-        test_unknown_mode_falls_back_to_default,
-    ]
-    ok = 0
-    for t in tests:
+    kill_all_vtm()
+
+    passed = 0
+    failed = 0
+
+    for test in TESTS:
         try:
-            if t():
-                ok += 1
+            result = test()
+            if result:
+                passed += 1
+            else:
+                failed += 1
         except Exception as e:
-            print(f"FAIL - exception: {e!r}")
+            print(f"ERROR: {test.__name__}: {e}")
+            import traceback
+            traceback.print_exc()
+            failed += 1
         finally:
             kill_all_vtm()
-    total = len(tests)
-    print(f"\n{ok}/{total} tests passed")
-    sys.exit(0 if ok == total else 1)
+
+    total = passed + failed
+    print(f"\n{'='*60}")
+    print(f"Results: {passed}/{total} passed, {failed} failed")
+    print(f"{'='*60}")
+
+    return 0 if failed == 0 else 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

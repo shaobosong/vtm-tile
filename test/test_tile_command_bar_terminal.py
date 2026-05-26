@@ -1298,50 +1298,54 @@ def test_keybind_proxies_terminal_call_to_focused_pane():
         return True
 
 
-if __name__ == "__main__":
+TESTS = [
+    test_command_bar_opens_via_menu_and_dispatches_to_terminal,
+    test_command_bar_dispatches_only_to_focused_pane,
+    test_command_bar_runs_tile_scoped_command,
+    test_keybind_proxies_terminal_call_to_focused_pane,
+    test_command_bar_broadcasts_to_all_selected_panes,
+    test_keybind_broadcasts_terminal_call_to_all_selected_panes,
+    test_keybind_single_pane_still_dispatches,
+    test_command_bar_does_not_dispatch_when_only_pane_unfocused,
+    test_single_pane_ctrl_click_defocus_cmdbar_no_ops,
+    test_two_pane_both_ctrl_click_defocused_cmdbar_no_ops,
+]
+
+
+def main():
     if not os.path.isfile(VTM_TILE_BINARY):
         print(f"ERROR: vtm-tile binary not found at {VTM_TILE_BINARY}")
         print("Set VTM_TILE_BINARY env var or build vtm-tile first.")
-        sys.exit(2)
+        return 1
+
     kill_all_vtm()
-    try:
-        ok = test_command_bar_opens_via_menu_and_dispatches_to_terminal()
-        if ok:
+
+    passed = 0
+    failed = 0
+
+    for test in TESTS:
+        try:
+            result = test()
+            if result:
+                passed += 1
+            else:
+                failed += 1
+        except Exception as e:
+            print(f"ERROR: {test.__name__}: {e}")
+            import traceback
+            traceback.print_exc()
+            failed += 1
+        finally:
             kill_all_vtm()
             time.sleep(0.5)
-            ok = test_command_bar_dispatches_only_to_focused_pane()
-        if ok:
-            kill_all_vtm()
-            time.sleep(0.5)
-            ok = test_command_bar_runs_tile_scoped_command()
-        if ok:
-            kill_all_vtm()
-            time.sleep(0.5)
-            ok = test_keybind_proxies_terminal_call_to_focused_pane()
-        if ok:
-            kill_all_vtm()
-            time.sleep(0.5)
-            ok = test_command_bar_broadcasts_to_all_selected_panes()
-        if ok:
-            kill_all_vtm()
-            time.sleep(0.5)
-            ok = test_keybind_broadcasts_terminal_call_to_all_selected_panes()
-        if ok:
-            kill_all_vtm()
-            time.sleep(0.5)
-            ok = test_keybind_single_pane_still_dispatches()
-        if ok:
-            kill_all_vtm()
-            time.sleep(0.5)
-            ok = test_command_bar_does_not_dispatch_when_only_pane_unfocused()
-        if ok:
-            kill_all_vtm()
-            time.sleep(0.5)
-            ok = test_single_pane_ctrl_click_defocus_cmdbar_no_ops()
-        if ok:
-            kill_all_vtm()
-            time.sleep(0.5)
-            ok = test_two_pane_both_ctrl_click_defocused_cmdbar_no_ops()
-    finally:
-        kill_all_vtm()
-    sys.exit(0 if ok else 1)
+
+    total = passed + failed
+    print(f"\n{'='*60}")
+    print(f"Results: {passed}/{total} passed, {failed} failed")
+    print(f"{'='*60}")
+
+    return 0 if failed == 0 else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

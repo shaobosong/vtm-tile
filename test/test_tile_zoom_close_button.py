@@ -385,6 +385,11 @@ def test_closepane_on_maximized_pane_leaves_empty_slot():
     This is the contrast/baseline test: ClosePane uses riseup(preview quit::one)
     which correctly propagates through workspace_0 and then to the node_veer,
     triggering pop_back().  It passes both before and after the close-button fix.
+
+    Since commit 64603594 ("Route tile destructive actions through reusable
+    confirm dialog"), ClosePane honors /config/tile/confirm_close just like
+    the × close button does, so we press Enter to accept the dialog before
+    asserting on the empty slot.
     """
     print("TEST: tile - ClosePane on maximized pane leaves empty slot ... ",
           end="", flush=True)
@@ -397,6 +402,10 @@ def test_closepane_on_maximized_pane_leaves_empty_slot():
 
         # Close the maximized right pane via the ClosePane scripting method.
         s.write(CLOSE_PANE_KEY)
+        time.sleep(0.6)
+        s.read(timeout=0.3)
+        # confirm_close=true is set; accept the dialog (Confirm is default).
+        s.write(b"\r")
         time.sleep(2.5)
         s.read(timeout=0.8)
 
@@ -418,6 +427,13 @@ def test_closepane_on_maximized_pane_leaves_empty_slot():
 # Main
 # ---------------------------------------------------------------------------
 
+TESTS = [
+    test_close_button_on_maximized_pane_leaves_empty_slot,
+    test_close_button_on_split_pane_leaves_empty_slot,
+    test_closepane_on_maximized_pane_leaves_empty_slot,
+]
+
+
 def main():
     if not os.path.isfile(VTM_TILE_BINARY):
         print(f"ERROR: vtm-tile not found at {VTM_TILE_BINARY}")
@@ -426,16 +442,10 @@ def main():
 
     kill_all_vtm()
 
-    tests = [
-        test_close_button_on_maximized_pane_leaves_empty_slot,
-        test_close_button_on_split_pane_leaves_empty_slot,
-        test_closepane_on_maximized_pane_leaves_empty_slot,
-    ]
-
     passed = 0
     failed = 0
 
-    for test in tests:
+    for test in TESTS:
         try:
             result = test()
             if result:

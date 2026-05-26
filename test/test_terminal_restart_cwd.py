@@ -339,21 +339,42 @@ def test_restart_cwd_disabled_uses_original_cwd():
     return True
 
 
+TESTS = [
+    test_restart_cwd_enabled_uses_child_cwd,
+    test_restart_cwd_disabled_uses_original_cwd,
+]
+
+
 def main():
     if not os.path.exists(VTM_TILE_BINARY):
         print(f"vtm-tile binary not found: {VTM_TILE_BINARY}")
-        return 2
+        return 1
 
     kill_all_vtm()
-    results = []
-    try:
-        results.append(test_restart_cwd_enabled_uses_child_cwd())
-        results.append(test_restart_cwd_disabled_uses_original_cwd())
-    finally:
-        kill_all_vtm()
 
-    failed = sum(1 for r in results if not r)
-    print(f"\n{len(results) - failed}/{len(results)} tests passed.")
+    passed = 0
+    failed = 0
+
+    for test in TESTS:
+        try:
+            result = test()
+            if result:
+                passed += 1
+            else:
+                failed += 1
+        except Exception as e:
+            print(f"ERROR: {test.__name__}: {e}")
+            import traceback
+            traceback.print_exc()
+            failed += 1
+        finally:
+            kill_all_vtm()
+
+    total = passed + failed
+    print(f"\n{'='*60}")
+    print(f"Results: {passed}/{total} passed, {failed} failed")
+    print(f"{'='*60}")
+
     return 0 if failed == 0 else 1
 
 

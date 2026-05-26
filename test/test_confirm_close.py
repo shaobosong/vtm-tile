@@ -807,6 +807,37 @@ def test_tile_split_then_close_intercept():
 # Main
 # ---------------------------------------------------------------------------
 
+TESTS = [
+    # Term tests.
+    test_term_close_button_shows_dialog,
+    test_term_confirm_enter,
+    test_term_cancel_esc,
+    test_term_cancel_click_outside,
+    test_term_click_yes_button,
+    test_term_click_no_button,
+    # Term tests (Tab/selection cursor).
+    test_term_tab_then_enter_cancels,
+    test_term_tab_twice_then_enter_confirms,
+    test_term_hover_cancel_then_enter_cancels,
+    test_term_hover_cancel_then_tab_then_enter_confirms,
+    # Term tests (Left/Right arrow navigation).
+    test_term_right_arrow_selects_cancel,
+    test_term_left_arrow_after_right_selects_confirm,
+    test_term_right_arrow_no_wrap,
+    test_term_left_arrow_no_wrap,
+    # Tile tests (basic).
+    test_tile_close_button_shows_dialog,
+    test_tile_cancel_esc,
+    # Tile tests (Left/Right arrow navigation).
+    test_tile_right_arrow_selects_cancel,
+    test_tile_left_arrow_after_right_selects_confirm,
+    # Tile tests (split regression — Bug 1 & Bug 2).
+    test_tile_split_then_close_intercept,
+    test_tile_split_then_close_confirm,
+    test_tile_split_twice_then_close_confirm,
+]
+
+
 def main():
     for label, path in [("vtm-desk", VTM_DESK_BINARY), ("vtm-tile", VTM_TILE_BINARY)]:
         if not os.path.isfile(path):
@@ -816,40 +847,10 @@ def main():
 
     kill_all_vtm()
 
-    tests = [
-        # Term tests.
-        test_term_close_button_shows_dialog,
-        test_term_confirm_enter,
-        test_term_cancel_esc,
-        test_term_cancel_click_outside,
-        test_term_click_yes_button,
-        test_term_click_no_button,
-        # Term tests (Tab/selection cursor).
-        test_term_tab_then_enter_cancels,
-        test_term_tab_twice_then_enter_confirms,
-        test_term_hover_cancel_then_enter_cancels,
-        test_term_hover_cancel_then_tab_then_enter_confirms,
-        # Term tests (Left/Right arrow navigation).
-        test_term_right_arrow_selects_cancel,
-        test_term_left_arrow_after_right_selects_confirm,
-        test_term_right_arrow_no_wrap,
-        test_term_left_arrow_no_wrap,
-        # Tile tests (basic).
-        test_tile_close_button_shows_dialog,
-        test_tile_cancel_esc,
-        # Tile tests (Left/Right arrow navigation).
-        test_tile_right_arrow_selects_cancel,
-        test_tile_left_arrow_after_right_selects_confirm,
-        # Tile tests (split regression — Bug 1 & Bug 2).
-        test_tile_split_then_close_intercept,
-        test_tile_split_then_close_confirm,
-        test_tile_split_twice_then_close_confirm,
-    ]
-
     passed = 0
     failed = 0
 
-    for test in tests:
+    for test in TESTS:
         try:
             result = test()
             if result:

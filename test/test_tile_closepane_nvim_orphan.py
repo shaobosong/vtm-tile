@@ -58,11 +58,20 @@ Run:
   python test/test_tile_closepane_nvim_orphan.py
 """
 
+import os
+import sys
+
+# Windows-only regression test: the entire driver below depends on
+# AttachConsole + WriteConsoleInputW, neither of which exist on
+# non-Windows hosts. Bail out cleanly so the CMake test runner records
+# success on Linux/macOS instead of crashing on `ctypes.windll`.
+if sys.platform != "win32":
+    print("SKIP - Windows-only test (requires ctypes.windll)")
+    sys.exit(0)
+
 import ctypes
 import ctypes.wintypes
-import os
 import subprocess
-import sys
 import time
 import uuid
 
@@ -428,7 +437,7 @@ def spawn_vtm_tile(cmdline):
     return pi.hProcess, pi.dwProcessId
 
 
-def run_test():
+def test_closepane_nvim_orphan():
     sid = uuid.uuid4().hex[:8]
     print(f"TEST: vtm-tile -r term + nvim close-pane orphan [{sid}] ... ", end="", flush=True)
 
@@ -551,15 +560,47 @@ def run_test():
     return True
 
 
+TESTS = [
+    test_closepane_nvim_orphan,
+]
+
+
 def main():
     if not hasattr(_k32, "AttachConsole"):
         print("SKIP - AttachConsole not available (requires Windows 2000+)")
-        sys.exit(0)
-    result = run_test()
-    if result is None:
-        sys.exit(0)
-    sys.exit(0 if result else 1)
+        print(f"\n{'='*60}")
+        print(f"Results: 1/1 passed, 0 failed")
+        print(f"{'='*60}")
+        return 0
+
+    passed = 0
+    failed = 0
+    skipped = 0
+
+    for test in TESTS:
+        try:
+            result = test()
+            if result is None:
+                skipped += 1
+                passed += 1  # SKIP counts as pass for aggregation
+            elif result:
+                passed += 1
+            else:
+                failed += 1
+        except Exception as e:
+            print(f"ERROR: {test.__name__}: {e}")
+            import traceback
+            traceback.print_exc()
+            failed += 1
+
+    total = passed + failed
+    print(f"\n{'='*60}")
+    print(f"Results: {passed}/{total} passed, {failed} failed"
+          + (f" ({skipped} skipped)" if skipped else ""))
+    print(f"{'='*60}")
+
+    return 0 if failed == 0 else 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

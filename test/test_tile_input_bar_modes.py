@@ -708,34 +708,50 @@ def test_ctrl_w_creates_workspace():
     return True
 
 
+TESTS = [
+    test_buttons_render_when_picker_opens,
+    test_enter_no_mode_keeps_existing_behavior,
+    test_pipe_button_then_enter_splits_pane,
+    test_dash_button_then_enter_splits_pane,
+    test_plus_button_then_enter_reruns_pane,
+    test_button_toggle_cancels_mode,
+    test_buttons_hidden_when_dialog_too_narrow,
+    test_click_item_with_mode_splits_pane,
+    test_tab_forward_cycles_modes_and_enter_splits,
+    test_tab_wraps_back_to_none_and_enter_is_plain,
+    test_shift_tab_cycles_backward,
+    test_ctrl_w_creates_workspace,
+]
+
+
 def main():
-    tests = [
-        test_buttons_render_when_picker_opens,
-        test_enter_no_mode_keeps_existing_behavior,
-        test_pipe_button_then_enter_splits_pane,
-        test_dash_button_then_enter_splits_pane,
-        test_plus_button_then_enter_reruns_pane,
-        test_button_toggle_cancels_mode,
-        test_buttons_hidden_when_dialog_too_narrow,
-        test_click_item_with_mode_splits_pane,
-        test_tab_forward_cycles_modes_and_enter_splits,
-        test_tab_wraps_back_to_none_and_enter_is_plain,
-        test_shift_tab_cycles_backward,
-        test_ctrl_w_creates_workspace,
-    ]
-    ok = 0
-    for t in tests:
+    kill_all_vtm()
+
+    passed = 0
+    failed = 0
+
+    for test in TESTS:
         try:
-            if t():
-                ok += 1
+            result = test()
+            if result:
+                passed += 1
+            else:
+                failed += 1
         except Exception as e:
-            print(f"FAIL - exception: {e!r}")
+            print(f"ERROR: {test.__name__}: {e}")
+            import traceback
+            traceback.print_exc()
+            failed += 1
         finally:
             kill_all_vtm()
-    total = len(tests)
-    print(f"\n{ok}/{total} tests passed")
-    sys.exit(0 if ok == total else 1)
+
+    total = passed + failed
+    print(f"\n{'='*60}")
+    print(f"Results: {passed}/{total} passed, {failed} failed")
+    print(f"{'='*60}")
+
+    return 0 if failed == 0 else 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
