@@ -186,9 +186,10 @@ def find_tagged_pids(tag):
 
 
 class VtmTileSession:
-    def __init__(self, args=None, settle_delay=SETTLE_DELAY):
+    def __init__(self, args=None, settle_delay=SETTLE_DELAY, vtm_config=None):
         self.args = args or []
         self.settle_delay = settle_delay
+        self.vtm_config = vtm_config
         self.master_fd = None
         self.pid = None
         self._screen_buf = b""
@@ -206,6 +207,8 @@ class VtmTileSession:
             os.dup2(slave_fd, 2)
             if slave_fd > 2:
                 os.close(slave_fd)
+            if self.vtm_config is not None:
+                os.environ["VTM_CONFIG"] = self.vtm_config
             os.execvp(VTM_TILE_BINARY, [VTM_TILE_BINARY] + self.args)
             os._exit(127)
         os.close(slave_fd)
@@ -319,7 +322,7 @@ def test_shutdown_leaves_no_orphans():
         print(f"FAIL - tag collision (preexisting tagged pids): {leaked_before}")
         return False
 
-    with VtmTileSession(["-c", cfg]) as s:
+    with VtmTileSession(vtm_config=cfg) as s:
         if not s.is_alive():
             print("FAIL - vtm-tile did not start")
             return False

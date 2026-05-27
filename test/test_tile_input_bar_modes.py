@@ -214,15 +214,16 @@ TILE_CONFIG = (
         '<TilePick="vtm.tile.PickApplication();"/>'
     "</Scripting>"
 )
-TILE_ARGS = ["-c", TILE_CONFIG]
+TILE_ARGS = []  # TILE_CONFIG is shipped via $VTM_CONFIG (vtm_config kwarg).
 
 
 class VtmTileSession:
-    def __init__(self, args, settle_delay=SETTLE_DELAY, cols=COLS, rows=ROWS):
+    def __init__(self, args, settle_delay=SETTLE_DELAY, cols=COLS, rows=ROWS, vtm_config=None):
         self.args = args
         self.settle_delay = settle_delay
         self.cols = cols
         self.rows = rows
+        self.vtm_config = vtm_config
         self.master_fd = None
         self.pid = None
         self._screen_buf = b""
@@ -247,6 +248,8 @@ class VtmTileSession:
             os.environ["PS1"] = "$ "
             os.environ.pop("STARSHIP_SHELL", None)
             os.environ.pop("STARSHIP_SESSION_KEY", None)
+            if self.vtm_config is not None:
+                os.environ["VTM_CONFIG"] = self.vtm_config
             os.execvp(VTM_TILE_BINARY, [VTM_TILE_BINARY] + self.args)
             sys.exit(1)
         os.close(slave_fd)
@@ -350,7 +353,7 @@ def open_picker_via_hotkey(s, timeout=2.0):
 def test_buttons_render_when_picker_opens():
     print("TEST: pickapp picker renders [+] [⬒] [|] [-] buttons ... ",
           end="", flush=True)
-    with VtmTileSession(TILE_ARGS) as s:
+    with VtmTileSession(TILE_ARGS, vtm_config=TILE_CONFIG) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
         if find_any_shell(timeout=6.0) is None:
@@ -374,7 +377,7 @@ def test_buttons_render_when_picker_opens():
 def test_enter_no_mode_keeps_existing_behavior():
     print("TEST: Enter without mode = plain app-pick (no split/rerun) ... ",
           end="", flush=True)
-    with VtmTileSession(TILE_ARGS) as s:
+    with VtmTileSession(TILE_ARGS, vtm_config=TILE_CONFIG) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
         old_shell = find_any_shell(timeout=6.0)
@@ -410,7 +413,7 @@ def test_enter_no_mode_keeps_existing_behavior():
 def test_pipe_button_then_enter_splits_pane():
     print("TEST: click [|] then Enter spawns SplitPane(0) ... ",
           end="", flush=True)
-    with VtmTileSession(TILE_ARGS) as s:
+    with VtmTileSession(TILE_ARGS, vtm_config=TILE_CONFIG) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
         old_shell = find_any_shell(timeout=6.0)
@@ -439,7 +442,7 @@ def test_pipe_button_then_enter_splits_pane():
 def test_dash_button_then_enter_splits_pane():
     print("TEST: click [-] then Enter spawns SplitPane(1) ... ",
           end="", flush=True)
-    with VtmTileSession(TILE_ARGS) as s:
+    with VtmTileSession(TILE_ARGS, vtm_config=TILE_CONFIG) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
         old_shell = find_any_shell(timeout=6.0)
@@ -465,7 +468,7 @@ def test_dash_button_then_enter_splits_pane():
 def test_plus_button_then_enter_reruns_pane():
     print("TEST: click [+] then Enter triggers ReRunApplication ... ",
           end="", flush=True)
-    with VtmTileSession(TILE_ARGS) as s:
+    with VtmTileSession(TILE_ARGS, vtm_config=TILE_CONFIG) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
         old_shell = find_any_shell(timeout=6.0)
@@ -500,7 +503,7 @@ def test_plus_button_then_enter_reruns_pane():
 def test_button_toggle_cancels_mode():
     print("TEST: clicking same button twice cancels the mode ... ",
           end="", flush=True)
-    with VtmTileSession(TILE_ARGS) as s:
+    with VtmTileSession(TILE_ARGS, vtm_config=TILE_CONFIG) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
         old_shell = find_any_shell(timeout=6.0)
@@ -563,7 +566,7 @@ def test_buttons_hidden_when_dialog_too_narrow():
 def test_tab_forward_cycles_modes_and_enter_splits():
     print("TEST: Tab cycles none→[+]→[⬒]→[|]→[-]→none, Enter with [|] splits ... ",
           end="", flush=True)
-    with VtmTileSession(TILE_ARGS) as s:
+    with VtmTileSession(TILE_ARGS, vtm_config=TILE_CONFIG) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
         old_shell = find_any_shell(timeout=6.0)
@@ -591,7 +594,7 @@ def test_tab_forward_cycles_modes_and_enter_splits():
 def test_tab_wraps_back_to_none_and_enter_is_plain():
     print("TEST: five Tabs wrap mode back to none, Enter is plain pick ... ",
           end="", flush=True)
-    with VtmTileSession(TILE_ARGS) as s:
+    with VtmTileSession(TILE_ARGS, vtm_config=TILE_CONFIG) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
         old_shell = find_any_shell(timeout=6.0)
@@ -624,7 +627,7 @@ def test_tab_wraps_back_to_none_and_enter_is_plain():
 def test_shift_tab_cycles_backward():
     print("TEST: Shift+Tab cycles [-]→[|]→[⬒]→[+]→none→[-] ... ",
           end="", flush=True)
-    with VtmTileSession(TILE_ARGS) as s:
+    with VtmTileSession(TILE_ARGS, vtm_config=TILE_CONFIG) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
         old_shell = find_any_shell(timeout=6.0)
@@ -651,7 +654,7 @@ def test_shift_tab_cycles_backward():
 def test_click_item_with_mode_splits_pane():
     print("TEST: click list item with [|] armed -> SplitPane(0) ... ",
           end="", flush=True)
-    with VtmTileSession(TILE_ARGS) as s:
+    with VtmTileSession(TILE_ARGS, vtm_config=TILE_CONFIG) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
         old_shell = find_any_shell(timeout=6.0)
@@ -685,7 +688,7 @@ def test_click_item_with_mode_splits_pane():
 def test_ctrl_w_creates_workspace():
     print("TEST: Ctrl+W creates a new workspace with selected entry ... ",
           end="", flush=True)
-    with VtmTileSession(TILE_ARGS) as s:
+    with VtmTileSession(TILE_ARGS, vtm_config=TILE_CONFIG) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
         old_shell = find_any_shell(timeout=6.0)

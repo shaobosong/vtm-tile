@@ -88,7 +88,7 @@ def make_tile_config(extra_events="", extra_scripting=""):
 
 
 TILE_CONFIG = make_tile_config()
-TILE_ARGS = ["-c", TILE_CONFIG]
+TILE_ARGS = []  # TILE_CONFIG is shipped via $VTM_CONFIG (vtm_config kwarg).
 
 # Menu row and column of the App button.
 #   - The menu is attached to slot::_1 of the outer fork: the top row of the
@@ -236,9 +236,10 @@ def grid_to_text(grid):
 
 
 class VtmTileSession:
-    def __init__(self, args, settle_delay=SETTLE_DELAY):
+    def __init__(self, args, settle_delay=SETTLE_DELAY, vtm_config=None):
         self.args = args
         self.settle_delay = settle_delay
+        self.vtm_config = vtm_config
         self.master_fd = None
         self.pid = None
         self._screen_buf = b""
@@ -263,6 +264,8 @@ class VtmTileSession:
             os.environ["PS1"] = "$ "
             os.environ.pop("STARSHIP_SHELL", None)
             os.environ.pop("STARSHIP_SESSION_KEY", None)
+            if self.vtm_config is not None:
+                os.environ["VTM_CONFIG"] = self.vtm_config
             os.execvp(VTM_TILE_BINARY, [VTM_TILE_BINARY] + self.args)
             sys.exit(1)
         os.close(slave_fd)
@@ -354,7 +357,7 @@ def row_text(grid, row_1indexed):
 
 def test_menu_renders_app_button():
     print("TEST: tile menu renders 'App: term' ... ", end="", flush=True)
-    with VtmTileSession(TILE_ARGS) as s:
+    with VtmTileSession(TILE_ARGS, vtm_config=TILE_CONFIG) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
         grid = s.snapshot_grid(timeout=2.0)
@@ -370,7 +373,7 @@ def test_menu_renders_app_button():
 def test_menu_app_button_click_opens_picker():
     print("TEST: clicking 'App: term' opens the picker ... ",
           end="", flush=True)
-    with VtmTileSession(TILE_ARGS) as s:
+    with VtmTileSession(TILE_ARGS, vtm_config=TILE_CONFIG) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
         s.drain(timeout=2.0)
@@ -395,7 +398,7 @@ def test_menu_app_button_click_opens_picker():
 def test_picker_filters_and_selects_via_enter():
     print("TEST: picker filters by query and Enter applies selection ... ",
           end="", flush=True)
-    with VtmTileSession(TILE_ARGS) as s:
+    with VtmTileSession(TILE_ARGS, vtm_config=TILE_CONFIG) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
         s.drain(timeout=2.0)
@@ -426,7 +429,7 @@ def test_picker_filters_and_selects_via_enter():
 def test_picker_escape_cancels():
     print("TEST: Esc dismisses the picker without changing the selection ... ",
           end="", flush=True)
-    with VtmTileSession(TILE_ARGS) as s:
+    with VtmTileSession(TILE_ARGS, vtm_config=TILE_CONFIG) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
         s.drain(timeout=2.0)
@@ -465,7 +468,7 @@ def test_lua_method_pickapplication_opens_picker():
             "</Scripting>"
         ),
     )
-    with VtmTileSession(["-c", cfg]) as s:
+    with VtmTileSession([], vtm_config=cfg) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
         s.drain(timeout=2.0)

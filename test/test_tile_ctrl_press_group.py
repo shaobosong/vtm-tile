@@ -59,7 +59,7 @@ TILE_CONFIG = (
         '<TileSplitHorizontally="vtm.tile.SplitPane(0);"/>'
     "</Scripting>"
 )
-TILE_ARGS   = ["-c", TILE_CONFIG]
+TILE_ARGS   = []  # TILE_CONFIG is shipped via $VTM_CONFIG (vtm_config kwarg).
 SPLIT_HZ_KEY = b"\x1b|"  # Alt+Shift+|
 
 # SGR mouse modifier bit for Ctrl (system.hpp:6083: ctl & 0x10 → LCtrl).
@@ -131,9 +131,10 @@ def sgr_move(col, row):
 
 
 class VtmSession:
-    def __init__(self, args, settle=TILE_SETTLE_DELAY):
+    def __init__(self, args, settle=TILE_SETTLE_DELAY, vtm_config=None):
         self.args   = args
         self.settle = settle
+        self.vtm_config = vtm_config
         self.master_fd = self.pid = None
 
     def __enter__(self):
@@ -149,6 +150,8 @@ class VtmSession:
             os.dup2(slave_fd, 2)
             if slave_fd > 2:
                 os.close(slave_fd)
+            if self.vtm_config is not None:
+                os.environ["VTM_CONFIG"] = self.vtm_config
             os.execvp(VTM_TILE_BINARY, [VTM_TILE_BINARY] + self.args)
             sys.exit(1)
         os.close(slave_fd)
@@ -296,7 +299,7 @@ def test_ctrl_press_group_add():
     print("TEST: tile - ctrl+press non-focused pane joins group ... ",
           end="", flush=True)
 
-    with VtmSession(TILE_ARGS) as s:
+    with VtmSession(TILE_ARGS, vtm_config=TILE_CONFIG) as s:
         s.write(SPLIT_HZ_KEY)
         time.sleep(2.0)
         accum = s.read(timeout=1.0)
@@ -339,7 +342,7 @@ def test_ctrl_press_group_remove():
     print("TEST: tile - ctrl+press focused pane leaves group ... ",
           end="", flush=True)
 
-    with VtmSession(TILE_ARGS) as s:
+    with VtmSession(TILE_ARGS, vtm_config=TILE_CONFIG) as s:
         s.write(SPLIT_HZ_KEY)
         time.sleep(2.0)
         accum = s.read(timeout=1.0)

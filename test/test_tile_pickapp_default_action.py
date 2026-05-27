@@ -197,11 +197,12 @@ def make_config(mode_arg):
 
 
 class VtmTileSession:
-    def __init__(self, args, settle_delay=SETTLE_DELAY, cols=COLS, rows=ROWS):
+    def __init__(self, args, settle_delay=SETTLE_DELAY, cols=COLS, rows=ROWS, vtm_config=None):
         self.args = args
         self.settle_delay = settle_delay
         self.cols = cols
         self.rows = rows
+        self.vtm_config = vtm_config
         self.master_fd = None
         self.pid = None
         self._screen_buf = b""
@@ -226,6 +227,8 @@ class VtmTileSession:
             os.environ["PS1"] = "$ "
             os.environ.pop("STARSHIP_SHELL", None)
             os.environ.pop("STARSHIP_SESSION_KEY", None)
+            if self.vtm_config is not None:
+                os.environ["VTM_CONFIG"] = self.vtm_config
             os.execvp(VTM_TILE_BINARY, [VTM_TILE_BINARY] + self.args)
             sys.exit(1)
         os.close(slave_fd)
@@ -310,7 +313,7 @@ def test_no_argument_keeps_default_mode():
     print("TEST: PickApplication() defaults to no mode (plain Enter) ... ",
           end="", flush=True)
     cfg = make_config("")  # vtm.tile.PickApplication();
-    with VtmTileSession(["-c", cfg]) as s:
+    with VtmTileSession([], vtm_config=cfg) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
         old_shell = find_any_shell(timeout=6.0)
@@ -341,7 +344,7 @@ def test_splith_arg_enter_splits_pane():
     print("TEST: PickApplication(\"|\") + Enter splits the pane ... ",
           end="", flush=True)
     cfg = make_config("'|'")
-    with VtmTileSession(["-c", cfg]) as s:
+    with VtmTileSession([], vtm_config=cfg) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
         old_shell = find_any_shell(timeout=6.0)
@@ -367,7 +370,7 @@ def test_splitv_arg_enter_splits_pane():
     print("TEST: PickApplication(\"-\") + Enter splits the pane ... ",
           end="", flush=True)
     cfg = make_config("'-'")
-    with VtmTileSession(["-c", cfg]) as s:
+    with VtmTileSession([], vtm_config=cfg) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
         old_shell = find_any_shell(timeout=6.0)
@@ -392,7 +395,7 @@ def test_rerun_arg_enter_reruns_pane():
     print("TEST: PickApplication(\"+\") + Enter reruns app ... ",
           end="", flush=True)
     cfg = make_config("'+'")
-    with VtmTileSession(["-c", cfg]) as s:
+    with VtmTileSession([], vtm_config=cfg) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
         old_shell = find_any_shell(timeout=6.0)
@@ -423,7 +426,7 @@ def test_workspace_arg_enter_creates_workspace():
     print("TEST: PickApplication(\"⬒\") + Enter creates workspace ... ",
           end="", flush=True)
     cfg = make_config("'⬒'")
-    with VtmTileSession(["-c", cfg]) as s:
+    with VtmTileSession([], vtm_config=cfg) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
         old_shell = find_any_shell(timeout=6.0)
@@ -449,7 +452,7 @@ def test_unknown_mode_falls_back_to_default():
     print("TEST: PickApplication(\"bogus\") falls back to plain Enter ... ",
           end="", flush=True)
     cfg = make_config("'bogus'")
-    with VtmTileSession(["-c", cfg]) as s:
+    with VtmTileSession([], vtm_config=cfg) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
         old_shell = find_any_shell(timeout=6.0)

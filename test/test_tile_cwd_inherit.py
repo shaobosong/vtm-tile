@@ -221,9 +221,11 @@ class VtmTileSession:
         self.master_fd, slave_fd = pty.openpty()
         set_winsize(self.master_fd, ROWS, COLS)
         cfg = make_overlay_config(self.cwd_enabled)
-        # vtm-tile (client mode) launches the tile server + client; the overlay
-        # config drives the tile applet's initial layout from /config/tile/app.
-        argv = [VTM_TILE_BINARY, "-c", cfg]
+        # Ship the overlay via $VTM_CONFIG so the tile server *and* every
+        # dtvt-spawned `vtm-tile -r term` child inherit it through the
+        # process environment (application.hpp:2326-2338 loads $VTM_CONFIG
+        # on each process startup).
+        argv = [VTM_TILE_BINARY]
         self.pid = os.fork()
         if self.pid == 0:
             os.close(self.master_fd)
@@ -239,6 +241,7 @@ class VtmTileSession:
             os.environ["ENV"] = "/dev/null"
             os.environ["HOME"] = "/tmp"
             os.environ["PS1"] = "$ "
+            os.environ["VTM_CONFIG"] = cfg
             try:
                 os.chdir(self.start_cwd)
             except OSError:

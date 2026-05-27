@@ -92,9 +92,10 @@ def sgr_mouse_release(col, row, button=0):
 class VtmTileSession:
     """Manage a vtm-tile process running in a pty for testing."""
 
-    def __init__(self, args=None, settle_delay=SETTLE_DELAY):
+    def __init__(self, args=None, settle_delay=SETTLE_DELAY, vtm_config=None):
         self.args = args or []
         self.settle_delay = settle_delay
+        self.vtm_config = vtm_config
         self.master_fd = None
         self.pid = None
 
@@ -112,6 +113,8 @@ class VtmTileSession:
             os.dup2(slave_fd, 2)
             if slave_fd > 2:
                 os.close(slave_fd)
+            if self.vtm_config is not None:
+                os.environ["VTM_CONFIG"] = self.vtm_config
             os.execvp(VTM_TILE_BINARY, [VTM_TILE_BINARY] + self.args)
             sys.exit(1)
         else:
@@ -367,7 +370,7 @@ TILE_CONFIG = (
         '<TileFocusNextPane="vtm.tile.FocusNextPane();"/>'
     "</Scripting>"
 )
-TILE_ARGS = ["-c", TILE_CONFIG]
+TILE_ARGS = []  # TILE_CONFIG is shipped via $VTM_CONFIG (vtm_config kwarg).
 
 
 # ---------------------------------------------------------------------------
@@ -377,7 +380,7 @@ TILE_ARGS = ["-c", TILE_CONFIG]
 def test_workspace_starts_with_one():
     """vtm-tile starts with a single workspace (workspace 0) and stays alive."""
     print("TEST: workspace - starts with one workspace ... ", end="", flush=True)
-    with VtmTileSession(TILE_ARGS) as s:
+    with VtmTileSession(TILE_ARGS, vtm_config=TILE_CONFIG) as s:
         if not s.is_alive():
             print("FAIL - vtm-tile did not start")
             return False
@@ -398,7 +401,7 @@ def test_workspace_starts_with_one():
 def test_create_workspace():
     """Alt+Shift+C creates a new workspace; tile stays alive."""
     print("TEST: workspace - create workspace ... ", end="", flush=True)
-    with VtmTileSession(TILE_ARGS) as s:
+    with VtmTileSession(TILE_ARGS, vtm_config=TILE_CONFIG) as s:
         if not s.is_alive():
             print("FAIL - vtm-tile did not start")
             return False
@@ -419,7 +422,7 @@ def test_create_workspace():
 def test_destroy_workspace():
     """Create a second workspace, destroy it, tile stays alive with workspace 0."""
     print("TEST: workspace - destroy workspace ... ", end="", flush=True)
-    with VtmTileSession(TILE_ARGS) as s:
+    with VtmTileSession(TILE_ARGS, vtm_config=TILE_CONFIG) as s:
         if not s.is_alive():
             print("FAIL - vtm-tile did not start")
             return False
@@ -447,7 +450,7 @@ def test_destroy_workspace():
 def test_destroy_last_workspace_exits():
     """Destroying the only workspace should shut down tile."""
     print("TEST: workspace - destroy last workspace exits tile ... ", end="", flush=True)
-    with VtmTileSession(TILE_ARGS) as s:
+    with VtmTileSession(TILE_ARGS, vtm_config=TILE_CONFIG) as s:
         if not s.is_alive():
             print("FAIL - vtm-tile did not start")
             return False
@@ -465,7 +468,7 @@ def test_destroy_last_workspace_exits():
 def test_workspace_close_button_still_works():
     """Close button works after workspace operations (confirm_close disabled => exits directly)."""
     print("TEST: workspace - close button after workspace ops ... ", end="", flush=True)
-    with VtmTileSession(TILE_ARGS) as s:
+    with VtmTileSession(TILE_ARGS, vtm_config=TILE_CONFIG) as s:
         if not s.is_alive():
             print("FAIL - vtm-tile did not start")
             return False
@@ -490,7 +493,7 @@ def test_workspace_close_button_still_works():
 def test_create_multiple_workspaces():
     """Create 3 workspaces, switch between them, tile stays alive."""
     print("TEST: workspace - create 3 workspaces ... ", end="", flush=True)
-    with VtmTileSession(TILE_ARGS) as s:
+    with VtmTileSession(TILE_ARGS, vtm_config=TILE_CONFIG) as s:
         if not s.is_alive():
             print("FAIL - vtm-tile did not start")
             return False
@@ -522,7 +525,7 @@ def test_split_in_workspace():
     """Split a pane within a workspace, switch workspaces, no crash."""
     print("TEST: workspace - split in workspace + switch ... ", end="", flush=True)
     SPLIT_HZ_KEY = b"\x1b|"
-    with VtmTileSession(TILE_ARGS) as s:
+    with VtmTileSession(TILE_ARGS, vtm_config=TILE_CONFIG) as s:
         if not s.is_alive():
             print("FAIL - vtm-tile did not start")
             return False
@@ -564,7 +567,7 @@ def test_split_in_workspace():
 def test_next_workspace():
     """NextWorkspace cycles through workspaces, wrapping from last to first."""
     print("TEST: workspace - next workspace wrapping ... ", end="", flush=True)
-    with VtmTileSession(TILE_ARGS) as s:
+    with VtmTileSession(TILE_ARGS, vtm_config=TILE_CONFIG) as s:
         if not s.is_alive():
             print("FAIL - vtm-tile did not start")
             return False
@@ -607,7 +610,7 @@ def test_next_workspace():
 def test_prev_workspace():
     """PrevWorkspace cycles through workspaces, wrapping from first to last."""
     print("TEST: workspace - prev workspace wrapping ... ", end="", flush=True)
-    with VtmTileSession(TILE_ARGS) as s:
+    with VtmTileSession(TILE_ARGS, vtm_config=TILE_CONFIG) as s:
         if not s.is_alive():
             print("FAIL - vtm-tile did not start")
             return False
@@ -657,7 +660,7 @@ def test_prev_workspace():
 def test_last_workspace():
     """LastWorkspace toggles between the current and last-visited workspace."""
     print("TEST: workspace - last workspace toggle ... ", end="", flush=True)
-    with VtmTileSession(TILE_ARGS) as s:
+    with VtmTileSession(TILE_ARGS, vtm_config=TILE_CONFIG) as s:
         if not s.is_alive():
             print("FAIL - vtm-tile did not start")
             return False
@@ -700,7 +703,7 @@ def test_last_workspace():
 def test_next_prev_single_workspace():
     """NextWorkspace and PrevWorkspace are no-ops with only one workspace."""
     print("TEST: workspace - next/prev with single workspace ... ", end="", flush=True)
-    with VtmTileSession(TILE_ARGS) as s:
+    with VtmTileSession(TILE_ARGS, vtm_config=TILE_CONFIG) as s:
         if not s.is_alive():
             print("FAIL - vtm-tile did not start")
             return False
@@ -733,7 +736,7 @@ def test_next_prev_single_workspace():
 def test_next_prev_after_destroy():
     """NextWorkspace and PrevWorkspace work correctly after a workspace is destroyed."""
     print("TEST: workspace - next/prev after destroy ... ", end="", flush=True)
-    with VtmTileSession(TILE_ARGS) as s:
+    with VtmTileSession(TILE_ARGS, vtm_config=TILE_CONFIG) as s:
         if not s.is_alive():
             print("FAIL - vtm-tile did not start")
             return False
@@ -776,7 +779,7 @@ def test_next_prev_after_destroy():
 def test_switch_workspace_by_index():
     """SwitchWorkspace(N) jumps directly to workspace N by index."""
     print("TEST: workspace - switch workspace by index ... ", end="", flush=True)
-    with VtmTileSession(TILE_ARGS) as s:
+    with VtmTileSession(TILE_ARGS, vtm_config=TILE_CONFIG) as s:
         if not s.is_alive():
             print("FAIL - vtm-tile did not start")
             return False
@@ -826,7 +829,7 @@ def test_switch_workspace_by_index():
 def test_switch_workspace_out_of_range():
     """SwitchWorkspace(N) to a non-existent index should be a no-op."""
     print("TEST: workspace - switch to non-existent index ... ", end="", flush=True)
-    with VtmTileSession(TILE_ARGS) as s:
+    with VtmTileSession(TILE_ARGS, vtm_config=TILE_CONFIG) as s:
         if not s.is_alive():
             print("FAIL - vtm-tile did not start")
             return False
@@ -853,7 +856,7 @@ def test_switch_workspace_out_of_range():
 def test_create_workspace_uses_selected_app():
     """New workspace should use the currently selected app, not the config default."""
     print("TEST: workspace - create workspace uses selected app ... ", end="", flush=True)
-    with VtmTileSession(TILE_ARGS) as s:
+    with VtmTileSession(TILE_ARGS, vtm_config=TILE_CONFIG) as s:
         if not s.is_alive():
             print("FAIL - vtm-tile did not start")
             return False
@@ -895,7 +898,7 @@ def test_create_workspace_uses_selected_app():
 def test_select_app_then_create_multiple_workspaces():
     """Changing selected app and creating multiple workspaces should all succeed."""
     print("TEST: workspace - select app + create multiple workspaces ... ", end="", flush=True)
-    with VtmTileSession(TILE_ARGS) as s:
+    with VtmTileSession(TILE_ARGS, vtm_config=TILE_CONFIG) as s:
         if not s.is_alive():
             print("FAIL - vtm-tile did not start")
             return False
@@ -945,7 +948,7 @@ def test_select_app_then_create_multiple_workspaces():
 def test_create_workspace_default_app_without_selection():
     """Without changing selection, new workspace should use the config default app."""
     print("TEST: workspace - create workspace with default app ... ", end="", flush=True)
-    with VtmTileSession(TILE_ARGS) as s:
+    with VtmTileSession(TILE_ARGS, vtm_config=TILE_CONFIG) as s:
         if not s.is_alive():
             print("FAIL - vtm-tile did not start")
             return False
@@ -979,7 +982,7 @@ def test_create_workspace_default_app_without_selection():
 def test_lastpane_within_single_workspace():
     """LastPane works within a single workspace with split panes."""
     print("TEST: workspace - LastPane within single workspace ... ", end="", flush=True)
-    with VtmTileSession(TILE_ARGS) as s:
+    with VtmTileSession(TILE_ARGS, vtm_config=TILE_CONFIG) as s:
         if not s.is_alive():
             print("FAIL - vtm-tile did not start")
             return False
@@ -1022,7 +1025,7 @@ def test_lastpane_isolated_across_workspaces():
     """LastPane only switches between panes within the current workspace,
     not across workspace boundaries. This is the core isolation test."""
     print("TEST: workspace - LastPane isolated across workspaces ... ", end="", flush=True)
-    with VtmTileSession(TILE_ARGS) as s:
+    with VtmTileSession(TILE_ARGS, vtm_config=TILE_CONFIG) as s:
         if not s.is_alive():
             print("FAIL - vtm-tile did not start")
             return False
@@ -1104,7 +1107,7 @@ def test_lastpane_isolated_across_workspaces():
 def test_lastpane_after_workspace_destroy():
     """LastPane works correctly after destroying a workspace that had focus history."""
     print("TEST: workspace - LastPane after workspace destroy ... ", end="", flush=True)
-    with VtmTileSession(TILE_ARGS) as s:
+    with VtmTileSession(TILE_ARGS, vtm_config=TILE_CONFIG) as s:
         if not s.is_alive():
             print("FAIL - vtm-tile did not start")
             return False
@@ -1170,7 +1173,7 @@ def test_lastpane_no_history_in_new_workspace():
     """LastPane in a brand new workspace (no focus history) should not crash
     and should not jump to a pane in another workspace."""
     print("TEST: workspace - LastPane no history in new workspace ... ", end="", flush=True)
-    with VtmTileSession(TILE_ARGS) as s:
+    with VtmTileSession(TILE_ARGS, vtm_config=TILE_CONFIG) as s:
         if not s.is_alive():
             print("FAIL - vtm-tile did not start")
             return False
@@ -1220,7 +1223,7 @@ def test_lastpane_no_history_in_new_workspace():
 def test_lastpane_three_workspaces():
     """LastPane stays isolated when cycling through three workspaces."""
     print("TEST: workspace - LastPane with three workspaces ... ", end="", flush=True)
-    with VtmTileSession(TILE_ARGS) as s:
+    with VtmTileSession(TILE_ARGS, vtm_config=TILE_CONFIG) as s:
         if not s.is_alive():
             print("FAIL - vtm-tile did not start")
             return False
@@ -1318,7 +1321,7 @@ def test_lastpane_three_workspaces():
 def test_popup_open_and_dismiss_click():
     """Opening the workspace popup and dismissing it by clicking empty space."""
     print("TEST: popup - open and dismiss via click ... ", end="", flush=True)
-    with VtmTileSession(TILE_ARGS) as s:
+    with VtmTileSession(TILE_ARGS, vtm_config=TILE_CONFIG) as s:
         if not s.is_alive():
             print("FAIL - vtm-tile did not start")
             return False
@@ -1353,7 +1356,7 @@ def test_popup_open_and_dismiss_click():
 def test_popup_switch_workspace():
     """Open popup and click a workspace thumbnail to switch workspaces."""
     print("TEST: popup - switch workspace via popup ... ", end="", flush=True)
-    with VtmTileSession(TILE_ARGS) as s:
+    with VtmTileSession(TILE_ARGS, vtm_config=TILE_CONFIG) as s:
         if not s.is_alive():
             print("FAIL - vtm-tile did not start")
             return False
@@ -1394,7 +1397,7 @@ def test_popup_switch_workspace():
 def test_popup_create_workspace_via_plus():
     """Open popup and click the '+' button to create a new workspace."""
     print("TEST: popup - create workspace via popup '+' ... ", end="", flush=True)
-    with VtmTileSession(TILE_ARGS) as s:
+    with VtmTileSession(TILE_ARGS, vtm_config=TILE_CONFIG) as s:
         if not s.is_alive():
             print("FAIL - vtm-tile did not start")
             return False
@@ -1431,7 +1434,7 @@ def test_popup_create_workspace_via_plus():
 def test_popup_reopen_after_dismiss():
     """Popup can be opened again after being dismissed."""
     print("TEST: popup - reopen after dismiss ... ", end="", flush=True)
-    with VtmTileSession(TILE_ARGS) as s:
+    with VtmTileSession(TILE_ARGS, vtm_config=TILE_CONFIG) as s:
         if not s.is_alive():
             print("FAIL - vtm-tile did not start")
             return False
@@ -1473,7 +1476,7 @@ def test_popup_reopen_after_dismiss():
 def test_popup_switch_then_operations():
     """After switching workspace via popup, normal operations still work."""
     print("TEST: popup - switch then normal operations ... ", end="", flush=True)
-    with VtmTileSession(TILE_ARGS) as s:
+    with VtmTileSession(TILE_ARGS, vtm_config=TILE_CONFIG) as s:
         if not s.is_alive():
             print("FAIL - vtm-tile did not start")
             return False
@@ -1530,7 +1533,7 @@ def test_popup_keyboard_navigation_bottom():
     """Bottom section: Left/Right cycle workspaces, Up/Down are ignored."""
     print("TEST: popup - keyboard nav bottom section (arrows + ignore up/down) ... ",
           end="", flush=True)
-    with VtmTileSession(TILE_ARGS) as s:
+    with VtmTileSession(TILE_ARGS, vtm_config=TILE_CONFIG) as s:
         if not s.is_alive():
             print("FAIL - vtm-tile did not start")
             return False
@@ -1584,7 +1587,7 @@ def test_popup_tab_toggle_sections():
     """Tab toggles focus between top and bottom sections; top-section arrows navigate panes."""
     print("TEST: popup - Tab toggles sections, top arrows navigate panes ... ",
           end="", flush=True)
-    with VtmTileSession(TILE_ARGS) as s:
+    with VtmTileSession(TILE_ARGS, vtm_config=TILE_CONFIG) as s:
         if not s.is_alive():
             print("FAIL - vtm-tile did not start")
             return False
@@ -1645,7 +1648,7 @@ def test_popup_tab_enter_focuses_pane():
     """Tab into top section, arrow-select a pane, Enter commits pane focus without crashing."""
     print("TEST: popup - Tab into top + Enter commits pane selection ... ",
           end="", flush=True)
-    with VtmTileSession(TILE_ARGS) as s:
+    with VtmTileSession(TILE_ARGS, vtm_config=TILE_CONFIG) as s:
         if not s.is_alive():
             print("FAIL - vtm-tile did not start")
             return False
@@ -1686,7 +1689,7 @@ def test_popup_tab_toggle_no_panes():
     """Tab into a top section that has a single pane should still not crash (edge case)."""
     print("TEST: popup - Tab with single-pane workspace (no 2D targets) ... ",
           end="", flush=True)
-    with VtmTileSession(TILE_ARGS) as s:
+    with VtmTileSession(TILE_ARGS, vtm_config=TILE_CONFIG) as s:
         if not s.is_alive():
             print("FAIL - vtm-tile did not start")
             return False
@@ -1727,7 +1730,7 @@ def test_popup_top_section_label_key_selects_pane():
     and dismiss the popup. Bottom-section label keys must still switch workspaces."""
     print("TEST: popup - top section label key selects pane ... ",
           end="", flush=True)
-    with VtmTileSession(TILE_ARGS) as s:
+    with VtmTileSession(TILE_ARGS, vtm_config=TILE_CONFIG) as s:
         if not s.is_alive():
             print("FAIL - vtm-tile did not start")
             return False

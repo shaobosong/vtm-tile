@@ -46,11 +46,21 @@ ROWS = 24
 
 TILE_SETTLE_DELAY = 1.2
 
-# Config: confirm_close disabled for both tile and terminal; bind split key.
+# Config:
+#   <tile/confirm_close=0>     — tile pane × closes immediately (no tile-level
+#                                confirm dialog); the test relies on this so
+#                                LeftUp triggers an observable close action.
+#   <terminal/confirm_close=1> — the inner terminal widget *does* prompt; this
+#                                produces the dimmed-title shadow the release
+#                                assertion looks for. We must set this
+#                                explicitly because $VTM_CONFIG now propagates
+#                                to the dtvt pane-child (see doc/vtm-tile-config.md);
+#                                relying on the user's ~/.config/vtm/settings.xml
+#                                default would make the test environment-dependent.
 TILE_CONFIG = (
     "<config>"
         "<tile><confirm_close=0/></tile>"
-        "<terminal><confirm_close=0/></terminal>"
+        "<terminal><confirm_close=1/></terminal>"
         "<events><tile>"
             """<script=TileSplitHorizontally on="Alt+Shift+'|'"/>"""
         "</tile></events>"
@@ -59,7 +69,7 @@ TILE_CONFIG = (
         '<TileSplitHorizontally="vtm.tile.SplitPane(0);"/>'
     "</Scripting>"
 )
-TILE_ARGS = ["-c", TILE_CONFIG]
+TILE_ARGS = []  # TILE_CONFIG is shipped via $VTM_CONFIG (vtm_config kwarg).
 SPLIT_HZ_KEY = b"\x1b|"   # Alt+Shift+|
 
 # Reference colours from the default vtm.xml palette.
@@ -128,9 +138,10 @@ def sgr_move(col, row):
 
 
 class VtmSession:
-    def __init__(self, args, settle=TILE_SETTLE_DELAY):
+    def __init__(self, args, settle=TILE_SETTLE_DELAY, vtm_config=None):
         self.args = args
         self.settle = settle
+        self.vtm_config = vtm_config
         self.master_fd = self.pid = None
 
     def __enter__(self):
@@ -146,6 +157,8 @@ class VtmSession:
             os.dup2(slave_fd, 2)
             if slave_fd > 2:
                 os.close(slave_fd)
+            if self.vtm_config is not None:
+                os.environ["VTM_CONFIG"] = self.vtm_config
             os.execvp(VTM_TILE_BINARY, [VTM_TILE_BINARY] + self.args)
             sys.exit(1)
         os.close(slave_fd)
@@ -284,7 +297,7 @@ def test_focus_on_press():
     left_right_col = COLS // 2 - 2     # ≈ right edge of left pane
     right_left_col = COLS // 2 + 2     # ≈ left edge of right pane
 
-    with VtmSession(TILE_ARGS) as s:
+    with VtmSession(TILE_ARGS, vtm_config=TILE_CONFIG) as s:
         # Horizontal split.
         s.write(SPLIT_HZ_KEY)
         time.sleep(2.0)
@@ -335,7 +348,7 @@ def test_close_button_on_release():
     left_right_col = COLS // 2 - 2
     right_left_col = COLS // 2 + 2
 
-    with VtmSession(TILE_ARGS) as s:
+    with VtmSession(TILE_ARGS, vtm_config=TILE_CONFIG) as s:
         # Horizontal split.
         s.write(SPLIT_HZ_KEY)
         time.sleep(2.0)
@@ -387,9 +400,10 @@ def test_close_button_on_release():
             print("PASS (vtm exited after LeftUp)")
             return True
 
-        # With confirm_close=true (user settings.xml overrides -c), vtm shows a
-        # confirm dialog instead of closing immediately.  The dialog shadows the
-        # left pane title bar to approximately FOCUSED_BG * 0.5 = (29, 41, 71).
+        # With <terminal/confirm_close=1> in TILE_CONFIG, the inner terminal
+        # shows a confirm dialog when the tile asks it to close.  The dialog
+        # shadows the left pane title bar to approximately
+        # FOCUSED_BG * 0.5 = (29, 41, 71).
         release_left = dominant_bg(after_release, 3, 1, left_right_col,
                                     exclude=(X_HOVER_BG, X_PRESS_BG))
         dimmed = tuple(round(v * 0.5) for v in FOCUSED_BG)

@@ -58,7 +58,8 @@ DESK_CONFIG = (
         '<IgnoreAltbuf="if (vtm.terminal.AltbufMode()) then vtm.terminal.ForwardKeys(); return; end;"/>'
     "</Scripting>"
 )
-DESK_TERM_ARGS = ["-c", DESK_CONFIG, "-r", "term"]
+DESK_TERM_ARGS = ["-r", "term"]
+# DESK_CONFIG is shipped to vtm-desk via $VTM_CONFIG (see VtmSession.vtm_config).
 
 # Bar geometry (mirrors term.hpp constants).
 BAR_COLS = 44
@@ -155,12 +156,13 @@ def sgr_release(col, row): return f"\033[<0;{col};{row}m".encode()
 
 
 class VtmSession:
-    def __init__(self, binary, args, settle_delay=SETTLE_DELAY, cols=COLS, rows=ROWS):
+    def __init__(self, binary, args, settle_delay=SETTLE_DELAY, cols=COLS, rows=ROWS, vtm_config=None):
         self.binary = binary
         self.args = args
         self.settle_delay = settle_delay
         self.cols = cols
         self.rows = rows
+        self.vtm_config = vtm_config
         self.master_fd = None
         self.pid = None
         self._buffer = b""
@@ -176,6 +178,8 @@ class VtmSession:
             os.dup2(slave_fd, 0); os.dup2(slave_fd, 1); os.dup2(slave_fd, 2)
             if slave_fd > 2:
                 os.close(slave_fd)
+            if self.vtm_config is not None:
+                os.environ["VTM_CONFIG"] = self.vtm_config
             os.execvp(self.binary, [self.binary] + self.args)
             sys.exit(1)
         os.close(slave_fd)
@@ -332,7 +336,7 @@ def assert_bar_absent(stream):
 
 def test_f3_opens_bar():
     print("TEST: F3 opens find-bar ... ", end="", flush=True)
-    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
+    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS, vtm_config=DESK_CONFIG) as s:
         s.fresh_snapshot(settle=0.3)
         s.write(b"\x1bOR")  # F3 (VT sequence — works with xterm legacy mapping)
         # vtm uses its own key event path; send via \e[ form too if needed.
@@ -353,7 +357,7 @@ def test_f3_opens_bar():
 
 def test_f3_toggles_bar():
     print("TEST: F3 toggles find-bar off again ... ", end="", flush=True)
-    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
+    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS, vtm_config=DESK_CONFIG) as s:
         s.write(F3)                 # open
         s.snapshot(settle=0.8)
         s._buffer = b""
@@ -373,7 +377,7 @@ def test_f3_toggles_bar():
 
 def test_esc_closes_bar():
     print("TEST: Esc closes find-bar ... ", end="", flush=True)
-    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
+    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS, vtm_config=DESK_CONFIG) as s:
         s.write(F3)     # open
         s.snapshot(settle=0.6)
         s.fresh_snapshot(settle=0.2)
@@ -396,7 +400,7 @@ def test_esc_closes_bar():
 
 def test_typing_shows_in_input():
     print("TEST: typing shows characters in input ... ", end="", flush=True)
-    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
+    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS, vtm_config=DESK_CONFIG) as s:
         s.write(F3)
         s.snapshot(settle=0.6)
         s.fresh_snapshot(settle=0.2)
@@ -414,7 +418,7 @@ def test_typing_shows_in_input():
 
 def test_close_button_click_closes_bar():
     print("TEST: clicking × closes find-bar ... ", end="", flush=True)
-    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
+    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS, vtm_config=DESK_CONFIG) as s:
         s.write(F3)
         s.snapshot(settle=0.8)
         s._buffer = b""
@@ -439,7 +443,7 @@ def test_bar_right_aligned_with_margin():
     print("TEST: bar right-aligned with 2-cell margin ... ", end="", flush=True)
     # Column where × would be if the bar were horizontally centered (old layout).
     old_centered_btn_x = (COLS - BAR_COLS) // 2 + 1 + 30
-    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
+    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS, vtm_config=DESK_CONFIG) as s:
         s.write(F3)
         s.snapshot(settle=0.8)
         # Click where the × used to be (centered layout) — bar must stay open.
@@ -472,7 +476,7 @@ def test_bar_right_aligned_with_margin():
 
 def test_keys_do_not_leak_to_shell():
     print("TEST: typing in bar does not leak to shell ... ", end="", flush=True)
-    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
+    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS, vtm_config=DESK_CONFIG) as s:
         s.write(F3)
         s.snapshot(settle=0.6)
         s.write(b"zzmarkerzz")
@@ -492,7 +496,7 @@ def test_keys_do_not_leak_to_shell():
 
 def test_long_input_horizontal_scroll():
     print("TEST: long input scrolls within fixed-width field ... ", end="", flush=True)
-    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
+    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS, vtm_config=DESK_CONFIG) as s:
         s.write(F3)
         s.snapshot(settle=0.6)
         payload = ("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
@@ -518,7 +522,7 @@ def test_long_input_horizontal_scroll():
 
 def test_backspace_removes_char():
     print("TEST: Backspace removes last char ... ", end="", flush=True)
-    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
+    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS, vtm_config=DESK_CONFIG) as s:
         s.write(F3)
         s.snapshot(settle=0.6)
         s.write(b"hello")
@@ -558,7 +562,7 @@ COUNTER_RE = re.compile(rb"(?:\d{3}|999\+)/(?:\d{3}|999\+)")
 def test_counter_initial_is_zero_padded():
     """When the bar opens with no query, counter must show 000/000."""
     print("TEST: empty-query counter is 000/000 ... ", end="", flush=True)
-    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
+    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS, vtm_config=DESK_CONFIG) as s:
         s.write(F3)
         stream = s.snapshot(settle=1.0)
         if b"000/000" not in stream:
@@ -586,7 +590,7 @@ def test_counter_updates_on_typing():
        we inspect the full accumulated stream (which contains the initial
        frame plus any diffs)."""
     print("TEST: counter reacts to typed query ... ", end="", flush=True)
-    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
+    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS, vtm_config=DESK_CONFIG) as s:
         s.write(F3)
         s.snapshot(settle=0.5)
         s.write(b"zzzzz")
@@ -622,7 +626,7 @@ def test_default_direction_is_down():
     # Tokyo-night "distinct blue" we chose for the active bg. Must match
     # col_act_bg in term.hpp.
     ACTIVE_BG_SGR = b"\x1b[48;2;61;89;161m"
-    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
+    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS, vtm_config=DESK_CONFIG) as s:
         s.write(F3)
         stream = s.snapshot(settle=1.2)
         if ACTIVE_BG_SGR not in stream:
@@ -642,7 +646,7 @@ def test_up_button_click_switches_direction():
        stays active-styled). A stronger check: click ↑, type a letter, and
        verify the bar still renders (no crash)."""
     print("TEST: click ↑ switches direction (no crash) ... ", end="", flush=True)
-    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
+    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS, vtm_config=DESK_CONFIG) as s:
         s.write(F3)
         s.snapshot(settle=0.6)
         s.click(BTN_UP_COL, BAR_INPUT_ROW)
@@ -672,7 +676,7 @@ def test_up_button_click_switches_direction():
 def test_enter_does_not_close_bar():
     """Pressing Enter (with or without Shift) must not close the bar."""
     print("TEST: Enter/Shift+Enter keep bar open ... ", end="", flush=True)
-    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
+    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS, vtm_config=DESK_CONFIG) as s:
         s.write(F3)
         s.snapshot(settle=0.6)
         s.write(b"abc")
@@ -854,7 +858,7 @@ def test_empty_query_resets_counter():
     """Typing a query then erasing it must reset the counter to 000/000.
        (Backend-driven: the UI mirrors the total/index reported by the term.)"""
     print("TEST: empty query resets counter to 000/000 ... ", end="", flush=True)
-    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
+    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS, vtm_config=DESK_CONFIG) as s:
         s.write(F3)
         s.snapshot(settle=0.6)
         # Type a query that likely has 0 matches to avoid dependence on shell output.
@@ -884,7 +888,7 @@ def test_close_bar_clears_counter_state():
     """After closing the find-bar, reopening it must start fresh at 000/000.
        (Tests that the backend drops last_find_* state on hide.)"""
     print("TEST: reopen after close starts at 000/000 ... ", end="", flush=True)
-    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
+    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS, vtm_config=DESK_CONFIG) as s:
         s.write(F3)
         s.snapshot(settle=0.6)
         s.write(b"zz")              # some query
@@ -921,7 +925,7 @@ def test_counter_width_is_fixed_for_high_totals():
             999+/999+) without breaking bar layout.
          2. The total side shows the "999+" overflow marker."""
     print("TEST: counter shows 999+ overflow for high totals ... ", end="", flush=True)
-    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
+    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS, vtm_config=DESK_CONFIG) as s:
         # Print exactly 1760 X's (22 rows × 80 cols) using a bash builtin so
         # that no external interpreter is needed inside the pty session.
         # Searching for single "X" gives 1760 matches, which exceeds the 999
@@ -974,7 +978,7 @@ def test_arrow_keys_navigate_matches():
        pattern-matching the raw stream would miss the /000 -> /007
        transition when only the final digit is repainted."""
     print("TEST: Up/Down arrows navigate matches ... ", end="", flush=True)
-    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
+    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS, vtm_config=DESK_CONFIG) as s:
         s.snapshot(settle=0.6)
         # Seed the scrollback with several lines containing a unique token.
         s.write(b"printf 'ZTOK\\n%.0s' {1..5}\r")
@@ -1107,7 +1111,7 @@ def test_clear_button_appears_when_typing():
     that vtm's diff-rendering (only changed cells re-emitted) does not cause
     false negatives."""
     print("TEST: clear-query button appears when typing ... ", end="", flush=True)
-    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
+    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS, vtm_config=DESK_CONFIG) as s:
         s.write(F3)
         s.snapshot(settle=0.8)
         s.write(b"hello")
@@ -1135,7 +1139,7 @@ def test_clear_button_absent_with_empty_query():
     """When the bar opens with an empty query, no '×' must appear at
     BTN_CLEAR_COL inside the input area."""
     print("TEST: clear-query button absent when query is empty ... ", end="", flush=True)
-    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
+    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS, vtm_config=DESK_CONFIG) as s:
         s.write(F3)
         stream = s.snapshot(settle=1.0)
         interactive_row = BAR_INPUT_ROW + 1
@@ -1163,7 +1167,7 @@ def test_clear_button_click_clears_query():
     000/000 (empty query → 0 matches).  Counter cells change on every match
     update, so _screen_counter (ANSI-replay) correctly tracks the transition."""
     print("TEST: clear-query button click wipes query and keeps bar open ... ", end="", flush=True)
-    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
+    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS, vtm_config=DESK_CONFIG) as s:
         # Seed one visible occurrence of a unique token so the counter > 000.
         s.snapshot(settle=0.4)
         s.write(b"printf 'CLRTOK\\n'\r")
@@ -1207,7 +1211,7 @@ def test_clear_button_disappears_after_backspace():
     """After typing and then erasing all characters with Backspace, the
     clear-query button must disappear (BTN_CLEAR_COL cell stops showing '×')."""
     print("TEST: clear-query button disappears after erasing query ... ", end="", flush=True)
-    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
+    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS, vtm_config=DESK_CONFIG) as s:
         s.write(F3)
         s.snapshot(settle=0.6)
         s.write(b"abc")
@@ -1250,7 +1254,7 @@ def test_input_strip_uses_underline_attribute():
     """The empty input field must be drawn with SGR underline attribute and
     must not contain stray `_` glyphs."""
     print("TEST: input strip uses cell underline attribute (no `_` glyphs) ... ", end="", flush=True)
-    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
+    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS, vtm_config=DESK_CONFIG) as s:
         s.fresh_snapshot(settle=0.4)
         s.write(F3)
         stream = s.snapshot(settle=1.0)
@@ -1287,7 +1291,7 @@ def test_clear_button_shares_underline_with_input():
     This is detectable by the SGR underline-on sequence (ESC[4m) appearing
     in the bar redraw stream while typing."""
     print("TEST: clear button connected to input strip via underline ... ", end="", flush=True)
-    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
+    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS, vtm_config=DESK_CONFIG) as s:
         s.write(F3)
         s.snapshot(settle=0.6)
         # Type something so the clear-button appears.
@@ -1324,7 +1328,7 @@ def _open_bar_at_cols(cols, settle_open=1.0):
     """Spawn vtm-desk at the given terminal cols, open the find-bar with F3,
     and return (session, post-F3 stream).  Caller is responsible for closing
     the session via context manager / normal_exit."""
-    s = VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS, cols=cols).__enter__()
+    s = VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS, cols=cols, vtm_config=DESK_CONFIG).__enter__()
     try:
         s.fresh_snapshot(settle=0.4)
         s.write(F3)
@@ -1517,7 +1521,7 @@ def test_tab_toggles_direction_no_crash():
     alive (basic smoke test — no crash, no accidental close)."""
     print("TEST: Tab toggles direction -- bar stays open (smoke) ... ",
           end="", flush=True)
-    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
+    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS, vtm_config=DESK_CONFIG) as s:
         s.write(F3)
         s.snapshot(settle=0.8)
         # First Tab: direction ↓ → ↑.
@@ -1548,7 +1552,7 @@ def test_tab_active_bg_appears_on_toggle():
     in response to the Tab keystroke."""
     print("TEST: Tab repaint emits active-direction bg SGR ... ",
           end="", flush=True)
-    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
+    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS, vtm_config=DESK_CONFIG) as s:
         s.write(F3)
         s.snapshot(settle=0.8)
         # Clear accumulated buffer: next snapshot contains only Tab's diff.
@@ -1577,7 +1581,7 @@ def test_tab_does_not_leak_to_shell():
     checking the shell output contains no TAB-completion artefacts."""
     print("TEST: Tab in bar does not leak to shell ... ",
           end="", flush=True)
-    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
+    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS, vtm_config=DESK_CONFIG) as s:
         s.write(F3)
         s.snapshot(settle=0.6)
         # Three Tab presses while bar is open.
@@ -1620,7 +1624,7 @@ def test_tab_toggles_direction_twice_restores_default():
     checked as a proxy for "bar is still open and rendering"."""
     print("TEST: Tab×2 returns direction to default (↓) ... ",
           end="", flush=True)
-    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
+    with VtmSession(VTM_DESK_BINARY, DESK_TERM_ARGS, vtm_config=DESK_CONFIG) as s:
         s.write(F3)
         s.snapshot(settle=0.8)
         # Tab 1: default ↓ → ↑.  Grab the diff frame for this toggle only.

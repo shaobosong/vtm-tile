@@ -181,7 +181,7 @@ class VtmTileTermSession:
         set_winsize(self.master_fd, ROWS, COLS)
 
         cfg = make_overlay_config(self.restart_cwd_enabled)
-        argv = [VTM_TILE_BINARY, "-c", cfg, "-r", "term"]
+        argv = [VTM_TILE_BINARY, "-r", "term"]
 
         self.pid = os.fork()
         if self.pid == 0:
@@ -197,6 +197,7 @@ class VtmTileTermSession:
                 os.chdir(self.start_cwd)
             except OSError:
                 pass
+            os.environ["VTM_CONFIG"] = cfg
             os.execvp(argv[0], argv)
             sys.exit(1)
         os.close(slave_fd)

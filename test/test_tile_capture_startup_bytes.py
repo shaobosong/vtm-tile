@@ -50,7 +50,7 @@ TILE_CONFIG = (
         "</tile>"
     "</config>"
 )
-TILE_ARGS = ["-c", TILE_CONFIG]
+TILE_ARGS = []  # TILE_CONFIG is shipped via $VTM_CONFIG (vtm_config kwarg).
 
 # ── ANSI strip helpers (copied from test_command_bar_terminal.py) ────────────
 
@@ -111,9 +111,10 @@ def kill_all_vtm():
 # ── Session context manager ─────────────────────────────────────────────────
 
 class VtmTileSession:
-    def __init__(self, args, settle_delay=SETTLE_DELAY):
+    def __init__(self, args, settle_delay=SETTLE_DELAY, vtm_config=None):
         self.args = args
         self.settle_delay = settle_delay
+        self.vtm_config = vtm_config
         self.master_fd = None
         self.pid = None
         self._screen_buf = b""
@@ -131,6 +132,8 @@ class VtmTileSession:
             os.dup2(slave_fd, 2)
             if slave_fd > 2:
                 os.close(slave_fd)
+            if self.vtm_config is not None:
+                os.environ["VTM_CONFIG"] = self.vtm_config
             os.execvp(VTM_TILE_BINARY, [VTM_TILE_BINARY] + self.args)
             sys.exit(1)
         os.close(slave_fd)
@@ -273,7 +276,7 @@ def test_capture_startup_bytes():
         print(f"\\nDEBUG visible (first 600 chars): {repr(visible[:600])}")
     """
     print("TEST: capture vtm-tile startup bytes and exit ... ", end="", flush=True)
-    with VtmTileSession(TILE_ARGS) as s:
+    with VtmTileSession(TILE_ARGS, vtm_config=TILE_CONFIG) as s:
         if not s.is_alive():
             print("FAIL - vtm-tile did not start")
             return False

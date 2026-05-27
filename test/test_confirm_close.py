@@ -48,10 +48,13 @@ TILE_SETTLE_DELAY = 1.0
 
 # Self-contained desk/term configuration: confirm_close enabled for the
 # terminal, so tests do not depend on vtm.xml built-in defaults.
-DESK_TERM_ARGS = ["-c", "<config><terminal><confirm_close=1/></terminal></config>", "-r", "term"]
+# Shipped to vtm-desk via $VTM_CONFIG (see VtmTestSession.vtm_config).
+DESK_TERM_CONFIG = "<config><terminal><confirm_close=1/></terminal></config>"
+DESK_TERM_ARGS = ["-r", "term"]
 
 # Self-contained tile configuration: confirm_close enabled, split key binding
 # and scripting definition included for split regression tests.
+# Shipped to vtm-tile via $VTM_CONFIG (see VtmTestSession.vtm_config).
 TILE_CONFIG = (
     "<config>"
         "<tile><confirm_close=1/></tile>"
@@ -63,7 +66,7 @@ TILE_CONFIG = (
         '<TileSplitHorizontally="vtm.tile.SplitPane(0);"/>'
     "</Scripting>"
 )
-TILE_ARGS = ["-c", TILE_CONFIG]
+TILE_ARGS = []
 
 
 def kill_all_vtm():
@@ -133,10 +136,11 @@ def sgr_mouse_move(col, row):
 class VtmTestSession:
     """Manage a vtm-desk or vtm-tile process running in a pty for testing."""
 
-    def __init__(self, binary, args, settle_delay=SETTLE_DELAY):
+    def __init__(self, binary, args, settle_delay=SETTLE_DELAY, vtm_config=None):
         self.binary = binary
         self.args = args
         self.settle_delay = settle_delay
+        self.vtm_config = vtm_config
         self.master_fd = None
         self.pid = None
 
@@ -155,6 +159,8 @@ class VtmTestSession:
             os.dup2(slave_fd, 2)
             if slave_fd > 2:
                 os.close(slave_fd)
+            if self.vtm_config is not None:
+                os.environ["VTM_CONFIG"] = self.vtm_config
             os.execvp(self.binary, [self.binary] + self.args)
             sys.exit(1)
         else:
@@ -277,7 +283,7 @@ def verify_cancel_via_reconfirm(session):
 def test_term_close_button_shows_dialog():
     """Clicking x in term with confirm_close=true keeps vtm-desk alive (dialog shown)."""
     print("TEST: term - close button shows dialog ... ", end="", flush=True)
-    with VtmTestSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
+    with VtmTestSession(VTM_DESK_BINARY, DESK_TERM_ARGS, vtm_config=DESK_TERM_CONFIG) as s:
         if not open_dialog_and_verify(s):
             print("FAIL - vtm exited immediately")
             return False
@@ -293,7 +299,7 @@ def test_term_close_button_shows_dialog():
 def test_term_confirm_enter():
     """Pressing Enter while dialog is open confirms close."""
     print("TEST: term - confirm by Enter ... ", end="", flush=True)
-    with VtmTestSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
+    with VtmTestSession(VTM_DESK_BINARY, DESK_TERM_ARGS, vtm_config=DESK_TERM_CONFIG) as s:
         if not open_dialog_and_verify(s):
             print("FAIL - vtm exited before dialog")
             return False
@@ -308,7 +314,7 @@ def test_term_confirm_enter():
 def test_term_tab_then_enter_cancels():
     """Default selection is Confirm; Tab toggles to Cancel; Enter then cancels."""
     print("TEST: term - Tab then Enter cancels ... ", end="", flush=True)
-    with VtmTestSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
+    with VtmTestSession(VTM_DESK_BINARY, DESK_TERM_ARGS, vtm_config=DESK_TERM_CONFIG) as s:
         if not open_dialog_and_verify(s):
             print("FAIL - vtm exited before dialog")
             return False
@@ -333,7 +339,7 @@ def test_term_tab_then_enter_cancels():
 def test_term_tab_twice_then_enter_confirms():
     """Tab twice toggles back to Confirm; Enter then confirms close."""
     print("TEST: term - Tab x2 then Enter confirms ... ", end="", flush=True)
-    with VtmTestSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
+    with VtmTestSession(VTM_DESK_BINARY, DESK_TERM_ARGS, vtm_config=DESK_TERM_CONFIG) as s:
         if not open_dialog_and_verify(s):
             print("FAIL - vtm exited before dialog")
             return False
@@ -353,7 +359,7 @@ def test_term_tab_twice_then_enter_confirms():
 def test_term_hover_cancel_then_enter_cancels():
     """Hovering Cancel button selects it; Enter then cancels."""
     print("TEST: term - hover Cancel then Enter cancels ... ", end="", flush=True)
-    with VtmTestSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
+    with VtmTestSession(VTM_DESK_BINARY, DESK_TERM_ARGS, vtm_config=DESK_TERM_CONFIG) as s:
         if not open_dialog_and_verify(s):
             print("FAIL - vtm exited before dialog")
             return False
@@ -382,7 +388,7 @@ def test_term_hover_cancel_then_enter_cancels():
 def test_term_hover_cancel_then_tab_then_enter_confirms():
     """Hover Cancel, then Tab toggles back to Confirm; Enter confirms close."""
     print("TEST: term - hover Cancel then Tab then Enter confirms ... ", end="", flush=True)
-    with VtmTestSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
+    with VtmTestSession(VTM_DESK_BINARY, DESK_TERM_ARGS, vtm_config=DESK_TERM_CONFIG) as s:
         if not open_dialog_and_verify(s):
             print("FAIL - vtm exited before dialog")
             return False
@@ -406,7 +412,7 @@ def test_term_hover_cancel_then_tab_then_enter_confirms():
 def test_term_cancel_esc():
     """Pressing Esc while dialog is open cancels the close."""
     print("TEST: term - cancel by Esc ... ", end="", flush=True)
-    with VtmTestSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
+    with VtmTestSession(VTM_DESK_BINARY, DESK_TERM_ARGS, vtm_config=DESK_TERM_CONFIG) as s:
         if not open_dialog_and_verify(s):
             print("FAIL - vtm exited before dialog")
             return False
@@ -426,7 +432,7 @@ def test_term_cancel_esc():
 def test_term_cancel_click_outside():
     """Clicking outside the dialog cancels the close."""
     print("TEST: term - cancel by click outside ... ", end="", flush=True)
-    with VtmTestSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
+    with VtmTestSession(VTM_DESK_BINARY, DESK_TERM_ARGS, vtm_config=DESK_TERM_CONFIG) as s:
         if not open_dialog_and_verify(s):
             print("FAIL - vtm exited before dialog")
             return False
@@ -446,7 +452,7 @@ def test_term_cancel_click_outside():
 def test_term_click_yes_button():
     """Clicking the Yes button in the dialog confirms close."""
     print("TEST: term - click Yes button ... ", end="", flush=True)
-    with VtmTestSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
+    with VtmTestSession(VTM_DESK_BINARY, DESK_TERM_ARGS, vtm_config=DESK_TERM_CONFIG) as s:
         if not open_dialog_and_verify(s):
             print("FAIL - vtm exited before dialog")
             return False
@@ -474,7 +480,7 @@ def test_term_click_yes_button():
 def test_term_click_no_button():
     """Clicking the No button in the dialog cancels close."""
     print("TEST: term - click No button ... ", end="", flush=True)
-    with VtmTestSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
+    with VtmTestSession(VTM_DESK_BINARY, DESK_TERM_ARGS, vtm_config=DESK_TERM_CONFIG) as s:
         if not open_dialog_and_verify(s):
             print("FAIL - vtm exited before dialog")
             return False
@@ -504,7 +510,7 @@ def test_term_click_no_button():
 def test_term_right_arrow_selects_cancel():
     """Right arrow moves selection from Confirm to Cancel; Enter then cancels close."""
     print("TEST: term - Right arrow selects Cancel ... ", end="", flush=True)
-    with VtmTestSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
+    with VtmTestSession(VTM_DESK_BINARY, DESK_TERM_ARGS, vtm_config=DESK_TERM_CONFIG) as s:
         if not open_dialog_and_verify(s):
             print("FAIL - vtm exited before dialog")
             return False
@@ -527,7 +533,7 @@ def test_term_right_arrow_selects_cancel():
 def test_term_left_arrow_after_right_selects_confirm():
     """Right then Left arrow returns selection to Confirm; Enter confirms close."""
     print("TEST: term - Right then Left arrow selects Confirm ... ", end="", flush=True)
-    with VtmTestSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
+    with VtmTestSession(VTM_DESK_BINARY, DESK_TERM_ARGS, vtm_config=DESK_TERM_CONFIG) as s:
         if not open_dialog_and_verify(s):
             print("FAIL - vtm exited before dialog")
             return False
@@ -548,7 +554,7 @@ def test_term_left_arrow_after_right_selects_confirm():
 def test_term_right_arrow_no_wrap():
     """Right arrow from Cancel (index 1) does not wrap back to Confirm; Enter cancels."""
     print("TEST: term - Right arrow no wrap at Cancel ... ", end="", flush=True)
-    with VtmTestSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
+    with VtmTestSession(VTM_DESK_BINARY, DESK_TERM_ARGS, vtm_config=DESK_TERM_CONFIG) as s:
         if not open_dialog_and_verify(s):
             print("FAIL - vtm exited before dialog")
             return False
@@ -573,7 +579,7 @@ def test_term_right_arrow_no_wrap():
 def test_term_left_arrow_no_wrap():
     """Left arrow from Confirm (index 0) does not wrap to Cancel; Enter confirms."""
     print("TEST: term - Left arrow no wrap at Confirm ... ", end="", flush=True)
-    with VtmTestSession(VTM_DESK_BINARY, DESK_TERM_ARGS) as s:
+    with VtmTestSession(VTM_DESK_BINARY, DESK_TERM_ARGS, vtm_config=DESK_TERM_CONFIG) as s:
         if not open_dialog_and_verify(s):
             print("FAIL - vtm exited before dialog")
             return False
@@ -596,7 +602,7 @@ def test_term_left_arrow_no_wrap():
 def test_tile_close_button_shows_dialog():
     """Clicking x in tile with confirm_close=true keeps vtm-tile alive."""
     print("TEST: tile - close button shows dialog ... ", end="", flush=True)
-    with VtmTestSession(VTM_TILE_BINARY, TILE_ARGS, settle_delay=TILE_SETTLE_DELAY) as s:
+    with VtmTestSession(VTM_TILE_BINARY, TILE_ARGS, settle_delay=TILE_SETTLE_DELAY, vtm_config=TILE_CONFIG) as s:
         if not open_dialog_and_verify(s):
             print("FAIL - vtm exited immediately")
             return False
@@ -612,7 +618,7 @@ def test_tile_close_button_shows_dialog():
 def test_tile_cancel_esc():
     """Pressing Esc while tile dialog is open cancels the close."""
     print("TEST: tile - cancel by Esc ... ", end="", flush=True)
-    with VtmTestSession(VTM_TILE_BINARY, TILE_ARGS, settle_delay=TILE_SETTLE_DELAY) as s:
+    with VtmTestSession(VTM_TILE_BINARY, TILE_ARGS, settle_delay=TILE_SETTLE_DELAY, vtm_config=TILE_CONFIG) as s:
         if not open_dialog_and_verify(s):
             print("FAIL - vtm exited before dialog")
             return False
@@ -631,7 +637,7 @@ def test_tile_cancel_esc():
 def test_tile_right_arrow_selects_cancel():
     """Right arrow moves selection to Cancel in tile; Enter then cancels close."""
     print("TEST: tile - Right arrow selects Cancel ... ", end="", flush=True)
-    with VtmTestSession(VTM_TILE_BINARY, TILE_ARGS, settle_delay=TILE_SETTLE_DELAY) as s:
+    with VtmTestSession(VTM_TILE_BINARY, TILE_ARGS, settle_delay=TILE_SETTLE_DELAY, vtm_config=TILE_CONFIG) as s:
         if not open_dialog_and_verify(s):
             print("FAIL - vtm exited before dialog")
             return False
@@ -652,7 +658,7 @@ def test_tile_right_arrow_selects_cancel():
 def test_tile_left_arrow_after_right_selects_confirm():
     """Right then Left arrow returns selection to Confirm in tile; Enter confirms close."""
     print("TEST: tile - Right then Left arrow selects Confirm ... ", end="", flush=True)
-    with VtmTestSession(VTM_TILE_BINARY, TILE_ARGS, settle_delay=TILE_SETTLE_DELAY) as s:
+    with VtmTestSession(VTM_TILE_BINARY, TILE_ARGS, settle_delay=TILE_SETTLE_DELAY, vtm_config=TILE_CONFIG) as s:
         if not open_dialog_and_verify(s):
             print("FAIL - vtm exited before dialog")
             return False
@@ -721,7 +727,7 @@ def check_all_vtm_exited(timeout=8.0):
 def test_tile_split_then_close_confirm():
     """Bug 2 regression: split once, confirm close — all processes must exit."""
     print("TEST: tile - split + confirm close cleans up ... ", end="", flush=True)
-    with VtmTestSession(VTM_TILE_BINARY, TILE_ARGS, settle_delay=TILE_SETTLE_DELAY) as s:
+    with VtmTestSession(VTM_TILE_BINARY, TILE_ARGS, settle_delay=TILE_SETTLE_DELAY, vtm_config=TILE_CONFIG) as s:
         # Split the pane.
         do_split(s)
         if not s.is_alive():
@@ -749,7 +755,7 @@ def test_tile_split_then_close_confirm():
 def test_tile_split_twice_then_close_confirm():
     """Bug 2 regression: split twice, confirm close — all processes must exit."""
     print("TEST: tile - split x2 + confirm close cleans up ... ", end="", flush=True)
-    with VtmTestSession(VTM_TILE_BINARY, TILE_ARGS, settle_delay=TILE_SETTLE_DELAY) as s:
+    with VtmTestSession(VTM_TILE_BINARY, TILE_ARGS, settle_delay=TILE_SETTLE_DELAY, vtm_config=TILE_CONFIG) as s:
         # Two splits.
         do_split(s, count=2)
         if not s.is_alive():
@@ -776,7 +782,7 @@ def test_tile_split_twice_then_close_confirm():
 def test_tile_split_then_close_intercept():
     """Bug 1 regression: split once, close button must be intercepted (not bypass)."""
     print("TEST: tile - split + close intercepted ... ", end="", flush=True)
-    with VtmTestSession(VTM_TILE_BINARY, TILE_ARGS, settle_delay=TILE_SETTLE_DELAY) as s:
+    with VtmTestSession(VTM_TILE_BINARY, TILE_ARGS, settle_delay=TILE_SETTLE_DELAY, vtm_config=TILE_CONFIG) as s:
         # Split the pane.
         do_split(s)
         if not s.is_alive():

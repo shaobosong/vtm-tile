@@ -74,7 +74,7 @@ TILE_CONFIG = (
         '<TileSplitHorizontally="vtm.tile.SplitPane(0);"/>'
     "</Scripting>"
 )
-TILE_ARGS = ["-c", TILE_CONFIG]
+TILE_ARGS = []  # TILE_CONFIG is shipped via $VTM_CONFIG (vtm_config kwarg).
 SPLIT_HZ_KEY = b"\x1b|"   # Alt+Shift+| → split horizontally.
 
 # Reference colors derived from the default vtm.xml palette.
@@ -141,10 +141,11 @@ def sgr_move(col, row):              return f"\033[<35;{col};{row}M".encode()
 class VtmSession:
     """Run vtm-tile under a pty for scripted interaction."""
 
-    def __init__(self, binary, args, settle_delay=TILE_SETTLE_DELAY):
+    def __init__(self, binary, args, settle_delay=TILE_SETTLE_DELAY, vtm_config=None):
         self.binary = binary
         self.args = args
         self.settle_delay = settle_delay
+        self.vtm_config = vtm_config
         self.master_fd = None
         self.pid = None
 
@@ -159,6 +160,8 @@ class VtmSession:
             os.dup2(slave_fd, 0); os.dup2(slave_fd, 1); os.dup2(slave_fd, 2)
             if slave_fd > 2:
                 os.close(slave_fd)
+            if self.vtm_config is not None:
+                os.environ["VTM_CONFIG"] = self.vtm_config
             os.execvp(self.binary, [self.binary] + self.args)
             sys.exit(1)
         os.close(slave_fd)
@@ -303,7 +306,7 @@ def test_left_x_click_refocuses_pane_under_dialog():
     pane is the focused one."""
     print("TEST: tile - X click refocuses pane under confirm dialog ... ",
           end="", flush=True)
-    with VtmSession(VTM_TILE_BINARY, TILE_ARGS) as s:
+    with VtmSession(VTM_TILE_BINARY, TILE_ARGS, vtm_config=TILE_CONFIG) as s:
         # ── Step 1: Horizontal split ──────────────────────────────────
         s.write(SPLIT_HZ_KEY)
         time.sleep(2.0)

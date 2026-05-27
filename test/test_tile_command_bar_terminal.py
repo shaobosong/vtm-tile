@@ -86,7 +86,7 @@ TILE_CONFIG = (
         "</tile>"
     "</config>"
 )
-TILE_ARGS = ["-c", TILE_CONFIG]
+TILE_ARGS = []  # TILE_CONFIG is shipped via $VTM_CONFIG (vtm_config kwarg).
 
 
 # Multi-pane variant: enables the split/focus-cycle key bindings used by
@@ -120,7 +120,7 @@ MULTI_PANE_TILE_CONFIG = (
         '<TileFocusNextPane="vtm.tile.FocusNextPane(1);"/>'
     "</Scripting>"
 )
-MULTI_PANE_TILE_ARGS = ["-c", MULTI_PANE_TILE_CONFIG]
+MULTI_PANE_TILE_ARGS = []  # MULTI_PANE_TILE_CONFIG is shipped via $VTM_CONFIG.
 
 
 def kill_all_vtm():
@@ -186,9 +186,10 @@ def strip_ansi(buf):
 
 
 class VtmTileSession:
-    def __init__(self, args, settle_delay=SETTLE_DELAY):
+    def __init__(self, args, settle_delay=SETTLE_DELAY, vtm_config=None):
         self.args = args
         self.settle_delay = settle_delay
+        self.vtm_config = vtm_config
         self.master_fd = None
         self.pid = None
         self._screen_buf = b""
@@ -206,6 +207,8 @@ class VtmTileSession:
             os.dup2(slave_fd, 2)
             if slave_fd > 2:
                 os.close(slave_fd)
+            if self.vtm_config is not None:
+                os.environ["VTM_CONFIG"] = self.vtm_config
             os.execvp(VTM_TILE_BINARY, [VTM_TILE_BINARY] + self.args)
             sys.exit(1)
         os.close(slave_fd)
@@ -406,7 +409,7 @@ def fail(msg):
 
 def test_command_bar_opens_via_menu_and_dispatches_to_terminal():
     print("TEST: command bar [CMD] menu -> terminal find bar ... ", end="", flush=True)
-    with VtmTileSession(TILE_ARGS) as s:
+    with VtmTileSession(TILE_ARGS, vtm_config=TILE_CONFIG) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
 
@@ -498,7 +501,7 @@ def test_command_bar_dispatches_only_to_focused_pane():
     focus to the other pane and re-toggling must move the bar.
     """
     print("TEST: command bar dispatches only to focused pane ... ", end="", flush=True)
-    with VtmTileSession(MULTI_PANE_TILE_ARGS) as s:
+    with VtmTileSession(MULTI_PANE_TILE_ARGS, vtm_config=MULTI_PANE_TILE_CONFIG) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
         # Drain initial paint with a generous timeout: when this test
@@ -605,7 +608,7 @@ def test_command_bar_runs_tile_scoped_command():
     half of the screen — that's only true when two panes exist.
     """
     print("TEST: command bar tile-scoped command (split via cmd bar) ... ", end="", flush=True)
-    with VtmTileSession(MULTI_PANE_TILE_ARGS) as s:
+    with VtmTileSession(MULTI_PANE_TILE_ARGS, vtm_config=MULTI_PANE_TILE_CONFIG) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
         s.snapshot(timeout=2.0)
@@ -686,7 +689,7 @@ KEYBIND_PROXY_TILE_CONFIG = (
         f'<KeybindProxyPrint=\'vtm.terminal.Print("{KEYBIND_PROXY_MARKER}_", 42, "_", tostring(true))\'/>'
     "</Scripting>"
 )
-KEYBIND_PROXY_TILE_ARGS = ["-c", KEYBIND_PROXY_TILE_CONFIG]
+KEYBIND_PROXY_TILE_ARGS = []  # KEYBIND_PROXY_TILE_CONFIG is shipped via $VTM_CONFIG.
 
 
 # Broadcast-config: same as MULTI_PANE_TILE_CONFIG but also binds
@@ -738,7 +741,7 @@ BROADCAST_TILE_CONFIG = (
         f'<BroadcastPrint=\'vtm.terminal.Print("{BROADCAST_MARKER}")\'/>'
     "</Scripting>"
 )
-BROADCAST_TILE_ARGS = ["-c", BROADCAST_TILE_CONFIG]
+BROADCAST_TILE_ARGS = []  # BROADCAST_TILE_CONFIG is shipped via $VTM_CONFIG.
 
 
 def test_command_bar_broadcasts_to_all_selected_panes():
@@ -758,7 +761,7 @@ def test_command_bar_broadcasts_to_all_selected_panes():
     only painted it in one.
     """
     print("TEST: command bar broadcasts to all selected panes ... ", end="", flush=True)
-    with VtmTileSession(BROADCAST_TILE_ARGS) as s:
+    with VtmTileSession(BROADCAST_TILE_ARGS, vtm_config=BROADCAST_TILE_CONFIG) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
         # Drain initial paint; same retry pattern as
@@ -825,7 +828,7 @@ def test_keybind_broadcasts_terminal_call_to_all_selected_panes():
     masquerade as a successful broadcast.
     """
     print("TEST: keybind broadcasts vtm.terminal.* to all selected panes ... ", end="", flush=True)
-    with VtmTileSession(BROADCAST_TILE_ARGS) as s:
+    with VtmTileSession(BROADCAST_TILE_ARGS, vtm_config=BROADCAST_TILE_CONFIG) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
         s.snapshot(timeout=2.0)
@@ -880,7 +883,7 @@ def test_keybind_single_pane_still_dispatches():
     'no focused applet' edge case and skips dispatch entirely.
     """
     print("TEST: single-pane keybind still dispatches ... ", end="", flush=True)
-    with VtmTileSession(BROADCAST_TILE_ARGS) as s:
+    with VtmTileSession(BROADCAST_TILE_ARGS, vtm_config=BROADCAST_TILE_CONFIG) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
         s.snapshot(timeout=2.0)
@@ -926,7 +929,7 @@ def test_command_bar_does_not_dispatch_when_only_pane_unfocused():
     of keyboard focus and reliably opens the bar regardless.
     """
     print("TEST: command bar no-ops when only pane is ctrl+click defocused ... ", end="", flush=True)
-    with VtmTileSession(BROADCAST_TILE_ARGS) as s:
+    with VtmTileSession(BROADCAST_TILE_ARGS, vtm_config=BROADCAST_TILE_CONFIG) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
         # Drain initial paint; retry to tolerate slow first-paint when
@@ -1042,7 +1045,7 @@ def test_single_pane_ctrl_click_defocus_cmdbar_no_ops():
     """
     print("TEST: single pane ctrl+click defocus -> cmdbar dispatch is a no-op ... ",
           end="", flush=True)
-    with VtmTileSession(TILE_ARGS) as s:
+    with VtmTileSession(TILE_ARGS, vtm_config=TILE_CONFIG) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
         # Drain initial paint; retry to tolerate slow first-paint.
@@ -1150,7 +1153,7 @@ def test_two_pane_both_ctrl_click_defocused_cmdbar_no_ops():
     """
     print("TEST: two panes both ctrl+click defocused -> cmdbar dispatch is a no-op ... ",
           end="", flush=True)
-    with VtmTileSession(MULTI_PANE_TILE_ARGS) as s:
+    with VtmTileSession(MULTI_PANE_TILE_ARGS, vtm_config=MULTI_PANE_TILE_CONFIG) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
         # Drain initial paint; retry for slow first-paint (same pattern
@@ -1268,7 +1271,7 @@ def test_keybind_proxies_terminal_call_to_focused_pane():
     """
     print("TEST: keybind proxies vtm.terminal.* to focused pane ... ", end="", flush=True)
     expected = f"{KEYBIND_PROXY_MARKER}_42_true"
-    with VtmTileSession(KEYBIND_PROXY_TILE_ARGS) as s:
+    with VtmTileSession(KEYBIND_PROXY_TILE_ARGS, vtm_config=KEYBIND_PROXY_TILE_CONFIG) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
         s.snapshot(timeout=2.0)

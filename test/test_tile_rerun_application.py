@@ -204,7 +204,7 @@ TILE_CONFIG = (
         "</tile>"
     "</config>"
 )
-TILE_ARGS = ["-c", TILE_CONFIG]
+TILE_ARGS = []  # TILE_CONFIG is shipped via $VTM_CONFIG (vtm_config kwarg).
 
 
 # Same plus key bindings to invoke ReRunApplication and ClosePane directly.
@@ -231,13 +231,14 @@ TILE_CONFIG_WITH_HOTKEYS = (
         '<TilePick="vtm.tile.PickApplication();"/>'
     "</Scripting>"
 )
-TILE_ARGS_WITH_HOTKEYS = ["-c", TILE_CONFIG_WITH_HOTKEYS]
+TILE_ARGS_WITH_HOTKEYS = []  # TILE_CONFIG_WITH_HOTKEYS is shipped via $VTM_CONFIG.
 
 
 class VtmTileSession:
-    def __init__(self, args, settle_delay=SETTLE_DELAY):
+    def __init__(self, args, settle_delay=SETTLE_DELAY, vtm_config=None):
         self.args = args
         self.settle_delay = settle_delay
+        self.vtm_config = vtm_config
         self.master_fd = None
         self.pid = None
         self._screen_buf = b""
@@ -265,6 +266,8 @@ class VtmTileSession:
             os.environ["PS1"] = "$ "
             os.environ.pop("STARSHIP_SHELL", None)
             os.environ.pop("STARSHIP_SESSION_KEY", None)
+            if self.vtm_config is not None:
+                os.environ["VTM_CONFIG"] = self.vtm_config
             os.execvp(VTM_TILE_BINARY, [VTM_TILE_BINARY] + self.args)
             sys.exit(1)
         os.close(slave_fd)
@@ -353,7 +356,7 @@ def test_pickapp_ctrl_r_replaces_focused_pane():
     """Ctrl+R inside the picker: close current applet + run with new selection."""
     print("TEST: pickapp Ctrl+R closes focused pane and runs new app ... ",
           end="", flush=True)
-    with VtmTileSession(TILE_ARGS_WITH_HOTKEYS) as s:
+    with VtmTileSession(TILE_ARGS_WITH_HOTKEYS, vtm_config=TILE_CONFIG_WITH_HOTKEYS) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
 
@@ -414,7 +417,7 @@ def test_rerun_application_empty_slot_fast_path():
     """ReRunApplication() on an already-empty slot: must run directly."""
     print("TEST: ReRunApplication empty-slot fast path ... ",
           end="", flush=True)
-    with VtmTileSession(TILE_ARGS_WITH_HOTKEYS) as s:
+    with VtmTileSession(TILE_ARGS_WITH_HOTKEYS, vtm_config=TILE_CONFIG_WITH_HOTKEYS) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
 
@@ -448,7 +451,7 @@ def test_rerun_application_replaces_focused_pane_via_hotkey():
     """ReRunApplication() with focused applet: close + rerun (single hotkey)."""
     print("TEST: ReRunApplication on focused applet closes+reruns ... ",
           end="", flush=True)
-    with VtmTileSession(TILE_ARGS_WITH_HOTKEYS) as s:
+    with VtmTileSession(TILE_ARGS_WITH_HOTKEYS, vtm_config=TILE_CONFIG_WITH_HOTKEYS) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
 

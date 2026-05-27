@@ -93,7 +93,7 @@ TILE_CONFIG = (
         '<TileClosePane="vtm.tile.ClosePane();"/>'
     "</Scripting>"
 )
-TILE_ARGS = ["-c", TILE_CONFIG]
+TILE_ARGS = []  # TILE_CONFIG is shipped via $VTM_CONFIG (vtm_config kwarg).
 
 SPLIT_HZ_KEY  = b"\x1b|"   # Alt+Shift+|  → SplitPane(horizontal)
 ZOOM_PANE_KEY = b"\x1bZ"   # Alt+Shift+Z  → ZoomPane
@@ -175,10 +175,11 @@ def sgr_release(col, row, button=0): return f"\033[<{button};{col};{row}m".encod
 
 
 class VtmSession:
-    def __init__(self, binary, args, settle_delay=TILE_SETTLE_DELAY):
+    def __init__(self, binary, args, settle_delay=TILE_SETTLE_DELAY, vtm_config=None):
         self.binary = binary
         self.args = args
         self.settle_delay = settle_delay
+        self.vtm_config = vtm_config
         self.master_fd = None
         self.pid = None
         self._screen_buf = b""
@@ -194,6 +195,8 @@ class VtmSession:
             os.dup2(slave_fd, 0); os.dup2(slave_fd, 1); os.dup2(slave_fd, 2)
             if slave_fd > 2:
                 os.close(slave_fd)
+            if self.vtm_config is not None:
+                os.environ["VTM_CONFIG"] = self.vtm_config
             os.execvp(self.binary, [self.binary] + self.args)
             sys.exit(1)
         os.close(slave_fd)
@@ -291,7 +294,7 @@ def test_close_button_on_maximized_pane_leaves_empty_slot():
     """
     print("TEST: tile - x close button on maximized pane leaves empty slot ... ",
           end="", flush=True)
-    with VtmSession(VTM_TILE_BINARY, TILE_ARGS) as s:
+    with VtmSession(VTM_TILE_BINARY, TILE_ARGS, vtm_config=TILE_CONFIG) as s:
         if not do_split_and_zoom_right(s):
             print("FAIL - vtm died during split/zoom setup")
             return False
@@ -339,7 +342,7 @@ def test_close_button_on_split_pane_leaves_empty_slot():
     """
     print("TEST: tile - x close button on split right pane leaves empty slot ... ",
           end="", flush=True)
-    with VtmSession(VTM_TILE_BINARY, TILE_ARGS) as s:
+    with VtmSession(VTM_TILE_BINARY, TILE_ARGS, vtm_config=TILE_CONFIG) as s:
         # Split horizontally; the new right pane gets focus.
         s.write(SPLIT_HZ_KEY)
         time.sleep(1.5)
@@ -393,7 +396,7 @@ def test_closepane_on_maximized_pane_leaves_empty_slot():
     """
     print("TEST: tile - ClosePane on maximized pane leaves empty slot ... ",
           end="", flush=True)
-    with VtmSession(VTM_TILE_BINARY, TILE_ARGS) as s:
+    with VtmSession(VTM_TILE_BINARY, TILE_ARGS, vtm_config=TILE_CONFIG) as s:
         if not do_split_and_zoom_right(s):
             print("FAIL - vtm died during split/zoom setup")
             return False

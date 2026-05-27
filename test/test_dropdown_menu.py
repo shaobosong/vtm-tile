@@ -96,7 +96,7 @@ TILE_CONFIG = (
         "</tile>"
     "</config>"
 )
-TILE_ARGS = ["-c", TILE_CONFIG]
+TILE_ARGS = []  # TILE_CONFIG is shipped via $VTM_CONFIG (vtm_config kwarg).
 
 
 # Multi-level config exercising menu::open_dropdown_popup's cascading
@@ -141,7 +141,7 @@ NEST_TILE_CONFIG = (
         "</tile>"
     "</config>"
 )
-NEST_TILE_ARGS = ["-c", NEST_TILE_CONFIG]
+NEST_TILE_ARGS = []  # NEST_TILE_CONFIG is shipped via $VTM_CONFIG.
 
 
 # Flip-left test fixture. Geometry (chosen so the flip kicks in
@@ -193,7 +193,7 @@ FLIP_TILE_CONFIG = (
         "</tile>"
     "</config>"
 )
-FLIP_TILE_ARGS = ["-c", FLIP_TILE_CONFIG]
+FLIP_TILE_ARGS = []  # FLIP_TILE_CONFIG is shipped via $VTM_CONFIG.
 
 
 # Event-passthrough fixture: two side-by-side dropdown triggers on
@@ -230,7 +230,7 @@ PASSTHROUGH_TILE_CONFIG = (
         "</tile>"
     "</config>"
 )
-PASSTHROUGH_TILE_ARGS = ["-c", PASSTHROUGH_TILE_CONFIG]
+PASSTHROUGH_TILE_ARGS = []  # PASSTHROUGH_TILE_CONFIG is shipped via $VTM_CONFIG.
 
 
 # Non-dropdown-button passthrough fixture: a dropdown trigger
@@ -261,7 +261,7 @@ PT_BUTTON_TILE_CONFIG = (
         "</tile>"
     "</config>"
 )
-PT_BUTTON_TILE_ARGS = ["-c", PT_BUTTON_TILE_CONFIG]
+PT_BUTTON_TILE_ARGS = []  # PT_BUTTON_TILE_CONFIG is shipped via $VTM_CONFIG.
 
 
 # Keyboard-navigation / '&Label' shortcut fixture. The trigger uses
@@ -314,7 +314,7 @@ KB_TILE_CONFIG = (
             "</tile>"
         "</config>"
 )
-KB_TILE_ARGS = ["-c", KB_TILE_CONFIG]
+KB_TILE_ARGS = []  # KB_TILE_CONFIG is shipped via $VTM_CONFIG.
 
 # Raw byte sequences for navigation keys. SGR mouse handles mouse; for
 # keyboard, vtm-tile speaks standard ANSI CSI sequences as a terminal
@@ -353,7 +353,7 @@ PAD_TILE_CONFIG = (
         "</tile>"
     "</config>"
 )
-PAD_TILE_ARGS = ["-c", PAD_TILE_CONFIG]
+PAD_TILE_ARGS = []  # PAD_TILE_CONFIG is shipped via $VTM_CONFIG.
 
 
 def kill_all_vtm():
@@ -421,9 +421,10 @@ def strip_ansi(buf):
 
 
 class VtmTileSession:
-    def __init__(self, args, settle_delay=SETTLE_DELAY):
+    def __init__(self, args, settle_delay=SETTLE_DELAY, vtm_config=None):
         self.args = args
         self.settle_delay = settle_delay
+        self.vtm_config = vtm_config
         self.master_fd = None
         self.pid = None
         self._screen_buf = b""
@@ -441,6 +442,8 @@ class VtmTileSession:
             os.dup2(slave_fd, 2)
             if slave_fd > 2:
                 os.close(slave_fd)
+            if self.vtm_config is not None:
+                os.environ["VTM_CONFIG"] = self.vtm_config
             os.execvp(VTM_TILE_BINARY, [VTM_TILE_BINARY] + self.args)
             sys.exit(1)
         os.close(slave_fd)
@@ -627,7 +630,7 @@ def test_dropdown_menu_item_loads_from_xml_and_opens_popup():
     """
     print("TEST: dropdown menu item: popup appears, menu bar stays visible ... ",
           end="", flush=True)
-    with VtmTileSession(TILE_ARGS) as s:
+    with VtmTileSession(TILE_ARGS, vtm_config=TILE_CONFIG) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
         s.snapshot(timeout=2.0)
@@ -704,7 +707,7 @@ def test_dropdown_menu_keeps_menubar_visible_with_log_repaint():
     """
     print("TEST: dropdown re-open preserves menu bar ... ",
           end="", flush=True)
-    with VtmTileSession(TILE_ARGS) as s:
+    with VtmTileSession(TILE_ARGS, vtm_config=TILE_CONFIG) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
         s.snapshot(timeout=2.0)
@@ -751,7 +754,7 @@ def test_nested_dropdown_submenu_opens_to_the_right():
     """
     print("TEST: nested dropdown: submenu opens to the right ... ",
           end="", flush=True)
-    with VtmTileSession(NEST_TILE_ARGS) as s:
+    with VtmTileSession(NEST_TILE_ARGS, vtm_config=NEST_TILE_CONFIG) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
         s.snapshot(timeout=2.0)
@@ -888,7 +891,7 @@ def test_nested_dropdown_submenu_flips_left_when_no_room_on_right():
     saved_cols = COLS
     COLS = FLIP_COLS
     try:
-        with VtmTileSession(FLIP_TILE_ARGS) as s:
+        with VtmTileSession(FLIP_TILE_ARGS, vtm_config=FLIP_TILE_CONFIG) as s:
             if not s.is_alive():
                 return fail("vtm-tile did not start")
             s.snapshot(timeout=2.0)
@@ -955,7 +958,7 @@ def test_nested_dropdown_submenu_opens_on_hover_no_click():
     """
     print("TEST: nested dropdown: submenu opens on hover (no click) ... ",
           end="", flush=True)
-    with VtmTileSession(NEST_TILE_ARGS) as s:
+    with VtmTileSession(NEST_TILE_ARGS, vtm_config=NEST_TILE_CONFIG) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
         s.snapshot(timeout=2.0)
@@ -1004,7 +1007,7 @@ def test_dropdown_esc_dismisses_chain():
     """
     print("TEST: dropdown: Esc dismisses chain ... ",
           end="", flush=True)
-    with VtmTileSession(NEST_TILE_ARGS) as s:
+    with VtmTileSession(NEST_TILE_ARGS, vtm_config=NEST_TILE_CONFIG) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
         s.snapshot(timeout=2.0)
@@ -1068,7 +1071,7 @@ def test_dropdown_outside_click_dismisses_chain():
     """
     print("TEST: dropdown: outside click dismisses chain ... ",
           end="", flush=True)
-    with VtmTileSession(NEST_TILE_ARGS) as s:
+    with VtmTileSession(NEST_TILE_ARGS, vtm_config=NEST_TILE_CONFIG) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
         s.snapshot(timeout=2.0)
@@ -1128,7 +1131,7 @@ def test_nested_dropdown_leaf_click_dismisses_chain():
     """
     print("TEST: nested dropdown: leaf click tears down whole chain ... ",
           end="", flush=True)
-    with VtmTileSession(NEST_TILE_ARGS) as s:
+    with VtmTileSession(NEST_TILE_ARGS, vtm_config=NEST_TILE_CONFIG) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
         s.snapshot(timeout=2.0)
@@ -1204,7 +1207,7 @@ def test_submenu_background_progressively_darker():
     """
     print("TEST: submenu bg progressively darker per level ... ",
           end="", flush=True)
-    with VtmTileSession(NEST_TILE_ARGS) as s:
+    with VtmTileSession(NEST_TILE_ARGS, vtm_config=NEST_TILE_CONFIG) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
         s.snapshot(timeout=2.0)
@@ -1279,7 +1282,7 @@ def test_hover_brightens_bg_keeps_fg_unchanged():
     """
     print("TEST: hover brightens bg, fg unchanged ... ",
           end="", flush=True)
-    with VtmTileSession(NEST_TILE_ARGS) as s:
+    with VtmTileSession(NEST_TILE_ARGS, vtm_config=NEST_TILE_CONFIG) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
         s.snapshot(timeout=2.0)
@@ -1371,7 +1374,7 @@ def test_click_another_trigger_closes_current_and_opens_new():
     """
     print("TEST: click another menu trigger closes current + opens new ... ",
           end="", flush=True)
-    with VtmTileSession(PASSTHROUGH_TILE_ARGS) as s:
+    with VtmTileSession(PASSTHROUGH_TILE_ARGS, vtm_config=PASSTHROUGH_TILE_CONFIG) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
         s.snapshot(timeout=2.0)
@@ -1444,7 +1447,7 @@ def test_hover_another_trigger_shows_hover_feedback():
     """
     print("TEST: hover another trigger shows hover feedback ... ",
           end="", flush=True)
-    with VtmTileSession(PASSTHROUGH_TILE_ARGS) as s:
+    with VtmTileSession(PASSTHROUGH_TILE_ARGS, vtm_config=PASSTHROUGH_TILE_CONFIG) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
         s.snapshot(timeout=2.0)
@@ -1537,7 +1540,7 @@ def test_click_non_dropdown_button_dismisses_open_chain():
     """
     print("TEST: click non-dropdown menu button dismisses open chain ... ",
           end="", flush=True)
-    with VtmTileSession(PT_BUTTON_TILE_ARGS) as s:
+    with VtmTileSession(PT_BUTTON_TILE_ARGS, vtm_config=PT_BUTTON_TILE_CONFIG) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
         s.snapshot(timeout=2.0)
@@ -1619,7 +1622,7 @@ def test_click_empty_menubar_area_dismisses_chain():
     """
     print("TEST: click empty menu-bar area dismisses chain ... ",
           end="", flush=True)
-    with VtmTileSession(NEST_TILE_ARGS) as s:
+    with VtmTileSession(NEST_TILE_ARGS, vtm_config=NEST_TILE_CONFIG) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
         s.snapshot(timeout=2.0)
@@ -1705,7 +1708,7 @@ def test_amp_label_strips_marker_and_underlines_shortcut():
     """
     print("TEST: '&Label' strips marker, underlines shortcut ... ",
           end="", flush=True)
-    with VtmTileSession(KB_TILE_ARGS) as s:
+    with VtmTileSession(KB_TILE_ARGS, vtm_config=KB_TILE_CONFIG) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
         s.snapshot(timeout=2.0)
@@ -1776,7 +1779,7 @@ def test_keyboard_down_up_arrows_select_rows():
     """
     print("TEST: kbd Down/Up arrows select rows ... ",
           end="", flush=True)
-    with VtmTileSession(KB_TILE_ARGS) as s:
+    with VtmTileSession(KB_TILE_ARGS, vtm_config=KB_TILE_CONFIG) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
         if _open_kb_popup(s) is None:
@@ -1833,7 +1836,7 @@ def test_keyboard_right_arrow_opens_submenu_and_focuses_first_row():
     """
     print("TEST: kbd Right arrow opens submenu, focuses first row ... ",
           end="", flush=True)
-    with VtmTileSession(KB_TILE_ARGS) as s:
+    with VtmTileSession(KB_TILE_ARGS, vtm_config=KB_TILE_CONFIG) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
         if _open_kb_popup(s) is None:
@@ -1880,7 +1883,7 @@ def test_keyboard_left_arrow_closes_submenu_returns_to_parent():
     """
     print("TEST: kbd Left arrow closes submenu, returns to parent ... ",
           end="", flush=True)
-    with VtmTileSession(KB_TILE_ARGS) as s:
+    with VtmTileSession(KB_TILE_ARGS, vtm_config=KB_TILE_CONFIG) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
         if _open_kb_popup(s) is None:
@@ -1933,7 +1936,7 @@ def test_keyboard_enter_activates_leaf_and_dismisses_chain():
     """
     print("TEST: kbd Enter activates leaf, dismisses chain ... ",
           end="", flush=True)
-    with VtmTileSession(KB_TILE_ARGS) as s:
+    with VtmTileSession(KB_TILE_ARGS, vtm_config=KB_TILE_CONFIG) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
         coords = _open_kb_popup(s)
@@ -1973,7 +1976,7 @@ def test_keyboard_shortcut_letter_activates_matching_row():
     """
     print("TEST: kbd shortcut letter activates matching row ... ",
           end="", flush=True)
-    with VtmTileSession(KB_TILE_ARGS) as s:
+    with VtmTileSession(KB_TILE_ARGS, vtm_config=KB_TILE_CONFIG) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
         coords = _open_kb_popup(s)
@@ -2041,7 +2044,7 @@ def test_keyboard_nav_is_independent_of_mouse_hover():
     """
     print("TEST: kbd nav independent of stationary mouse hover ... ",
           end="", flush=True)
-    with VtmTileSession(KB_TILE_ARGS) as s:
+    with VtmTileSession(KB_TILE_ARGS, vtm_config=KB_TILE_CONFIG) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
         if _open_kb_popup(s) is None:
@@ -2122,7 +2125,7 @@ def test_keyboard_does_not_pass_through_to_terminal():
     """
     print("TEST: kbd events do not pass through to terminal ... ",
           end="", flush=True)
-    with VtmTileSession(KB_TILE_ARGS, settle_delay=2.0) as s:
+    with VtmTileSession(KB_TILE_ARGS, settle_delay=2.0, vtm_config=KB_TILE_CONFIG) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
         if _open_kb_popup(s) is None:
@@ -2170,7 +2173,7 @@ def test_menu_padding_config_controls_horizontal_cell_padding():
     """
     print("TEST: <menu padding=N> controls item horizontal padding ... ",
           end="", flush=True)
-    with VtmTileSession(PAD_TILE_ARGS) as s:
+    with VtmTileSession(PAD_TILE_ARGS, vtm_config=PAD_TILE_CONFIG) as s:
         if not s.is_alive():
             return fail("vtm-tile did not start")
         s.snapshot(timeout=2.0)

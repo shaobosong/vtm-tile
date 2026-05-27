@@ -244,10 +244,11 @@ def row1_text(grid):
 # Session helpers
 # ---------------------------------------------------------------------------
 
-def launch_vtm(cols, rows=ROWS, extra_args=None):
+def launch_vtm(cols, rows=ROWS, extra_args=None, vtm_config=None):
     """
     Fork a vtm-desk -r term process in a pty of size (rows, cols).
     Returns (master_fd, pid).  Caller is responsible for cleanup.
+    `vtm_config` is shipped to the child via $VTM_CONFIG.
     """
     args = [VTM_DESK_BINARY, "-r", "term"]
     if extra_args:
@@ -264,6 +265,8 @@ def launch_vtm(cols, rows=ROWS, extra_args=None):
         os.dup2(slave_fd, 2)
         if slave_fd > 2:
             os.close(slave_fd)
+        if vtm_config is not None:
+            os.environ["VTM_CONFIG"] = vtm_config
         os.execvp(args[0], args)
         sys.exit(1)
     os.close(slave_fd)
@@ -373,8 +376,10 @@ def test_close_button_functional():
     close_col = cols - 2  # expected 1-indexed column of ×
 
     # Use confirm_close=0 so vtm exits immediately without a dialog.
-    extra_args = ["-c", "<config><terminal><confirm_close=0/></terminal></config>"]
-    master_fd, pid = launch_vtm(cols, extra_args=extra_args)
+    master_fd, pid = launch_vtm(
+        cols,
+        vtm_config="<config><terminal><confirm_close=0/></terminal></config>",
+    )
     try:
         time.sleep(SETTLE_DELAY)
         read_all(master_fd, timeout=1.0)  # drain initial output
