@@ -2423,16 +2423,18 @@ def test_dropdown_bottom_edge_uses_upper_half_block_with_menu_bg_fg():
 
 
 def test_dropdown_edge_background_is_transparent():
-    """The decorative edge rows leave the cell background untouched —
-    only fg + txt are set. So the bg of an edge cell must differ from
-    the popup body's bg (which IS the level_bg).
+    """The decorative edge rows wipe the cell first (clearing cursor,
+    style bits, hyperlinks etc.) then set only fg + txt, leaving bg at
+    wipe's alpha=0 sentinel so the layer beneath blends through. So an
+    edge cell's rendered bg must differ from the popup body's bg
+    (which IS the level_bg).
 
     If we accidentally painted bg=level_bg on the edge, the edge cell's
     bg would equal the popup row bg and the visual "transparent" effect
     would be lost. This test asserts the inverse: at least one edge
-    glyph (the bottom edge ▀) carries a bg distinct from the level_bg
-    that its own fg equals. Together with the top/bottom edge tests
-    above, this confirms the cell was painted as fg-only.
+    glyph carries a bg distinct from the level_bg that its own fg
+    equals. Together with the top/bottom edge tests above, this
+    confirms the cell was painted as fg-only over a transparent bg.
     """
     print("TEST: dropdown edge bg is transparent (≠ menu-bg) ... ",
           end="", flush=True)

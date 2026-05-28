@@ -1598,10 +1598,15 @@ namespace netxs::app::shared
                             });
                         }
                     }
+                    // wipe() first so any cursor / style bits / hyperlink
+                    // on the cell beneath are cleared; fgc then sets only
+                    // the foreground, leaving bg at wipe's alpha=0 so the
+                    // underlying layer's bg blends through.
                     if (has_top_edge)
                     {
                         parent_canvas.fill(rect{{ px, py - 1 }, { popup_w, 1 }}, [=](cell& c)
                         {
+                            c.wipe();
                             c.fgc(level_bg).txt("\xE2\x96\x84").link(ovl_id); // ▄
                         });
                     }
@@ -1609,6 +1614,7 @@ namespace netxs::app::shared
                     {
                         parent_canvas.fill(rect{{ px, py + popup_h }, { popup_w, 1 }}, [=](cell& c)
                         {
+                            c.wipe();
                             c.fgc(level_bg).txt("\xE2\x96\x80").link(ovl_id); // ▀
                         });
                     }
