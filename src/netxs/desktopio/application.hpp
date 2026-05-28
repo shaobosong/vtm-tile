@@ -2218,6 +2218,20 @@ namespace netxs::app::shared
                         menu::open_dropdown_popup(boss, item.children);
                         gear.dismiss();
                     });
+                    // Hover-switch: once any dropdown has been opened, moving
+                    // the cursor onto another menu-bar dropdown trigger swaps
+                    // the chain over to it. When no chain is open, hover is
+                    // a no-op (clicks remain the only way to first open one).
+                    boss.on(tier::mouserelease, input::key::MouseEnter, [&boss, &item](hids& /*gear*/)
+                    {
+                        auto active = menu::active_chain_slot();
+                        if (!active) return;
+                        if (auto trigger_lock = active->trigger_shadow.lock())
+                        {
+                            if (trigger_lock.get() == static_cast<ui::base*>(&boss)) return;
+                        }
+                        menu::open_dropdown_popup(boss, item.children);
+                    });
                 }
                 else
                 {
