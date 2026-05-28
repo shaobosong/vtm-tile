@@ -2121,7 +2121,7 @@ namespace netxs::app::shared
         //              pattern in app::tile (see netxs/apps/tile.hpp) and is
         //              attached by the application wrapper on demand. Until
         //              the wrapper subscribes, the click is a visible no-op.
-        static auto load_item(settings& config, auto menuitem_ptr) -> link
+        static auto load_item(settings& config, auto menuitem_ptr, bool top_level = false) -> link
         {
             auto item = menu::item{};
             auto menuitem_context = config.settings::push_context(menuitem_ptr);
@@ -2144,6 +2144,7 @@ namespace netxs::app::shared
                     item.children.push_back(std::move(child_item));
                 }
                 item.alive = !item.children.empty();
+                if (top_level) item.label += " ▾"; // Menu-bar dropdown triggers only; nested submenu rows don't get the chevron.
             }
             else if (item.type == menu::kind::separator)
             {
@@ -2232,7 +2233,7 @@ namespace netxs::app::shared
             auto menuitem_ptr_list = config.settings::take_ptr_list_for_name("item");
             for (auto menuitem_ptr : menuitem_ptr_list)
             {
-                list.push_back(load_item(config, menuitem_ptr));
+                list.push_back(load_item(config, menuitem_ptr, true));
             }
             return menu::create(config, list);
         };
