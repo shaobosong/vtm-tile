@@ -612,6 +612,62 @@ def find_fg_rgb_before_marker(raw_buf, marker):
     return (int(last.group(1)), int(last.group(2)), int(last.group(3)))
 
 
+def find_marker_with_fg_positions(raw_buf, marker, expected_fg_rgb):
+    """All on-screen (row, col) positions where `marker` was painted with
+    `expected_fg_rgb` as its 24-bit foreground.
+
+    Walks the raw paint stream forward, tracking the most recent CUP and
+    the most recent SGR 38;2;R;G;B. For every occurrence of `marker` that
+    follows a matching fg SGR (with no intervening fg SGR overriding it),
+    derive the marker's screen coord from CUP + the visible-cell length
+    of the bytes painted between CUP and the marker.
+
+    Used to disambiguate edge-decoration glyphs (▄/▀) painted by the
+    dropdown popup overlay from any other ▀ emitted on the menu-bar
+    cover etc., which use a different fg color.
+    """
+    marker_b = marker.encode() if isinstance(marker, str) else marker
+    cup_re = re.compile(rb"\x1b\[(\d+);(\d+)H")
+    fg_re  = re.compile(rb"38;2;(\d+);(\d+);(\d+)")
+    positions = []
+    cur_row = None
+    cur_col = None
+    cur_fg = None
+    # Combined token stream: CUPs, fg SGRs, and marker hits — processed
+    # in source order so the current row/col/fg reflect what the paint
+    # cursor would see at each marker.
+    events = []
+    for m in cup_re.finditer(raw_buf):
+        events.append((m.start(), "cup", m))
+    for m in fg_re.finditer(raw_buf):
+        events.append((m.start(), "fg", m))
+    pos = 0
+    while True:
+        idx = raw_buf.find(marker_b, pos)
+        if idx < 0:
+            break
+        events.append((idx, "mark", idx))
+        pos = idx + len(marker_b)
+    events.sort(key=lambda e: e[0])
+    last_cup_end = 0
+    for evt_pos, kind, payload in events:
+        if kind == "cup":
+            cur_row = int(payload.group(1))
+            cur_col = int(payload.group(2))
+            last_cup_end = payload.end()
+        elif kind == "fg":
+            cur_fg = (int(payload.group(1)),
+                      int(payload.group(2)),
+                      int(payload.group(3)))
+        else:  # "mark"
+            if cur_row is None or cur_fg != expected_fg_rgb:
+                continue
+            between = strip_ansi(raw_buf[last_cup_end:evt_pos]).decode(
+                "utf-8", errors="replace")
+            positions.append((cur_row, cur_col + len(between)))
+    return positions
+
+
 def fail(msg):
     print(f"FAIL - {msg}")
     return False
@@ -2229,6 +2285,225 @@ def test_menu_padding_config_controls_horizontal_cell_padding():
         return True
 
 
+def test_dropdown_top_edge_uses_lower_half_block_with_menu_bg_fg():
+    """The dropdown popup paints a decorative '▄' (U+2584, lower half
+    block) row immediately above its first item row. The half-block's
+    foreground equals the popup body's background colour, while its
+    own background is left untouched (the cell behind it shows
+    through). Visually, the menu colour bleeds half a cell into the
+    row above the popup — giving the popup a "soft top" that flows
+    into the menu bar.
+
+    Verifies the contract added to menu::_attach_popup_overlay:
+      - At least one '▄' is emitted with fg == depth-0 popup level_bg
+        (R=49, G=50, B=68) — derived from the per-level palette in
+        application.hpp.
+      - That '▄' is positioned exactly one row above the popup's
+        first item row (NEST_LEAF_X), at the same column as the
+        popup's left edge.
+    """
+    print("TEST: dropdown top edge ▄ with menu-bg fg ... ",
+          end="", flush=True)
+    with VtmTileSession(NEST_TILE_ARGS, vtm_config=NEST_TILE_CONFIG) as s:
+        if not s.is_alive():
+            return fail("vtm-tile did not start")
+        s.snapshot(timeout=2.0)
+
+        coords = find_marker_position(s._screen_buf, "[NEST]")
+        if coords is None:
+            return fail("trigger '[NEST]' not rendered")
+        trigger_row, trigger_col = coords
+
+        # Open the parent popup.
+        s.reset_buffer()
+        s.click(trigger_col + 2, trigger_row)
+        s.snapshot(timeout=1.5)
+
+        leaf_pos = find_marker_position(s._screen_buf, NEST_LEAF_X)
+        if leaf_pos is None:
+            return fail("could not locate first popup row")
+        first_row, _ = leaf_pos
+
+        # Depth-0 level_bg from application.hpp = (0x31, 0x32, 0x44).
+        level_bg = (49, 50, 68)
+        top_positions = find_marker_with_fg_positions(
+            s._screen_buf, "▄", level_bg)
+        if not top_positions:
+            return fail(
+                "no '▄' (U+2584) glyph emitted with fg=(49,50,68) — "
+                "the dropdown's top decoration is missing"
+            )
+
+        # At least one ▄ must land on the row IMMEDIATELY above the
+        # popup's first item.
+        expected_edge_row = first_row - 1
+        edge_hits = [p for p in top_positions if p[0] == expected_edge_row]
+        if not edge_hits:
+            return fail(
+                f"'▄' with fg=(49,50,68) was emitted but not on the "
+                f"expected edge row {expected_edge_row} (one above the "
+                f"first popup item at row {first_row}); rows seen: "
+                f"{sorted({p[0] for p in top_positions})}"
+            )
+
+        if not s.is_alive():
+            return fail("vtm-tile crashed during top-edge test")
+        if not s.normal_exit():
+            return fail("vtm-tile did not exit cleanly")
+        print(f"PASS (edge_row={expected_edge_row}, first_row={first_row}, "
+              f"hits={len(edge_hits)})")
+        return True
+
+
+def test_dropdown_bottom_edge_uses_upper_half_block_with_menu_bg_fg():
+    """The dropdown popup paints a decorative '▀' (U+2580, upper half
+    block) row immediately below its last item row. Like the top edge,
+    the foreground equals the popup body's background colour and the
+    cell's background is left untouched (transparent — whatever's
+    behind shows through).
+
+    Verifies the contract added to menu::_attach_popup_overlay:
+      - At least one '▀' is emitted with fg == depth-0 popup level_bg
+        (R=49, G=50, B=68).
+      - That '▀' lands exactly one row below the popup's LAST item
+        row (NEST_LEAF_Y).
+
+    The menu-bar's cover layer also emits '▀' glyphs (tile.hpp), but
+    those use the window background as fg, not the popup level_bg, so
+    filtering by fg disambiguates the bottom-edge ▀ from the cover ▀.
+    """
+    print("TEST: dropdown bottom edge ▀ with menu-bg fg ... ",
+          end="", flush=True)
+    with VtmTileSession(NEST_TILE_ARGS, vtm_config=NEST_TILE_CONFIG) as s:
+        if not s.is_alive():
+            return fail("vtm-tile did not start")
+        s.snapshot(timeout=2.0)
+
+        coords = find_marker_position(s._screen_buf, "[NEST]")
+        if coords is None:
+            return fail("trigger '[NEST]' not rendered")
+        trigger_row, trigger_col = coords
+
+        # Open the parent popup.
+        s.reset_buffer()
+        s.click(trigger_col + 2, trigger_row)
+        s.snapshot(timeout=1.5)
+
+        last_pos = find_marker_position(s._screen_buf, NEST_LEAF_Y)
+        if last_pos is None:
+            return fail("could not locate last popup row")
+        last_row, _ = last_pos
+
+        level_bg = (49, 50, 68)
+        bot_positions = find_marker_with_fg_positions(
+            s._screen_buf, "▀", level_bg)
+        if not bot_positions:
+            return fail(
+                "no '▀' (U+2580) glyph emitted with fg=(49,50,68) — "
+                "the dropdown's bottom decoration is missing"
+            )
+
+        expected_edge_row = last_row + 1
+        edge_hits = [p for p in bot_positions if p[0] == expected_edge_row]
+        if not edge_hits:
+            return fail(
+                f"'▀' with fg=(49,50,68) was emitted but not on the "
+                f"expected edge row {expected_edge_row} (one below the "
+                f"last popup item at row {last_row}); rows seen: "
+                f"{sorted({p[0] for p in bot_positions})}"
+            )
+
+        if not s.is_alive():
+            return fail("vtm-tile crashed during bottom-edge test")
+        if not s.normal_exit():
+            return fail("vtm-tile did not exit cleanly")
+        print(f"PASS (edge_row={expected_edge_row}, last_row={last_row}, "
+              f"hits={len(edge_hits)})")
+        return True
+
+
+def test_dropdown_edge_background_is_transparent():
+    """The decorative edge rows leave the cell background untouched —
+    only fg + txt are set. So the bg of an edge cell must differ from
+    the popup body's bg (which IS the level_bg).
+
+    If we accidentally painted bg=level_bg on the edge, the edge cell's
+    bg would equal the popup row bg and the visual "transparent" effect
+    would be lost. This test asserts the inverse: at least one edge
+    glyph (the bottom edge ▀) carries a bg distinct from the level_bg
+    that its own fg equals. Together with the top/bottom edge tests
+    above, this confirms the cell was painted as fg-only.
+    """
+    print("TEST: dropdown edge bg is transparent (≠ menu-bg) ... ",
+          end="", flush=True)
+    with VtmTileSession(NEST_TILE_ARGS, vtm_config=NEST_TILE_CONFIG) as s:
+        if not s.is_alive():
+            return fail("vtm-tile did not start")
+        s.snapshot(timeout=2.0)
+
+        coords = find_marker_position(s._screen_buf, "[NEST]")
+        if coords is None:
+            return fail("trigger '[NEST]' not rendered")
+        trigger_row, trigger_col = coords
+
+        s.reset_buffer()
+        s.click(trigger_col + 2, trigger_row)
+        s.snapshot(timeout=1.5)
+
+        level_bg = (49, 50, 68)
+        # Scan the raw stream for ANY ▀-or-▄ painted with fg=level_bg.
+        # Walk forward tracking the most recent bg SGR (48;2;R;G;B) and
+        # most recent fg SGR; for every edge glyph we encounter, record
+        # the bg that was in effect at that point. The test passes if at
+        # least one edge glyph carried a bg ≠ level_bg.
+        raw = s._screen_buf
+        cup_re = re.compile(rb"\x1b\[(\d+);(\d+)H")
+        fg_re  = re.compile(rb"38;2;(\d+);(\d+);(\d+)")
+        bg_re  = re.compile(rb"48;2;(\d+);(\d+);(\d+)")
+        events = []
+        for m in fg_re.finditer(raw):
+            events.append((m.start(), "fg", m))
+        for m in bg_re.finditer(raw):
+            events.append((m.start(), "bg", m))
+        for glyph in (b"\xe2\x96\x84", b"\xe2\x96\x80"):
+            pos = 0
+            while True:
+                idx = raw.find(glyph, pos)
+                if idx < 0: break
+                events.append((idx, "mark", idx))
+                pos = idx + len(glyph)
+        events.sort(key=lambda e: e[0])
+        cur_fg = None
+        cur_bg = None
+        transparent_edge_seen = False
+        for _pos, kind, payload in events:
+            if kind == "fg":
+                cur_fg = (int(payload.group(1)),
+                          int(payload.group(2)),
+                          int(payload.group(3)))
+            elif kind == "bg":
+                cur_bg = (int(payload.group(1)),
+                          int(payload.group(2)),
+                          int(payload.group(3)))
+            else:
+                if cur_fg == level_bg and cur_bg is not None and cur_bg != level_bg:
+                    transparent_edge_seen = True
+                    break
+        if not transparent_edge_seen:
+            return fail(
+                "no edge glyph found whose fg=level_bg but bg≠level_bg "
+                "— either the edge was painted with bg=level_bg "
+                "(opaque) or no edges were emitted at all"
+            )
+
+        if not s.is_alive():
+            return fail("vtm-tile crashed during edge-transparency test")
+        if not s.normal_exit():
+            return fail("vtm-tile did not exit cleanly")
+        print("PASS")
+        return True
+
+
 TESTS = [
     test_dropdown_menu_item_loads_from_xml_and_opens_popup,
     test_dropdown_menu_keeps_menubar_visible_with_log_repaint,
@@ -2253,6 +2528,9 @@ TESTS = [
     test_keyboard_nav_is_independent_of_mouse_hover,
     test_keyboard_does_not_pass_through_to_terminal,
     test_menu_padding_config_controls_horizontal_cell_padding,
+    test_dropdown_top_edge_uses_lower_half_block_with_menu_bg_fg,
+    test_dropdown_bottom_edge_uses_upper_half_block_with_menu_bg_fg,
+    test_dropdown_edge_background_is_transparent,
 ]
 
 

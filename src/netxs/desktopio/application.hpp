@@ -1412,7 +1412,10 @@ namespace netxs::app::shared
                     gear.set_handled(faux);
                 };
 
-            _attach_popup_overlay(chain, twod{ anchor.x, anchor.y + trigger_h }, items);
+            // Anchor one row below the trigger's bottom edge so the
+            // popup's '▄' top-edge decoration lands in the row beneath
+            // the menu bar rather than overwriting menu-bar cells.
+            _attach_popup_overlay(chain, twod{ anchor.x, anchor.y + trigger_h + 1 }, items);
         }
 
         // Attach a single popup overlay anchored at `top_left`, listing `items`.
@@ -1487,7 +1490,20 @@ namespace netxs::app::shared
                     if (py < 0) py = 0;
                     *popup_px_ptr = px;
                     *popup_py_ptr = py;
-                    *painted_rect_ptr = rect{ { px, py }, { popup_w, popup_h } };
+                    // Decorative half-block edges extend the popup into the
+                    // rows immediately above and below it. They paint with
+                    // bg=transparent and fg=menu background, so the menu
+                    // colour bleeds into the adjacent row (▄ at the top fills
+                    // the lower half of the row above; ▀ at the bottom fills
+                    // the upper half of the row below). Following the
+                    // command-bar pattern from tile.hpp, only fg/txt/link
+                    // are set so the underlying bg shows through.
+                    auto has_top_edge    = py > 0;
+                    auto has_bottom_edge = py + popup_h < area.size.y;
+                    auto rect_y          = has_top_edge ? py - 1 : py;
+                    auto rect_h          = popup_h + (has_top_edge ? 1 : 0)
+                                                   + (has_bottom_edge ? 1 : 0);
+                    *painted_rect_ptr = rect{ { px, rect_y }, { popup_w, rect_h } };
                     // Per-level palette. Each submenu level subtracts a
                     // fixed amount from every RGB channel of the root
                     // popup's background, so deeper levels are visibly
@@ -1581,6 +1597,20 @@ namespace netxs::app::shared
                                 c.bgc(bg).fgc(fg).txt("▸").link(ovl_id);
                             });
                         }
+                    }
+                    if (has_top_edge)
+                    {
+                        parent_canvas.fill(rect{{ px, py - 1 }, { popup_w, 1 }}, [=](cell& c)
+                        {
+                            c.fgc(level_bg).txt("\xE2\x96\x84").link(ovl_id); // ▄
+                        });
+                    }
+                    if (has_bottom_edge)
+                    {
+                        parent_canvas.fill(rect{{ px, py + popup_h }, { popup_w, 1 }}, [=](cell& c)
+                        {
+                            c.fgc(level_bg).txt("\xE2\x96\x80").link(ovl_id); // ▀
+                        });
                     }
                 };
                 // open_submenu_for_row(idx): if idx is a submenu trigger and
