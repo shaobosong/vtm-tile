@@ -5360,10 +5360,17 @@ namespace netxs::app::tile
                                 });
 
                                 // Upper decoration: ▄ above entry row (fg = entry bg, bg = transparent).
+                                // st.wipe()/px.wipe() drop any cursor / style bits /
+                                // hyperlink from the cell beneath without touching uv,
+                                // so the underlying cell's bg color is preserved (true
+                                // transparency — a full c.wipe() would zero bg too,
+                                // which renders as opaque black, not blend-through).
                                 if (dlg_y > 0)
                                 {
                                     parent_canvas.fill(rect{{ dlg_x, dlg_y - 1 }, { dlg_w, 1 }}, [=, ovl_id = ovl_id](cell& c)
                                     {
+                                        c.st.wipe();
+                                        c.px.wipe();
                                         c.fgc(cb_surface).txt("\xe2\x96\x84").link(ovl_id); // ▄
                                     });
                                 }
@@ -5444,8 +5451,14 @@ namespace netxs::app::tile
                                 }
 
                                 // Row 1: lower separator ▀ (fg = entry bg, bg = list bg).
+                                // Wipe only attributes (style bits + hyperlink) so any
+                                // residual cursor/underline/etc from the cell beneath
+                                // does not bleed through; bgc/fgc below set the colors
+                                // explicitly so uv does not need wiping.
                                 parent_canvas.fill(rect{{ dlg_x, dlg_y + 1 }, { dlg_w, 1 }}, [=, ovl_id = ovl_id](cell& c)
                                 {
+                                    c.st.wipe();
+                                    c.px.wipe();
                                     c.bgc(cb_bg).fgc(cb_surface).txt("\xe2\x96\x80").link(ovl_id); // ▀
                                 });
 
