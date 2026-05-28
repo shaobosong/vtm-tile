@@ -683,7 +683,14 @@ namespace netxs::ui
                 if (auto v = gear.tooltip.get_fresh_qiew())
                 {
                     auto tooltip_qiew = v.value();
-                    list.thing.push(ext_gear_id, tooltip_qiew, props.tooltip_colors.fgc(), props.tooltip_colors.bgc());
+                    auto tooltip_anchor = twod{};
+                    auto tooltip_use_anchor = faux;
+                    if (auto& cur = gear.tooltip.current_sptr)
+                    {
+                        tooltip_anchor = cur->anchor_offset;
+                        tooltip_use_anchor = cur->use_anchor;
+                    }
+                    list.thing.push(ext_gear_id, tooltip_qiew, props.tooltip_colors.fgc(), props.tooltip_colors.bgc(), tooltip_anchor, tooltip_use_anchor);
                 }
             }
             list.thing.sendby<true>(canal);

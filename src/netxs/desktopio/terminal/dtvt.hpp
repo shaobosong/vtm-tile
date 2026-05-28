@@ -45,6 +45,8 @@
                     {
                         auto& tooltip_sptr = owner.get_tooltip_reference(tooltip.gear_id);
                         tooltip_sptr->set(tooltip.utf8);
+                        if (tooltip.use_anchor) tooltip_sptr->set_anchor(tooltip.anchor);
+                        else                    tooltip_sptr->use_anchor = faux;
                     }
                 });
             }
