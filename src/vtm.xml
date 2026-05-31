@@ -187,7 +187,7 @@ R"==(
         </colors>
         <border=0/>  <!-- Width of the left and right border of the terminal window. -->
         <tablen=8/>  <!-- Tab length. -->
-        <menu item*>  <!-- Each <item> defaults to type="button". Set type="dropdown" to open a popup list of nested <item> children below the trigger on left-click. Nested <item type="dropdown"> items render with a chevron '>' and cascade as submenus to the right. type="separator" renders a non-interactive horizontal '─' divider inside a dropdown popup; it is skipped by mouse hover and keyboard navigation. -->
+        <menu item*>  <!-- Each <item> defaults to type="button". Set type="dropdown" to open a popup list of nested <item> children below the trigger on left-click. Nested <item type="dropdown"> items render with a chevron '>' and cascade as submenus to the right. type="radiomenu" opens its nested <item> children as a radio-menu group (each row prefixed with ◉/○); the selected row is published by the trigger's own <script> via vtm.item.Check(idx), with a child checked="true" as the static fallback. type="separator" renders a non-interactive horizontal '─' divider inside a dropdown popup; it is skipped by mouse hover and keyboard navigation. -->
             <autohide=/Menu/Defaults/autohide/>
             <slim=/Menu/Defaults/slim/>
             <padding=/Menu/Defaults/padding/>
@@ -196,7 +196,7 @@ R"==(
             <item=/Menu/Buttons/FindNext/>
             <item=/Menu/Buttons/ExclusiveKeyboard/>
             <item=/Menu/Buttons/NoWrapMode/>
-            <item=/Menu/Buttons/ClipboardFormat/>
+            <item=/Menu/Buttons/ClipboardFormatMenu/>  <!-- type="radiomenu" usage example: the clipboard formats as a radio-menu group. -->
             <item=/Menu/Buttons/StdioLog/>
             <item=/Menu/Buttons/ClearScrollback/>
             <item=/Menu/Buttons/Restart/>
@@ -212,6 +212,19 @@ R"==(
                 <item type="dropdown" label="Session" tooltip=" Session submenu " item*>
                     <item label="Restart" tooltip=" Restart the terminal session " script=OnLeftClick|TerminalRestart/>
                     <item label="Clear Scrollback" tooltip=" Clear terminal scrollback "    script=OnLeftClick|TerminalClearScrollback/>
+                </item>
+                <item type="radiomenu" label="Clipboard Format" tooltip=" Clipboard format submenu " item*>  <!-- type="radiomenu" nested inside a dropdown: the formats render as a radio group (◉/○). The <script> below publishes the current format as the selected row via vtm.item.Check(idx); it runs against the owning menu-bar trigger when the submenu opens, so the bullet tracks the live selection even though this radiomenu is nested. -->
+                    <script>
+                        <on="release: e2::form::upon::started"  source="applet"/>
+                        <on="release: terminal::events::selmod" source="terminal"/>
+                        vtm.item.Check(vtm.terminal.ClipboardFormat())
+                    </script>
+                    <item label=/Ns/ClipboardFormat/disabled/label tooltip=" Disable clipboard "       script=OnLeftClick|'vtm.terminal.ClipboardFormat(0)'/>
+                    <item label=/Ns/ClipboardFormat/textonly/label tooltip=" Copy as plaintext "       script=OnLeftClick|'vtm.terminal.ClipboardFormat(1)'/>
+                    <item label=/Ns/ClipboardFormat/ansitext/label tooltip=" Copy as ANSI/VT text "    script=OnLeftClick|'vtm.terminal.ClipboardFormat(2)'/>
+                    <item label=/Ns/ClipboardFormat/richtext/label tooltip=" Copy as RTF "             script=OnLeftClick|'vtm.terminal.ClipboardFormat(3)'/>
+                    <item label=/Ns/ClipboardFormat/htmltext/label tooltip=" Copy as HTML "            script=OnLeftClick|'vtm.terminal.ClipboardFormat(4)'/>
+                    <item label=/Ns/ClipboardFormat/safetext/label tooltip=" Copy as protected text "  script=OnLeftClick|'vtm.terminal.ClipboardFormat(5)'/>
                 </item>
             </item>
         </menu>
@@ -626,6 +639,19 @@ R"==(
                 vtm.item.Deface()
             </script>
         </ClipboardFormat>
+        <ClipboardFormatMenu type="radiomenu" label=/Ns/ClipboardFormatMenu/label tooltip=/Ns/ClipboardFormatMenu/tooltip>  <!-- type="radiomenu": open the clipboard formats as a radio-menu group instead of cycling. -->
+            <script>  <!-- Publish the terminal's current clipboard format as the selected radio row. Same event-driven pattern as the ClipboardFormat button above, but it calls vtm.item.Check(idx) instead of relabeling itself. Child order matches the format codes 0..5 returned by vtm.terminal.ClipboardFormat(). -->
+                <on="release: e2::form::upon::started"  source="applet"/>
+                <on="release: terminal::events::selmod" source="terminal"/>
+                vtm.item.Check(vtm.terminal.ClipboardFormat())
+            </script>
+            <item label=/Ns/ClipboardFormatMenu/disabled/label tooltip=" Disable clipboard "       script=OnLeftClick|'vtm.terminal.ClipboardFormat(0)'/>
+            <item label=/Ns/ClipboardFormatMenu/textonly/label tooltip=" Copy as plaintext "       script=OnLeftClick|'vtm.terminal.ClipboardFormat(1)'/>
+            <item label=/Ns/ClipboardFormatMenu/ansitext/label tooltip=" Copy as ANSI/VT text "    script=OnLeftClick|'vtm.terminal.ClipboardFormat(2)'/>
+            <item label=/Ns/ClipboardFormatMenu/richtext/label tooltip=" Copy as RTF "             script=OnLeftClick|'vtm.terminal.ClipboardFormat(3)'/>
+            <item label=/Ns/ClipboardFormatMenu/htmltext/label tooltip=" Copy as HTML "            script=OnLeftClick|'vtm.terminal.ClipboardFormat(4)'/>
+            <item label=/Ns/ClipboardFormatMenu/safetext/label tooltip=" Copy as protected text "  script=OnLeftClick|'vtm.terminal.ClipboardFormat(5)'/>
+        </ClipboardFormatMenu>
         <StdioLog tooltip=/Ns/StdioLog/tooltip script=OnLeftClick|TerminalStdioLog>
             <script>
                 <on="release: e2::form::upon::started"  source="applet"/>
@@ -906,6 +932,14 @@ R"==(
                     </label>
                 </richtext>
         </ClipboardFormat>
+        <ClipboardFormatMenu label="Clipboard Format" tooltip=" Clipboard format ">
+                <textonly label="Plain Text"/>
+                <ansitext label="ANSI Text"/>
+                <htmltext label="HTML code"/>
+                <richtext label="Rich Text"/>
+                <safetext label="Protected"/>
+                <disabled label="Disabled"/>
+        </ClipboardFormatMenu>
         <StdioLog>
             <tooltip>
                 "\e[1m"" Console logging        ""\e[m\n"

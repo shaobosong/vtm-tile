@@ -114,6 +114,16 @@ if(Python3_FOUND)
         TIMEOUT 300
         LABELS "tui;tile;menu")
 
+    # Regression test for the menu item type="radiomenu" feature: renders a
+    # group of options as radio-menu rows (◉/○) and tracks the live selection
+    # published via vtm.item.Check(idx), including when nested in a dropdown.
+    add_test(NAME radiomenu_test
+             COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test_radiomenu.py")
+    set_tests_properties(radiomenu_test PROPERTIES
+        ENVIRONMENT "VTM_TILE_BINARY=$<TARGET_FILE:vtm-tile>"
+        TIMEOUT 300
+        LABELS "tui;tile;menu")
+
     add_test(NAME tile_select_app_picker_test
              COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test_tile_select_app_picker.py")
     set_tests_properties(tile_select_app_picker_test PROPERTIES

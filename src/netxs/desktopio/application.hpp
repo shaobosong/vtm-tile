@@ -801,6 +801,18 @@ namespace netxs::app::shared
         //   dropdown          : clickable label that opens a popup listing its nested
         //                       <item> children below the trigger. Each child is itself
         //                       a menu::item (so dropdowns may nest recursively).
+        //   radiomenu         : like a dropdown, but its <item> children render as a
+        //                       group of radio-menu rows — each prefixed with a radio
+        //                       bullet (◉ for the currently-selected option, ○ for the
+        //                       rest). Which row is selected is read at popup-open time
+        //                       from the trigger's "menu.radio.index" property (set by
+        //                       the trigger's own <script> via vtm.item.Check(idx), the
+        //                       same event-driven pattern the ClipboardFormat button
+        //                       uses to refresh its label); a child marked checked="true"
+        //                       in the config provides the static fallback when no index
+        //                       has been published yet. Clicking a row runs that child's
+        //                       <script> (e.g. to switch the underlying mode) and
+        //                       dismisses the chain, exactly like a dropdown leaf.
         //   separator         : non-interactive horizontal rule rendered as a row of
         //                       '─' characters spanning the popup width. Skipped by
         //                       mouse hover and keyboard navigation.
@@ -808,6 +820,7 @@ namespace netxs::app::shared
         {
             button,
             dropdown,
+            radiomenu,
             separator,
         };
 
@@ -819,7 +832,8 @@ namespace netxs::app::shared
             cell hover{};
             cell focus{};
             kind type{ kind::button };
-            std::vector<item> children;            // Populated only when type == kind::dropdown.
+            bool checked{};                        // Radiomenu rows only: static fallback for the selected option.
+            std::vector<item> children;            // Populated only when type == kind::dropdown or kind::radiomenu.
             input::bindings::vector bindings;
         };
 
@@ -832,6 +846,7 @@ namespace netxs::app::shared
         static auto parse_kind(view s) -> kind
         {
             if (s == "dropdown")  return kind::dropdown;
+            if (s == "radiomenu") return kind::radiomenu;
             if (s == "separator") return kind::separator;
             return kind::button;
         }
@@ -959,8 +974,12 @@ namespace netxs::app::shared
         }
 
         // Forward decl: a popup's row click may recursively open a submenu.
+        // `radio` renders the rows as a radio-menu group (◉/○ left gutter) with
+        // `radio_checked` as the filled row index; both default off so plain
+        // dropdown / submenu popups are unaffected.
         static auto _attach_popup_overlay(popup_chain_ptr chain, twod top_left,
-                                          std::vector<menu::item> const& items) -> netxs::wptr<ui::base>;
+                                          std::vector<menu::item> const& items,
+                                          bool radio = faux, si32 radio_checked = -1) -> netxs::wptr<ui::base>;
 
         // Byte position of the shortcut '&' marker in `s` (the '&'
         // character followed by an ASCII alphabetic key letter), or
@@ -1023,7 +1042,11 @@ namespace netxs::app::shared
         // overlaps the parent popup when there is no room on the right).
         // `padding` is the horizontal padding cell count on EACH side of
         // an item (driven by the <menu><padding=N/></menu> config).
-        static auto _popup_dimensions(std::vector<menu::item> const& items, si32 padding) -> twod
+        // Width of the radio gutter painted at the left edge of every row in a
+        // radiomenu popup: a radio bullet glyph (◉/○) plus one trailing space.
+        static constexpr auto radio_gutter = si32{ 2 };
+
+        static auto _popup_dimensions(std::vector<menu::item> const& items, si32 padding, bool radio = faux) -> twod
         {
             auto has_submenus = false;
             for (auto& c : items) if (!c.children.empty()) { has_submenus = true; break; }
@@ -1031,10 +1054,54 @@ namespace netxs::app::shared
             for (auto& c : items)
             {
                 if (!is_selectable(c)) continue; // Separators don't drive width.
-                auto w = label_display_length(c.label) + 2 * padding + (has_submenus ? 2 : 0);
+                auto w = label_display_length(c.label) + 2 * padding + (has_submenus ? 2 : 0)
+                       + (radio ? radio_gutter : 0);
                 if (w > popup_w) popup_w = w;
             }
             return twod{ popup_w, (si32)items.size() };
+        }
+
+        // Index of the radio row to render filled (◉) when opening a radiomenu
+        // popup. Prefers the live "menu.radio.index" property published on the
+        // trigger by its <script> (vtm.item.Check(idx) — the same event-driven
+        // pattern the ClipboardFormat button uses to refresh itself). Falls back
+        // to the first child marked checked="true" in the config when no index
+        // has been published yet (property default -1), so a purely static
+        // radiomenu still shows a selection.
+        static auto radio_checked_index(ui::base& trigger, std::vector<menu::item> const& children) -> si32
+        {
+            auto idx = trigger.base::property("menu.radio.index", si32{ -1 });
+            if (idx < 0)
+            {
+                for (auto i = si32{ 0 }; i < (si32)children.size(); ++i)
+                {
+                    if (children[(size_t)i].checked) { idx = i; break; }
+                }
+            }
+            return idx;
+        }
+
+        // Resolve the selected radio row for `radio_item` at popup-open time.
+        // The radiomenu's <script> updater (vtm.item.Check(idx)) is run here
+        // through the LIVE `trigger`'s scripting context so the selection is
+        // refreshed on demand, then read back via radio_checked_index. This is
+        // what makes a radiomenu work whether it is a live menu-bar button OR a
+        // row nested inside a dropdown popup: a nested radiomenu's trigger is
+        // not a live object, so its <on=...> event subscriptions never fire —
+        // running the updater body here against the owning menu-bar trigger
+        // publishes the current selection regardless of nesting depth. Items
+        // with no script fall through to the checked="true" static fallback.
+        static auto radio_resolve_index(ui::base& trigger, menu::item const& radio_item) -> si32
+        {
+            auto& luafx = trigger.bell::indexer.luafx;
+            for (auto& b : radio_item.bindings)
+            {
+                if (b.script_ptr && b.script_ptr->second.size())
+                {
+                    luafx.run_script(trigger, b.script_ptr->second);
+                }
+            }
+            return radio_checked_index(trigger, radio_item.children);
         }
 
         // Open a dropdown popup anchored to the bottom of `trigger`, listing
@@ -1051,7 +1118,8 @@ namespace netxs::app::shared
         //     row's script via luafx and dismisses the whole chain; clicking
         //     a submenu trigger row opens the submenu without dismissing.
         // The popup auto-flips above the trigger if there isn't room below.
-        static auto open_dropdown_popup(ui::item& trigger, std::vector<menu::item> const& items) -> void
+        static auto open_dropdown_popup(ui::item& trigger, std::vector<menu::item> const& items,
+                                        bool radio = faux, si32 radio_checked = -1) -> void
         {
             if (items.empty()) return;
             // Event-passthrough handshake on the menu bar:
@@ -1415,7 +1483,7 @@ namespace netxs::app::shared
             // Anchor one row below the trigger's bottom edge so the
             // popup's '▄' top-edge decoration lands in the row beneath
             // the menu bar rather than overwriting menu-bar cells.
-            _attach_popup_overlay(chain, twod{ anchor.x, anchor.y + trigger_h + 1 }, items);
+            _attach_popup_overlay(chain, twod{ anchor.x, anchor.y + trigger_h + 1 }, items, radio, radio_checked);
         }
 
         // Attach a single popup overlay anchored at `top_left`, listing `items`.
@@ -1423,7 +1491,8 @@ namespace netxs::app::shared
         // recursively call back into this function for submenus, and any leaf
         // click tears down the whole chain via dismiss_dropdown_chain.
         static auto _attach_popup_overlay(popup_chain_ptr chain, twod top_left,
-                                          std::vector<menu::item> const& items) -> netxs::wptr<ui::base>
+                                          std::vector<menu::item> const& items,
+                                          bool radio, si32 radio_checked) -> netxs::wptr<ui::base>
         {
             if (items.empty() || !chain || !chain->host_ptr) return {};
             // Geometry: width = max label width + 2 padding cells. When ANY
@@ -1436,7 +1505,7 @@ namespace netxs::app::shared
             auto has_submenus = false;
             for (auto& c : items) if (!c.children.empty()) { has_submenus = true; break; }
             auto padding = chain->padding;
-            auto dim = _popup_dimensions(items, padding);
+            auto dim = _popup_dimensions(items, padding, radio);
             auto popup_w = dim.x;
             auto popup_h = dim.y;
 
@@ -1477,7 +1546,8 @@ namespace netxs::app::shared
 
                 ovl.LISTEN(tier::release, e2::render::any, parent_canvas, -,
                     (items, top_left, popup_w, popup_h, has_submenus, hover_row_ptr,
-                     popup_px_ptr, popup_py_ptr, painted_rect_ptr, ovl_id, depth, padding))
+                     popup_px_ptr, popup_py_ptr, painted_rect_ptr, ovl_id, depth, padding,
+                     radio, radio_checked))
                 {
                     auto hover_row = *hover_row_ptr;
                     auto area = parent_canvas.area();
@@ -1551,12 +1621,27 @@ namespace netxs::app::shared
                             c.wipe();
                             c.bgc(bg).fgc(fg).txt(whitespace).link(ovl_id);
                         });
+                        // Radiomenu rows: paint the radio bullet in the left
+                        // gutter (◉ for the selected row, ○ for the rest),
+                        // then push the label start past the gutter. The
+                        // popup width budget already reserves radio_gutter
+                        // cells for this (see _popup_dimensions).
+                        auto gutter = radio ? radio_gutter : si32{ 0 };
+                        if (radio)
+                        {
+                            auto bullet = (i == radio_checked) ? "\xE2\x97\x89"  // ◉
+                                                               : "\xE2\x97\x8B"; // ○
+                            parent_canvas.fill(rect{{ px + padding, py + i }, { 1, 1 }}, [=](cell& c)
+                            {
+                                c.bgc(bg).fgc(fg).txt(bullet).link(ovl_id);
+                            });
+                        }
                         auto& label = row_item.label;
                         // Reserve trailing 2 cells for the chevron when any
                         // row in this popup has children (the popup width
                         // budget already accounts for this).
                         auto right_reserve = has_submenus ? si32{ 2 } : si32{ 0 };
-                        auto wx = px + padding;
+                        auto wx = px + padding + gutter;
                         auto max_wx = px + popup_w - padding - right_reserve;
                         auto off = size_t{ 0 };
                         // '&'-shortcut handling: skip the '&' marker
@@ -1667,10 +1752,22 @@ namespace netxs::app::shared
                     current = -1;
                     if (idx < 0 || idx >= (si32)items.size()) return;
                     if (items[(size_t)idx].children.empty()) return;
+                    // A radiomenu submenu renders its children as a radio
+                    // group; resolve its selected row (and widen the popup
+                    // for the bullet gutter) the same way the root popup does.
+                    auto sub_radio = items[(size_t)idx].type == menu::kind::radiomenu;
+                    auto sub_checked = si32{ -1 };
+                    if (sub_radio)
+                    {
+                        if (auto tr = chain->trigger_shadow.lock())
+                        {
+                            sub_checked = radio_resolve_index(*tr, items[(size_t)idx]);
+                        }
+                    }
                     // Decide submenu placement: prefer RIGHT of the parent;
                     // FLIP to LEFT if right would overflow the host. Parent
                     // and submenu rects are mutually exclusive — no overlap.
-                    auto sub_dim = _popup_dimensions(items[(size_t)idx].children, chain->padding);
+                    auto sub_dim = _popup_dimensions(items[(size_t)idx].children, chain->padding, sub_radio);
                     auto px = *popup_px_ptr;
                     auto py = *popup_py_ptr;
                     auto sub_x_right = px + popup_w;
@@ -1685,7 +1782,7 @@ namespace netxs::app::shared
                     }
                     _attach_popup_overlay(chain,
                         twod{ sub_x, py + idx },
-                        items[(size_t)idx].children);
+                        items[(size_t)idx].children, sub_radio, sub_checked);
                     current = idx;
                 };
 
@@ -2135,12 +2232,16 @@ namespace netxs::app::shared
             item.type    = menu::parse_kind(type_str);
             item.label   = config.settings::take_value_from(menuitem_ptr, "label", " "s);
             item.tooltip = config.settings::take_value_from(menuitem_ptr, "tooltip", ""s);
+            // Static fallback for radiomenu selection: a child option marked
+            // checked="true" is rendered filled (◉) until the trigger publishes
+            // a live index via vtm.item.Check(). Harmless on non-radio items.
+            item.checked = config.settings::take_value_from(menuitem_ptr, "checked", faux);
             if (auto color = config.settings::take("hover/bgc", ui32{ 0 })) item.hover.bgc(color);
             if (auto color = config.settings::take("hover/fgc", ui32{ 0 })) item.hover.fgc(color);
-            if (item.type == menu::kind::dropdown)
+            if (item.type == menu::kind::dropdown || item.type == menu::kind::radiomenu)
             {
-                // Dropdowns don't bind their own scripts; their children do.
-                // "alive" reflects whether the dropdown has any children to show.
+                // Dropdowns/radiomenus list their <item> children as popup rows.
+                // "alive" reflects whether there are any children to show.
                 auto child_ptr_list = config.settings::take_ptr_list_of(menuitem_ptr, "item");
                 for (auto child_ptr : child_ptr_list)
                 {
@@ -2148,7 +2249,17 @@ namespace netxs::app::shared
                     item.children.push_back(std::move(child_item));
                 }
                 item.alive = !item.children.empty();
-                if (top_level) item.label += " ▾"; // Menu-bar dropdown triggers only; nested submenu rows don't get the chevron.
+                if (top_level) item.label += " ▾"; // Menu-bar trigger only; nested submenu rows don't get the chevron.
+                // A plain dropdown lets its children own all scripts; a
+                // radiomenu trigger additionally keeps its OWN <script> — the
+                // event-driven updater that publishes the selected row via
+                // vtm.item.Check(idx). This mirrors how the ClipboardFormat
+                // button keeps itself in sync with terminal state, so the
+                // radio bullet reflects the live selection when the popup opens.
+                if (item.type == menu::kind::radiomenu)
+                {
+                    item.bindings = input::bindings::load(config, script_list);
+                }
             }
             else if (item.type == menu::kind::separator)
             {
@@ -2203,6 +2314,32 @@ namespace netxs::app::shared
                                         boss.base::deface();
                                         luafx.set_return();
                                     }},
+                    { "Check",      [&]
+                                    {
+                                        // Radiomenu selection bridge. With an
+                                        // argument, publish the selected row
+                                        // index onto the trigger so the next
+                                        // popup-open renders that row's bullet
+                                        // filled (◉). With no argument, return
+                                        // the last published index (-1 = none).
+                                        // The trigger's event-driven <script>
+                                        // calls vtm.item.Check(idx) to keep the
+                                        // selection live, exactly like the
+                                        // ClipboardFormat button refreshes its
+                                        // label on terminal::events::selmod.
+                                        auto args_count = luafx.args_count();
+                                        if (args_count) // Set selected index.
+                                        {
+                                            auto idx = luafx.get_args_or(1, si32{ -1 });
+                                            boss.base::property("menu.radio.index", si32{ -1 }) = idx;
+                                            luafx.set_return();
+                                        }
+                                        else // Get selected index.
+                                        {
+                                            auto idx = boss.base::property("menu.radio.index", si32{ -1 });
+                                            luafx.set_return(idx);
+                                        }
+                                    }},
                 });
             };
             auto setup = [classname_list = std::move(classname_list),
@@ -2213,20 +2350,34 @@ namespace netxs::app::shared
                     boss.bell::indexer.add_base_class(classname, boss);
                 }
                 add_lua_methods(boss);
-                if (item.type == menu::kind::dropdown)
+                if (item.type == menu::kind::dropdown || item.type == menu::kind::radiomenu)
                 {
+                    // A radiomenu opens its children as a radio group (◉/○);
+                    // a plain dropdown opens them as ordinary rows. The radio
+                    // flag and the currently-selected row index are resolved
+                    // per-open so the bullet tracks the live selection.
+                    auto radio = item.type == menu::kind::radiomenu;
+                    // A radiomenu trigger keeps its own event-driven <script>
+                    // (the vtm.item.Check(idx) updater); wire it up like a
+                    // plain button so it runs on terminal/applet events. A
+                    // dropdown trigger has no scripts of its own.
+                    if (radio)
+                    {
+                        input::bindings::keybind(boss, item.bindings);
+                    }
                     // Open a popup of children anchored below the trigger on
                     // left-click. See menu::open_dropdown_popup for details.
-                    boss.on(tier::mouserelease, input::key::LeftClick, [&boss, &item](hids& gear)
+                    boss.on(tier::mouserelease, input::key::LeftClick, [&boss, &item, radio](hids& gear)
                     {
-                        menu::open_dropdown_popup(boss, item.children);
+                        auto checked = radio ? menu::radio_resolve_index(boss, item) : -1;
+                        menu::open_dropdown_popup(boss, item.children, radio, checked);
                         gear.dismiss();
                     });
                     // Hover-switch: once any dropdown has been opened, moving
                     // the cursor onto another menu-bar dropdown trigger swaps
                     // the chain over to it. When no chain is open, hover is
                     // a no-op (clicks remain the only way to first open one).
-                    boss.on(tier::mouserelease, input::key::MouseEnter, [&boss, &item](hids& /*gear*/)
+                    boss.on(tier::mouserelease, input::key::MouseEnter, [&boss, &item, radio](hids& /*gear*/)
                     {
                         auto active = menu::active_chain_slot();
                         if (!active) return;
@@ -2234,7 +2385,8 @@ namespace netxs::app::shared
                         {
                             if (trigger_lock.get() == static_cast<ui::base*>(&boss)) return;
                         }
-                        menu::open_dropdown_popup(boss, item.children);
+                        auto checked = radio ? menu::radio_resolve_index(boss, item) : -1;
+                        menu::open_dropdown_popup(boss, item.children, radio, checked);
                     });
                 }
                 else
