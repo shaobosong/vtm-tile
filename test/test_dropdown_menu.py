@@ -356,6 +356,59 @@ PAD_TILE_CONFIG = (
 PAD_TILE_ARGS = []  # PAD_TILE_CONFIG is shipped via $VTM_CONFIG.
 
 
+# ---------------------------------------------------------------------------
+# Pane-applet dropdown fixture (cross-process dismissal regression).
+#
+# This is the scenario from the bug report: the dropdown lives in the menu
+# bar of an *applet running inside a tile pane*, not in the tile's own
+# top-level menu bar. A tile pane applet (e.g. the terminal built by
+# build_terminal in term.hpp) runs as a separate dtvt subprocess bridged
+# over directvt; its menu bar — and therefore the dropdown popup it opens —
+# is rendered entirely inside that subprocess.
+#
+# The on-screen layout has three stacked bars:
+#   row 1: the tile's own menu bar          (TILEBAR marker, outer process)
+#   row 2: the tile pane's title bar         (grip/header,    outer process)
+#   row 3: the applet's menu bar             ([PANEDROP] trigger, subprocess)
+#
+# Clicks on rows 1 and 2 are handled by the OUTER tile process and are never
+# delivered to the subprocess, so the subprocess's own outside-click hook
+# (which only covers the pane's content viewport) can't see them. The
+# regression: the open dropdown stayed visible when the user clicked the
+# tile menu bar or the pane title bar to dismiss it.
+#
+# The dropdown is configured under the top-level <terminal><menu>, which the
+# dtvt child inherits via the $VTM_CONFIG environment variable (the child is
+# launched as `$0 -r term` with no -c override, so it merges the same env
+# config). The tile keeps a TILEBAR button so row 1 has a concrete click
+# target, and confirm_close=0 lets the app exit on the close button.
+PANE_TRIGGER_LABEL = "  [PANEDROP]  "
+PANE_CHILD_LABEL   = "PaneChildA-XYZ"
+PANE_TILEBAR_LABEL = "  TILEBAR  "
+PANE_TILE_CONFIG = (
+    "<config>"
+        "<terminal>"
+            "<menu item*>"
+                f'<item type="dropdown" label="{PANE_TRIGGER_LABEL}" tooltip=" d " item*>'
+                    f'<item label="{PANE_CHILD_LABEL}" tooltip=" a " script=\'OnLeftClick|\'/>'
+                "</item>"
+            "</menu>"
+        "</terminal>"
+        "<tile>"
+            "<confirm_close=0/>"
+            "<menu item*>"
+                f'<item label="{PANE_TILEBAR_LABEL}" tooltip=" t " script=\'OnLeftClick|\'/>'
+            "</menu>"
+            '<app selected="term">'
+                "<item*/>"
+                '<item id="term" label="term" type="dtvt" cmd="$0 -r term"/>'
+            "</app>"
+        "</tile>"
+    "</config>"
+)
+PANE_TILE_ARGS = []  # PANE_TILE_CONFIG is shipped via $VTM_CONFIG.
+
+
 def kill_all_vtm():
     subprocess.run(["pkill", "-9", "-x", "vtm-tile"], capture_output=True)
     deadline = time.time() + 3.0
@@ -2506,6 +2559,111 @@ def test_dropdown_edge_background_is_transparent():
         return True
 
 
+def _open_pane_dropdown(s):
+    """Locate the pane applet's [PANEDROP] trigger (row 3) and click it
+    open. Returns (trigger_row, trigger_col) of the '[' cell, or None if
+    the trigger never rendered. Helper for the pane-applet tests below.
+    """
+    # The subprocess needs extra settle time: the dtvt child boots, merges
+    # the inherited config, and paints its menu bar a beat after the outer
+    # tile is up.
+    s.snapshot(timeout=2.0)
+    coords = find_marker_position(s._screen_buf, "[PANEDROP]")
+    if coords is None:
+        return None
+    trigger_row, trigger_col = coords
+    s.reset_buffer()
+    # Click one cell right of '[' (on the label text) to open the popup.
+    s.click(trigger_col + 1, trigger_row)
+    s.snapshot(timeout=1.5)
+    if find_marker_position(s._screen_buf, PANE_CHILD_LABEL) is None:
+        return None
+    return (trigger_row, trigger_col)
+
+
+def _pane_dropdown_dismissed_by_click(label, target_col_fn):
+    """Shared driver: open the pane applet's dropdown, click a target cell
+    in the OUTER tile process (the tile menu bar or the pane title bar),
+    then re-click the trigger and confirm the popup re-opens.
+
+    Re-open is the dismissal probe: open_dropdown_popup's `menu.dropdown.open`
+    guard makes a second click on an already-open trigger toggle the chain
+    OFF instead of re-opening it. So if the outer click dismissed the chain,
+    the guard is clear and the re-click re-opens the popup (child visible);
+    if the chain stayed attached, the re-click toggles it off and the child
+    does NOT repaint. (Same live-state probe used by the other dismissal
+    tests in this file.)
+    """
+    print(f"TEST: pane-applet dropdown dismissed by {label} ... ",
+          end="", flush=True)
+    with VtmTileSession(PANE_TILE_ARGS, settle_delay=3.0,
+                        vtm_config=PANE_TILE_CONFIG) as s:
+        if not s.is_alive():
+            return fail("vtm-tile did not start")
+        coords = _open_pane_dropdown(s)
+        if coords is None:
+            return fail(
+                "pane applet dropdown trigger '[PANEDROP]' did not render or "
+                "did not open — the dtvt child may not have inherited the "
+                "<terminal><menu> dropdown config via $VTM_CONFIG"
+            )
+        trigger_row, trigger_col = coords
+
+        # Click the outer-process target (row 1 tile menu bar, or row 2
+        # pane title bar). This click is handled entirely by the outer
+        # tile process; the only thing the subprocess observes is the
+        # cursor leaving the pane viewport (a forwarded sysmouse halt),
+        # which must tear the chain down.
+        tcol, trow = target_col_fn()
+        s.reset_buffer()
+        s.click(tcol, trow)
+        time.sleep(0.4)
+        s.snapshot(timeout=1.2)
+
+        # Re-click the trigger. Re-opens iff the outer click dismissed.
+        s.reset_buffer()
+        s.click(trigger_col + 1, trigger_row)
+        rendered = s.snapshot(timeout=1.5)
+        if PANE_CHILD_LABEL not in rendered:
+            return fail(
+                f"after clicking {label} with the pane dropdown open, "
+                f"re-clicking the trigger did not re-open the popup — the "
+                f"outer-process click did not dismiss the subprocess's open "
+                f"dropdown chain (regression: cursor leaving the pane "
+                f"viewport must tear the chain down across the dtvt bridge)"
+            )
+
+        if not s.is_alive():
+            return fail("vtm-tile crashed during pane-dropdown dismissal test")
+        if not s.normal_exit():
+            return fail("vtm-tile did not exit cleanly")
+        print("PASS")
+        return True
+
+
+def test_pane_applet_dropdown_dismissed_by_tile_menu_bar_click():
+    """Regression: a dropdown in a tile pane applet's menu bar (row 3,
+    rendered by a dtvt subprocess) must close when the user clicks the
+    tile's own menu bar (row 1, owned by the outer tile process)."""
+    return _pane_dropdown_dismissed_by_click(
+        "tile menu bar (row 1)",
+        # The TILEBAR button sits at the left of row 1; click on its label.
+        lambda: (6, 1),
+    )
+
+
+def test_pane_applet_dropdown_dismissed_by_pane_title_bar_click():
+    """Regression: a dropdown in a tile pane applet's menu bar (row 3,
+    rendered by a dtvt subprocess) must close when the user clicks the
+    pane's title bar (row 2, owned by the outer tile process)."""
+    return _pane_dropdown_dismissed_by_click(
+        "pane title bar (row 2)",
+        # Mid-screen on row 2 lands on the pane's title/grip bar, clear of
+        # the row-1 controls and the row-3 applet menu.
+        lambda: (COLS // 2, 2),
+    )
+
+
 TESTS = [
     test_dropdown_menu_item_loads_from_xml_and_opens_popup,
     test_dropdown_menu_keeps_menubar_visible_with_log_repaint,
@@ -2533,6 +2691,8 @@ TESTS = [
     test_dropdown_top_edge_uses_lower_half_block_with_menu_bg_fg,
     test_dropdown_bottom_edge_uses_upper_half_block_with_menu_bg_fg,
     test_dropdown_edge_background_is_transparent,
+    test_pane_applet_dropdown_dismissed_by_tile_menu_bar_click,
+    test_pane_applet_dropdown_dismissed_by_pane_title_bar_click,
 ]
 
 

@@ -921,6 +921,7 @@ namespace netxs::app::shared
             std::vector<netxs::wptr<ui::base>> overlays;  // open popups, root-first
             netxs::sptr<hook> kbd_hook;                   // Esc interceptor on host
             netxs::sptr<hook> mouse_hook;                 // outside-click dismisser on host
+            netxs::sptr<hook> leave_hook;                 // mouse-left-the-host dismisser
             std::vector<popup_nav> navs;                  // per-overlay kbd nav state
             si32 padding{ 1 };                            // horizontal cell padding per item
         };
@@ -963,6 +964,8 @@ namespace netxs::app::shared
             chain->kbd_hook.reset();
             if (chain->mouse_hook) chain->mouse_hook->reset();
             chain->mouse_hook.reset();
+            if (chain->leave_hook) chain->leave_hook->reset();
+            chain->leave_hook.reset();
             if (auto t = chain->trigger_shadow.lock())
             {
                 t->base::property("menu.dropdown.open", faux) = faux;
@@ -1190,6 +1193,7 @@ namespace netxs::app::shared
             chain->trigger_shadow = ptr::shadow(ui::sptr{ trigger.This() });
             chain->kbd_hook = ptr::shared<hook>();
             chain->mouse_hook = ptr::shared<hook>();
+            chain->leave_hook = ptr::shared<hook>();
             // Inherit the horizontal padding configured on the
             // trigger button so popup rows match the menu-bar
             // appearance. mini()/makeitem stamps this property on
@@ -1478,6 +1482,38 @@ namespace netxs::app::shared
                     // remains the exclusive consumer of keyboard
                     // input while it is open.
                     gear.set_handled(faux);
+                };
+
+            // Mouse-left-the-host dismisser. The mouse_hook above can only
+            // dismiss on presses that land inside this host (the applet's
+            // own area). When the applet runs inside a tile pane it is a
+            // dtvt subprocess whose host covers only the pane's content
+            // viewport — the tile's own menu bar and the pane's title bar
+            // belong to the PARENT process and never deliver a mouse event
+            // to this subprocess, so a press there can't reach mouse_hook.
+            //
+            // What the subprocess DOES receive is a mouse-leave: when the
+            // cursor exits the pane viewport (on its way to the parent's
+            // menu/title bars, another pane, the taskbar, etc.) the parent
+            // forwards a sysmouse halt, the gate deactivates the gear, and
+            // the host's e2::form::state::mouse toggles to faux. Tearing
+            // the chain down on that leave gives the user the expected
+            // "click outside the pane closes the open menu" behaviour even
+            // across the dtvt bridge. For a top-level (non-pane) applet the
+            // host spans the whole window, so this only fires when the
+            // cursor leaves the window entirely — harmless and on-spec.
+            //
+            // Guarded by overlays.empty(): the listener is installed before
+            // the first overlay attaches below, so a transient leave during
+            // the attach/reflow is ignored; only leaves observed once a
+            // popup is actually on screen dismiss the chain.
+            host_ptr->bell::submit(tier::release, e2::form::state::mouse, *chain->leave_hook)
+                = [chain](bool& hovered)
+                {
+                    if (!hovered && !chain->overlays.empty())
+                    {
+                        dismiss_dropdown_chain(chain);
+                    }
                 };
 
             // Anchor one row below the trigger's bottom edge so the
