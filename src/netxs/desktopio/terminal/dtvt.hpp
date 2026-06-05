@@ -492,6 +492,24 @@
             };
             LISTEN(tier::preview, input::events::keybd::any, gear)
             {
+                // A host-side binding upstream of this relay has already consumed the
+                // key (e.g. a modal overlay). Do not leak it to the dtvt child.
+                if (gear.keybd::handled)
+                {
+                    gear.dismiss();
+                    return;
+                }
+                // A host-side binding has claimed the key for its release phase (e.g. the
+                // tmux-style prefix: gear.touched is set by the keybd_prerun and not cleared
+                // by KeyFilter's Bypass()). Don't forward it to the child; bounce it up so
+                // the host's release-phase handler runs. When prefix mode is off, Bypass()
+                // resets gear.touched and the key is forwarded to the child as before.
+                if (gear.touched)
+                {
+                    pro::keybd::forward_release(*this, gear);
+                    gear.dismiss();
+                    return;
+                }
                 gear.gear_id = gear.id;
                 stream.syskeybd.send(*this, gear);
                 gear.dismiss();
