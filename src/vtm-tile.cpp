@@ -11,6 +11,11 @@ using namespace netxs;
 enum class type { client, server, daemon, logmon, runapp, config, sessions };
 enum class code { noaccess, noserver, nodaemon, nosrvlog, interfer, errormsg };
 
+// In-process FileZilla/PuTTY parvionsftp backend entry point. This is the backend's
+// own platform main(), renamed to parvionsftp_main via a per-file compile define in
+// CMake (parvionsftp_be lib) so it links alongside vtm-tile's main() without clashing.
+extern "C" int parvionsftp_main(int argc, char** argv);
+
 namespace tile_session_reg
 {
     namespace fs = std::filesystem;
@@ -233,6 +238,25 @@ namespace tile_session_reg
 
 int main(int argc, char* argv[])
 {
+    // Multi-call entry: `vtm-tile -r parvionsftp [opts]` runs the in-process parvionsftp
+    // backend (its renamed main) and exits — handled before any vtm console/log
+    // init runs, because the backend owns stdout for its fzprintf protocol.
+    for (auto i = 1; i + 1 < argc; i++)
+    {
+        auto flag = view{ argv[i] };
+        if (flag == "-r" || flag == "--run" || flag == "--")
+        {
+            if (view{ argv[i + 1] }.starts_with("parvionsftp"))
+            {
+                static char arg0[] = "parvionsftp";
+                auto args = std::vector<char*>{ arg0 };
+                for (auto j = i + 2; j < argc; j++) args.push_back(argv[j]);
+                args.push_back(nullptr);
+                return parvionsftp_main((int)args.size() - 1, args.data());
+            }
+            break; // A run flag was given but not parvionsftp: fall through to normal handling.
+        }
+    }
     auto whoami = type::client;
     auto params = text{};
     auto cliopt = text{};
@@ -539,6 +563,7 @@ int main(int argc, char* argv[])
         else if (shadow.starts_with(app::empty::id))     { aptype = app::empty::id;     apname = app::empty::name;     }
         else if (shadow.starts_with(app::strobe::id))    { aptype = app::strobe::id;    apname = app::strobe::name;    }
         else if (shadow.starts_with(app::textancy::id))  { aptype = app::textancy::id;  apname = app::textancy::name;  }
+        else if (shadow.starts_with(app::parvion::id))   { aptype = app::parvion::id;   apname = app::parvion::name;   }
         else if (shadow.starts_with(app::truecolor::id)) { aptype = app::truecolor::id; apname = app::truecolor::name; }
 
         else if (shadow.starts_with(app::app1::id)) { aptype = app::app1::id; apname = app::app1::name; }

@@ -835,6 +835,7 @@ namespace netxs::app::shared
             bool checked{};                        // Radiomenu rows only: static fallback for the selected option.
             std::vector<item> children;            // Populated only when type == kind::dropdown or kind::radiomenu.
             input::bindings::vector bindings;
+            std::function<void(hids&)> action{};   // Optional native row action (programmatic dropdowns); run by activate_leaf alongside any script bindings.
         };
 
         using action_map_t = utf::unordered_map<text, std::function<void(ui::item&, menu::item&)>>;
@@ -1121,10 +1122,17 @@ namespace netxs::app::shared
         //     row's script via luafx and dismisses the whole chain; clicking
         //     a submenu trigger row opens the submenu without dismissing.
         // The popup auto-flips above the trigger if there isn't room below.
-        static auto open_dropdown_popup(ui::item& trigger, std::vector<menu::item> const& items,
-                                        bool radio = faux, si32 radio_checked = -1) -> void
+        // `cursor` (when its x >= 0) requests a context-menu anchored at that
+        // point inside the trigger (e.g. a right-click on a canvas panel) rather
+        // than beneath the trigger's bottom edge. The trigger may be any ui::base
+        // (a plain button for the menu-bar/▾ case, or a content panel for a
+        // right-click context menu).
+        static auto open_dropdown_popup(ui::base& trigger, std::vector<menu::item> const& items,
+                                        bool radio = faux, si32 radio_checked = -1,
+                                        twod cursor = twod{ -1, -1 }) -> void
         {
             if (items.empty()) return;
+            auto context_mode = cursor.x >= 0; // Cursor-anchored right-click context menu.
             // Event-passthrough handshake on the menu bar:
             //
             //  - If THIS trigger already has its chain open (popup_open
@@ -1211,7 +1219,10 @@ namespace netxs::app::shared
             // dismissing in preview tier would clear popup_open BEFORE
             // the trigger handler runs, and the trigger would
             // immediately re-open the chain (flash close-then-open).
-            auto own_trigger_rect = rect{ anchor, trigger.base::region.size };
+            // For a context menu the trigger is the whole content panel, so there
+            // is no "own trigger" cell to carve out — any click outside the popups
+            // should dismiss. An empty rect never hit-tests, giving exactly that.
+            auto own_trigger_rect = context_mode ? rect{} : rect{ anchor, trigger.base::region.size };
             // Mouse-event interceptor on the host. Fires at mousepreview
             // tier so it runs BEFORE the targeted widget receives the
             // event, but it does NOT consume the event — so every mouse
@@ -1516,10 +1527,12 @@ namespace netxs::app::shared
                     }
                 };
 
-            // Anchor one row below the trigger's bottom edge so the
-            // popup's '▄' top-edge decoration lands in the row beneath
-            // the menu bar rather than overwriting menu-bar cells.
-            _attach_popup_overlay(chain, twod{ anchor.x, anchor.y + trigger_h + 1 }, items, radio, radio_checked);
+            // Context menu: anchor at the cursor. Otherwise anchor one row below
+            // the trigger's bottom edge so the popup's '▄' top-edge decoration
+            // lands in the row beneath the menu bar rather than overwriting it.
+            auto root_at = context_mode ? twod{ anchor.x + cursor.x, anchor.y + cursor.y }
+                                        : twod{ anchor.x, anchor.y + trigger_h + 1 };
+            _attach_popup_overlay(chain, root_at, items, radio, radio_checked);
         }
 
         // Attach a single popup overlay anchored at `top_left`, listing `items`.
@@ -1583,7 +1596,7 @@ namespace netxs::app::shared
                 ovl.LISTEN(tier::release, e2::render::any, parent_canvas, -,
                     (items, top_left, popup_w, popup_h, has_submenus, hover_row_ptr,
                      popup_px_ptr, popup_py_ptr, painted_rect_ptr, ovl_id, depth, padding,
-                     radio, radio_checked))
+                     radio, radio_checked, chain))
                 {
                     auto hover_row = *hover_row_ptr;
                     auto area = parent_canvas.area();
@@ -1606,6 +1619,16 @@ namespace netxs::app::shared
                     // are set so the underlying bg shows through.
                     auto has_top_edge    = py > 0;
                     auto has_bottom_edge = py + popup_h < area.size.y;
+                    // Left/right transparent margins extend the popup outward by
+                    // one whitespace cell on each side, running the full height
+                    // of the popup incl. its top/bottom edge rows (rect_y/rect_h
+                    // below) so they reach one cell beyond the top and bottom
+                    // boundaries. has_left/right_edge only gate the canvas
+                    // bounds; per-cell suppression against adjacent popups
+                    // (so cascading menus stay directly connected) happens in
+                    // the paint loop below.
+                    auto has_left_edge   = px > 0;
+                    auto has_right_edge  = px + popup_w < area.size.x;
                     auto rect_y          = has_top_edge ? py - 1 : py;
                     auto rect_h          = popup_h + (has_top_edge ? 1 : 0)
                                                    + (has_bottom_edge ? 1 : 0);
@@ -1743,6 +1766,38 @@ namespace netxs::app::shared
                             c.fgc(level_bg).txt("\xE2\x96\x80").link(ovl_id); // ▀
                         });
                     }
+                    // Left/right transparent margins, painted cell-by-cell so
+                    // the boundary shared with a directly-adjacent popup stays
+                    // free of a margin (the two opaque bodies touch and stay
+                    // connected), while the rest of the edge — the non-menu
+                    // area above/below that neighbour — still gets its margin.
+                    // A cell is suppressed when any OTHER popup in the chain has
+                    // painted over it (its body or top/bottom edge row); each
+                    // nav's painted_rect tracks that live region.
+                    auto covered_by_neighbour = [&](twod at)
+                    {
+                        for (auto& nav : chain->navs)
+                        {
+                            if (nav.painted_rect.get() == painted_rect_ptr.get()) continue; // self
+                            if (nav.painted_rect && nav.painted_rect->hittest(at)) return true;
+                        }
+                        return faux;
+                    };
+                    auto paint_margin = [&](si32 col)
+                    {
+                        for (auto ry = rect_y; ry < rect_y + rect_h; ++ry)
+                        {
+                            if (covered_by_neighbour({ col, ry })) continue;
+                            parent_canvas.fill(rect{{ col, ry }, { 1, 1 }}, [=](cell& c)
+                            {
+                                c.st.wipe();
+                                c.px.wipe();
+                                c.txt(whitespace).link(ovl_id);
+                            });
+                        }
+                    };
+                    if (has_left_edge)  paint_margin(px - 1);
+                    if (has_right_edge) paint_margin(px + popup_w);
                 };
                 // open_submenu_for_row(idx): if idx is a submenu trigger and
                 // not already open, close any existing child submenu of this
@@ -1877,6 +1932,7 @@ namespace netxs::app::shared
                     if (idx < 0 || idx >= (si32)items.size()) return;
                     auto& item = items[(size_t)idx];
                     if (!item.children.empty()) return;
+                    if (item.action) item.action(gear); // Native row action (programmatic dropdowns).
                     if (auto tr = chain->trigger_shadow.lock())
                     {
                         auto& luafx = tr->bell::indexer.luafx;

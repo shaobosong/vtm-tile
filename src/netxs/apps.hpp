@@ -47,6 +47,7 @@ namespace netxs::app::app1
 #include "apps/text.hpp"
 #include "apps/shop.hpp"
 #include "apps/test.hpp"
+#include "apps/parvion.hpp"
 
 namespace netxs::app::strobe
 {

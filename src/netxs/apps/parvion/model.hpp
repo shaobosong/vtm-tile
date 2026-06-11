@@ -1,0 +1,201 @@
+// Copyright (c) Shaobo Song
+// Licensed under the MIT license.
+
+#pragma once
+
+// parvion/model.hpp: Data model for the Parvion applet.
+//   - direntry  : one directory entry (modeled on FileZilla's CDirentry).
+//   - queue_item: one queued transfer (modeled on FileZilla's CFileItem).
+//   - local FS browsing via std::filesystem + human-readable formatters.
+// The remote side reuses `direntry`/`queue_item`; only the producer differs
+// (std::filesystem here vs. the parvionsftp/fzprintf session in later phases).
+
+#include "rate.hpp"
+
+#include <filesystem>
+#include <vector>
+#include <array>
+#include <algorithm>
+#include <chrono>
+#include <ctime>
+#include <cstdio>
+#include <system_error>
+
+namespace netxs::app::parvion
+{
+    namespace fs = std::filesystem;
+
+    // One entry in a directory listing (local or remote).
+    struct direntry
+    {
+        text   name;            // File or directory name (no path).
+        si64   size   = -1;     // Size in bytes; -1 = unknown (e.g. directory).
+        text   perms;           // "rwxr-xr-x" (remote; empty if unknown).
+        text   owner;           // "user:group" (remote; empty if unknown).
+        time_t mtime  = 0;      // Modification time (epoch seconds; 0 = unknown).
+        bool   is_dir = faux;   // Directory.
+        bool   is_link = faux;  // Symbolic link.
+        text   target;          // Symlink target (if is_link).
+    };
+
+    // One queued/active/finished transfer.
+    struct queue_item
+    {
+        enum status_t { queued, transferring, succeeded, failed };
+
+        bool     download = true;   // true: remote->local; false: local->remote.
+        text     local_path;        // Absolute local path.
+        text     remote_path;       // Absolute remote path.
+        text     dest_dir;          // Destination directory at enqueue time (local_dir for a
+                                    // download, remote path for an upload); used on completion
+                                    // to refresh the destination pane only if it is still shown.
+        si64     size = 0;          // Total bytes.
+        si64     done = 0;          // Bytes transferred so far.
+        si32     priority = 2;      // 0..4 (lowest..highest); 2 = normal.
+        status_t status = queued;
+        bool     paused = faux;     // Queued item held back from auto-start (user "Pause"); shown as "paused".
+        text     error;             // Failure reason (when status == failed).
+        std::time_t started = 0;    // Wall-clock start (for the FileZilla-style "transferred X in Y" summary).
+        rate_meter rate;            // Live byte-rate: EMA instantaneous (rate.speed) + resume-aware baseline (see rate.hpp).
+        // Parallel-transfer metadata (Phase 4): chunk index/count + state path.
+        ui32     chunk_index = 0;
+        ui32     chunk_count = 1;
+        bool     expanded = faux;   // UI: parallel subtasks shown as child rows in the queue panel.
+        bool     selected = faux;   // UI: row is part of the queue panel's selection set.
+    };
+
+    // One remembered Quick Connect target (the most-recent-first history persisted by
+    // sftp_remote; mirrors FileZilla's CRecentServerList entries).
+    struct recent_server
+    {
+        text host;
+        text user;
+        text pass;
+        si32 port = 22;
+        // Identity for de-duplication (the password is not part of the key).
+        auto same_target(recent_server const& o) const
+        {
+            return host == o.host && user == o.user && port == o.port;
+        }
+    };
+
+    // Human-readable byte count, e.g. "1.2K", "410M". Empty for size < 0.
+    inline auto human_size(si64 n) -> text
+    {
+        if (n < 0) return {};
+        static constexpr auto unit = std::array{ "B", "K", "M", "G", "T", "P" };
+        auto v = (double)n;
+        auto i = size_t{ 0 };
+        while (v >= 1024.0 && i + 1 < unit.size()) { v /= 1024.0; ++i; }
+        auto buf = std::array<char, 32>{};
+        if (i == 0) std::snprintf(buf.data(), buf.size(), "%lld B", (long long)n);
+        else        std::snprintf(buf.data(), buf.size(), "%.1f %s", v, unit[i]);
+        return text{ buf.data() };
+    }
+
+    // Format an epoch time as "YYYY-MM-DD HH:MM". Empty for t == 0.
+    inline auto fmt_time(time_t t) -> text
+    {
+        if (!t) return {};
+        auto tmv = std::tm{};
+        #if defined(_WIN32)
+            ::localtime_s(&tmv, &t);
+        #else
+            ::localtime_r(&t, &tmv);
+        #endif
+        auto buf = std::array<char, 32>{};
+        std::strftime(buf.data(), buf.size(), "%Y-%m-%d %H:%M", &tmv);
+        return text{ buf.data() };
+    }
+
+    // Convert a std::filesystem file_time_type to epoch seconds (portable across
+    // libstdc++/MSVC where file_clock's epoch differs from system_clock's).
+    inline auto to_epoch(fs::file_time_type ft) -> time_t
+    {
+        auto sys = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+            ft - fs::file_time_type::clock::now() + std::chrono::system_clock::now());
+        return std::chrono::system_clock::to_time_t(sys);
+    }
+
+    // Parent of a path. is_local picks native (std::filesystem) vs POSIX (remote).
+    inline auto parent_path(text const& path, bool is_local) -> text
+    {
+        if (is_local)
+        {
+        #if defined(_WIN32)
+            if (path.empty()) return path;               // already at the drive list
+            auto p = fs::path{ path };
+            if (p.has_root_name() && p.relative_path().empty()) return {}; // C:\ -> drive list
+        #endif
+            auto up = fs::path{ path }.parent_path();
+            return up.empty() ? path : up.string();
+        }
+        if (path == "/" || path.empty()) return "/";
+        auto s = path;
+        while (s.size() > 1 && s.back() == '/') s.pop_back();
+        auto pos = s.find_last_of('/');
+        if (pos == text::npos) return "/";
+        return pos == 0 ? text{ "/" } : s.substr(0, pos);
+    }
+    // Child path (path + name).
+    inline auto child_path(text const& path, text const& name, bool is_local) -> text
+    {
+        if (is_local) return (fs::path{ path } / name).string();
+        if (path.empty() || path == "/") return "/" + name;
+        return path.back() == '/' ? path + name : path + "/" + name;
+    }
+
+#if defined(_WIN32)
+    // Available drive roots (C:, D:, …) as directory entries, for the "drive list"
+    // shown when going up from a drive root. Plain letters only (no volume labels).
+    inline auto read_local_drives() -> std::vector<direntry>
+    {
+        auto out  = std::vector<direntry>{};
+        auto mask = ::GetLogicalDrives(); // bit 0 = A:, bit 1 = B:, …
+        for (auto i = 0; i < 26; ++i)
+            if (mask & (1u << i))
+            {
+                auto e = direntry{};
+                e.name   = text{ char('A' + i) } + ":"; // "C:"; root path is name + "\\"
+                e.is_dir = true;
+                out.push_back(std::move(e));
+            }
+        return out;
+    }
+#endif
+
+    // Read a local directory into entries, sorted directories-first then by
+    // case-insensitive name. Errors are swallowed (returns what was readable).
+    inline auto read_local_dir(fs::path const& dir) -> std::vector<direntry>
+    {
+        auto out = std::vector<direntry>{};
+        auto ec = std::error_code{};
+        auto it = fs::directory_iterator(dir, fs::directory_options::skip_permission_denied, ec);
+        if (ec) return out;
+        for (auto& de : it)
+        {
+            auto e = direntry{};
+            e.name = de.path().filename().string();
+            if (e.name.empty()) continue;
+            auto se = std::error_code{};
+            e.is_link = de.is_symlink(se);
+            e.is_dir  = de.is_directory(se);
+            if (!e.is_dir)
+            {
+                auto sz = de.file_size(se);
+                e.size = se ? si64{ -1 } : (si64)sz;
+            }
+            auto ft = de.last_write_time(se);
+            if (!se) e.mtime = to_epoch(ft);
+            out.push_back(std::move(e));
+        }
+        std::sort(out.begin(), out.end(), [](direntry const& a, direntry const& b)
+        {
+            if (a.is_dir != b.is_dir) return a.is_dir > b.is_dir; // Directories first.
+            auto al = a.name; utf::to_lower(al);
+            auto bl = b.name; utf::to_lower(bl);
+            return al < bl;
+        });
+        return out;
+    }
+}

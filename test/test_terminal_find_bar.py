@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (c) Dmitry Sapozhnikov
+# Copyright (c) Shaobo Song
 # Licensed under the MIT license.
 
 """

@@ -401,6 +401,11 @@ R"==(
         <menu=/Menu/Defaults>
         </menu>
     </defapp>
+    <parvion>  <!-- Parvion applet (vtm-tile -r parvion). -->
+        <menu>
+            <padding=/Menu/Defaults/padding/>  <!-- Horizontal cell padding on each side of every Parvion menu-bar button. -->
+        </menu>
+    </parvion>
     <events>  <!-- The required key combination sequence can be generated on the Info page, accessible by clicking on the label in the lower right corner of the vtm desktop. -->
         <gate script*>  <!-- `User gate`/`standalone app` bindings. The 'script*' statement here is to clear all previous bindings and start a new list. -->
             <script=IncreaseCellHeight     on="CapsLock+UpArrow"                 />

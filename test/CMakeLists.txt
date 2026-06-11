@@ -22,6 +22,16 @@ target_include_directories(ansi_sgr_state_machine_test PRIVATE "${CMAKE_SOURCE_D
 target_link_libraries(ansi_sgr_state_machine_test PRIVATE Lua::Lua)
 add_test(NAME ansi_sgr_state_machine_test COMMAND ansi_sgr_state_machine_test)
 
+# Unit test for the Parvion transfer-rate meter (resume-aware instantaneous speed/average).
+add_executable(parvion_rate_meter_test "parvion_rate_meter_test.cpp")
+target_include_directories(parvion_rate_meter_test PRIVATE "${CMAKE_SOURCE_DIR}/src")
+add_test(NAME parvion_rate_meter_test COMMAND parvion_rate_meter_test)
+
+# Unit test for the Parvion "Pin to Top" reorder (no-op must not wipe row contents).
+add_executable(parvion_pin_top_test "parvion_pin_top_test.cpp")
+target_include_directories(parvion_pin_top_test PRIVATE "${CMAKE_SOURCE_DIR}/src")
+add_test(NAME parvion_pin_top_test COMMAND parvion_pin_top_test)
+
 # Python TUI regression tests for close confirmation dialog.
 # Requires vtm-desk and vtm-tile binaries to be built first.
 find_package(Python3 COMPONENTS Interpreter)
@@ -200,4 +210,45 @@ if(Python3_FOUND)
         ENVIRONMENT "VTM_TILE_BINARY=$<TARGET_FILE:vtm-tile>"
         TIMEOUT 300
         LABELS "tui;tile;zoom")
+
+    # Regression test for the Parvion transfer-queue tables: Reason-column
+    # resize handle, selection highlight ending at the last column, and the
+    # right-click context menus (Start/Pause/Remove/Pin to Top and the *All variants).
+    add_test(NAME parvion_queue_test
+             COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test_parvion_queue.py")
+    set_tests_properties(parvion_queue_test PROPERTIES
+        ENVIRONMENT "VTM_TILE_BINARY=$<TARGET_FILE:vtm-tile>"
+        TIMEOUT 300
+        LABELS "tui;tile;parvion;queue")
+
+    # Regression test for the file-preview pane operations (blank-area selection rules, right-click
+    # context menus, and the local Create Directory / Delete / Rename filesystem operations).
+    add_test(NAME parvion_panes_test
+             COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test_parvion_panes.py")
+    set_tests_properties(parvion_panes_test PROPERTIES
+        ENVIRONMENT "VTM_TILE_BINARY=$<TARGET_FILE:vtm-tile>"
+        TIMEOUT 300
+        LABELS "tui;tile;parvion;panes")
+
+    # Folder (recursive) Download/Upload/Delete in the file-preview pane. The recursive Download case
+    # connects to the public read-only test.rebex.net SFTP server and skips itself when offline, so a
+    # longer timeout covers the real network transfers.
+    add_test(NAME parvion_folder_ops_test
+             COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test_parvion_folder_ops.py")
+    set_tests_properties(parvion_folder_ops_test PROPERTIES
+        ENVIRONMENT "VTM_TILE_BINARY=$<TARGET_FILE:vtm-tile>"
+        TIMEOUT 600
+        LABELS "tui;tile;parvion;panes;folder;network")
+
+    # Remote (SFTP) directory navigation timing: the destination path is revealed only with its
+    # listing (no premature switch), and a second double-click issued while the first cd/ls is still
+    # in flight does not over-descend (enter <dir>/<dir>). Connects to the public read-only
+    # test.rebex.net and skips itself when offline; uses the PARVION_DEBUG_LS_DELAY_MS test seam to make
+    # the in-flight race deterministic.
+    add_test(NAME parvion_nav_test
+             COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test_parvion_nav.py")
+    set_tests_properties(parvion_nav_test PROPERTIES
+        ENVIRONMENT "VTM_TILE_BINARY=$<TARGET_FILE:vtm-tile>"
+        TIMEOUT 300
+        LABELS "tui;tile;parvion;panes;network")
 endif()
