@@ -455,9 +455,10 @@ namespace netxs::app::parvion
         for (auto row = si32{}; row < st.total(); ++row) w = std::max(w, cell_width(pane_cell_text(st, col, row)));
         return w;
     }
-    // Build the column-header right-click menu: one ▣/□ show-hide toggle per column (mirrors the
-    // message log's "Show detailed log"). At least one column stays visible. Toggling defaces the
-    // pane; the action only touches `st` after locking the pane so a torn-down pane is safe.
+    // Build the column-header right-click menu: one kind::check show-hide toggle (▣/□) per column
+    // (mirrors the message log's "Show detailed log"). At least one column stays visible. Toggling
+    // defaces the pane; the action only touches `st` after locking the pane so a torn-down pane is
+    // safe.
     inline auto build_pane_columns_menu(pane_state& st, netxs::wptr<ui::base> panel_wp) -> std::vector<app::shared::menu::item>
     {
         namespace m = app::shared::menu;
@@ -465,10 +466,8 @@ namespace netxs::app::parvion
         for (auto i = si32{}; i < p_ncol; ++i)
         {
             auto shown = st.col_shown[(size_t)i];
-            auto row = m::item{ .alive = true,
-                .label = (shown ? text{ "\xE2\x96\xA3 " }   // ▣ shown
-                                : text{ "\xE2\x96\xA1 " })   // □ hidden
-                       + text{ p_headers[(size_t)i] } };
+            auto row = m::item{ .alive = true, .label = text{ p_headers[(size_t)i] },
+                                .type = m::kind::check, .checked = shown };
             row.action = [&st, panel_wp, i](hids&)
             {
                 if (auto p = panel_wp.lock())

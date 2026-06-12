@@ -187,7 +187,7 @@ R"==(
         </colors>
         <border=0/>  <!-- Width of the left and right border of the terminal window. -->
         <tablen=8/>  <!-- Tab length. -->
-        <menu item*>  <!-- Each <item> defaults to type="button". Set type="dropdown" to open a popup list of nested <item> children below the trigger on left-click. Nested <item type="dropdown"> items render with a chevron '>' and cascade as submenus to the right. type="radiomenu" opens its nested <item> children as a radio-menu group (each row prefixed with ◉/○); the selected row is published by the trigger's own <script> via vtm.item.Check(idx), with a child checked="true" as the static fallback. type="separator" renders a non-interactive horizontal '─' divider inside a dropdown popup; it is skipped by mouse hover and keyboard navigation. -->
+        <menu item*>  <!-- Each <item> defaults to type="button". Set type="dropdown" to open a popup list of nested <item> children below the trigger on left-click. Nested <item type="dropdown"> items render with a chevron '>' and cascade as submenus to the right. type="radiomenu" opens its nested <item> children as a radio-menu group (each row prefixed with ◉/○); the selected row is published by the trigger's own <script> via vtm.item.Check(idx), with a child checked="true" as the static fallback. type="separator" renders a non-interactive horizontal '─' divider inside a dropdown popup; it is skipped by mouse hover and keyboard navigation. type="check" renders as a checkbox toggle row (▣/□) inside a dropdown popup; the checked state is published by the item's own <script> via vtm.item.Check(0|1) — run against the owning menu-bar trigger at popup-open time — with checked="true" as the static fallback, and clicking the row runs its input-driven scripts (e.g. script=OnLeftClick|...) and dismisses the menu. -->
             <autohide=/Menu/Defaults/autohide/>
             <slim=/Menu/Defaults/slim/>
             <padding=/Menu/Defaults/padding/>
@@ -203,6 +203,7 @@ R"==(
             <item=/Menu/Buttons/FindBar/>
             <item type="dropdown" label="Edit" tooltip=" Edit menu " item*>  <!-- Multi-level dropdown demo: leaf rows run their script, submenu rows (type="dropdown") cascade to the right. -->
                 <item label="Clear Scrollback" tooltip=" Clear terminal scrollback "    script=OnLeftClick|TerminalClearScrollback/>
+                <item=/Menu/Buttons/ExclusiveKeyboardCheck/>  <!-- type="check" usage example: a ▣/□ toggle row whose state is published via vtm.item.Check() at popup-open (see /Menu/Buttons/ExclusiveKeyboardCheck). -->
                 <item type="separator"/>  <!-- Non-interactive '─' divider; skipped by mouse hover and keyboard navigation. -->
                 <item type="dropdown" label="Find" tooltip=" Find submenu " item*>  <!-- Nested submenu: opens to the right of 'Edit', anchored on this row. -->
                     <item label="Toggle Find Bar" tooltip=" Toggle the terminal find-bar " script=OnLeftClick|TerminalFindBarToggle/>
@@ -618,6 +619,14 @@ R"==(
                 vtm.item.Deface()
             </script>
         </ExclusiveKeyboard>
+        <ExclusiveKeyboardCheck type="check" label=/Ns/ExclusiveKeyboard/menuitem/label tooltip=/Ns/ExclusiveKeyboard/off/tooltip>  <!-- type="check" flavor of the ExclusiveKeyboard toggle for use as a dropdown row (the bar button above relabels itself instead). -->
+            <script>  <!-- Publish the live mode as the checked state (▣/□). Run at popup-open against the owning menu-bar trigger — the same vtm.item.Check pattern a radiomenu uses — so the box reflects the current mode regardless of how it was toggled. -->
+                <on="release: e2::form::upon::started"  source="applet"/>
+                <on="release: terminal::events::rawkbd" source="terminal"/>
+                vtm.item.Check(vtm.terminal.ExclusiveKeyboardMode())
+            </script>
+            <script=OnLeftClick|ExclusiveKeyboardMode/>
+        </ExclusiveKeyboardCheck>
         <NoWrapMode script=OnLeftClick|TerminalWrapMode>
             <script>
                 <on="release: e2::form::upon::started"          source="applet"/>
@@ -912,6 +921,7 @@ R"==(
             </tooltip_body>
             <on  label="\e[2:247m\e[2:231;38:2:0:255:0mExclusive\e[2:239m\e[m" state="     ON" tooltip=tooltip_body/>
             <off label="Exclusive"                                             state="    OFF" tooltip=tooltip_body/>
+            <menuitem label="Exclusive keyboard mode"/>  <!-- Plain-text label for the type="check" dropdown row (the ▣/□ box shows the state, so no on/off label swap). -->
         </ExclusiveKeyboard>
         <NoWrapMode>
             <on  label="\e[2:247m\e[2:231;38:2:0:255:0mNoWrap\e[2:239m\e[m" tooltip=" \e[1mText line wrapping mode\e[m  \n Text wrapping off        "/>
@@ -1190,6 +1200,7 @@ R"==(
             </tooltip_body>
             <on  label="\e[2:247m \e[2:231;38:2:0:255:0m Монопольно \e[2:239m \e[m" state="    ВКЛ" tooltip=tooltip_body/>
             <off label=                               "  Монопольно  "              state="   ВЫКЛ" tooltip=tooltip_body/>
+            <menuitem label="Монопольный режим клавиатуры"/>  <!-- Текстовая метка для пункта выпадающего меню (type="check"): состояние показывает ▣/□. -->
         </ExclusiveKeyboard>
         <NoWrapMode>
             <on  label="\e[2:247m \e[2:231;38:2:0:255:0mРазвернуть\e[2:239m \e[m" tooltip=" \e[1mАвтоперенос строк текста\e[m  \n          Автоперенос ВЫКЛ "/>

@@ -152,11 +152,11 @@ namespace netxs::app::parvion
         auto deface = [panel_wp]{ if (auto p = panel_wp.lock()) p->base::deface(); };
         auto items = std::vector<m::item>{};
 
-        // "&Show detailed log" — wxITEM_CHECK in FileZilla; ▣/□ shows the state.
-        auto detail = m::item{ .alive = true,
-            .label = (ctrl->show_detailed ? text{ "\xE2\x96\xA3 " }   // ▣
-                                          : text{ "\xE2\x96\xA1 " })   // □
-                   + "Show detailed log" };
+        // "&Show detailed log" — wxITEM_CHECK in FileZilla; the kind::check row
+        // paints ▣/□ in the popup's check gutter from .checked (the menu is
+        // rebuilt on every open, so the state is always fresh).
+        auto detail = m::item{ .alive = true, .label = "Show detailed log",
+                               .type = m::kind::check, .checked = ctrl->show_detailed };
         detail.action = [ctrl, deface](hids&){ ctrl->show_detailed = !ctrl->show_detailed; deface(); };
         items.push_back(std::move(detail));
 
@@ -289,9 +289,10 @@ namespace netxs::app::parvion
         return items;
     }
 
-    // Build the table-header right-click menu: one toggle per column (▣ shown / □ hidden, mirroring
-    // the message log's "Show detailed log"). Reason appears only on the Failed tab. At least one
-    // column stays visible. Rebuilt on every open so the ▣/□ reflect the live state.
+    // Build the table-header right-click menu: one kind::check toggle per column (▣ shown /
+    // □ hidden, mirroring the message log's "Show detailed log"). Reason appears only on the
+    // Failed tab. At least one column stays visible. Rebuilt on every open so the ▣/□ reflect
+    // the live state.
     inline auto build_queue_columns_menu(sftp_remote* ctrl, si32 tab, netxs::wptr<ui::base> panel_wp) -> std::vector<app::shared::menu::item>
     {
         namespace m = app::shared::menu;
@@ -301,10 +302,8 @@ namespace netxs::app::parvion
         for (auto i = si32{}; i < n; ++i)
         {
             auto shown = ctrl->col_shown[(size_t)i];
-            auto row = m::item{ .alive = true,
-                .label = (shown ? text{ "\xE2\x96\xA3 " }   // ▣ shown
-                                : text{ "\xE2\x96\xA1 " })   // □ hidden
-                       + text{ q_headers[(size_t)i] } };
+            auto row = m::item{ .alive = true, .label = text{ q_headers[(size_t)i] },
+                                .type = m::kind::check, .checked = shown };
             row.action = [ctrl, deface, i, n](hids&)
             {
                 if (ctrl->col_shown[(size_t)i]) // Hiding: keep at least one column visible.

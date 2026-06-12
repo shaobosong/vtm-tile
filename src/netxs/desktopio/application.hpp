@@ -816,12 +816,26 @@ namespace netxs::app::shared
         //   separator         : non-interactive horizontal rule rendered as a row of
         //                       '─' characters spanning the popup width. Skipped by
         //                       mouse hover and keyboard navigation.
+        //   check             : checkbox toggle row rendered with ▣ (checked) / □
+        //                       (unchecked) in a left gutter (FileZilla's wxITEM_CHECK
+        //                       style). The checked state is published by the item's own
+        //                       <script> updater via vtm.item.Check(0|1) and resolved at
+        //                       popup-open time against the live trigger — the same
+        //                       event-driven bridge a radiomenu uses — with the item's
+        //                       checked="true" / programmatic .checked value as the
+        //                       static fallback when no updater script is present.
+        //                       Clicking runs the item's input-driven scripts (e.g.
+        //                       script=OnLeftClick|...) and dismisses the chain, exactly
+        //                       like a dropdown leaf. Placed top-level on the menu bar a
+        //                       check item degrades to a plain button (its scripts are
+        //                       wired as live keybindings; no gutter is drawn).
         enum class kind : si32
         {
             button,
             dropdown,
             radiomenu,
             separator,
+            check,
         };
 
         struct item
@@ -832,7 +846,7 @@ namespace netxs::app::shared
             cell hover{};
             cell focus{};
             kind type{ kind::button };
-            bool checked{};                        // Radiomenu rows only: static fallback for the selected option.
+            bool checked{};                        // Radiomenu rows: static fallback for the selected option. Check rows: the ▣/□ state (live-resolved at popup open when an updater script is present).
             std::vector<item> children;            // Populated only when type == kind::dropdown or kind::radiomenu.
             input::bindings::vector bindings;
             std::function<void(hids&)> action{};   // Optional native row action (programmatic dropdowns); run by activate_leaf alongside any script bindings.
@@ -849,6 +863,7 @@ namespace netxs::app::shared
             if (s == "dropdown")  return kind::dropdown;
             if (s == "radiomenu") return kind::radiomenu;
             if (s == "separator") return kind::separator;
+            if (s == "check")     return kind::check;
             return kind::button;
         }
 
@@ -1049,17 +1064,31 @@ namespace netxs::app::shared
         // Width of the radio gutter painted at the left edge of every row in a
         // radiomenu popup: a radio bullet glyph (◉/○) plus one trailing space.
         static constexpr auto radio_gutter = si32{ 2 };
+        // Width of the checkbox gutter reserved on every row when a popup
+        // contains any kind::check row: a ▣/□ glyph plus one trailing space.
+        static constexpr auto check_gutter = si32{ 2 };
+
+        // True when any row in the popup is a checkbox toggle — the whole popup
+        // then reserves a check gutter on every row (same popup-wide reservation
+        // the chevron column uses for submenus) so labels stay aligned.
+        static auto has_check_rows(std::vector<menu::item> const& items) -> bool
+        {
+            for (auto& c : items) if (c.type == menu::kind::check) return true;
+            return faux;
+        }
 
         static auto _popup_dimensions(std::vector<menu::item> const& items, si32 padding, bool radio = faux) -> twod
         {
             auto has_submenus = false;
             for (auto& c : items) if (!c.children.empty()) { has_submenus = true; break; }
+            auto has_checks = has_check_rows(items);
             auto popup_w = si32{ 12 };
             for (auto& c : items)
             {
                 if (!is_selectable(c)) continue; // Separators don't drive width.
                 auto w = label_display_length(c.label) + 2 * padding + (has_submenus ? 2 : 0)
-                       + (radio ? radio_gutter : 0);
+                       + (radio ? radio_gutter : 0)
+                       + (has_checks ? check_gutter : 0);
                 if (w > popup_w) popup_w = w;
             }
             return twod{ popup_w, (si32)items.size() };
@@ -1106,6 +1135,54 @@ namespace netxs::app::shared
                 }
             }
             return radio_checked_index(trigger, radio_item.children);
+        }
+
+        // True when the binding subscribes to generic events (on="release: e2::...")
+        // rather than to a mouse/keyboard chord (on="LeftClick" etc.). Used to tell
+        // a check item's state-updater script apart from its click/toggle script.
+        static auto is_event_binding(input::bindings::binding_t const& b) -> bool
+        {
+            auto [chords, is_preview] = input::bindings::get_chords(b.chord);
+            for (auto& binary_chord : chords)
+            {
+                if (binary_chord.size() && input::key::is_generic((byte)binary_chord.front())) return true;
+            }
+            return faux;
+        }
+
+        // Resolve the live ▣/□ state for a kind::check item at popup-open time.
+        // Mirrors radio_resolve_index: a nested check row is not a live object, so
+        // its <on=...> event subscriptions never fire — instead its event-updater
+        // script (the one calling vtm.item.Check(0|1)) is run here against the LIVE
+        // trigger's scripting context and the published state is read back through
+        // the same "menu.radio.index" property bridge. Only event-subscription
+        // bindings run; mouse/keyboard-chord bindings (the OnLeftClick toggle) are
+        // skipped so opening the popup never flips the underlying mode. Items with
+        // no updater script (programmatic menus, static config) fall through to
+        // their .checked value. The property is snapshotted and restored so a
+        // radiomenu sharing the same trigger keeps its published selection.
+        static auto check_resolve_state(ui::base& trigger, menu::item const& check_item) -> bool
+        {
+            auto has_updater = faux;
+            for (auto& b : check_item.bindings)
+            {
+                if (b.script_ptr && b.script_ptr->second.size() && is_event_binding(b)) { has_updater = true; break; }
+            }
+            if (!has_updater) return check_item.checked;
+            auto saved = trigger.base::property("menu.radio.index", si32{ -1 });
+            // Preset so an updater that doesn't call Check() leaves the state unchanged.
+            trigger.base::property("menu.radio.index", si32{ -1 }) = check_item.checked ? 1 : 0;
+            auto& luafx = trigger.bell::indexer.luafx;
+            for (auto& b : check_item.bindings)
+            {
+                if (b.script_ptr && b.script_ptr->second.size() && is_event_binding(b))
+                {
+                    luafx.run_script(trigger, b.script_ptr->second);
+                }
+            }
+            auto checked = trigger.base::property("menu.radio.index", si32{ -1 }) == 1;
+            trigger.base::property("menu.radio.index", si32{ -1 }) = saved;
+            return checked;
         }
 
         // Open a dropdown popup anchored to the bottom of `trigger`, listing
@@ -1540,10 +1617,22 @@ namespace netxs::app::shared
         // recursively call back into this function for submenus, and any leaf
         // click tears down the whole chain via dismiss_dropdown_chain.
         static auto _attach_popup_overlay(popup_chain_ptr chain, twod top_left,
-                                          std::vector<menu::item> const& items,
+                                          std::vector<menu::item> const& items_in,
                                           bool radio, si32 radio_checked) -> netxs::wptr<ui::base>
         {
-            if (items.empty() || !chain || !chain->host_ptr) return {};
+            if (items_in.empty() || !chain || !chain->host_ptr) return {};
+            // Resolve the live ▣/□ state of every check row up front (the lambdas
+            // below capture the items by value, so the resolved copy is what both
+            // the render and activation paths see). Items with no updater script
+            // keep their static/programmatic .checked value.
+            auto items = items_in;
+            if (auto trigger_ptr = chain->trigger_shadow.lock())
+            {
+                for (auto& c : items)
+                {
+                    if (c.type == menu::kind::check) c.checked = check_resolve_state(*trigger_ptr, c);
+                }
+            }
             // Geometry: width = max label width + 2 padding cells. When ANY
             // row carries children, reserve 2 extra cells at the right edge
             // of every row for the chevron indicator (visual alignment +
@@ -1553,6 +1642,7 @@ namespace netxs::app::shared
             // placement.
             auto has_submenus = false;
             for (auto& c : items) if (!c.children.empty()) { has_submenus = true; break; }
+            auto has_checks = has_check_rows(items);
             auto padding = chain->padding;
             auto dim = _popup_dimensions(items, padding, radio);
             auto popup_w = dim.x;
@@ -1594,7 +1684,7 @@ namespace netxs::app::shared
                 auto kbd_lock_coord_ptr = ptr::shared(twod{ -32768, -32768 });
 
                 ovl.LISTEN(tier::release, e2::render::any, parent_canvas, -,
-                    (items, top_left, popup_w, popup_h, has_submenus, hover_row_ptr,
+                    (items, top_left, popup_w, popup_h, has_submenus, has_checks, hover_row_ptr,
                      popup_px_ptr, popup_py_ptr, painted_rect_ptr, ovl_id, depth, padding,
                      radio, radio_checked, chain))
                 {
@@ -1685,7 +1775,8 @@ namespace netxs::app::shared
                         // then push the label start past the gutter. The
                         // popup width budget already reserves radio_gutter
                         // cells for this (see _popup_dimensions).
-                        auto gutter = radio ? radio_gutter : si32{ 0 };
+                        auto gutter = (radio      ? radio_gutter : si32{ 0 })
+                                    + (has_checks ? check_gutter : si32{ 0 });
                         if (radio)
                         {
                             auto bullet = (i == radio_checked) ? "\xE2\x97\x89"  // ◉
@@ -1693,6 +1784,20 @@ namespace netxs::app::shared
                             parent_canvas.fill(rect{{ px + padding, py + i }, { 1, 1 }}, [=](cell& c)
                             {
                                 c.bgc(bg).fgc(fg).txt(bullet).link(ovl_id);
+                            });
+                        }
+                        // Check rows: paint the ▣/□ box in the check gutter
+                        // (reserved on every row of this popup when any row is
+                        // a kind::check, so labels stay aligned). Non-check
+                        // rows leave their gutter blank.
+                        if (has_checks && row_item.type == menu::kind::check)
+                        {
+                            auto box = row_item.checked ? "\xE2\x96\xA3"  // ▣
+                                                        : "\xE2\x96\xA1"; // □
+                            auto bx = px + padding + (radio ? radio_gutter : si32{ 0 });
+                            parent_canvas.fill(rect{{ bx, py + i }, { 1, 1 }}, [=](cell& c)
+                            {
+                                c.bgc(bg).fgc(fg).txt(box).link(ovl_id);
                             });
                         }
                         auto& label = row_item.label;
@@ -2308,6 +2413,9 @@ namespace netxs::app::shared
         //
         // The returned setup function differs by kind:
         //   button   - installs script keybindings (LeftClick runs scripts).
+        //   check    - same wiring as button; the ▣/□ state only materialises
+        //              when the item is rendered as a dropdown row (resolved at
+        //              popup-open via check_resolve_state).
         //   dropdown - skips script keybindings (children own their scripts);
         //              installs a LeftClick that opens a popup of children.
         //              The popup overlay rendering follows the command_bar
