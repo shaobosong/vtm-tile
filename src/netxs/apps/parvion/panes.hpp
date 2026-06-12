@@ -540,9 +540,18 @@ namespace netxs::app::parvion
                 else     st.remote->delete_remote_file(nm);
             return;
         }
+        st.marked = { 0 }; st.sel = 0; st.sel_anchor = 0;
+        if (st.ctrl)
+        {
+            // Local: hand the paths to the controller's detached worker (a big subtree must not
+            // freeze the UI); each completed item bumps local_gen, which re-lists this pane.
+            auto paths = std::vector<text>{};
+            for (auto& [nm, dir] : victims) paths.push_back(child_path(st.path, nm, true));
+            st.ctrl->delete_local_async(std::move(paths));
+            return;
+        }
         auto ec = std::error_code{};
         for (auto& [nm, dir] : victims) fs::remove_all(fs::path{ child_path(st.path, nm, true) }, ec); // remove_all recurses.
-        st.marked = { 0 }; st.sel = 0; st.sel_anchor = 0;
         pane_refresh(st);
     }
     inline void pane_transfer_selection(pane_state& st) // Enqueue marked items (upload local / download remote); folders recurse.

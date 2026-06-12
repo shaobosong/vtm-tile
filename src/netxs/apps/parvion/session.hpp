@@ -795,6 +795,19 @@ namespace netxs::app::parvion
         std::vector<queue_item> rec_uploads;    // upload: per-file uploads to enqueue once the mkdirs complete.
         bool  remote_refresh_pending = faux; // A completed upload landed in the displayed remote dir; re-list when idle.
         ui64  local_gen = 0;          // Bumped when a download completes into the displayed local dir (pane re-lists).
+        // Async local delete (delete_local_async): the detached worker touches only this
+        // shared block of atomics, never the pane or this object's non-atomic fields, so it
+        // can outlive both. poll() folds `done` ticks into local_gen on the event context.
+        struct local_del_state
+        {
+            std::atomic<ui64> done{ 0 };    // remove_all calls completed (success or not).
+            std::atomic<si32> fails{ 0 };   // remove_all calls that reported an error.
+            std::atomic<si32> running{ 0 }; // In-flight delete batches.
+        };
+        std::shared_ptr<local_del_state> ldel = std::make_shared<local_del_state>();
+        ui64  ldel_seen = 0;          // Last ldel->done seen by poll() (event context only).
+        si32  dbg_local_del_delay_ms = 0; // Test seam (env PARVION_DEBUG_LOCAL_DEL_DELAY_MS): sleep this long before
+                                          // each remove_all so a test can observe the UI staying live mid-delete.
         bool  use_parallel = true;    // Split large files across concurrent connections.
         si64  parallel_threshold = 4ll << 20; // "Larger than" gate / per-chunk target (4 MiB).
         ui32  max_connections = 6;    // Cap on concurrent connections (chunks) per transfer.
@@ -843,6 +856,8 @@ namespace netxs::app::parvion
             if (auto e = std::getenv("PARVION_XFER_IDLE_SEC"))   { if (auto n = std::atoi(e); n >= 0) xfer_idle_sec = n; }
             //   PARVION_DEBUG_LS_DELAY_MS=<n> test seam: hold the post-cd directory listing to widen the cd->ls window
             if (auto e = std::getenv("PARVION_DEBUG_LS_DELAY_MS")) { if (auto n = std::atoi(e); n > 0) dbg_ls_delay_ms = n; }
+            //   PARVION_DEBUG_LOCAL_DEL_DELAY_MS=<n> test seam: stall each local remove_all to keep a delete in flight
+            if (auto e = std::getenv("PARVION_DEBUG_LOCAL_DEL_DELAY_MS")) { if (auto n = std::atoi(e); n > 0) dbg_local_del_delay_ms = n; }
             load_recent(); // Restore the persisted Quick Connect history.
         }
 
@@ -1068,6 +1083,21 @@ namespace netxs::app::parvion
             // Test seam: a post-cd `ls` held by PARVION_DEBUG_LS_DELAY_MS is now due.
             if (ls_deferred && await == c_cd && steady_clock::now() >= ls_due) { ls_deferred = faux; list_dir(); }
             drive_recop(); // Pace a recursive folder download/upload/delete on the idle control session.
+            // Fold async local-delete progress into local_gen (the timer re-lists the local pane
+            // per tick, so rows vanish as items go). `running` is read before `done`: seeing 0
+            // means every worker's last `done` increment is already visible, so `done` is final.
+            auto del_running = ldel->running.load();
+            if (auto g = ldel->done.load(); g != ldel_seen)
+            {
+                ldel_seen = g;
+                ++local_gen;
+                if (del_running == 0)
+                {
+                    auto f = ldel->fails.exchange(0);
+                    if (f) fail(std::to_string(f) + " local item(s) could not be deleted.");
+                    else   mark("Delete finished.");
+                }
+            }
         }
 
         // The established control link dropped: remember where we were and hand off to the
@@ -1218,6 +1248,27 @@ namespace netxs::app::parvion
             if (!connected() || name.empty() || recop == rec_download || recop == rec_upload) return;
             recop = rec_delete;
             rec_delfiles.push_back(child_path(path, name, faux));
+        }
+        // Remove local items (absolute paths, recursing into folders) on a detached worker so a
+        // big subtree can't freeze the UI. The worker owns the shared atomics block only; poll()
+        // folds its `done` ticks into local_gen, which re-lists the local pane as items vanish.
+        void delete_local_async(std::vector<text> paths)
+        {
+            if (paths.empty()) return;
+            mark("Deleting " + std::to_string(paths.size()) + " local item(s)...");
+            ldel->running.fetch_add(1);
+            std::thread{ [st = ldel, paths = std::move(paths), delay = dbg_local_del_delay_ms]
+            {
+                for (auto& p : paths)
+                {
+                    if (delay > 0) std::this_thread::sleep_for(std::chrono::milliseconds{ delay });
+                    auto ec = std::error_code{};
+                    fs::remove_all(fs::path{ p }, ec);
+                    if (ec) st->fails.fetch_add(1);
+                    st->done.fetch_add(1);
+                }
+                st->running.fetch_sub(1);
+            }}.detach();
         }
         // Upload a local directory `local_full` into the current remote path as `name`, recursing into
         // sub-directories. The remote directory tree is created first (mkdir, parent-first); the per-file

@@ -8,6 +8,8 @@ parvion/panes.hpp + parvion/session.hpp — the Download / Upload / Delete right
 into directories (modeled on FileZilla's CRecursiveOperation):
 
   1. Delete on a local folder removes the whole subtree from disk (recursive, no network).
+  1b. Local Delete is asynchronous: with the worker stalled via PARVION_DEBUG_LOCAL_DEL_DELAY_MS the
+     click returns immediately, the UI keeps responding, and disk/pane/status catch up on completion.
   2. Download on a remote folder mirrors the remote subtree locally and enqueues one transfer per
      file, then the transfers run. Exercised against the public read-only SFTP test server
      test.rebex.net (demo/password): downloading /pub recurses through /pub/example and pulls every
@@ -91,6 +93,68 @@ def test_local_delete_folder():
                 return False
             if T.grid_contains(s.screen()[0], "/topdir"):
                 print("FAIL - folder still shown after Delete")
+                return False
+            print("PASS")
+            return True
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_local_delete_async():
+    """A local Delete runs off the UI thread: with the worker stalled (test seam), the click
+    returns at once, the in-flight status shows, the UI keeps responding, and disk + pane
+    catch up once the worker lands."""
+    print("TEST: parvion folder - local Delete is asynchronous (UI live while in flight) ... ", end="", flush=True)
+    d = make_nested_tree()
+    try:
+        env = {"PARVION_DEMO_QUEUE": "1", "PARVION_DEBUG_LOCAL_DEL_DELAY_MS": "2000"}
+        with T.ParvionSession(d, env=env) as s:
+            pos = T.find_text(s.screen()[0], "/topdir")
+            if pos is None:
+                print("FAIL - topdir not listed")
+                return False
+            r, c = pos
+            s.click(c + 1, r + 1, button=2)              # Right-click the folder -> item menu (selects it).
+            de = T.find_text(s.screen()[0], "Delete")
+            if de is None:
+                print("FAIL - 'Delete' not in menu")
+                return False
+            t0 = time.time()
+            s.click(de[1] + 1, de[0] + 1, button=0, settle=0.3)
+            # Well inside the 2 s stall: nothing removed yet, but the delete is reported in flight
+            # (the disconnected remote pane mirrors the controller's status line).
+            if not os.path.exists(os.path.join(d, "topdir")):
+                print("FAIL - folder already gone (delete ran synchronously?)")
+                return False
+            if not T.grid_contains(s.screen()[0], "Deleting 1 local item"):
+                print("FAIL - in-flight 'Deleting...' status not shown")
+                return False
+            # The UI must still respond mid-delete: a right-click opens the item menu again.
+            kp = T.find_text(s.screen()[0], "keep.txt")
+            if kp is None:
+                print("FAIL - keep.txt not listed mid-delete")
+                return False
+            s.click(kp[1] + 1, kp[0] + 1, button=2, settle=0.3)
+            if not T.grid_contains(s.screen()[0], "Rename"):
+                print("FAIL - UI unresponsive mid-delete (no context menu)")
+                return False
+            s.click(T.COLS - 20, kp[0] + 1, settle=0.3)  # Click far away to dismiss the menu.
+            # Wait out the stall: the worker lands, the pane re-lists, the status flips.
+            remaining = t0 + 2.0 - time.time()
+            if remaining > 0:
+                time.sleep(remaining)
+            s.feed(1.5)
+            if os.path.exists(os.path.join(d, "topdir")):
+                print("FAIL - folder still on disk after the stall elapsed")
+                return False
+            if not os.path.exists(os.path.join(d, "keep.txt")):
+                print("FAIL - sibling file was wrongly deleted")
+                return False
+            if T.grid_contains(s.screen()[0], "/topdir"):
+                print("FAIL - folder still shown after Delete")
+                return False
+            if not T.grid_contains(s.screen()[0], "Delete finished."):
+                print("FAIL - completion status not shown")
                 return False
             print("PASS")
             return True
@@ -596,6 +660,7 @@ def test_upload_parallel_pooling():
 
 TESTS = [
     test_local_delete_folder,
+    test_local_delete_async,
     test_download_folder_recursive,
     test_download_pooling_reuses_connection,
     test_download_parallel_pooling,
