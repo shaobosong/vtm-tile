@@ -405,6 +405,52 @@ def test_selection_highlight_ends_at_last_column():
         return True
 
 
+def test_expand_button_press_and_hold_feedback():
+    """Holding the left button on a row's +/- button doubles its highlight ("pushed",
+    like the connect bar's buttons); releasing drops back to the hover shade and still
+    toggles the row's subtasks."""
+    print("TEST: parvion - expand button press-and-hold feedback ... ", end="", flush=True)
+    with ParvionSession(DEMO_ENV) as s:
+        chars = s.screen()[0]
+        pos = find_text(chars, "bigfile.iso")
+        if pos is None:
+            print("FAIL - parallel item row not found")
+            return False
+        r, _ = pos
+        c = row_text(chars, r).find("+")  # The enabled "+" button (item collapsed).
+        if c < 0:
+            print("FAIL - expand button not found on the parallel row")
+            return False
+        resting = s.screen()[1][r][c]
+        # Hover the button in two motion steps: the first packet only seeds the
+        # pointer position (vtm swallows it as the initial sync), the second lands.
+        s._write(f"\x1b[<35;{100};{r + 1}M".encode())
+        s.feed(0.3)
+        s._write(f"\x1b[<35;{c + 1};{r + 1}M".encode())
+        s.feed(0.6)
+        hover = s.screen()[1][r][c]
+        if hover is None or hover == resting:
+            print(f"FAIL - no hover highlight (bg {resting} -> {hover})")
+            return False
+        s._write(f"\x1b[<0;{c + 1};{r + 1}M".encode())   # Press and hold.
+        s.feed(0.6)
+        pressed = s.screen()[1][r][c]
+        if pressed is None or pressed in (hover, resting):
+            print(f"FAIL - held press not distinct (bg rest {resting} / hover {hover} / press {pressed})")
+            return False
+        s._write(f"\x1b[<0;{c + 1};{r + 1}m".encode())   # Release: toggles the subtasks.
+        s.feed(0.6)
+        released = s.screen()[1][r][c]
+        if released != hover:
+            print(f"FAIL - press shade did not drop on release (bg {released}, hover {hover})")
+            return False
+        if not grid_contains(s.screen()[0], "Part 1/4"):
+            print("FAIL - release did not expand the subtasks")
+            return False
+        print("PASS")
+        return True
+
+
 def test_blank_area_menu_lists_all_actions():
     """Right-click on the blank area shows Start All / Pause All / Remove All."""
     print("TEST: parvion - blank-area menu lists *All actions ... ", end="", flush=True)
@@ -1131,6 +1177,7 @@ TESTS = [
     test_reason_column_has_resize_handle,
     test_right_click_activates_queue,
     test_selection_highlight_ends_at_last_column,
+    test_expand_button_press_and_hold_feedback,
     test_blank_area_menu_lists_all_actions,
     test_right_click_blank_clears_selection,
     test_item_menu_lists_item_actions,

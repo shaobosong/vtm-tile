@@ -29,6 +29,7 @@ namespace netxs::app::parvion
         std::array<rect, 4> tabbox{};       // Cached tab hitboxes (bottom row).
         std::vector<std::pair<rect, si32>> expand_hit{}; // Per-render: +/- button box -> queue index.
         si32                hover_expand = -1; // Queue index whose +/- button is hovered (-1 = none).
+        si32                press_expand = -1; // Queue index whose +/- button is held down (-1 = none).
 
         // Scrolling (transfer tabs). `scroll` is the first visible display row (parents +
         // expanded subtasks, flattened); `hscroll` is the horizontal cell offset. `follow`
@@ -691,8 +692,9 @@ namespace netxs::app::parvion
                     {
                         auto arrow = it.download ? text{ "↓" } : text{ "↑" }; // down / up
                         col(q_dir_x, 2, y, arrow, dir_fg, row_bg);
-                        // Expand (+/-) button: enabled (sel_bg fill, hover-brightens) for parallel
-                        // items; a muted, hitbox-free "+" for single-connection items.
+                        // Expand (+/-) button: enabled (sel_bg fill, hover-brightens; a held press
+                        // doubles the lift for a "pushed" look, like the connect bar's buttons) for
+                        // parallel items; a muted, hitbox-free "+" for single-connection items.
                         auto parallel = it.chunk_count > 1;
                         auto bx = q_exp_x - hs;
                         if (parallel)
@@ -702,7 +704,8 @@ namespace netxs::app::parvion
                                 auto btn = rect{{ bx, y }, { q_exp_w, 1 }};
                                 canvas.fill(btn, [&](cell& c){ c.bgc(theme::sel_bg); });
                                 put_str(canvas, bx, y, it.expanded ? " - " : " + ", theme::text_fg, theme::sel_bg, q_exp_w);
-                                if (st.hover_expand == qi) canvas.fill(btn, [](cell& c){ c.xlight(); });
+                                if      (st.press_expand == qi) canvas.fill(btn, [](cell& c){ c.xlight(2); });
+                                else if (st.hover_expand == qi) canvas.fill(btn, [](cell& c){ c.xlight(); });
                                 st.expand_hit.emplace_back(btn, qi);
                             }
                         }
@@ -836,9 +839,14 @@ namespace netxs::app::parvion
                 if (auto sb = queue_vsb(st); sb.ok && mx == sb.x && my >= sb.top && my < sb.top + sb.track_h) return;
                 if (auto sb = queue_hsb(st); sb.ok && my == sb.top && mx >= sb.x && mx < sb.x + sb.track_h) return;
                 // A press on a row's +/- button is left to the click handler: toggling the
-                // expanded subtasks must not change the row selection.
+                // expanded subtasks must not change the row selection. The press itself only
+                // arms the doubled-xlight "pushed" feedback painted by the render.
                 for (auto& [b, idx] : st.expand_hit)
-                    if (my == b.coor.y && mx >= b.coor.x && mx < b.coor.x + b.size.x) return;
+                    if (my == b.coor.y && mx >= b.coor.x && mx < b.coor.x + b.size.x)
+                    {
+                        if (st.press_expand != idx) { st.press_expand = idx; boss.base::deface(); }
+                        return;
+                    }
                 // A press on a column border (the resize handle, extended down the body) is
                 // left to the drag handler; never let it fall through to row selection.
                 if (st.tab != 3 && my >= 1 && my < st.div_bottom)
@@ -883,6 +891,10 @@ namespace netxs::app::parvion
                 }
                 boss.base::deface();
                 gear.dismiss();
+            });
+            boss.on(tier::mouserelease, input::key::LeftUp, [&](hids&)
+            {
+                if (st.press_expand != -1) { st.press_expand = -1; boss.base::deface(); }
             });
             boss.on(tier::mouserelease, input::key::LeftClick, [&](hids& gear)
             {
@@ -994,6 +1006,7 @@ namespace netxs::app::parvion
                 for (auto& [b, idx] : st.expand_hit)
                     if (my == b.coor.y && mx >= b.coor.x && mx < b.coor.x + b.size.x) { over = idx; break; }
                 if (st.hover_expand != over) { st.hover_expand = over; boss.base::deface(); }
+                if (st.press_expand != -1 && st.press_expand != over) { st.press_expand = -1; boss.base::deface(); } // Drag-off cancels.
                 // Scrollbar + resizable-border hover feedback (transfer tabs).
                 auto vsb  = queue_vsb(st);
                 auto nsb  = vsb.ok && mx == vsb.x && my >= vsb.top && my < vsb.top + vsb.track_h;
@@ -1010,6 +1023,7 @@ namespace netxs::app::parvion
             {
                 if (st.hover) { st.hover = faux; boss.base::deface(); }
                 if (st.hover_expand != -1) { st.hover_expand = -1; boss.base::deface(); }
+                if (st.press_expand != -1) { st.press_expand = -1; boss.base::deface(); }
                 if (st.sb_hover)  { st.sb_hover = faux;  boss.base::deface(); }
                 if (st.hsb_hover) { st.hsb_hover = faux; boss.base::deface(); }
                 if (st.hover_border != -1) { st.hover_border = -1; boss.base::deface(); }
