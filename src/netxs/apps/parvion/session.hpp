@@ -871,6 +871,23 @@ namespace netxs::app::parvion
         {
             return it.download ? it.dest_dir == local_dir : it.dest_dir == path;
         }
+        // Directory of the item's local file: the target dir for a download, the source dir
+        // for an upload (mirrors setup_parallel_state's split; POSIX or Windows separators).
+        static auto local_dir_of(queue_item const& it) -> text
+        {
+            auto ls = it.local_path.find_last_of("/\\");
+            return ls == text::npos ? text{ "." } : (ls == 0 ? text{ "/" } : it.local_path.substr(0, ls));
+        }
+        // Signal a re-list for every displayed dir the stopped transfer touched: the destination
+        // dir where the (possibly partial) target landed (upload -> remote, download -> local),
+        // and an upload's local source dir, which gains its PARVIONC2 resume-state file on
+        // pause/failure/removal (kept for a later resume) and loses it on success. A download
+        // keeps both artifacts in its destination dir, so the first check covers it alone.
+        void refresh_panes(queue_item const& it)
+        {
+            if (dest_in_view(it)) { if (it.download) ++local_gen; else remote_refresh_pending = true; }
+            if (!it.download && local_dir_of(it) == local_dir) ++local_gen;
+        }
 
         // Local "HH:MM:SS" timestamp for a log entry (FileZilla uses %H:%M:%S).
         static auto make_stamp() -> text
@@ -1245,7 +1262,7 @@ namespace netxs::app::parvion
                 if (!pred(it)) continue;
                 if (it.status == queue_item::transferring)
                 {
-                    if (active == i) stop_active(); // Pause terminates the in-flight connections (FileZilla parity); resume reconnects.
+                    if (active == i) { stop_active(); refresh_panes(it); } // Pause terminates the in-flight connections (FileZilla parity); resume reconnects.
                     it.status = queue_item::queued; it.paused = true; it.rate.speed = 0.0;
                     changed = true;
                 }
@@ -1274,7 +1291,7 @@ namespace netxs::app::parvion
         // keeps pointing at the same (surviving) transfer across the erase.
         template<class P> void queue_remove(P pred)
         {
-            if (active >= 0 && active < (si32)queue.size() && pred(queue[active])) stop_active();
+            if (active >= 0 && active < (si32)queue.size() && pred(queue[active])) { refresh_panes(queue[active]); stop_active(); }
             auto act = (active >= 0 && active < (si32)queue.size()) ? &queue[active] : nullptr;
             auto out = std::vector<queue_item>{};
             out.reserve(queue.size());
@@ -1692,16 +1709,17 @@ namespace netxs::app::parvion
                     item.status = queue_item::queued; item.error.clear(); item.done = 0; item.rate.speed = 0.0;
                     active = -1; holding_followers = faux; active_state_path.clear();
                 }
-                else if (any_err) { log_transfer_result(item, faux, run_bytes(total)); item.status = queue_item::failed; item.rate.speed = avg_speed(item.done); for (auto& w : workers) w->stop(); workers.clear(); active = -1; holding_followers = faux; active_state_path.clear(); }
+                else if (any_err) { log_transfer_result(item, faux, run_bytes(total)); item.status = queue_item::failed; item.rate.speed = avg_speed(item.done); for (auto& w : workers) w->stop(); workers.clear(); active = -1; holding_followers = faux; active_state_path.clear(); refresh_panes(item); }
                 else if (all_ok)  { log_transfer_result(item, true, run_bytes(item.size > 0 ? item.size : total)); if (item.size > 0) item.done = item.size; item.status = queue_item::succeeded; item.rate.speed = avg_speed(item.done);
                                     // Success: return every still-connected worker (the single stream, or each
                                     // parallel chunk) to the idle pool for reuse (recycle_worker caps the pool).
                                     for (auto& w : workers) recycle_worker(std::move(w));
                                     workers.clear(); active = -1; holding_followers = faux;
                                     if (!active_state_path.empty()) { std::remove(active_state_path.c_str()); active_state_path.clear(); }
-                                    // Refresh the destination pane if it still shows the dir the file landed in
-                                    // (FileZilla refreshes the displayed directory only). Upload -> remote, download -> local.
-                                    if (dest_in_view(item)) { if (item.download) ++local_gen; else remote_refresh_pending = true; } }
+                                    // Refresh the panes still showing the dirs the transfer touched (FileZilla
+                                    // refreshes displayed directories only): the destination, and for an upload
+                                    // the local source dir, whose resume-state file was just removed.
+                                    refresh_panes(item); }
             }
             if (active == -1 && !no_autostart)
             {
