@@ -56,7 +56,7 @@ namespace netxs::app::parvion
         bool     paused = faux;     // Queued item held back from auto-start (user "Pause"); shown as "paused".
         text     error;             // Failure reason (when status == failed).
         std::time_t started = 0;    // Wall-clock start (for the FileZilla-style "transferred X in Y" summary).
-        rate_meter rate;            // Live byte-rate: EMA instantaneous (rate.speed) + resume-aware baseline (see rate.hpp).
+        rate_meter rate;            // Live byte-rate: sliding-window instantaneous (rate.speed) + resume-aware baseline (see rate.hpp).
         // Parallel-transfer metadata (Phase 4): chunk index/count + state path.
         ui32     chunk_index = 0;
         ui32     chunk_count = 1;

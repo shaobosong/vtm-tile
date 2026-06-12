@@ -1738,8 +1738,8 @@ namespace netxs::app::parvion
                 // finished), so all_ok stays false until they have actually run.
                 if (holding_followers) all_ok = faux;
                 item.done = total;
-                // Sample the transfer rate on a coarse interval (~0.5s) to avoid the 50ms poll's
-                // jitter, smoothed with an EMA and measured from this run's resume baseline.
+                // Feed every poll into the ~1s sliding-window rate (rate.hpp): the shown speed
+                // covers only the last second, measured from this run's resume baseline.
                 item.rate.sample(item.done, std::chrono::steady_clock::now());
                 dirty = true;
                 // On failure keep the state file on disk so a retry resumes; on
