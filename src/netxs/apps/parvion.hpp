@@ -202,8 +202,8 @@ namespace netxs::app::parvion
                         auto panes = workspace->attach(slot::_1, ui::fork::ctor(axis::X, 2, 1, 1));
                             panes->limits({ -1, min_panes_h }); // Panes (and the divider) can't collapse under the queue bar.
                             pane_state* local_st = nullptr; // Stable handle to the local pane's state so the timer can re-list it after a download.
-                            auto local_pane = panes->attach(slot::_1, make_file_pane("Local site", true, local_lister(), cwd(), true, nullptr, ctrl.get(), &local_st));
-                            auto remote_pane = panes->attach(slot::_2, make_file_pane("Remote site", faux, lister_t{}, "/", faux, ctrl.get(), ctrl.get()));
+                            auto local_pane = panes->attach(slot::_1, make_file_pane("Local site", true, local_lister(), cwd(), true, nullptr, ctrl.get(), &local_st, window));
+                            auto remote_pane = panes->attach(slot::_2, make_file_pane("Remote site", faux, lister_t{}, "/", faux, ctrl.get(), ctrl.get(), nullptr, window));
                             // Draggable Local|Remote divider: pro::mover feeds the fork's split ratio; pro::shade lightens on hover.
                             panes->attach(slot::_I, ui::mock::ctor()
                                 ->active()
@@ -221,7 +221,7 @@ namespace netxs::app::parvion
                                 }));
                         // Transfer queue + message log, merged into one bottom-pinned tabbed panel.
                         // Its empty top handle bar drags the panes/queue split.
-                        auto queue_panel = workspace->attach(slot::_2, make_queue_panel(ctrl.get(), ptr::shadow(workspace)));
+                        auto queue_panel = workspace->attach(slot::_2, make_queue_panel(ctrl.get(), ptr::shadow(workspace), window));
                             queue_panel->limits({ -1, min_queue_h });
             // Drive the SFTP controller from a periodic timer; repaint the remote pane on change.
             window->invoke([&, ctrl, local_pane, local_st, remote_pane, queue_panel](auto& boss)

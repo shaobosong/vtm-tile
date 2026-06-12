@@ -84,6 +84,7 @@ def test_local_delete_folder():
                 print("FAIL - 'Delete' not in menu")
                 return False
             s.click(de[1] + 1, de[0] + 1, button=0)
+            s.write("\r")  # Confirm the delete dialog (Enter -> Confirm, the default selection).
             s.feed(0.8)
             if os.path.exists(os.path.join(d, "topdir")):
                 print("FAIL - folder still on disk after Delete")
@@ -119,8 +120,10 @@ def test_local_delete_async():
             if de is None:
                 print("FAIL - 'Delete' not in menu")
                 return False
-            t0 = time.time()
             s.click(de[1] + 1, de[0] + 1, button=0, settle=0.3)
+            # Delete now asks for confirmation; the stalled worker starts on Confirm.
+            t0 = time.time()
+            s.write("\r", settle=0.3)
             # Well inside the 2 s stall: nothing removed yet, but the delete is reported in flight
             # (the disconnected remote pane mirrors the controller's status line).
             if not os.path.exists(os.path.join(d, "topdir")):
@@ -524,6 +527,7 @@ def test_remove_terminates_connections():
                 print("FAIL - 'Remove All' not in menu")
                 return False
             s.click(ra[1] + 1, ra[0] + 1, button=0)
+            s.write("\r")  # Confirm the Remove All dialog (Enter -> Confirm, the default selection).
             after = before
             for _ in range(12):
                 s.feed(0.5); after = min(after, len(_pgrep_parvionsftp()))

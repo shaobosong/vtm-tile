@@ -255,6 +255,10 @@ class ParvionSession:
     def _write(self, data):
         os.write(self.master_fd, data)
 
+    def write(self, data, settle=0.5):
+        self._write(data.encode() if isinstance(data, str) else data)
+        self.feed(settle)
+
     def click(self, col, row, button=0, settle=0.6):
         self._write(f"\x1b[<{button};{col};{row}M".encode())
         time.sleep(0.05)
@@ -660,6 +664,11 @@ def test_remove_item_via_menu():
         if not click_label(s, "Remove"):        # Click "Remove".
             print("FAIL - Remove entry not found")
             return False
+        # Remove now asks for confirmation; a single selection gets the singular wording.
+        if not grid_contains(s.screen()[0], "Remove this transfer from the queue?"):
+            print("FAIL - confirmation dialog not shown")
+            return False
+        s.write("\r")  # Enter -> Confirm (the default selection).
         chars = s.screen()[0]
         after = tab_count(chars, "Transferring")
         if grid_contains(chars, "notes.txt"):
@@ -688,6 +697,11 @@ def test_multiselect_remove_all_selected():
         if not click_label(s, "Remove"):
             print("FAIL - Remove entry not found")
             return False
+        # Remove now asks for confirmation; a multi-selection gets the counted wording.
+        if not grid_contains(s.screen()[0], "Remove 2 transfers from the queue?"):
+            print("FAIL - confirmation dialog not shown")
+            return False
+        s.write("\r")  # Enter -> Confirm (the default selection).
         chars = s.screen()[0]
         after = tab_count(chars, "Transferring")
         if grid_contains(chars, "queued_00") or grid_contains(chars, "queued_02"):
@@ -698,6 +712,34 @@ def test_multiselect_remove_all_selected():
             return False
         if after != before - 2:
             print(f"FAIL - tab count {before} -> {after} (expected {before - 2})")
+            return False
+        print("PASS")
+        return True
+
+
+def test_keyboard_clear_finished_confirm():
+    """The Delete key asks before clearing finished items; Esc preserves them, Enter clears."""
+    print("TEST: parvion - keyboard clear-finished asks for confirmation ... ", end="", flush=True)
+    with ParvionSession(DEMO_ENV) as s:
+        pos = find_text(s.screen()[0], "notes.txt")
+        if pos is None:
+            print("FAIL - queue row not found")
+            return False
+        s.click(pos[1] + 1, pos[0] + 1, button=0)  # Focus the queue panel.
+        s.write("\x1b[3~")                         # Delete -> confirmation dialog.
+        if not grid_contains(s.screen()[0], "Clear all finished transfers?"):
+            print("FAIL - confirmation dialog not shown")
+            return False
+        s.write("\x1b")                            # Esc -> Cancel: nothing cleared.
+        chars = s.screen()[0]
+        if tab_count(chars, "Failed") != 1 or tab_count(chars, "Succeeded") != 1:
+            print("FAIL - finished items cleared despite cancelling")
+            return False
+        s.write("\x1b[3~")                         # Delete again ...
+        s.write("\r")                              # ... Enter -> Confirm: finished items cleared.
+        chars = s.screen()[0]
+        if tab_count(chars, "Failed") != 0 or tab_count(chars, "Succeeded") != 0:
+            print("FAIL - finished items not cleared after confirm")
             return False
         print("PASS")
         return True
@@ -1188,6 +1230,7 @@ TESTS = [
     test_header_menu_toggles_column_visibility,
     test_remove_item_via_menu,
     test_multiselect_remove_all_selected,
+    test_keyboard_clear_finished_confirm,
     test_pin_to_top_reorders_pending,
     test_pause_then_start_progress_label,
     test_local_and_remote_name_columns,

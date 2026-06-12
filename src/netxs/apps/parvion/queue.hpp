@@ -23,6 +23,7 @@ namespace netxs::app::parvion
         enum dmode { d_none, d_vsb, d_hsb, d_col, d_rubber }; // Active left-drag gesture.
 
         sftp_remote*        ctrl = nullptr;
+        netxs::wptr<ui::base> window_wp;    // App top-level window cake: anchor for confirm dialogs.
         si32                tab = 0;        // 0=Transferring, 1=Failed, 2=Succeeded, 3=Message log.
         bool                focused = faux;
         bool                hover = faux;   // Cursor is over the top handle bar (row 0).
@@ -205,7 +206,7 @@ namespace netxs::app::parvion
     // Build the per-item right-click menu (Start / Pause / Remove, plus Pin to Top on the
     // Transferring tab). Mirrors build_log_menu's construction; the actions run on the panel's live
     // selection so a single right-clicked row and a multi-selection are handled uniformly.
-    inline auto build_queue_item_menu(sftp_remote* ctrl, si32 tab, netxs::wptr<ui::base> panel_wp) -> std::vector<app::shared::menu::item>
+    inline auto build_queue_item_menu(sftp_remote* ctrl, si32 tab, netxs::wptr<ui::base> panel_wp, netxs::wptr<ui::base> window_wp) -> std::vector<app::shared::menu::item>
     {
         namespace m = app::shared::menu;
         auto deface = [panel_wp]{ if (auto p = panel_wp.lock()) p->base::deface(); };
@@ -220,7 +221,25 @@ namespace netxs::app::parvion
         add("Start",  [ctrl, sel]{ ctrl->queue_start(sel); });
         // Pause applies only to in-flight/pending items (Transferring tab); finished items can't be paused.
         if (tab == 0) add("Pause", [ctrl, sel]{ ctrl->queue_pause(sel); });
-        add("Remove", [ctrl, sel]{ ctrl->queue_remove(sel); });
+        add("Remove", [ctrl, sel, panel_wp, window_wp]
+        {
+            // The count is taken now for the message; `sel` re-evaluates live at confirm time,
+            // so items that finish or get deselected meanwhile simply drop out of the removal.
+            auto count = si32{};
+            for (auto& it : ctrl->queue) if (it.selected) ++count;
+            if (!count) return;
+            auto run = [ctrl, sel, panel_wp]
+            {
+                if (auto p = panel_wp.lock()) { ctrl->queue_remove(sel); p->base::deface(); }
+            };
+            auto window = window_wp.lock();
+            if (!window) { run(); return; } // No dialog anchor wired: behave as before.
+            auto texts = app::shared::confirm_dialog_text{
+                count == 1 ? text{ "Remove this transfer from the queue?" }
+                           : "Remove " + std::to_string(count) + " transfers from the queue?",
+                "Remove", "Cancel" };
+            app::shared::show_close_confirmation(*window, run, {}, texts);
+        });
         // Pin to Top reorders pending (queued) items: only on the Transferring tab, and only when the
         // selection actually contains a queued item — a transferring item has nothing to pin, so the
         // entry is dropped for it (the dropdown has no disabled-row style).
@@ -237,7 +256,7 @@ namespace netxs::app::parvion
     // Build the blank-area right-click menu (Start All / Pause All / Remove All), scoped to the
     // items on the active tab (the visible queue) per the confirmed "current tab only" behavior.
     // Pause All is shown only on the Transferring tab (finished items can't be paused).
-    inline auto build_queue_all_menu(sftp_remote* ctrl, si32 tab, netxs::wptr<ui::base> panel_wp) -> std::vector<app::shared::menu::item>
+    inline auto build_queue_all_menu(sftp_remote* ctrl, si32 tab, netxs::wptr<ui::base> panel_wp, netxs::wptr<ui::base> window_wp) -> std::vector<app::shared::menu::item>
     {
         namespace m = app::shared::menu;
         auto deface = [panel_wp]{ if (auto p = panel_wp.lock()) p->base::deface(); };
@@ -251,7 +270,22 @@ namespace netxs::app::parvion
         };
         add("Start All",  [ctrl, scope]{ ctrl->queue_start(scope); });
         if (tab == 0) add("Pause All", [ctrl, scope]{ ctrl->queue_pause(scope); });
-        add("Remove All", [ctrl, scope]{ ctrl->queue_remove(scope); });
+        add("Remove All", [ctrl, scope, panel_wp, window_wp]
+        {
+            // `scope` re-evaluates live at confirm time, so items leaving the tab meanwhile drop out.
+            auto count = si32{};
+            for (auto& it : ctrl->queue) if (scope(it)) ++count;
+            if (!count) return;
+            auto run = [ctrl, scope, panel_wp]
+            {
+                if (auto p = panel_wp.lock()) { ctrl->queue_remove(scope); p->base::deface(); }
+            };
+            auto window = window_wp.lock();
+            if (!window) { run(); return; } // No dialog anchor wired: behave as before.
+            auto texts = app::shared::confirm_dialog_text{
+                "Remove all transfers on this tab?", "Remove", "Cancel" };
+            app::shared::show_close_confirmation(*window, run, {}, texts);
+        });
         return items;
     }
 
@@ -799,7 +833,7 @@ namespace netxs::app::parvion
         }
     }
 
-    inline auto make_queue_panel(sftp_remote* ctrl, netxs::wptr<ui::fork> resize_target) -> ui::sptr
+    inline auto make_queue_panel(sftp_remote* ctrl, netxs::wptr<ui::fork> resize_target, netxs::wptr<ui::base> window_wp = {}) -> ui::sptr
     {
         auto panel = ui::mock::ctor()
             ->active()
@@ -810,6 +844,7 @@ namespace netxs::app::parvion
         {
             auto& st = boss.base::field(queue_state{});
             st.ctrl = ctrl;
+            st.window_wp = window_wp;
             boss.LISTEN(tier::release, e2::render::any, parent_canvas)
             {
                 queue_render(st, parent_canvas, boss.base::size());
@@ -982,7 +1017,7 @@ namespace netxs::app::parvion
                         boss.base::deface();
                     }
                     app::shared::menu::open_dropdown_popup(boss,
-                        build_queue_item_menu(st.ctrl, st.tab, ptr::shadow(boss.This())), faux, -1, at);
+                        build_queue_item_menu(st.ctrl, st.tab, ptr::shadow(boss.This()), st.window_wp), faux, -1, at);
                 }
                 else
                 {
@@ -991,7 +1026,7 @@ namespace netxs::app::parvion
                     for (auto& it : st.ctrl->queue) { any |= it.selected; it.selected = faux; }
                     if (any) { st.sel_anchor = -1; boss.base::deface(); }
                     app::shared::menu::open_dropdown_popup(boss,
-                        build_queue_all_menu(st.ctrl, st.tab, ptr::shadow(boss.This())), faux, -1, at);
+                        build_queue_all_menu(st.ctrl, st.tab, ptr::shadow(boss.This()), st.window_wp), faux, -1, at);
                 }
                 gear.dismiss();
             });
@@ -1228,9 +1263,22 @@ namespace netxs::app::parvion
                 auto k = gear.keybd::generic();
                 if (k == input::key::KeyDelete || k == input::key::Backspace)
                 {
-                    st.ctrl->clear_finished();
-                    gear.set_handled();
-                    boss.base::deface();
+                    gear.set_handled(); // Swallow the key either way (matches the old behavior).
+                    // Count predicate mirrors clear_finished's erase predicate: succeeded or failed, all tabs.
+                    auto count = si32{};
+                    for (auto& it : st.ctrl->queue)
+                        if (it.status == queue_item::succeeded || it.status == queue_item::failed) ++count;
+                    if (!count) return; // Nothing finished: keep the old no-op, no dialog.
+                    auto run = [&st, panel_wp = ptr::shadow(boss.This())]
+                    {
+                        if (auto p = panel_wp.lock()) { st.ctrl->clear_finished(); p->base::deface(); }
+                    };
+                    if (auto window = st.window_wp.lock())
+                    {
+                        app::shared::show_close_confirmation(*window, run, {},
+                            app::shared::confirm_dialog_text{ "Clear all finished transfers?", "Clear", "Cancel" });
+                    }
+                    else run(); // No dialog anchor wired: behave as before.
                     return;
                 }
                 if (st.tab == 3) return; // Navigation applies to the transfer tables only.

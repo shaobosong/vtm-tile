@@ -307,6 +307,10 @@ def queue_all_action(s, label):
     if it is None:
         return f"'{label}' not in the queue menu"
     s.click(it[1] + 1, it[0] + 1, button=0)
+    if label == "Remove All":  # Destructive: confirm the dialog (Enter -> Confirm, the default).
+        if not T.grid_contains(s.screen()[0], "Remove all transfers on this tab?"):
+            return "Remove All confirmation dialog not shown"
+        s.write("\r")
     return None
 
 

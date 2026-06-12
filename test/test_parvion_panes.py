@@ -398,12 +398,50 @@ def test_delete_item():
                 print("FAIL - 'Delete' not in menu")
                 return False
             s.click(de[1] + 1, de[0] + 1, button=0)
+            # Delete now asks for confirmation; the message names the single victim.
+            if not grid_contains(s.screen()[0], "Delete 'beta.txt'?"):
+                print("FAIL - confirmation dialog not shown")
+                return False
+            s.write("\r")  # Enter -> Confirm (the default selection).
             s.feed(0.6)
             if os.path.exists(os.path.join(d, "beta.txt")):
                 print("FAIL - file still on disk after Delete")
                 return False
             if grid_contains(s.screen()[0], "beta.txt"):
                 print("FAIL - file still shown after Delete")
+                return False
+            print("PASS")
+            return True
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_delete_cancel():
+    """Esc in the Delete confirmation dialog cancels: nothing is removed."""
+    print("TEST: parvion pane - Delete cancelled by Esc ... ", end="", flush=True)
+    d = make_tree()
+    try:
+        with ParvionSession(d) as s:
+            pos = find_text(s.screen()[0], "beta.txt")
+            if pos is None:
+                print("FAIL - beta.txt not listed")
+                return False
+            s.click(pos[1] + 1, pos[0] + 1, button=2)   # Right-click -> item menu (selects beta).
+            de = find_text(s.screen()[0], "Delete")
+            if de is None:
+                print("FAIL - 'Delete' not in menu")
+                return False
+            s.click(de[1] + 1, de[0] + 1, button=0)
+            if not grid_contains(s.screen()[0], "Delete 'beta.txt'?"):
+                print("FAIL - confirmation dialog not shown")
+                return False
+            s.write("\x1b")  # Esc -> Cancel.
+            s.feed(0.6)
+            if not os.path.exists(os.path.join(d, "beta.txt")):
+                print("FAIL - file deleted despite cancelling")
+                return False
+            if not grid_contains(s.screen()[0], "beta.txt"):
+                print("FAIL - file no longer listed after cancel")
                 return False
             print("PASS")
             return True
@@ -566,6 +604,7 @@ TESTS = [
     test_item_context_menu,
     test_create_directory,
     test_delete_item,
+    test_delete_cancel,
     test_rename_item,
 ]
 

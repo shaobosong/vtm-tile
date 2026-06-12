@@ -114,6 +114,7 @@ namespace netxs::app::parvion
         si32                  hsb_grab  = 0;    // H-thumb-drag grab offset (press col - thumb left).
         sftp_remote*          remote = nullptr; // Non-null: remote pane backed by the SFTP controller.
         sftp_remote*          ctrl = nullptr;   // SFTP controller (both panes) for enqueueing transfers.
+        netxs::wptr<ui::base> window_wp;        // App top-level window cake: anchor for confirm dialogs.
         ui64                  seen_gen = ~0ull; // Last remote listing generation seen (selection reset).
         ui64                  seen_local_gen = 0; // Last local refresh generation seen (post-download re-list); matches ctrl->local_gen's initial 0.
 
@@ -605,7 +606,32 @@ namespace netxs::app::parvion
             items.push_back(std::move(row));
         };
         add(st.remote ? text{ "Download" } : text{ "Upload" }, [&st]{ pane_transfer_selection(st); });
-        add("Delete", [&st]{ pane_delete_selection(st); });
+        add("Delete", [&st, panel_wp]
+        {
+            // Count the victims exactly like pane_delete_selection (skip row 0 = "..") so the
+            // dialog reflects what would actually be deleted; bail silently when there's nothing.
+            auto& its = st.cur_items();
+            auto count = si32{};
+            auto first = text{};
+            for (auto row : st.marked)
+                if (row > 0 && row - 1 < (si32)its.size())
+                {
+                    if (!count) first = its[(size_t)(row - 1)].name;
+                    ++count;
+                }
+            if (!count) return;
+            auto run = [&st, panel_wp] // Deferred to confirm time: lock the panel before touching its st field storage.
+            {
+                if (auto p = panel_wp.lock()) { pane_delete_selection(st); p->base::deface(); }
+            };
+            auto window = st.window_wp.lock();
+            if (!window) { run(); return; } // No dialog anchor wired: behave as before.
+            auto texts = app::shared::confirm_dialog_text{
+                count == 1 ? "Delete '" + fit_ellipsis(first, 26) + "'?" // 26-cell name keeps the message on one dialog row.
+                           : "Delete " + std::to_string(count) + " selected items?",
+                "Delete", "Cancel" };
+            app::shared::show_close_confirmation(*window, run, {}, texts);
+        });
         add("Rename", [&st, panel_wp]
         {
             auto& its = st.cur_items();
@@ -861,7 +887,7 @@ namespace netxs::app::parvion
 
     // Build an interactive file pane. `lister` may be empty for a not-yet-wired
     // remote pane (shows an error/placeholder until a session is attached).
-    inline auto make_file_pane(text label, bool is_local, lister_t lister, text initial_path, bool grab_focus = faux, sftp_remote* remote = nullptr, sftp_remote* ctrl = nullptr, pane_state** out_state = nullptr) -> ui::sptr
+    inline auto make_file_pane(text label, bool is_local, lister_t lister, text initial_path, bool grab_focus = faux, sftp_remote* remote = nullptr, sftp_remote* ctrl = nullptr, pane_state** out_state = nullptr, netxs::wptr<ui::base> window_wp = {}) -> ui::sptr
     {
         auto pane = ui::mock::ctor()
             ->active()
@@ -877,6 +903,7 @@ namespace netxs::app::parvion
             st.lister   = lister;
             st.remote   = remote;
             st.ctrl     = ctrl;
+            st.window_wp = window_wp;
             st.path     = initial_path;
             if (!remote) pane_relist(st, initial_path);
 
