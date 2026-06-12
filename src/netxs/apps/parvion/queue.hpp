@@ -49,9 +49,9 @@ namespace netxs::app::parvion
         si32                sel_anchor = -1;   // Queue index anchor for ctrl/shift selection.
         si32                rubber_a = -1, rubber_b = -1; // Live rubber-band display-row span.
         // Ctrl+drag rubber-band (additive select / deselect): `drag_base` holds the queue indices that
-        // were selected when the band started (merged onto each pull); `rubber_ctrl` marks a Ctrl band;
-        // `rubber_add` is its mode (true = select swept rows, false = deselect them, from the anchor's
-        // pre-drag state).
+        // were selected at press time (captured by the LeftDown handler before the press mutates the
+        // selection; merged onto each pull); `rubber_ctrl` marks a Ctrl band; `rubber_add` is its mode
+        // (true = select swept rows, false = deselect them, from the anchor's pre-press state).
         std::set<si32>      drag_base;
         bool                rubber_ctrl = faux;
         bool                rubber_add  = true;
@@ -816,12 +816,82 @@ namespace netxs::app::parvion
                 st.focused = !!count;
                 boss.base::deface();
             };
-            boss.on(tier::mouserelease, input::key::LeftClick, [&](hids& gear)
+            // Select rows and switch tabs on press (mousedown), not on the completed click
+            // (mirrors the file panes, see panes.hpp). Presses on the scrollbar tracks, the
+            // +/- buttons and the column borders are left to the click/drag handlers.
+            boss.on(tier::mouserelease, input::key::LeftDown, [&](hids& gear)
             {
                 pro::focus::set(boss.This(), gear.id, solo::on);
                 auto mx = (si32)gear.coord.x;
                 auto my = (si32)gear.coord.y;
                 auto tab_row = boss.base::size().y - 1; // Tabs live on the bottom row.
+                // Snapshot the pre-press selection so a Ctrl+drag that follows can merge its
+                // swept span onto it (the selection below mutates on this very press).
+                if (st.ctrl && st.tab != 3)
+                {
+                    st.drag_base.clear();
+                    for (auto i = si32{}; i < (si32)st.ctrl->queue.size(); ++i) if (st.ctrl->queue[i].selected) st.drag_base.insert(i);
+                }
+                // Presses on either scrollbar track are left to the thumb-drag / rail-click handlers.
+                if (auto sb = queue_vsb(st); sb.ok && mx == sb.x && my >= sb.top && my < sb.top + sb.track_h) return;
+                if (auto sb = queue_hsb(st); sb.ok && my == sb.top && mx >= sb.x && mx < sb.x + sb.track_h) return;
+                // A press on a row's +/- button is left to the click handler: toggling the
+                // expanded subtasks must not change the row selection.
+                for (auto& [b, idx] : st.expand_hit)
+                    if (my == b.coor.y && mx >= b.coor.x && mx < b.coor.x + b.size.x) return;
+                // A press on a column border (the resize handle, extended down the body) is
+                // left to the drag handler; never let it fall through to row selection.
+                if (st.tab != 3 && my >= 1 && my < st.div_bottom)
+                    for (auto i = si32{}; i < q_border_count(st); ++i)
+                        if (mx == q_border_cx(st, i) - st.hscroll) return;
+                // Row selection (transfer tabs): plain = pick one; Ctrl = toggle; Shift = range
+                // from the anchor; a plain press on empty body area clears the selection (a Ctrl
+                // press keeps it so a Ctrl+drag from blank can add the swept rows onto it).
+                if (st.tab != 3)
+                {
+                    auto& qv  = st.ctrl->queue;
+                    auto ctl  = !!(gear.ctlstat & hids::anyCtrl);
+                    auto shft = !!(gear.ctlstat & hids::anyShift);
+                    auto hit  = si32{ -1 };
+                    for (auto& [b, idx] : st.row_hit)
+                        if (my == b.coor.y && mx >= b.coor.x && mx < b.coor.x + b.size.x) { hit = idx; break; }
+                    if (hit >= 0)
+                    {
+                        if (shft && st.sel_anchor >= 0 && st.sel_anchor < (si32)qv.size())
+                        {
+                            auto lo = std::min(st.sel_anchor, hit), hi = std::max(st.sel_anchor, hit);
+                            for (auto j = si32{}; j < (si32)qv.size(); ++j)
+                                qv[j].selected = j >= lo && j <= hi && item_in_tab(st, qv[j]);
+                        }
+                        else if (ctl) { qv[hit].selected = !qv[hit].selected; st.sel_anchor = hit; }
+                        else { for (auto& it : qv) it.selected = faux; qv[hit].selected = true; st.sel_anchor = hit; }
+                        boss.base::deface();
+                        gear.dismiss();
+                        return;
+                    }
+                    if (!ctl && my >= st.body_top && my < st.tab_row)
+                    {
+                        auto any = faux;
+                        for (auto& it : qv) { any |= it.selected; it.selected = faux; }
+                        if (any) { st.sel_anchor = -1; boss.base::deface(); gear.dismiss(); return; }
+                    }
+                }
+                if (my == tab_row) for (auto i = si32{}; i < 4; ++i)
+                {
+                    auto& b = st.tabbox[i];
+                    if (mx >= b.coor.x && mx < b.coor.x + b.size.x) st.tab = i;
+                }
+                boss.base::deface();
+                gear.dismiss();
+            });
+            boss.on(tier::mouserelease, input::key::LeftClick, [&](hids& gear)
+            {
+                // Re-assert focus on the click release: the pro::focus plugin's Ctrl+LeftClick
+                // handler toggles focus off when the panel is already focused (the selection
+                // itself happens on LeftDown above).
+                pro::focus::set(boss.This(), gear.id, solo::on);
+                auto mx = (si32)gear.coord.x;
+                auto my = (si32)gear.coord.y;
                 // A click on the scrollbar track outside the thumb pages the view by one
                 // screenful (command_bar style, see tile.hpp): on the VSB clicking above the
                 // thumb pages up and below pages down; on the HSB the same to the left/right.
@@ -855,48 +925,6 @@ namespace netxs::app::parvion
                         gear.dismiss();
                         return;
                     }
-                // A click on a column border (the resize handle, now extended down the body) is
-                // consumed by the drag handler; never let it fall through to row selection.
-                if (st.tab != 3 && my >= 1 && my < st.div_bottom)
-                    for (auto i = si32{}; i < q_border_count(st); ++i)
-                        if (mx == q_border_cx(st, i) - st.hscroll) { gear.dismiss(); return; }
-                // Row selection (transfer tabs): plain = pick one; Ctrl = toggle; Shift =
-                // range from the anchor; a click on empty body area clears the selection.
-                if (st.tab != 3)
-                {
-                    auto& qv  = st.ctrl->queue;
-                    auto ctl  = !!(gear.ctlstat & hids::anyCtrl);
-                    auto shft = !!(gear.ctlstat & hids::anyShift);
-                    auto hit  = si32{ -1 };
-                    for (auto& [b, idx] : st.row_hit)
-                        if (my == b.coor.y && mx >= b.coor.x && mx < b.coor.x + b.size.x) { hit = idx; break; }
-                    if (hit >= 0)
-                    {
-                        if (shft && st.sel_anchor >= 0 && st.sel_anchor < (si32)qv.size())
-                        {
-                            auto lo = std::min(st.sel_anchor, hit), hi = std::max(st.sel_anchor, hit);
-                            for (auto j = si32{}; j < (si32)qv.size(); ++j)
-                                qv[j].selected = j >= lo && j <= hi && item_in_tab(st, qv[j]);
-                        }
-                        else if (ctl) { qv[hit].selected = !qv[hit].selected; st.sel_anchor = hit; }
-                        else { for (auto& it : qv) it.selected = faux; qv[hit].selected = true; st.sel_anchor = hit; }
-                        boss.base::deface();
-                        gear.dismiss();
-                        return;
-                    }
-                    if (my >= st.body_top && my < st.tab_row)
-                    {
-                        auto any = faux;
-                        for (auto& it : qv) { any |= it.selected; it.selected = faux; }
-                        if (any) { st.sel_anchor = -1; boss.base::deface(); gear.dismiss(); return; }
-                    }
-                }
-                if (my == tab_row) for (auto i = si32{}; i < 4; ++i)
-                {
-                    auto& b = st.tabbox[i];
-                    if (mx >= b.coor.x && mx < b.coor.x + b.size.x) st.tab = i;
-                }
-                boss.base::deface();
                 gear.dismiss();
             });
             // Right-click context menus, reusing application.hpp's dropdown machinery (same as the
@@ -1060,15 +1088,12 @@ namespace netxs::app::parvion
                     st.rubber_a = st.rubber_b = r;
                     st.drag = queue_state::d_rubber;
                     auto anchor_qi = (r < (si32)rows.size() && rows[r].child == -1) ? rows[r].qi : -1;
-                    // Ctrl+drag merges the swept rows onto the pre-drag selection (add when the anchor
-                    // row was unselected, remove when it was selected); a plain drag replaces it.
+                    // Ctrl+drag merges the swept rows onto the pre-press selection captured by the
+                    // LeftDown handler (drag_base; the press itself already mutated the live flags):
+                    // add when the anchor row was unselected, remove when it was selected. A plain
+                    // drag replaces the selection.
                     st.rubber_ctrl = !!(gear.ctlstat & hids::anyCtrl);
-                    if (st.rubber_ctrl)
-                    {
-                        st.drag_base.clear();
-                        for (auto i = si32{}; i < (si32)st.ctrl->queue.size(); ++i) if (st.ctrl->queue[i].selected) st.drag_base.insert(i);
-                        st.rubber_add = !(anchor_qi >= 0 && st.ctrl->queue[anchor_qi].selected);
-                    }
+                    if (st.rubber_ctrl) st.rubber_add = !st.drag_base.count(anchor_qi);
                     else for (auto& it : st.ctrl->queue) it.selected = faux;
                     if (anchor_qi >= 0) st.sel_anchor = anchor_qi;
                     boss.base::deface();
