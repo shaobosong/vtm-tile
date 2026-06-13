@@ -3,3 +3,4 @@
 /bin
 /build*/
 /vcpkg
+/test/__pycache__

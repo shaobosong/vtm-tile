@@ -251,4 +251,22 @@ if(Python3_FOUND)
         ENVIRONMENT "VTM_TILE_BINARY=$<TARGET_FILE:vtm-tile>"
         TIMEOUT 300
         LABELS "tui;tile;parvion;panes;network")
+
+    # The editable address bar in the pane title strip: click-to-edit (block caret), Enter
+    # navigates (absolute or relative to the current dir), Esc reverts, bad paths error.
+    add_test(NAME parvion_address_bar_test
+             COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test_parvion_address_bar.py")
+    set_tests_properties(parvion_address_bar_test PROPERTIES
+        ENVIRONMENT "VTM_TILE_BINARY=$<TARGET_FILE:vtm-tile>"
+        TIMEOUT 300
+        LABELS "tui;tile;parvion;panes")
+
+    # The Quick Connect bar's input fields: a left press (not the release) focuses and
+    # activates the field under the cursor, and a left press-drag scrubs the caret.
+    add_test(NAME parvion_connectbar_test
+             COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test_parvion_connectbar.py")
+    set_tests_properties(parvion_connectbar_test PROPERTIES
+        ENVIRONMENT "VTM_TILE_BINARY=$<TARGET_FILE:vtm-tile>"
+        TIMEOUT 300
+        LABELS "tui;tile;parvion;connectbar")
 endif()

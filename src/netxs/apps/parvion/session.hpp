@@ -1392,6 +1392,17 @@ namespace netxs::app::parvion
             await = c_cd;
             send_cmd("cd " + quote_name(pending_path));
         }
+        // Address-bar navigation: cd to an explicit path (absolute, or resolved against the
+        // current dir when relative). A failed cd keeps the old path (handled as any browse).
+        void chdir_abs(text const& newpath)
+        {
+            if (!connected() || recop != rec_none || await != c_none || newpath.empty()) return;
+            pending_path = newpath.front() == '/' ? newpath : child_path(path, newpath, faux);
+            path_pending = true;
+            await = c_cd;
+            send_cmd("cd " + quote_name(pending_path));
+            mark("Entering " + pending_path + "...");
+        }
         // Remote file operations (psftp/parvionsftp verbs): each fires the command and then re-lists the
         // current directory once the backend reports done (handled as c_op in command_done).
         void remote_mkdir(text const& name)

@@ -58,6 +58,10 @@ namespace netxs::app::parvion
             auto ec = std::error_code{};
             auto p = fs::path{ path };
             if (!fs::is_directory(p, ec)) { err = "Not a directory: " + path; return faux; }
+            // Probe the directory open: read_local_dir silently lists an unreadable dir as
+            // empty, but navigation (the address bar) must see the EACCES to fall back.
+            auto probe = fs::directory_iterator{ p, ec };
+            if (ec) { err = "Cannot access: " + path + " (" + ec.message() + ")"; return faux; }
             out = read_local_dir(p);
             return true;
         };
@@ -89,6 +93,13 @@ namespace netxs::app::parvion
         // Inline name entry for the right-click "Create Directory" / "Rename" actions.
         si32                  input_mode = 0;   // 0 = none, 1 = create-directory, 2 = rename.
         text                  input_buf;        // The name being typed.
+        // Address-bar path entry (the row-0 path field, connect-bar style).
+        bool                  addr_edit  = faux; // Editing the path in place.
+        text                  addr_buf;          // The path being typed.
+        si32                  addr_caret = 0;    // Caret grapheme-cluster index.
+        si32                  addr_off   = 0;    // Horizontal scroll offset (display cells).
+        rect                  addr_box;          // Cached field box (render→mouse), like connect_state::box.
+        bool                  addr_drag  = faux; // Left-drag from the field scrubs the caret.
         si32                  scroll = 0;       // First visible logical row.
         si32                  hscroll = 0;      // Horizontal cell offset (long names overflow).
         // Transfer-table-style columns (Name, Size, Modified): session-only widths + visibility,
@@ -246,6 +257,46 @@ namespace netxs::app::parvion
         return out;
     }
 
+    // --- single-line editor core (shared by the connect bar's fields and the panes'
+    // address bar): a text value + a grapheme-cluster caret index. ---------------
+
+    // Strip control characters from pasted/typed input.
+    inline auto edit_filter(view utf8) -> text
+    {
+        auto out = text{};
+        out.reserve(utf8.size());
+        for (auto i = size_t{}; i < utf8.size();)
+        {
+            auto c = (unsigned char)utf8[i];
+            if (c < 0x20 || c == 0x7f) { ++i; continue; }
+            auto n = u8_step(utf8, i);
+            out.append(utf8.data() + i, n);
+            i += n;
+        }
+        return out;
+    }
+    inline void edit_insert(text& v, si32& caret, view ins)
+    {
+        if (ins.empty()) return;
+        v.insert(cluster_to_byte(v, caret), ins);
+        caret += cluster_count(ins);
+    }
+    inline void edit_backspace(text& v, si32& caret)
+    {
+        if (caret <= 0) return;
+        auto e = cluster_to_byte(v, caret);
+        auto b = cluster_to_byte(v, caret - 1);
+        v.erase(b, e - b);
+        --caret;
+    }
+    inline void edit_delete(text& v, si32& caret)
+    {
+        if (caret >= cluster_count(v)) return;
+        auto b = cluster_to_byte(v, caret);
+        auto e = cluster_to_byte(v, caret + 1);
+        v.erase(b, e - b);
+    }
+
     // Make `boss` a vertical drag-resize handle for `target` fork's split: dragging the
     // widget up/down moves the boundary (drag down → the region above grows). When
     // `row_gate >= 0`, only a press landing on that local row begins a resize, so the rest
@@ -393,6 +444,59 @@ namespace netxs::app::parvion
             auto nm  = pane_row_name(st, row);
             if (!nm.empty() && lc(nm.front()) == want) { st.sel = row; return; }
         }
+    }
+
+    // --- address-bar editing (the row-0 path field, connect-bar style) -----------
+    inline void pane_addr_begin(pane_state& st)
+    {
+        st.input_mode = 0; // The two inline editors are mutually exclusive.
+        st.input_buf.clear();
+        st.addr_buf   = st.cur_path();
+        st.addr_caret = cluster_count(st.addr_buf);
+        // Open scrolled to the tail (where the resting view is anchored), caret at the end.
+        st.addr_off   = std::max(0, cell_width(st.addr_buf) - st.addr_box.size.x);
+        st.addr_edit  = true;
+    }
+    inline void pane_addr_cancel(pane_state& st)
+    {
+        st.addr_edit = faux;
+        st.addr_drag = faux;
+        st.addr_buf.clear();
+        st.addr_caret = 0;
+        st.addr_off = 0;
+    }
+    // Enter: navigate to the typed path. Edit mode ends before navigating, so a failed
+    // remote cd leaves the field showing the unchanged remote->path.
+    inline void pane_addr_commit(pane_state& st)
+    {
+        auto p = view{ st.addr_buf };
+        utf::trim_front(p);
+        utf::trim_back(p);
+        auto dest = text{ p };
+        pane_addr_cancel(st);
+        if (st.remote)
+        {
+            if (dest.empty()) return;
+            while (dest.size() > 1 && dest.back() == '/') dest.pop_back();
+            st.remote->chdir_abs(dest);
+            return;
+        }
+    #if defined(_WIN32)
+        if (dest.empty()) { pane_relist(st, {}); return; } // The drive list ("Computer").
+    #else
+        if (dest.empty()) return;
+    #endif
+        auto fp = fs::path{ dest };
+        if (fp.is_relative() && !st.path.empty()) // `..` / a subdir name resolves against the current dir.
+        {
+            dest = (fs::path{ st.path } / fp).lexically_normal().string();
+        }
+        auto oldpath = st.path;
+        pane_relist(st, dest);
+        // Nonexistent / inaccessible target: fall back to the previous directory (the
+        // reverted address is the feedback). Mirrors the remote pane, whose failed cd
+        // keeps the old path server-side.
+        if (!st.error.empty() && dest != oldpath) pane_relist(st, oldpath);
     }
 
     // local_y is the widget-local mouse row (gear.coord is rebased per-widget).
@@ -726,12 +830,58 @@ namespace netxs::app::parvion
         auto oy = r.coor.y;
         parent_canvas.fill(r, [&](cell& c){ c.bgc(theme::bg).fgc(theme::text_fg); });
 
-        // Row 0: title + path.
+        // Row 0: title + the path as an editable address field, in the connect-bar field
+        // style (connect_render in connectbar.hpp): an underline marks the editable
+        // extent — muted at rest, accent blue with a block caret while editing.
         if (st.remote && st.remote->gen != st.seen_gen) { st.seen_gen = st.remote->gen; st.sel = 0; st.sel_anchor = 0; st.marked = { 0 }; st.scroll = 0; st.hscroll = 0; }
         auto tfg = st.focused ? theme::title_fg_act : theme::title_fg;
         parent_canvas.fill(rect{{ ox, oy }, { w, 1 }}, [&](cell& c){ c.bgc(theme::header); });
         auto disp = st.is_local && st.cur_path().empty() ? text{ "Computer" } : st.cur_path();
-        put_str(parent_canvas, ox, oy, ' ' + st.label + "  " + disp, tfg, theme::header, w);
+        auto lead = ' ' + st.label + ' ';
+        auto fx = cell_width(lead) + 1; // One gap cell between the label and the field.
+        auto fw = w - fx - 1;           // The field spans to a one-cell right margin.
+        if (fw < 2) // Too narrow for a field: plain title, no hitbox.
+        {
+            st.addr_box = {};
+            if (st.addr_edit) pane_addr_cancel(st);
+            put_str(parent_canvas, ox, oy, lead + ' ' + disp, tfg, theme::header, w);
+        }
+        else
+        {
+            put_str(parent_canvas, ox, oy, lead, tfg, theme::header, w);
+            st.addr_box = rect{{ fx, 0 }, { fw, 1 }};
+            auto und_clr = st.addr_edit ? ui32{ theme::sel_bg_act } : ui32{ theme::subtext };
+            parent_canvas.fill(st.addr_box, [&](cell& c){ c.bgc(theme::header).und(unln::line).unc(argb{ und_clr }); });
+            if (st.addr_edit)
+            {
+                // Scroll the field so the caret stays inside its fw-cell window (mirrors connect_render).
+                auto total = cell_width(st.addr_buf);
+                auto ccell = caret_cell(st.addr_buf, st.addr_caret);
+                auto& off  = st.addr_off;
+                if (off > ccell)       off = ccell;
+                if (ccell - off >= fw) off = ccell - fw + 1;
+                off = std::clamp(off, si32{ 0 }, std::max(si32{ 0 }, total - fw + 1));
+                auto shown = view{ st.addr_buf }.substr(byte_at_cell(st.addr_buf, off));
+                put_str(parent_canvas, fx, 0, shown, theme::sel_bg_act, theme::header, fw);
+                auto carx = ccell - off;
+                if (carx >= 0 && carx < fw)
+                {
+                    parent_canvas.fill(rect{{ fx + carx, 0 }, { 1, 1 }}, [&](cell& c){ c.bgc(theme::sel_bg_act).fgc(theme::header); });
+                }
+            }
+            else
+            {
+                // Tail-anchored: the current directory name matters most, so a long path
+                // shows "…tail" instead of clipping the tail off.
+                auto off = std::max(0, cell_width(disp) - fw);
+                if (off > 0)
+                {
+                    put_str(parent_canvas, fx, 0, "\xE2\x80\xA6", tfg, theme::header, 1); // …
+                    put_str(parent_canvas, fx + 1, 0, view{ disp }.substr(byte_at_cell(disp, off + 1)), tfg, theme::header, fw - 1);
+                }
+                else put_str(parent_canvas, fx, 0, disp, tfg, theme::header, fw);
+            }
+        }
 
         // Resizable column content-x positions (Name, Size, Modified); -1 marks a hidden column.
         auto cx = std::array<si32, p_ncol>{};
@@ -917,6 +1067,7 @@ namespace netxs::app::parvion
             boss.LISTEN(tier::release, e2::form::state::focus::count, count)
             {
                 st.focused = !!count;
+                if (!count && st.addr_edit) pane_addr_cancel(st); // Blur (other pane/bar/queue) cancels the address edit.
                 boss.base::deface();
             };
             // Select the hit row on press (mousedown), not on the completed click. A press on
@@ -926,6 +1077,24 @@ namespace netxs::app::parvion
                 pro::focus::set(boss.This(), gear.id, solo::on);
                 auto mx = (si32)gear.coord.x;
                 auto my = (si32)gear.coord.y;
+                // A press on the row-0 path field starts (or continues) the address edit and
+                // places the caret at the clicked column (mirrors the connect bar's fields).
+                // A press anywhere else cancels an active edit.
+                if (my == 0)
+                {
+                    auto& b = st.addr_box;
+                    if (b.size.x > 0 && mx >= b.coor.x && mx < b.coor.x + b.size.x
+                        && !(st.remote && !st.remote->connected())) // No address edit while disconnected.
+                    {
+                        if (!st.addr_edit) pane_addr_begin(st);
+                        st.addr_caret = std::min(cell_to_cluster(st.addr_buf, st.addr_off + (mx - b.coor.x)), cluster_count(st.addr_buf));
+                        boss.base::deface();
+                    }
+                    else if (st.addr_edit) { pane_addr_cancel(st); boss.base::deface(); }
+                    gear.dismiss();
+                    return;
+                }
+                if (st.addr_edit) { pane_addr_cancel(st); boss.base::deface(); } // A press in the body cancels, then selects as usual.
                 // Presses on either scrollbar are left to the thumb-drag / rail-click handlers.
                 if (auto sb = pane_scrollbar(st); sb.ok && mx == sb.x && my >= sb.top && my < sb.top + sb.track_h) return;
                 if (auto sb = pane_hsb(st);       sb.ok && my == sb.top && mx >= sb.x && mx < sb.x + sb.track_h) return;
@@ -1054,7 +1223,7 @@ namespace netxs::app::parvion
             boss.on(tier::mouserelease, input::key::RightClick, [&](hids& gear)
             {
                 pro::focus::set(boss.This(), gear.id, solo::on); // Right-clicking activates this pane.
-                if (st.input_mode) { gear.dismiss(); return; } // Ignore while entering a name.
+                if (st.input_mode || st.addr_edit) { gear.dismiss(); return; } // Ignore while entering text.
                 auto mx = (si32)gear.coord.x;
                 auto my = (si32)gear.coord.y;
                 auto at = twod{ mx, my };
@@ -1085,6 +1254,14 @@ namespace netxs::app::parvion
             {
                 auto px = (si32)gear.click.x;
                 auto py = (si32)gear.click.y;
+                // A drag that began on the address field scrubs the caret (the press itself
+                // already entered the edit and placed it; pulls keep it under the cursor).
+                if (py == 0)
+                {
+                    auto& b = st.addr_box;
+                    if (st.addr_edit && b.size.x > 0 && px >= b.coor.x && px < b.coor.x + b.size.x) st.addr_drag = true;
+                    return;
+                }
                 if (auto sb = pane_scrollbar(st); sb.ok && px == sb.x && py >= sb.top && py < sb.top + sb.track_h)
                 {
                     pro::focus::set(boss.This(), gear.id, solo::on);
@@ -1135,7 +1312,13 @@ namespace netxs::app::parvion
             };
             boss.LISTEN(tier::release, e2::form::drag::pull::_<hids::buttons::left>, gear)
             {
-                if      (st.sb_drag)  { pane_sb_scroll_to(st,  (si32)gear.coord.y, pane_scrollbar(st)); boss.base::deface(); }
+                if (st.addr_drag) // Scrub the caret to the cursor column (the render's window clamp auto-scrolls at the edges).
+                {
+                    auto col = st.addr_off + ((si32)gear.coord.x - st.addr_box.coor.x);
+                    st.addr_caret = std::min(cell_to_cluster(st.addr_buf, col), cluster_count(st.addr_buf));
+                    boss.base::deface();
+                }
+                else if (st.sb_drag)  { pane_sb_scroll_to(st,  (si32)gear.coord.y, pane_scrollbar(st)); boss.base::deface(); }
                 else if (st.hsb_drag) { pane_hsb_scroll_to(st, (si32)gear.coord.x, pane_hsb(st));       boss.base::deface(); }
                 else if (st.col_drag >= 0)
                 {
@@ -1167,16 +1350,51 @@ namespace netxs::app::parvion
                     boss.base::deface();
                 }
             };
-            boss.LISTEN(tier::release, e2::form::drag::stop::_<hids::buttons::left>,   gear) { if (st.sb_drag || st.hsb_drag || st.col_drag >= 0 || st.rubber) { st.sb_drag = st.hsb_drag = faux; st.col_drag = -1; st.rubber = faux; boss.base::deface(); } };
-            boss.LISTEN(tier::release, e2::form::drag::cancel::_<hids::buttons::left>, gear) { if (st.sb_drag || st.hsb_drag || st.col_drag >= 0 || st.rubber) { st.sb_drag = st.hsb_drag = faux; st.col_drag = -1; st.rubber = faux; boss.base::deface(); } };
+            boss.LISTEN(tier::release, e2::form::drag::stop::_<hids::buttons::left>,   gear) { if (st.sb_drag || st.hsb_drag || st.col_drag >= 0 || st.rubber || st.addr_drag) { st.sb_drag = st.hsb_drag = faux; st.col_drag = -1; st.rubber = faux; st.addr_drag = faux; boss.base::deface(); } };
+            boss.LISTEN(tier::release, e2::form::drag::cancel::_<hids::buttons::left>, gear) { if (st.sb_drag || st.hsb_drag || st.col_drag >= 0 || st.rubber || st.addr_drag) { st.sb_drag = st.hsb_drag = faux; st.col_drag = -1; st.rubber = faux; st.addr_drag = faux; boss.base::deface(); } };
             boss.LISTEN(tier::preview, input::events::keybd::any, gear)
             {
                 if (!st.focused) return;
+                if (st.addr_edit && gear.payload == input::keybd::type::keypaste) // Paste into the address field.
+                {
+                    edit_insert(st.addr_buf, st.addr_caret, edit_filter(gear.cluster));
+                    gear.set_handled();
+                    boss.base::deface();
+                    return;
+                }
                 if (gear.payload != input::keybd::type::keypress) return;
                 if (gear.keystat == input::key::interrupted) return;
                 if (gear.keybd::handled) return;
                 if (gear.keystat == input::key::released) return; // Act on key press only.
                 auto k = gear.keybd::generic();
+                // Address edit: a full inline editor (caret moves, mirroring the connect bar's
+                // fields); Enter navigates to the typed path, Esc reverts to the current one.
+                if (st.addr_edit)
+                {
+                    auto& v = st.addr_buf;
+                    auto& c = st.addr_caret;
+                    auto act = true;
+                         if (k == input::key::Esc)           pane_addr_cancel(st);
+                    else if (k == input::key::KeyEnter)      pane_addr_commit(st);
+                    else if (k == input::key::Backspace)     edit_backspace(v, c);
+                    else if (k == input::key::KeyDelete)     edit_delete(v, c);
+                    else if (k == input::key::KeyLeftArrow)  c = std::max(0, c - 1);
+                    else if (k == input::key::KeyRightArrow) c = std::min(cluster_count(v), c + 1);
+                    else if (k == input::key::KeyHome)       c = 0;
+                    else if (k == input::key::KeyEnd)        c = cluster_count(v);
+                    else
+                    {
+                        auto ins = edit_filter(gear.cluster); // '/' and '\\' are path chars: keep them.
+                        if (ins.size()) edit_insert(v, c, ins);
+                        else act = faux;
+                    }
+                    if (act)
+                    {
+                        gear.set_handled();
+                        boss.base::deface();
+                    }
+                    return;
+                }
                 // Inline name entry (Create Directory / Rename): capture text until Enter or Esc.
                 if (st.input_mode)
                 {
