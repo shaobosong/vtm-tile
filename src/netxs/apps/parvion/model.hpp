@@ -144,6 +144,29 @@ namespace netxs::app::parvion
         if (path.empty() || path == "/") return "/" + name;
         return path.back() == '/' ? path + name : path + "/" + name;
     }
+    // Resolve "."/".." segments in a POSIX path lexically (no symlink awareness — matches the
+    // remote panes' logical navigation, like parent_path()). Collapses redundant slashes and any
+    // trailing slash; ".." at an absolute root is clamped, a leading ".." in a relative path kept.
+    inline auto normalize_posix(view path) -> text
+    {
+        auto abs   = !path.empty() && path.front() == '/';
+        auto parts = std::vector<text>{};
+        auto seg   = text{};
+        auto flush = [&]
+        {
+            if      (seg.empty() || seg == ".") {}
+            else if (seg == "..") { if (!parts.empty() && parts.back() != "..") parts.pop_back();
+                                    else if (!abs) parts.push_back(".."); }
+            else    parts.push_back(seg);
+            seg.clear();
+        };
+        for (auto c : path) { if (c == '/') flush(); else seg += c; }
+        flush();
+        auto out = text{};
+        for (auto& p : parts) { out += '/'; out += p; }
+        if (abs) return out.empty() ? text{ "/" } : out;
+        return out.empty() ? text{ "." } : text{ view{ out }.substr(1) }; // strip leading '/' (relative)
+    }
 
 #if defined(_WIN32)
     // Available drive roots (C:, D:, …) as directory entries, for the "drive list"

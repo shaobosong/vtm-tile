@@ -138,6 +138,70 @@ def test_address_relative_navigation():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_address_relative_dotdot():
+    """A relative ".." resolves to the parent (no literal "..", no trailing slash)."""
+    print("TEST: parvion address bar - relative .. resolves to parent ... ", end="", flush=True)
+    d = T.make_tree()  # Contains the subdir "gamma" and alpha.txt.
+    try:
+        with T.ParvionSession(d) as s:
+            hdr = _local_header(s)
+            if hdr is None:
+                print("FAIL - Local site header not found")
+                return False
+            # Descend into gamma first, then go back up with "..".
+            _click_path_end(s, hdr)
+            s.write("\x7f" * (len(d) + 8))
+            s.write("gamma")
+            s.write("\r")
+            hdr2 = _local_header(s)
+            want_sub = os.path.join(d, "gamma")
+            if hdr2 is None or hdr2[1] != want_sub:
+                print(f"FAIL - did not enter gamma; header shows {hdr2 and hdr2[1]!r}")
+                return False
+            _click_path_end(s, hdr2)
+            s.write("\x7f" * (len(want_sub) + 8))
+            s.write("..")
+            s.write("\r")
+            hdr3 = _local_header(s)
+            if hdr3 is None or hdr3[1] != d:
+                print(f"FAIL - header shows {hdr3 and hdr3[1]!r}, want the parent {d!r}")
+                return False
+            if not T.grid_contains(s.screen()[0], "alpha.txt"):
+                print("FAIL - parent dir contents not listed after ..")
+                return False
+            print("PASS")
+            return True
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_address_absolute_dotdot():
+    """An absolute path containing ".." is normalized before navigating/display."""
+    print("TEST: parvion address bar - absolute .. is normalized ... ", end="", flush=True)
+    d = T.make_tree()  # Contains the subdir "gamma" and alpha.txt.
+    try:
+        with T.ParvionSession(d) as s:
+            hdr = _local_header(s)
+            if hdr is None:
+                print("FAIL - Local site header not found")
+                return False
+            _click_path_end(s, hdr)
+            s.write("\x7f" * (len(d) + 8))
+            s.write(os.path.join(d, "gamma", ".."))  # -> normalizes back to d.
+            s.write("\r")
+            hdr2 = _local_header(s)
+            if hdr2 is None or hdr2[1] != d:
+                print(f"FAIL - header shows {hdr2 and hdr2[1]!r}, want the normalized {d!r}")
+                return False
+            if not T.grid_contains(s.screen()[0], "alpha.txt"):
+                print("FAIL - dir contents not listed after a normalized absolute path")
+                return False
+            print("PASS")
+            return True
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_address_esc_reverts():
     """Esc cancels the edit: the header path and the listing stay unchanged."""
     print("TEST: parvion address bar - Esc reverts ... ", end="", flush=True)
@@ -198,6 +262,38 @@ def test_address_bad_path_falls_back():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_address_bad_path_logs_error():
+    """A nonexistent local path also surfaces an Error line in the Message log tab (not just a
+    silent fallback): switch to the Message log and find the 'Not a directory' error."""
+    print("TEST: parvion address bar - bad path logs an error to the message log ... ", end="", flush=True)
+    d = T.make_tree()
+    try:
+        with T.ParvionSession(d) as s:
+            hdr = _local_header(s)
+            if hdr is None:
+                print("FAIL - Local site header not found")
+                return False
+            _click_path_end(s, hdr)
+            s.write("\x7f" * (len(d) + 8))
+            s.write("/nonexistent_parvion_xyz")
+            s.write("\r")
+            s.feed(0.6)
+            # The Message-log tab lives in the bottom queue panel's tab strip; click it.
+            pos = T.find_text(s.screen()[0], "Message log")
+            if pos is None:
+                print("FAIL - Message log tab not found")
+                return False
+            s.click(pos[1] + 1, pos[0] + 1)  # 1-based SGR coords.
+            s.feed(0.6)
+            if not T.grid_contains(s.screen()[0], "Not a directory"):
+                print("FAIL - bad-path error not shown in the message log")
+                return False
+            print("PASS")
+            return True
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_address_drag_scrubs_caret():
     """A left-drag within the field moves the caret with the cursor."""
     print("TEST: parvion address bar - drag scrubs caret ... ", end="", flush=True)
@@ -229,8 +325,11 @@ TESTS = [
     test_address_click_starts_edit,
     test_address_absolute_navigation,
     test_address_relative_navigation,
+    test_address_relative_dotdot,
+    test_address_absolute_dotdot,
     test_address_esc_reverts,
     test_address_bad_path_falls_back,
+    test_address_bad_path_logs_error,
     test_address_drag_scrubs_caret,
 ]
 

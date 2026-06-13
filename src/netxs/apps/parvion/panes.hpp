@@ -57,7 +57,11 @@ namespace netxs::app::parvion
         #endif
             auto ec = std::error_code{};
             auto p = fs::path{ path };
-            if (!fs::is_directory(p, ec)) { err = "Not a directory: " + path; return faux; }
+            // A permission error reaching even the stat (e.g. no execute on a parent dir) is
+            // reported as such; a clean "doesn't exist / not a dir" keeps the simpler message.
+            auto isdir = fs::is_directory(p, ec);
+            if (ec == std::errc::permission_denied) { err = "Cannot access: " + path + " (" + ec.message() + ")"; return faux; }
+            if (!isdir) { err = "Not a directory: " + path; return faux; }
             // Probe the directory open: read_local_dir silently lists an unreadable dir as
             // empty, but navigation (the address bar) must see the EACCES to fall back.
             auto probe = fs::directory_iterator{ p, ec };
@@ -477,8 +481,7 @@ namespace netxs::app::parvion
         if (st.remote)
         {
             if (dest.empty()) return;
-            while (dest.size() > 1 && dest.back() == '/') dest.pop_back();
-            st.remote->chdir_abs(dest);
+            st.remote->chdir_abs(dest); // chdir_abs normalizes (resolves "."/".." and trailing slashes).
             return;
         }
     #if defined(_WIN32)
@@ -487,16 +490,24 @@ namespace netxs::app::parvion
         if (dest.empty()) return;
     #endif
         auto fp = fs::path{ dest };
-        if (fp.is_relative() && !st.path.empty()) // `..` / a subdir name resolves against the current dir.
-        {
-            dest = (fs::path{ st.path } / fp).lexically_normal().string();
-        }
+        if (fp.is_relative() && !st.path.empty()) fp = fs::path{ st.path } / fp; // `..`/subdir resolve against the current dir.
+        fp   = fp.lexically_normal();
+        dest = fp.string();
+        // lexically_normal appends a trailing separator when a path ends in ".." (".../a/.." -> ".../");
+        // drop it so the title matches the cwd-seeded form, but keep a bare root ("/", "C:\").
+        auto root = fp.root_path().string();
+        if (dest.size() > root.size() && (dest.back() == '/' || dest.back() == '\\')) dest.pop_back();
         auto oldpath = st.path;
         pane_relist(st, dest);
-        // Nonexistent / inaccessible target: fall back to the previous directory (the
-        // reverted address is the feedback). Mirrors the remote pane, whose failed cd
-        // keeps the old path server-side.
-        if (!st.error.empty() && dest != oldpath) pane_relist(st, oldpath);
+        // Nonexistent / inaccessible target: report it in the message log (the remote pane's
+        // failed cd surfaces an Error line the same way), then fall back to the previous
+        // directory (the reverted address is the on-pane feedback). The fallback relist clears
+        // st.error, so log it first.
+        if (!st.error.empty() && dest != oldpath)
+        {
+            if (st.ctrl) st.ctrl->log_line(logtype::error, st.error);
+            pane_relist(st, oldpath);
+        }
     }
 
     // local_y is the widget-local mouse row (gear.coord is rebased per-widget).

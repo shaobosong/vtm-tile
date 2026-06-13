@@ -1397,7 +1397,10 @@ namespace netxs::app::parvion
         void chdir_abs(text const& newpath)
         {
             if (!connected() || recop != rec_none || await != c_none || newpath.empty()) return;
-            pending_path = newpath.front() == '/' ? newpath : child_path(path, newpath, faux);
+            // Resolve against the current dir when relative, then collapse "."/".." segments so the
+            // committed path (and the title) is the real target, not e.g. "/home/user/..".
+            auto full = newpath.front() == '/' ? newpath : child_path(path, newpath, faux);
+            pending_path = normalize_posix(full);
             path_pending = true;
             await = c_cd;
             send_cmd("cd " + quote_name(pending_path));

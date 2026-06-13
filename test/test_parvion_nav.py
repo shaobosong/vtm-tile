@@ -62,6 +62,22 @@ def _remote_header_path(s):
     return after.split()[0] if after else ""
 
 
+def _remote_header(s):
+    """(row, path, path_col) for the Remote site header: the title row paints
+    ' ' + label + '  ' + cur_path() (panes.hpp); the path is the first token after the label,
+    and its 0-based start column is where the address-bar field is clickable."""
+    chars = s.screen()[0]
+    pos = T.find_text(chars, "Remote site")
+    if pos is None:
+        return None
+    row = T.row_text(chars, pos[0])
+    after = row[pos[1] + len("Remote site"):]
+    toks = after.split()
+    path = toks[0] if toks else ""
+    col = row.find(path, pos[1] + len("Remote site")) if path else -1
+    return (pos[0], path, col)
+
+
 def _settled_in_pub(s, tries=20):
     """Poll until the remote pane has fully entered /pub: its child 'example' dir is listed AND the
     header path reads exactly /pub (header and listing agree)."""
@@ -144,9 +160,60 @@ def test_double_doubleclick_does_not_overdescend():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_remote_dotdot_normalizes():
+    """Address-bar ".." on the remote pane resolves to the parent: chdir_abs normalizes
+    "/pub/.." to "/", so the header reads "/" -- never a literal "/pub/..". This pins the
+    POSIX path conversion (normalize_posix) on the remote navigation path."""
+    print("TEST: parvion nav - remote address-bar .. normalizes to the parent ... ", end="", flush=True)
+    if not F._rebex_reachable():
+        print("SKIP (test.rebex.net unreachable)")
+        return True
+    d = tempfile.mkdtemp(prefix="parvionnavdd_")
+    try:
+        with T.ParvionSession(d, env={"PARVION_KEEPALIVE_SEC": "30"}) as s:
+            if not F._connect_rebex(s):
+                print("FAIL - could not connect / list the remote root")
+                return False
+            pub = _find_remote_row(s, "/pub")
+            if pub is None:
+                print("FAIL - /pub not found in the remote pane")
+                return False
+            F.dclick(s, pub[1] + 2, pub[0] + 1, settle=1.0)  # Enter /pub.
+            if not _settled_in_pub(s):
+                print(f"FAIL - did not settle into /pub (header={_remote_header_path(s)!r})")
+                return False
+            hdr = _remote_header(s)
+            if hdr is None or hdr[1] != "/pub":
+                print(f"FAIL - remote header not at /pub: {hdr!r}")
+                return False
+            r, path, col = hdr
+            s.click(col + len(path) + 1, r + 1)  # Start the address edit, caret at the end.
+            s.write("\x7f" * (len(path) + 8))     # Clear "/pub".
+            s.write("..")
+            s.write("\r")
+            # Poll until we are back at root: header reads exactly "/" and /pub is listed again.
+            settled = False
+            for _ in range(20):
+                s.feed(1.0)
+                if _remote_header_path(s) == "/" and _find_remote_row(s, "/pub") is not None:
+                    settled = True
+                    break
+            if not settled:
+                print(f"FAIL - .. did not return to root (header={_remote_header_path(s)!r})")
+                return False
+            if T.grid_contains(s.screen()[0], "/pub/.."):
+                print("FAIL - literal '/pub/..' appeared (path was not normalized)")
+                return False
+            print("PASS")
+            return True
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 TESTS = [
     test_remote_enter_reveals_path_with_listing,
     test_double_doubleclick_does_not_overdescend,
+    test_remote_dotdot_normalizes,
 ]
 
 
