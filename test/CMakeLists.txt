@@ -22,6 +22,15 @@ target_include_directories(ansi_sgr_state_machine_test PRIVATE "${CMAKE_SOURCE_D
 target_link_libraries(ansi_sgr_state_machine_test PRIVATE Lua::Lua)
 add_test(NAME ansi_sgr_state_machine_test COMMAND ansi_sgr_state_machine_test)
 
+# Unit test for the rapid double double-click maximize/restore fix: drives the
+# real input::mouse click-counter and asserts break_click_chain() lets a second
+# same-cell double-click register instead of being folded into a multi-click run.
+add_executable(tile_dblclick_chain_test "tile_dblclick_chain_test.cpp")
+target_include_directories(tile_dblclick_chain_test PRIVATE "${CMAKE_SOURCE_DIR}/src"
+                                                            ${LUA_INCLUDE_DIR})
+target_link_libraries(tile_dblclick_chain_test PRIVATE Lua::Lua)
+add_test(NAME tile_dblclick_chain_test COMMAND tile_dblclick_chain_test)
+
 # Unit test for the Parvion transfer-rate meter (resume-aware instantaneous speed/average).
 add_executable(parvion_rate_meter_test "parvion_rate_meter_test.cpp")
 target_include_directories(parvion_rate_meter_test PRIVATE "${CMAKE_SOURCE_DIR}/src")
@@ -269,4 +278,14 @@ if(Python3_FOUND)
         ENVIRONMENT "VTM_TILE_BINARY=$<TARGET_FILE:vtm-tile>"
         TIMEOUT 300
         LABELS "tui;tile;parvion;connectbar")
+
+    # Regression test: a rapid second double-click on a pane's menu bar (same
+    # cell, within the double-click timeout) must restore the pane instead of
+    # leaving it stuck maximized (the click run was misread as a triple/quad).
+    add_test(NAME tile_dblclick_maximize_restore_test
+             COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test_tile_dblclick_maximize_restore.py")
+    set_tests_properties(tile_dblclick_maximize_restore_test PROPERTIES
+        ENVIRONMENT "VTM_TILE_BINARY=$<TARGET_FILE:vtm-tile>"
+        TIMEOUT 300
+        LABELS "tui;tile;maximize")
 endif()

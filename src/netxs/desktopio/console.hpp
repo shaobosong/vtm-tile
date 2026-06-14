@@ -1259,6 +1259,12 @@ namespace netxs::ui
                         {
                             gear.setfree();
                             forward = true;
+                            // A double-click forwarded outside (e.g. on the applet's menu bar)
+                            // is a window gesture for the host (maximize/restore toggle). Reset
+                            // our click run so a rapid second same-cell double-click forwards as
+                            // a fresh double-click instead of being folded into the same
+                            // single->double->triple->quad run (which would never re-reach 2).
+                            if (action == input::key::MouseDoubleClick) gear.break_click_chain();
                         }
                         else if (action == input::key::MouseDragStart)
                         {
