@@ -1926,7 +1926,7 @@ namespace netxs::app::parvion
                     if (path_pending) { path = pending_path; path_pending = faux; } // Reveal the dir only now (with its listing).
                     ++gen;
                     await = c_none;
-                    mark(host + "  " + path);
+                    mark("Directory listing of " + path + " successful");
                     break;
                 case c_cd:
                     // Don't reveal pending_path yet; c_ls commits it once the listing is in. The test seam
