@@ -2102,6 +2102,20 @@ static int psftp_connect(char *userhost, char *user, int portnumber)
             conf_del_str_str(conf, CONF_portfwd, key);
     }
 
+    /*
+     * fz/parvion: enable SSH + TCP keepalive so an idle or half-open control link is
+     * kept warm and a dead peer surfaces (FileZilla logon.cpp flag_keepalive parity).
+     * PuTTY default leaves both off (ping_interval 0, tcp_keepalives false). Mirror the
+     * applet's PARVION_KEEPALIVE_SEC (default 30s; 0 disables the SSH ping per pinger.c).
+     */
+    {
+        int ka = 30;
+        const char *ka_env = getenv("PARVION_KEEPALIVE_SEC");
+        if (ka_env && *ka_env) { int n = atoi(ka_env); if (n >= 0) ka = n; }
+        conf_set_int(conf, CONF_ping_interval, ka);     /* SSH_MSG_IGNORE every ka seconds */
+        conf_set_bool(conf, CONF_tcp_keepalives, true); /* SO_KEEPALIVE on the control socket */
+    }
+
     /* Set up subsystem name. */
     conf_set_str(conf, CONF_remote_cmd, "sftp");
     conf_set_bool(conf, CONF_ssh_subsys, true);

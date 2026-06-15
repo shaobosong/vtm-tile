@@ -830,6 +830,10 @@ namespace netxs::app::parvion
         si32  keepalive_sec = 30;     // Idle seconds before a keepalive (env PARVION_KEEPALIVE_SEC; 0 = off). FileZilla uses 30s.
         si32  reconnect_delay_sec = 5;// Delay between reconnect attempts (FileZilla OPTION_RECONNECTDELAY default).
         si32  max_reconnect_tries = 10;// Cap on consecutive reconnect attempts (env PARVION_RECONNECT_TRIES; 0 = unlimited).
+        si32  response_timeout_sec = 20;// Max seconds to wait for ANY control traffic while a command or keepalive is
+                                      // outstanding before declaring the link dead (env PARVION_TIMEOUT_SEC). FileZilla
+                                      // OPTION_TIMEOUT: default 20, min 10; 0 = off. The real exposure is the inter-frame
+                                      // gap, not total op time, since last_activity resets on every inbound batch.
         si32  dbg_ls_delay_ms = 0;    // Test seam (env PARVION_DEBUG_LS_DELAY_MS): hold the post-cd `ls` this long to
                                       // widen the cd->ls window so navigation races are reproducible. 0 = off (prod).
         bool  ls_deferred = faux;     // A post-cd `ls` is currently being held by dbg_ls_delay_ms.
@@ -852,6 +856,8 @@ namespace netxs::app::parvion
             //   PARVION_RECONNECT_TRIES=<n> cap on auto-reconnect attempts after a drop (0 = unlimited)
             if (auto e = std::getenv("PARVION_KEEPALIVE_SEC"))   { if (auto n = std::atoi(e); n >= 0) keepalive_sec = n; }
             if (auto e = std::getenv("PARVION_RECONNECT_TRIES")) { if (auto n = std::atoi(e); n >= 0) max_reconnect_tries = n; }
+            //   PARVION_TIMEOUT_SEC=<n> seconds to wait for a control reply before declaring the link dead (0 = off)
+            if (auto e = std::getenv("PARVION_TIMEOUT_SEC")) { if (auto n = std::atoi(e); n >= 0) response_timeout_sec = n == 0 ? 0 : std::max(10, n); }
             //   PARVION_XFER_IDLE_SEC=<n> idle seconds before a pooled transfer connection is closed (0 = don't pool)
             if (auto e = std::getenv("PARVION_XFER_IDLE_SEC"))   { if (auto n = std::atoi(e); n >= 0) xfer_idle_sec = n; }
             //   PARVION_DEBUG_LS_DELAY_MS=<n> test seam: hold the post-cd directory listing to widen the cd->ls window
@@ -1069,6 +1075,7 @@ namespace netxs::app::parvion
                 }
             }
             drive_reconnect(); // Backoff-paced (re)connect attempts while recovering.
+            maybe_watchdog();  // Fast death detection while waiting on a command/keepalive reply.
             maybe_keepalive(); // Keep an idle control link warm so the server doesn't time it out.
             pump_queue(); // Drive transfer workers (independent of the control session).
             reap_idle_workers(); // Close pooled transfer connections that have gone idle (or were dropped).
@@ -1149,6 +1156,24 @@ namespace netxs::app::parvion
             stage = s_greeting;
             last_activity = steady_clock::now();
         }
+        // Inactivity/response watchdog (FileZilla CControlSocket OPTION_TIMEOUT parity). While the
+        // link is "waiting" -- a real command outstanding (await != c_none) or a keepalive pwd in
+        // flight (keep_skip > 0) -- if no control traffic has arrived within response_timeout_sec the
+        // SSH link is dead even though the backend helper hasn't noticed (silent half-open: no
+        // RST/FIN). Force recovery rather than wait for the helper's slower internal kill. last_activity
+        // is reset on every inbound drain (poll(), so each streaming `ls` chunk re-arms it) and every
+        // outbound send, so a slow-but-alive listing never trips this. RST/FIN is still caught instantly
+        // via session.alive() in poll(); this covers only the silent case.
+        void maybe_watchdog()
+        {
+            if (response_timeout_sec <= 0) return;
+            if (stage != s_connected || !session.alive()) return;
+            if (recovering) return;                        // A recovery is already in flight; don't double-fire.
+            if (await == c_none && keep_skip == 0) return; // Link genuinely idle: nothing outstanding to time out.
+            if (steady_clock::now() - last_activity <= std::chrono::seconds{ response_timeout_sec }) return;
+            trace(dbg_warning, "Control response timeout (" + std::to_string(response_timeout_sec) + "s); link presumed dead.");
+            begin_recover();
+        }
         // Keep the idle control link warm with a cheap `pwd` (mirrors CFtpControlSocket's
         // keep-alive). It runs only when the link is genuinely idle (no nav command, no
         // keepalive already outstanding); its reply is swallowed via keep_skip so it never
@@ -1159,14 +1184,7 @@ namespace netxs::app::parvion
             if (keepalive_sec <= 0) return;
             if (stage != s_connected || !session.alive()) return;
             auto now = steady_clock::now();
-            if (keep_skip > 0)
-            {
-                // A keepalive is still outstanding. If it goes unanswered far past its
-                // interval the link is half-open (backend alive, SSH dead) -- death
-                // detection won't fire, so force recovery instead of waiting forever.
-                if (now - last_activity > std::chrono::seconds{ std::max(20, keepalive_sec * 2) }) begin_recover();
-                return;
-            }
+            if (keep_skip > 0) return;    // A keepalive is still outstanding; maybe_watchdog() owns its timeout now.
             if (await != c_none) return; // Control session busy with a real command.
             if (now - last_activity < std::chrono::seconds{ keepalive_sec }) return;
             ++keep_skip;
