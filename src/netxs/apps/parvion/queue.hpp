@@ -60,6 +60,30 @@ namespace netxs::app::parvion
 
         dmode               drag = d_none;     // Which gesture the current left-drag drives.
 
+        // --- Message-log (tab 3) text selection ----------------------------------------------------
+        // A selection position is (line index into the render's freshly-gathered `vis` list,
+        // grapheme-cluster index within that line's log_format text). The endpoints are ALSO anchored
+        // to the underlying logline objects (log_*_ptr): std::deque never invalidates element pointers
+        // on push_back / pop_front, so each render re-resolves the line indices from the pointers. This
+        // keeps the selection alive as the log grows (new lines appended) or scrolls past the log_cap,
+        // and re-indexes it when a filter toggle adds/removes other lines; the selection is dropped
+        // only when a selected line itself leaves the visible set, when the timestamp layout changes,
+        // or when the tab changes.
+        enum selmode { sel_none, sel_char, sel_word, sel_line };
+        selmode             log_selmode = sel_none;          // Active selection granularity.
+        bool                log_sel = faux;                  // A selection currently exists.
+        bool                log_dragging = faux;             // A left-drag is currently driving the selection.
+        si32                log_anchor_ln = 0, log_anchor_cl = 0; // Fixed end (the press).
+        si32                log_head_ln = 0,   log_head_cl = 0;   // Moving end (the cursor).
+        sftp_remote::logline const* log_anchor_ptr = nullptr;     // Stable identity of the anchor/head lines,
+        sftp_remote::logline const* log_head_ptr   = nullptr;     // re-resolved to ln indices every render.
+        // Word/line drag: the originally-anchored word/line span, unioned with the span under the
+        // cursor as the drag grows (mirrors term_body's selection_drag_word/line_pull).
+        si32                log_base_lo_ln = 0, log_base_lo_cl = 0;
+        si32                log_base_hi_ln = 0, log_base_hi_cl = 0;
+        // Timestamp toggle changes every line's text (and so its cluster columns): drop the selection.
+        bool                log_seen_stamps = true;
+
         // Geometry/hit caches rebuilt every render so the mouse handlers agree with paint.
         std::vector<std::pair<rect, si32>> row_hit{}; // Parent-row rect -> queue index.
         si32                body_top = 2, body_rows = 0, tab_row = 0;
@@ -140,6 +164,153 @@ namespace netxs::app::parvion
         if (stamps) s += ln.stamp + " ";
         s += text{ log_prefix(ln.type) } + ln.body;
         return s;
+    }
+
+    // --- Message-log text selection (tab 3) ------------------------------------------------------
+    // A position within the message-log selection: a line index into the render's `vis` list and a
+    // grapheme-cluster index within that line's log_format text.
+    struct log_pos { si32 ln = 0; si32 cl = 0; };
+    inline auto operator < (log_pos a, log_pos b) -> bool { return a.ln < b.ln || (a.ln == b.ln && a.cl < b.cl); }
+
+    // The filtered, ordered visible message-log lines. Shared by the renderer and the mouse
+    // handlers so their line indexing can never drift apart.
+    inline auto log_visible_lines(sftp_remote* ctrl) -> std::vector<sftp_remote::logline const*>
+    {
+        auto vis = std::vector<sftp_remote::logline const*>{};
+        if (!ctrl) return vis;
+        for (auto& ln : ctrl->logbuf)
+            if (log_visible(ln, ctrl->show_detailed, ctrl->debug_level)) vis.push_back(&ln);
+        return vis;
+    }
+    // The exact rendered text of visible line i (== what the renderer paints).
+    inline auto log_line_text(std::vector<sftp_remote::logline const*> const& vis, si32 i, bool stamps) -> text
+    {
+        if (i < 0 || i >= (si32)vis.size()) return {};
+        return log_format(*vis[(size_t)i], stamps);
+    }
+    // Character class for word selection: 0 = space, 1 = word (alnum / '_' / UTF-8 multibyte lead),
+    // 2 = punctuation. Classifies by the cluster's first byte (multibyte leads select as words so
+    // CJK / accented runs behave like words).
+    inline auto log_cclass(view cl) -> int
+    {
+        if (cl.empty()) return 0;
+        auto c = (unsigned char)cl.front();
+        if (c >= 0x80) return 1;
+        if (c == ' ' || c == '\t') return 0;
+        auto word = (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_';
+        return word ? 1 : 2;
+    }
+    // Expand cluster index `idx` in `s` to the [lo, hi) cluster range of its word: the maximal run
+    // of clusters sharing idx's class. A click at/after end snaps to the empty word [count, count).
+    inline auto log_word_bounds(view s, si32 idx) -> std::pair<si32, si32>
+    {
+        auto cls = std::vector<int>{};
+        utf::decode_clusters(s, [&](view cl){ cls.push_back(log_cclass(cl)); return true; });
+        auto n = (si32)cls.size();
+        if (n == 0) return { 0, 0 };
+        if (idx >= n) return { n, n };
+        auto k  = std::clamp(idx, 0, n - 1);
+        auto cc = cls[(size_t)k];
+        auto lo = k, hi = k + 1;
+        while (lo > 0 && cls[(size_t)(lo - 1)] == cc) --lo;
+        while (hi < n && cls[(size_t)hi]       == cc) ++hi;
+        return { lo, hi };
+    }
+    // Map a widget-local mouse cell (mx,my) to a selection position over `vis`. Mirrors the render:
+    // body rows run body_top .. body_top+body_rows-1, the first visible line is st.scroll, content
+    // starts at x=1 (one-cell margin), shifted by hscroll. A click above/below the body clamps to the
+    // first/last visible line; left of the margin / past EOL clamps via cell_to_cluster.
+    inline auto log_hit(queue_state const& st, std::vector<sftp_remote::logline const*> const& vis, si32 mx, si32 my) -> log_pos
+    {
+        auto last = (si32)vis.size() - 1;
+        if (last < 0) return { 0, 0 };
+        auto vrow = my - st.body_top;
+        auto ln   = vrow < 0 ? st.scroll : st.scroll + std::clamp(vrow, 0, std::max(0, st.body_rows - 1));
+        ln = std::clamp(ln, 0, last);
+        auto s   = log_line_text(vis, ln, st.ctrl->show_stamps);
+        auto col = mx - 1 + st.hscroll; // Content-cell column from the line start (margin is 1).
+        auto cl  = cell_to_cluster(s, std::max(0, col));
+        return { ln, cl };
+    }
+    // Word span around a hit: [lo, hi) clusters on the hit's line (single-line words).
+    inline auto log_word_span(queue_state const& st, std::vector<sftp_remote::logline const*> const& vis, log_pos p) -> std::pair<log_pos, log_pos>
+    {
+        auto s = log_line_text(vis, p.ln, st.ctrl->show_stamps);
+        auto [lo, hi] = log_word_bounds(s, p.cl);
+        return { log_pos{ p.ln, lo }, log_pos{ p.ln, hi } };
+    }
+    // Line span around a hit: the whole line, cluster 0 .. end-of-line count.
+    inline auto log_line_span(queue_state const& st, std::vector<sftp_remote::logline const*> const& vis, log_pos p) -> std::pair<log_pos, log_pos>
+    {
+        auto s = log_line_text(vis, p.ln, st.ctrl->show_stamps);
+        return { log_pos{ p.ln, 0 }, log_pos{ p.ln, cluster_count(s) } };
+    }
+    // Ordered selection bounds [lo, hi) from anchor/head, clamped to vis.
+    inline auto log_sel_bounds(queue_state const& st, std::vector<sftp_remote::logline const*> const& vis) -> std::pair<log_pos, log_pos>
+    {
+        auto a = log_pos{ st.log_anchor_ln, st.log_anchor_cl };
+        auto h = log_pos{ st.log_head_ln,   st.log_head_cl   };
+        auto lo = a < h ? a : h;
+        auto hi = a < h ? h : a;
+        auto last = std::max(0, (si32)vis.size() - 1);
+        lo.ln = std::clamp(lo.ln, 0, last);
+        hi.ln = std::clamp(hi.ln, 0, last);
+        return { lo, hi };
+    }
+    // True when the current selection covers at least one cluster (not an empty caret).
+    inline auto log_has_selection(queue_state const& st) -> bool
+    {
+        return st.log_sel && (st.log_anchor_ln != st.log_head_ln || st.log_anchor_cl != st.log_head_cl);
+    }
+    // Extract the selected text, lines joined with "\n" (first line lo.cl..end, middle lines whole,
+    // last line ..hi.cl). Sliced by byte offset via cluster_to_byte.
+    inline auto log_selection_text(queue_state const& st, std::vector<sftp_remote::logline const*> const& vis) -> text
+    {
+        if (vis.empty()) return {};
+        auto [lo, hi] = log_sel_bounds(st, vis);
+        auto stamps = st.ctrl->show_stamps;
+        auto out = text{};
+        for (auto i = lo.ln; i <= hi.ln; ++i)
+        {
+            auto s = log_line_text(vis, i, stamps);
+            auto a = i == lo.ln ? cluster_to_byte(s, lo.cl) : size_t{ 0 };
+            auto b = i == hi.ln ? cluster_to_byte(s, hi.cl) : s.size();
+            if (b > a) out += s.substr(a, b - a);
+            if (i < hi.ln) out += '\n';
+        }
+        return out;
+    }
+    // Drop the message-log selection (all transient and persistent selection state).
+    inline void log_sel_clear(queue_state& st)
+    {
+        st.log_sel = faux;
+        st.log_dragging = faux;
+        st.log_selmode = queue_state::sel_none;
+        st.log_anchor_ln = st.log_anchor_cl = 0;
+        st.log_head_ln   = st.log_head_cl   = 0;
+        st.log_anchor_ptr = st.log_head_ptr = nullptr;
+    }
+    // Index of `ptr` within `vis`, or -1 if it is no longer visible.
+    inline auto log_index_of(std::vector<sftp_remote::logline const*> const& vis, sftp_remote::logline const* ptr) -> si32
+    {
+        if (!ptr) return -1;
+        for (auto i = si32{}; i < (si32)vis.size(); ++i) if (vis[(size_t)i] == ptr) return i;
+        return -1;
+    }
+    // Re-resolve the selection's line indices from its anchored logline pointers against the freshly
+    // gathered `vis`. Returns faux (and the caller should clear) when the timestamp layout changed or
+    // a selected line is no longer visible (dropped past the cap, or filtered out). New lines appended
+    // to the log leave the anchored pointers intact, so the selection survives a log update.
+    inline auto log_sel_reanchor(queue_state& st, std::vector<sftp_remote::logline const*> const& vis) -> bool
+    {
+        if (!st.log_sel) return true;
+        if (st.ctrl->show_stamps != st.log_seen_stamps) return faux; // Layout shift invalidates the columns.
+        auto a = log_index_of(vis, st.log_anchor_ptr);
+        auto h = log_index_of(vis, st.log_head_ptr);
+        if (a < 0 || h < 0) return faux;
+        st.log_anchor_ln = a;
+        st.log_head_ln   = h;
+        return true;
     }
 
     // Build the Message-log right-click context menu. Mirrors FileZilla's
@@ -574,9 +745,12 @@ namespace netxs::app::parvion
         if (st.tab == 3) // Message log: a scrolling, typed, colour-coded protocol log.
         {
             // Gather the visible lines (newest last) honouring "Show detailed log".
-            auto vis = std::vector<sftp_remote::logline const*>{};
-            for (auto& ln : st.ctrl->logbuf)
-                if (log_visible(ln, st.ctrl->show_detailed, st.ctrl->debug_level)) vis.push_back(&ln);
+            auto vis = log_visible_lines(st.ctrl);
+            // Re-anchor the selection to its logline pointers: it survives appended log lines and
+            // cap-scrolling, and re-indexes across filter toggles; it is dropped only when a selected
+            // line itself leaves the visible set or the timestamp layout changes.
+            if (st.log_sel && !log_sel_reanchor(st, vis)) log_sel_clear(st);
+            st.log_seen_stamps = st.ctrl->show_stamps;
 
             // Content width = a one-cell left margin + the widest visible line, so the HSB is
             // sized to the longest line and short lines never force a horizontal scroll.
@@ -622,6 +796,28 @@ namespace netxs::app::parvion
                     if (st.ctrl->show_stamps) x += seg(x, y, ln.stamp + " ", theme::subtext);
                     x += seg(x, y, log_prefix(ln.type), fg);
                     seg(x, y, ln.body, fg);
+                }
+                // Selection highlight: recolour the selected cell span on each visible line, keeping
+                // the painted glyphs (only the background changes). Columns use the same -hscroll /
+                // +1 margin / clip-to-disp_w math as the text paint above, so the highlight clips
+                // identically; off-screen selected lines are skipped by the clamp.
+                if (st.log_sel)
+                {
+                    auto [lo, hi] = log_sel_bounds(st, vis);
+                    for (auto i = std::max(first, lo.ln); i <= std::min(last - 1, hi.ln); ++i)
+                    {
+                        auto s  = log_line_text(vis, i, st.ctrl->show_stamps);
+                        auto nc = cluster_count(s);
+                        auto c0 = std::clamp(i == lo.ln ? lo.cl : 0,  0, nc);
+                        auto c1 = std::clamp(i == hi.ln ? hi.cl : nc, 0, nc);
+                        auto px0 = caret_cell(s, c0) - hs + 1; // +1 for the one-cell left margin.
+                        auto px1 = caret_cell(s, c1) - hs + 1;
+                        if (lo.ln != hi.ln && i < hi.ln) px1 += 1; // Extend past EOL to signal the newline.
+                        auto x0 = std::clamp(px0, 0, clipw);
+                        auto x1 = std::clamp(px1, 0, clipw);
+                        auto y  = st.body_top + (i - first);
+                        if (x1 > x0) canvas.fill(rect{{ x0, y }, { x1 - x0, 1 }}, [&](cell& c){ c.bgc(theme::sel_bg); });
+                    }
                 }
             }
             queue_paint_scrollbars(st, canvas);
@@ -921,7 +1117,11 @@ namespace netxs::app::parvion
                 if (my == tab_row) for (auto i = si32{}; i < 4; ++i)
                 {
                     auto& b = st.tabbox[i];
-                    if (mx >= b.coor.x && mx < b.coor.x + b.size.x) st.tab = i;
+                    if (mx >= b.coor.x && mx < b.coor.x + b.size.x)
+                    {
+                        if (st.tab != i) log_sel_clear(st); // Leaving/entering the Message log drops its text selection.
+                        st.tab = i;
+                    }
                 }
                 boss.base::deface();
                 gear.dismiss();
@@ -971,6 +1171,15 @@ namespace netxs::app::parvion
                         gear.dismiss();
                         return;
                     }
+                // Message log: a plain left-click cancels the text selection (a Shift-click is left
+                // free for a future extend). The scrollbar branches above already returned.
+                if (st.tab == 3 && log_has_selection(st) && !(gear.ctlstat & hids::anyShift))
+                {
+                    log_sel_clear(st);
+                    boss.base::deface();
+                    gear.dismiss();
+                    return;
+                }
                 gear.dismiss();
             });
             // Right-click context menus, reusing application.hpp's dropdown machinery (same as the
@@ -986,8 +1195,18 @@ namespace netxs::app::parvion
                 auto at = twod{ mx, my };
                 if (st.tab == 3)
                 {
-                    app::shared::menu::open_dropdown_popup(boss,
-                        build_log_menu(st.ctrl, ptr::shadow(boss.This())), faux, -1, at);
+                    namespace m = app::shared::menu;
+                    auto items = build_log_menu(st.ctrl, ptr::shadow(boss.This()));
+                    // "Copy" is always present; it is disabled (greyed, inert) when there is no
+                    // selection. Capture the selection text by value: the popup is modal, so the
+                    // selection can't change while it's open (and this avoids a reference into st).
+                    auto has  = log_has_selection(st);
+                    auto out  = has ? log_selection_text(st, log_visible_lines(st.ctrl)) : text{};
+                    auto copy = m::item{ .alive = true, .label = "Copy", .disabled = !has };
+                    copy.action = [out](hids& g){ if (!out.empty()) g.set_clipboard(dot_00, out, mime::textonly); };
+                    items.insert(items.begin(), m::item{ .alive = true, .type = m::kind::separator });
+                    items.insert(items.begin(), std::move(copy));
+                    app::shared::menu::open_dropdown_popup(boss, items, faux, -1, at);
                     gear.dismiss();
                     return;
                 }
@@ -1111,7 +1330,25 @@ namespace netxs::app::parvion
                     boss.base::deface();
                     return;
                 }
-                if (st.tab == 3) return; // Message log: no column resize / rubber-band selection.
+                if (st.tab == 3) // Message log: begin a character text selection (word/line modes are
+                {                // armed earlier by the double/triple-press handlers; don't clobber them).
+                    if (st.log_dragging && st.log_selmode != queue_state::sel_char) return;
+                    auto vis = log_visible_lines(st.ctrl);
+                    if (vis.empty()) return;
+                    pro::focus::set(boss.This(), gear.id, solo::on);
+                    auto p = log_hit(st, vis, px, py);
+                    st.log_anchor_ln = st.log_head_ln = p.ln;
+                    st.log_anchor_cl = st.log_head_cl = p.cl;
+                    st.log_anchor_ptr = st.log_head_ptr = vis[(size_t)p.ln];
+                    st.log_selmode  = queue_state::sel_char;
+                    st.log_sel      = true;
+                    st.log_dragging = true;
+                    st.follow       = faux;                 // Don't let new lines scroll the view mid-select.
+                    st.drag         = queue_state::d_none;  // Log drags route via log_dragging, not st.drag.
+                    st.log_seen_stamps = st.ctrl->show_stamps; // Sync the layout guard for this fresh selection.
+                    boss.base::deface();
+                    return;
+                }
                 if (py >= 1 && py < st.div_bottom) // Grab the divider anywhere along its length.
                     for (auto i = si32{}; i < q_border_count(st); ++i)
                         if (px == q_border_cx(st, i) - st.hscroll)
@@ -1152,6 +1389,34 @@ namespace netxs::app::parvion
             {
                 auto mx = (si32)gear.coord.x;
                 auto my = (si32)gear.coord.y;
+                // Message-log text selection: extend the moving end. char tracks the exact cluster;
+                // word/line grow the originally-anchored span to the word/line under the cursor.
+                if (st.tab == 3 && st.log_dragging)
+                {
+                    auto vis = log_visible_lines(st.ctrl);
+                    if (vis.empty()) return;
+                    auto p = log_hit(st, vis, mx, my);
+                    if (st.log_selmode == queue_state::sel_char)
+                    {
+                        st.log_head_ln = p.ln; st.log_head_cl = p.cl;
+                        st.log_head_ptr = vis[(size_t)p.ln];
+                    }
+                    else
+                    {
+                        auto [elo, ehi] = st.log_selmode == queue_state::sel_word ? log_word_span(st, vis, p)
+                                                                                  : log_line_span(st, vis, p);
+                        auto blo = log_pos{ st.log_base_lo_ln, st.log_base_lo_cl };
+                        auto bhi = log_pos{ st.log_base_hi_ln, st.log_base_hi_cl };
+                        auto lo  = elo < blo ? elo : blo;
+                        auto hi  = bhi < ehi ? ehi : bhi;
+                        st.log_anchor_ln = lo.ln; st.log_anchor_cl = lo.cl;
+                        st.log_head_ln   = hi.ln; st.log_head_cl   = hi.cl;
+                        st.log_anchor_ptr = vis[(size_t)lo.ln];
+                        st.log_head_ptr   = vis[(size_t)hi.ln];
+                    }
+                    boss.base::deface();
+                    return;
+                }
                 switch (st.drag)
                 {
                     case queue_state::d_vsb:
@@ -1210,6 +1475,7 @@ namespace netxs::app::parvion
             // resulting per-item `selected` flags persist; only the live span (rubber_a/b) clears.
             boss.LISTEN(tier::release, e2::form::drag::stop::_<hids::buttons::left>, gear)
             {
+                if (st.log_dragging) { st.log_dragging = faux; boss.base::deface(); return; } // Keep the selection.
                 auto was = st.drag;
                 st.drag = queue_state::d_none;
                 st.sb_drag = st.hsb_drag = faux;
@@ -1219,6 +1485,7 @@ namespace netxs::app::parvion
             };
             boss.LISTEN(tier::release, e2::form::drag::cancel::_<hids::buttons::left>, gear)
             {
+                if (st.log_dragging) { st.log_dragging = faux; boss.base::deface(); return; } // Keep the selection.
                 auto was = st.drag;
                 st.drag = queue_state::d_none;
                 st.sb_drag = st.hsb_drag = faux;
@@ -1231,11 +1498,48 @@ namespace netxs::app::parvion
             // Double-click the handle (row 0) restores the default 3:2 panes:queue split
             // (mirrors the workspace fork default in parvion.hpp: fork::ctor(axis::Y, 0, 3, 2)).
             attach_dblclick_reset(boss, resize_target, 3, 2, 0);
+            // Message-log word/line selection helper. A double/triple *Press* arms a word/line drag
+            // (so dragging grows it span-by-span); the matching *Click* RE-creates the span. The Click
+            // must create (not merely finalize) because m2_click fires a plain LeftClick right before
+            // the Double/MultiClick on the same release (input.hpp) — and our LeftClick handler cancels
+            // the selection, so the Click has to re-establish it. A word/line *drag* fires drag_stop
+            // instead of a click, so it never hits that cancel. Mirrors term_body's dblpress/dblclk.
+            auto log_over_scrollbar = [&st](si32 mx, si32 my) -> bool
+            {
+                if (auto sb = queue_vsb(st); sb.ok && mx == sb.x && my >= sb.top && my < sb.top + sb.track_h) return true;
+                if (auto sb = queue_hsb(st); sb.ok && my == sb.top && mx >= sb.x && mx < sb.x + sb.track_h) return true;
+                return faux;
+            };
+            auto log_span_select = [&, log_over_scrollbar](hids& gear, queue_state::selmode mode, bool dragging)
+            {
+                auto mx = (si32)gear.coord.x;
+                auto my = (si32)gear.coord.y;
+                if (log_over_scrollbar(mx, my)) return;
+                auto vis = log_visible_lines(st.ctrl);
+                if (vis.empty()) return;
+                pro::focus::set(boss.This(), gear.id, solo::on);
+                auto p = log_hit(st, vis, mx, my);
+                auto [lo, hi] = mode == queue_state::sel_word ? log_word_span(st, vis, p) : log_line_span(st, vis, p);
+                st.log_base_lo_ln = lo.ln; st.log_base_lo_cl = lo.cl;
+                st.log_base_hi_ln = hi.ln; st.log_base_hi_cl = hi.cl;
+                st.log_anchor_ln = lo.ln; st.log_anchor_cl = lo.cl;
+                st.log_head_ln   = hi.ln; st.log_head_cl   = hi.cl;
+                st.log_anchor_ptr = vis[(size_t)lo.ln];
+                st.log_head_ptr   = vis[(size_t)hi.ln];
+                st.log_selmode = mode;
+                st.log_sel = true; st.log_dragging = dragging; st.follow = faux;
+                st.drag = queue_state::d_none;
+                st.log_seen_stamps = st.ctrl->show_stamps;
+                gear.dismiss();
+                boss.base::deface();
+            };
             // Double-click a column border (rows 1..div_bottom) auto-fits that column to the widest
             // of its content and header (+1 for the reserved border cell), clamped to the limits.
-            boss.on(tier::mouserelease, input::key::LeftDoubleClick, [&](hids& gear)
+            // On the Message log, a double-click instead selects the word under the cursor.
+            boss.on(tier::mouserelease, input::key::LeftDoubleClick, [&, log_span_select](hids& gear)
             {
-                if (!st.ctrl || st.tab == 3) return;
+                if (!st.ctrl) return;
+                if (st.tab == 3) { log_span_select(gear, queue_state::sel_word, faux); return; }
                 auto mx = (si32)gear.coord.x;
                 auto my = (si32)gear.coord.y;
                 if (my < 1 || my >= st.div_bottom) return; // Only on the divider span, not the handle bar.
@@ -1249,6 +1553,21 @@ namespace netxs::app::parvion
                         gear.dismiss();
                         return;
                     }
+            });
+            boss.on(tier::mouserelease, input::key::LeftDoublePress, [&, log_span_select](hids& gear)
+            {
+                if (!st.ctrl || st.tab != 3) return;
+                log_span_select(gear, queue_state::sel_word, /*dragging=*/true);
+            });
+            boss.on(tier::mouserelease, input::key::LeftMultiPress, [&, log_span_select](hids& gear)
+            {
+                if (!st.ctrl || st.tab != 3 || gear.clicked != 3) return; // Triple-press only.
+                log_span_select(gear, queue_state::sel_line, /*dragging=*/true);
+            });
+            boss.on(tier::mouserelease, input::key::LeftMultiClick, [&, log_span_select](hids& gear)
+            {
+                if (!st.ctrl || st.tab != 3 || gear.clicked != 3) return; // Triple-click only.
+                log_span_select(gear, queue_state::sel_line, /*dragging=*/faux);
             });
             // Keyboard: Delete/Backspace clears finished items; arrows/Home/End/PageUp/Down
             // move the selection or scroll the table; Esc clears the selection. Manual moves

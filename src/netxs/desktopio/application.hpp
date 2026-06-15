@@ -847,6 +847,7 @@ namespace netxs::app::shared
             cell focus{};
             kind type{ kind::button };
             bool checked{};                        // Radiomenu rows: static fallback for the selected option. Check rows: the ▣/□ state (live-resolved at popup open when an updater script is present).
+            bool disabled{};                       // Regular (button) rows: render greyed-out and inert (no hover, no activation) when true.
             std::vector<item> children;            // Populated only when type == kind::dropdown or kind::radiomenu.
             input::bindings::vector bindings;
             std::function<void(hids&)> action{};   // Optional native row action (programmatic dropdowns); run by activate_leaf alongside any script bindings.
@@ -873,6 +874,15 @@ namespace netxs::app::shared
         static auto is_selectable(menu::item const& it) -> bool
         {
             return it.type != menu::kind::separator;
+        }
+
+        // True for items that actually respond to input (hover highlight, keyboard
+        // navigation, click activation). A separator is decorative; a disabled row
+        // still renders its label (greyed) but is inert, so it is skipped by all
+        // input handling just like a separator.
+        static auto is_interactive(menu::item const& it) -> bool
+        {
+            return is_selectable(it) && !it.disabled;
         }
 
         // Per-popup shared state. Held in a shared_ptr so the popup's render /
@@ -1443,7 +1453,7 @@ namespace netxs::app::shared
                         for (auto step = si32{ 1 }; step <= count; ++step)
                         {
                             auto i = ((start + dir * step) % count + count) % count;
-                            if (is_selectable(top.items[(size_t)i])) return i;
+                            if (is_interactive(top.items[(size_t)i])) return i;
                         }
                         return -1;
                     };
@@ -1473,7 +1483,7 @@ namespace netxs::app::shared
                             auto first_sel = si32{ -1 };
                             for (auto i = si32{ 0 }; i < (si32)child.items.size(); ++i)
                             {
-                                if (is_selectable(child.items[(size_t)i])) { first_sel = i; break; }
+                                if (is_interactive(child.items[(size_t)i])) { first_sel = i; break; }
                             }
                             *child.selected_row = first_sel;
                             child.request_deface();
@@ -1507,7 +1517,7 @@ namespace netxs::app::shared
                     if (gen == input::key::KeyRightArrow)
                     {
                         if (sel >= 0 && sel < count
-                            && is_selectable(top.items[(size_t)sel])
+                            && is_interactive(top.items[(size_t)sel])
                             && !top.items[(size_t)sel].children.empty())
                         {
                             open_and_focus(sel);
@@ -1531,7 +1541,7 @@ namespace netxs::app::shared
                     if (gen == input::key::KeyEnter)
                     {
                         if (sel >= 0 && sel < count
-                            && is_selectable(top.items[(size_t)sel]))
+                            && is_interactive(top.items[(size_t)sel]))
                         {
                             if (!top.items[(size_t)sel].children.empty()) open_and_focus(sel);
                             else                                          top.activate_row(sel, gear);
@@ -1553,7 +1563,8 @@ namespace netxs::app::shared
                             auto target = (char)std::tolower(first);
                             for (auto i = si32{ 0 }; i < count; ++i)
                             {
-                                if (label_shortcut_char(top.items[(size_t)i].label) == target)
+                                if (label_shortcut_char(top.items[(size_t)i].label) == target
+                                 && is_interactive(top.items[(size_t)i]))
                                 {
                                     *top.selected_row = i;
                                     top.request_deface();
@@ -1762,9 +1773,13 @@ namespace netxs::app::shared
                             });
                             continue;
                         }
-                        auto active = (i == hover_row);
+                        // Disabled rows render greyed-out and never highlight on hover
+                        // (the hover handler skips them, so i never equals hover_row here,
+                        // but guard anyway). The dimmed fg also tints the gutter glyphs,
+                        // label and chevron painted below, since they all read `fg`.
+                        auto active = (i == hover_row) && !row_item.disabled;
                         auto bg = active ? hover_bg : level_bg;
-                        auto fg = row_fg;
+                        auto fg = row_item.disabled ? 0xFF6C7086u : row_fg; // greyed (theme subtext) when disabled.
                         parent_canvas.fill(rect{{ px, py + i }, { popup_w, 1 }}, [=](cell& c)
                         {
                             c.wipe();
@@ -2013,7 +2028,7 @@ namespace netxs::app::shared
                             // them clears the highlight instead of selecting
                             // the divider line.
                             if (row >= 0 && row < (si32)items.size()
-                                && is_selectable(items[(size_t)row]))
+                                && is_interactive(items[(size_t)row]))
                             {
                                 new_hover = row;
                             }
@@ -2037,6 +2052,7 @@ namespace netxs::app::shared
                     if (idx < 0 || idx >= (si32)items.size()) return;
                     auto& item = items[(size_t)idx];
                     if (!item.children.empty()) return;
+                    if (item.disabled) return; // Inert: keyboard/shortcut paths must not fire a disabled row.
                     if (item.action) item.action(gear); // Native row action (programmatic dropdowns).
                     if (auto tr = chain->trigger_shadow.lock())
                     {
@@ -2068,10 +2084,10 @@ namespace netxs::app::shared
                             if (idx >= 0 && idx < (si32)items.size())
                             {
                                 auto& item = items[(size_t)idx];
-                                // Clicks on a separator row are swallowed
-                                // (the popup stays open) — the divider has
-                                // no action and shouldn't dismiss the menu.
-                                if (!is_selectable(item))
+                                // Clicks on a separator or disabled row are swallowed
+                                // (the popup stays open) — they have no action and
+                                // shouldn't dismiss the menu.
+                                if (!is_interactive(item))
                                 {
                                     gear.dismiss();
                                     return;

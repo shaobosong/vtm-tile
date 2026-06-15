@@ -223,13 +223,23 @@ namespace netxs::app::parvion
                         // Its empty top handle bar drags the panes/queue split.
                         auto queue_panel = workspace->attach(slot::_2, make_queue_panel(ctrl.get(), ptr::shadow(workspace), window));
                             queue_panel->limits({ -1, min_queue_h });
+            // Test/demo seam ($PARVION_DEMO_LOG_TICK=N): append a Status line every N polls (each ~50ms)
+            // so the Python regression tests can verify the Message-log selection survives live log
+            // updates. Off (0) unless the env var is set, so normal runs are unaffected.
+            auto log_tick = []{ auto e = std::getenv("PARVION_DEMO_LOG_TICK"); return e && *e ? std::atoi(e) : 0; }();
             // Drive the SFTP controller from a periodic timer; repaint the remote pane on change.
-            window->invoke([&, ctrl, local_pane, local_st, remote_pane, queue_panel](auto& boss)
+            window->invoke([&, ctrl, local_pane, local_st, remote_pane, queue_panel, log_tick](auto& boss)
             {
                 boss.base::template plugin<pro::timer>().actify(std::chrono::milliseconds{ 50 },
-                    [ctrl, lp = ptr::shadow(local_pane), local_st, rp = ptr::shadow(remote_pane), qp = ptr::shadow(queue_panel)](auto)
+                    [ctrl, lp = ptr::shadow(local_pane), local_st, rp = ptr::shadow(remote_pane), qp = ptr::shadow(queue_panel),
+                     log_tick, tickc = ptr::shared(si32{ 0 })](auto)
                     {
                         ctrl->poll();
+                        if (log_tick > 0 && (++*tickc % log_tick == 0))
+                        {
+                            ctrl->log_line(logtype::status, "tick " + std::to_string(*tickc / log_tick));
+                            ctrl->dirty = true;
+                        }
                         // A completed download into the displayed local dir bumped local_gen:
                         // re-list the local pane. Lock the shadow before touching local_st,
                         // which points into the (still-alive) widget's field storage.
