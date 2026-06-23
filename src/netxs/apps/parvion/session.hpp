@@ -14,6 +14,7 @@
 // server using the native parvionsftp built from the vendored FileZilla source.
 
 #include "model.hpp"
+#include "settings.hpp"
 #include "reorder.hpp"
 #include "proto.hpp"
 
@@ -28,6 +29,8 @@
 #include <cstdlib>
 #include <ctime>
 #include <functional>
+#include <map>
+#include <set>
 
 #if !defined(_WIN32)
     #include <unistd.h>
@@ -547,6 +550,20 @@ namespace netxs::app::parvion
     // shows only when the selected debug level reaches its sub-level.
     enum dbg : si32 { dbg_warning = 1, dbg_info = 2, dbg_verbose = 3, dbg_debug = 4 };
 
+    // Extract the key file path from a backend "SSH key passphrase" prompt, whose text is
+    // 'Passphrase for key "<comment>" in key file "<path>"' (ssh2userauth.c). The comment can
+    // itself contain quotes, so anchor on the LAST `in key file "` and read up to the final quote.
+    inline auto sftp_keyfile_from_prompt(view prompt) -> text
+    {
+        auto marker = view{ "in key file \"" };
+        auto p = prompt.rfind(marker);
+        if (p == view::npos) return {};
+        auto start = p + marker.size();
+        auto end = prompt.rfind('"');
+        if (end == view::npos || end <= start) return {};
+        return text{ prompt.substr(start, end - start) };
+    }
+
     // One transfer worker: a dedicated parvionsftp connection performing a single
     // get/put (optionally a byte range, for parallel chunks). Mirrors the connect
     // handshake, then issues the transfer and accumulates Transfer deltas. Like a
@@ -556,7 +573,8 @@ namespace netxs::app::parvion
     {
         sftp_session session;
         text exe, host, user, pass;
-        std::vector<text> runargs; // Backend run-prefix (copied from sftp_remote).
+        std::vector<text> runargs;  // Backend run-prefix (copied from sftp_remote; gains -C when compression is on).
+        std::vector<text> keyfiles; // Private keys to register before auth (copied from sftp_remote::cfg.keyfiles).
         si32 port = 22;
         bool download = true;
         bool parallel = faux;          // Use parvion-get/-put (chunked).
@@ -570,8 +588,15 @@ namespace netxs::app::parvion
         bool opened = faux;            // Helper has opened the remote file (Info line during xfer).
         enum stt { s_init, s_connecting, s_running, s_ok, s_err } state = s_init;
         text error;
-        enum awt { a_none, a_open, a_xfer } await = a_none;
+        enum awt { a_none, a_open, a_xfer, a_keyfile } await = a_none;
+        size_t keyfile_i = 0; // Cursor into `keyfiles` during the pre-auth a_keyfile phase.
         std::function<void(logtype, text, si32)> logsink; // -> sftp_remote::log_line (set by cfg_worker).
+        // Passphrase plumbing (set by cfg_worker): the provider queries sftp_remote's session-scoped
+        // passphrase cache. Workers never prompt the user — the control connection authenticates first
+        // and populates the cache; pass_asked guards against an infinite re-ask if a cached value is wrong.
+        std::function<bool(text const&, text&)> passphrase_provider;
+        text last_preamble, last_instruction;
+        std::set<text> pass_asked;
 
         // Log into the shared message log (FileZilla routes every control socket
         // through one StatusView). lg() no-ops if no sink was attached.
@@ -605,6 +630,7 @@ namespace netxs::app::parvion
         {
             session.stop();
             done = 0; opened = faux; error.clear(); await = a_none; state = s_connecting;
+            pass_asked.clear(); last_preamble.clear(); last_instruction.clear(); // Fresh auth session.
             auto label = text{ download ? "download" : "upload" } + " of " + (download ? remote_path : local_path);
             lg(logtype::status, "Starting " + label + "..."); // FileZilla logs each transfer's start.
             session.runargs = runargs;
@@ -641,7 +667,19 @@ namespace netxs::app::parvion
                 case sftp_evt::ask_hostkey:
                 case sftp_evt::ask_hostkey_changed:
                 case sftp_evt::ask_hostkey_betteralg: session.write_line("y"); break; // Secret-ish; sent raw, unlogged.
-                case sftp_evt::ask_password: session.write_line(pass); break;          // Never logged.
+                case sftp_evt::request_preamble:    last_preamble    = m.line.empty() ? text{} : text{ m.first() }; break;
+                case sftp_evt::request_instruction: last_instruction = m.line.empty() ? text{} : text{ m.first() }; break;
+                case sftp_evt::ask_password: // Key passphrase from the controller's cache, else the account password.
+                    if (last_preamble == "SSH key passphrase")
+                    {
+                        auto kf = sftp_keyfile_from_prompt(m.first());
+                        auto pp = text{};
+                        if (!pass_asked.count(kf) && passphrase_provider && passphrase_provider(kf, pp)) { pass_asked.insert(kf); session.write_line(pp); }
+                        else { state = s_err; if (error.empty()) error = "Key passphrase unavailable"; session.stop(); } // Workers never prompt.
+                    }
+                    else session.write_line(pass); // Account password (unchanged; from the Quick Connect bar).
+                    last_preamble.clear(); last_instruction.clear();
+                    break;
                 case sftp_evt::transfer: { auto d = to_i64(m.first()); if (d > 0) done += d; } break; // Progress: status bar, not the log.
                 case sftp_evt::verbose: if (!m.line.empty()) lg(logtype::trace, text{ m.first() }, dbg_info); break;
                 case sftp_evt::info:
@@ -651,7 +689,7 @@ namespace netxs::app::parvion
                     break;
                 case sftp_evt::reply:
                     if (!m.line.empty()) lg(logtype::response, text{ m.first() });
-                    if (await == a_none) { await = a_open; wr_cmd("open " + quote_name(user + "@" + host) + " " + std::to_string(port)); }
+                    if (await == a_none) { keyfile_i = 0; send_next_keyfile_or_open(); } // Greeting: register keys, then open.
                     else complete();
                     break;
                 // The Done payload is the command result code (FileZilla
@@ -660,11 +698,30 @@ namespace netxs::app::parvion
                 // upload emits Error then Done("0"), so honouring the code is what
                 // keeps the item in the Failed queue instead of Succeeded.
                 case sftp_evt::done:
-                    if (m.first() == "1") complete();
+                    if (await == a_keyfile) send_next_keyfile_or_open(); // Key registered; next key or open.
+                    else if (m.first() == "1") complete();
                     else { state = s_err; if (error.empty()) error = "Transfer failed"; }
                     break;
                 default: break;
             }
+        }
+        // Register the next existing key file (await a_keyfile), or send `open` once all are done.
+        // Each `keyfile` command's Done must be consumed before the next command (see the control
+        // session's send_next_keyfile_or_open for why they can't be pipelined ahead of `open`).
+        void send_next_keyfile_or_open()
+        {
+            while (keyfile_i < keyfiles.size())
+            {
+                auto& kf = keyfiles[keyfile_i++];
+                if (kf.empty()) continue;
+                auto ec = std::error_code{};
+                if (!fs::is_regular_file(fs::path{ kf }, ec)) continue;
+                await = a_keyfile;
+                wr_cmd("keyfile " + quote_name(kf));
+                return;
+            }
+            await = a_open;
+            wr_cmd("open " + quote_name(user + "@" + host) + " " + std::to_string(port));
         }
         void complete()
         {
@@ -691,26 +748,9 @@ namespace netxs::app::parvion
         }
     };
 
-    // Resolve the Quick Connect history file: <config>/parvion/recent_servers, where <config> is
-    // $XDG_CONFIG_HOME (else $HOME/.config) on POSIX and %APPDATA% on Windows. The directory is
-    // created on demand.
-    inline auto parvion_recent_path() -> fs::path
-    {
-        auto ec = std::error_code{};
-        #if defined(_WIN32)
-        auto base = std::getenv("APPDATA");
-        auto cfg  = fs::path{ base && *base ? base : "." };
-        #else
-        auto xdg  = std::getenv("XDG_CONFIG_HOME");
-        auto home = std::getenv("HOME");
-        auto cfg  = xdg  && *xdg  ? fs::path{ xdg }
-                  : home && *home ? fs::path{ home } / ".config"
-                  :                 fs::path{ "." };
-        #endif
-        auto dir = cfg / "parvion";
-        fs::create_directories(dir, ec);
-        return dir / "recent_servers";
-    }
+    // The Quick Connect history file: <config>/parvion/recent_servers (see parvion_config_dir
+    // in settings.hpp for how <config> is resolved). The directory is created on demand.
+    inline auto parvion_recent_path() -> fs::path { return parvion_config_dir() / "recent_servers"; }
 
     // Connect/navigate state machine. Owns the session and the current remote
     // listing. The remote pane renders from `path`/`items`/`status`; navigation
@@ -720,7 +760,8 @@ namespace netxs::app::parvion
         enum stage_t { s_idle, s_greeting, s_opening, s_connected, s_failed };
         enum cmd_t   { c_none, c_open, c_pwd, c_ls, c_cd, c_op, // c_op: mkdir/rm/rmdir/mv, then re-list.
                        c_rls,   // Recursive-walk listing (ls <path>) for a folder download/delete; result drives recop.
-                       c_recop }; // A recop one-shot command (mkdir for upload, rm/rmdir for delete); advance regardless of result.
+                       c_recop, // A recop one-shot command (mkdir for upload, rm/rmdir for delete); advance regardless of result.
+                       c_keyfile }; // Pre-auth `keyfile <path>` registration; its Done advances to the next key or `open`.
 
         sftp_session          session;
         text                  exe;
@@ -740,6 +781,20 @@ namespace netxs::app::parvion
         text                  host, user, pass;
         si32                  port = 22;
         bool                  dirty = faux;
+
+        // --- Passphrase / password interaction (FileZilla CInteractiveLoginNotification) ---------
+        // The backend asks for an SSH key passphrase ("SSH key passphrase" preamble) or the account
+        // password (ask_password). We answer from a session-scoped cache, or raise a UI modal via
+        // on_prompt_secret (set by parvion.hpp). The cache lets reconnects + parallel transfer workers
+        // authenticate without re-prompting (the control connection populates it on the first auth).
+        struct secret_req_t { bool is_passphrase = true; text prompt; text keyfile; bool is_retry = faux; };
+        std::map<text, text>  key_passphrases;      // keyfile path -> validated passphrase (in-memory only).
+        std::set<text>        pass_asked;           // keyfiles asked during the current backend auth.
+        bool                  account_asked = faux; // The account password was already offered this auth.
+        text                  last_preamble, last_instruction; // Last request_preamble / request_instruction.
+        enum sec_state_t { sec_idle, sec_pending, sec_shown } sec = sec_idle; // Single-shot modal latch.
+        secret_req_t          sec_req;              // The outstanding prompt (valid when sec != sec_idle).
+        std::function<void(secret_req_t const&)> on_prompt_secret; // Raise the UI modal (set by parvion.hpp).
 
         // Message log (FileZilla-style typed protocol log). The queue panel's
         // "Message log" tab renders the tail of `logbuf`; entries are color-coded
@@ -808,9 +863,15 @@ namespace netxs::app::parvion
         ui64  ldel_seen = 0;          // Last ldel->done seen by poll() (event context only).
         si32  dbg_local_del_delay_ms = 0; // Test seam (env PARVION_DEBUG_LOCAL_DEL_DELAY_MS): sleep this long before
                                           // each remove_all so a test can observe the UI staying live mid-delete.
-        bool  use_parallel = true;    // Split large files across concurrent connections.
+        bool  use_parallel = true;    // Split large files across parallel connections.
         si64  parallel_threshold = 4ll << 20; // "Larger than" gate / per-chunk target (4 MiB).
-        ui32  max_connections = 6;    // Cap on concurrent connections (chunks) per transfer.
+        ui32  max_connections = 6;    // Cap on parallel connections (chunks) per transfer.
+
+        // Persisted user settings (Edit -> Settings dialog): the SFTP subset of FileZilla's
+        // Connection / Connection-SFTP option pages. load()ed in the constructor and applied onto
+        // the live fields below (apply_settings); the dialog edits a copy and calls update_settings.
+        parvion_settings cfg;
+        size_t connect_keyfile_i = 0; // Cursor into cfg.keyfiles during the pre-auth c_keyfile phase.
 
         // Control-connection liveness (FileZilla parity). The control session handles
         // browsing/keepalive only; transfers run on their own connections, so the control
@@ -839,11 +900,36 @@ namespace netxs::app::parvion
         bool  ls_deferred = faux;     // A post-cd `ls` is currently being held by dbg_ls_delay_ms.
         steady_clock::time_point ls_due{}; // When the held `ls` becomes due.
 
+        // Copy the persisted settings onto the live engine fields so they take effect.
+        // Called from the constructor (before the env test-seams, which still win) and
+        // whenever the Settings dialog commits a change (update_settings).
+        void apply_settings()
+        {
+            response_timeout_sec = cfg.timeout;                       // OPTION_TIMEOUT (0 = off).
+            max_reconnect_tries  = cfg.reconnect_count;               // OPTION_RECONNECTCOUNT (0 = unlimited).
+            reconnect_delay_sec  = cfg.reconnect_delay;              // OPTION_RECONNECTDELAY.
+            parallel_threshold   = std::max<si64>(1, cfg.threshold_bytes());
+            max_connections      = (ui32)std::clamp(cfg.max_connections, 1, 16);
+            // Compression (cfg.compression) and key files (cfg.keyfiles) are read straight
+            // from cfg at backend-launch / auth time; no separate live copy is kept.
+        }
+        // Commit an edited settings copy: store, apply onto the engine, and persist to disk.
+        void update_settings(parvion_settings const& s)
+        {
+            cfg = s;
+            cfg.clamp();
+            apply_settings();
+            cfg.save();
+            log_line(logtype::status, "Settings saved.");
+        }
+
         sftp_remote()
         {
+            cfg.load();        // Restore persisted Edit -> Settings values...
+            apply_settings();  // ...and apply them before the env seams (which override for tests).
             // Escape hatches (also handy for A/B verification):
             //   PARVION_NO_PARALLEL=1    force single-stream transfers
-            //   PARVION_MAX_CONN=<n>     cap on concurrent connections (PARVION_CHUNKS is an alias)
+            //   PARVION_MAX_CONN=<n>     cap on parallel connections (PARVION_CHUNKS is an alias)
             //   PARVION_THRESHOLD_MB=<n> files larger than this (and the per-chunk target) go parallel
             if (auto e = std::getenv("PARVION_NO_PARALLEL")) { if (*e && *e != '0') use_parallel = faux; }
             if (auto e = std::getenv("PARVION_MAX_CONN")) { if (auto n = std::atoi(e); n > 0) max_connections = (ui32)n; }
@@ -867,7 +953,7 @@ namespace netxs::app::parvion
             load_recent(); // Restore the persisted Quick Connect history.
         }
 
-        // Number of concurrent connections (chunks) for a file of `size` bytes.
+        // Number of parallel connections (chunks) for a file of `size` bytes.
         // Mirrors CQueueView::GetParallelSftpPartCount: single-stream at or below
         // the threshold, otherwise ceil(size/threshold) clamped to [2, max].
         auto part_count(si64 size) const -> ui32
@@ -937,6 +1023,34 @@ namespace netxs::app::parvion
         void mark(text s) { status = s; log_line(logtype::status, std::move(s)); dirty = true; }
         // Error: short hint on the bar + an Error line in the log.
         void fail(text e) { status = "Error: " + e; log_line(logtype::error, std::move(e)); dirty = true; }
+
+        // Session-scoped passphrase cache lookup (used by the control session and, via a provider,
+        // by transfer workers). Returns true and sets `out` when a validated passphrase is known.
+        bool lookup_passphrase(text const& keyfile, text& out) const
+        {
+            auto it = key_passphrases.find(keyfile);
+            if (it == key_passphrases.end()) return faux;
+            out = it->second;
+            return true;
+        }
+        // The user answered the outstanding prompt: cache a passphrase (so reconnects/workers reuse
+        // it) or adopt the account password, send it to the waiting backend, and clear the latch.
+        void provide_secret(text v)
+        {
+            if (sec_req.is_passphrase) key_passphrases[sec_req.keyfile] = v;
+            else                       pass = v; // Remember the working account password for this session.
+            session.write_line(v);
+            sec = sec_idle;
+        }
+        // The user dismissed the prompt: never send an empty line (the backend would just re-ask in a
+        // loop) — tear the connection down. s_failed does not auto-reconnect (only an s_connected drop does).
+        void cancel_secret()
+        {
+            session.stop();
+            sec = sec_idle;
+            fail("Authentication cancelled.");
+            stage = s_failed;
+        }
         // Issue a user-visible SFTP command on the control session, logging it as
         // a Command line first (mirrors FileZilla logging the command it sends).
         void send_cmd(view c) { last_activity = steady_clock::now(); log_line(logtype::command, text{ c }); session.write_line(c); }
@@ -1028,13 +1142,21 @@ namespace netxs::app::parvion
             reset_recop(); // Drop any half-finished folder walk from a previous session.
             idle_pool.clear(); // Drop pooled transfer connections to the previous server.
             recovering = faux; restoring = faux; reconnect_tries = 0; keep_skip = 0; // Fresh user-initiated connect, not a recovery.
+            key_passphrases.clear(); pass_asked.clear(); account_asked = faux; // Fresh credentials: drop any cached passphrases.
+            sec = sec_idle; last_preamble.clear(); last_instruction.clear();
             last_activity = steady_clock::now();
             if (host.empty()) { mark("Enter a host name."); stage = s_failed; return; }
             mark("Connecting to " + host + "...");
             trace(dbg_debug, "Target: " + user + "@" + host + ":" + std::to_string(port)); // Wire-level detail.
             trace(dbg_verbose, "Going to execute " + exe);                                  // FileZilla connect.cpp parity.
+            // Surface the applied SFTP settings (Edit -> Settings) for this connection.
+            if (!cfg.keyfiles.empty()) log_line(logtype::status, "Public-key authentication: " + std::to_string(cfg.keyfiles.size()) + " key file(s) configured.");
+            if (cfg.compression)       log_line(logtype::status, "SFTP compression enabled.");
+            trace(dbg_debug, "Settings: timeout=" + std::to_string(response_timeout_sec) + "s, retries=" + std::to_string(max_reconnect_tries)
+                + ", delay=" + std::to_string(reconnect_delay_sec) + "s, parallel>=" + std::to_string(parallel_threshold) + "B x" + std::to_string(max_connections));
             remember(host, user, pass, port); // Record this target in the Quick Connect history.
             session.runargs = runargs;
+            if (cfg.compression) session.runargs.push_back("-C"); // SFTP compression (Settings -> SFTP).
             if (!session.launch(exe)) { fail("Failed to launch parvionsftp: " + exe); stage = s_failed; return; }
             stage = s_greeting;
         }
@@ -1048,6 +1170,8 @@ namespace netxs::app::parvion
             reset_recop(); // Drop any half-finished folder walk.
             idle_pool.clear(); // Close pooled transfer connections.
             recovering = faux; restoring = faux; reconnect_tries = 0; keep_skip = 0; // User asked to disconnect: don't auto-reconnect.
+            key_passphrases.clear(); pass_asked.clear(); account_asked = faux;
+            sec = sec_idle; last_preamble.clear(); last_instruction.clear();
             items.clear();
             pending.clear();
             mark("Not connected.");
@@ -1060,6 +1184,9 @@ namespace netxs::app::parvion
                 auto msgs = session.drain();
                 if (!msgs.empty()) last_activity = steady_clock::now(); // Inbound traffic counts as activity.
                 for (auto& m : msgs) process(m);
+                // A passphrase/password prompt came due: raise the UI modal exactly once (the backend
+                // re-emits the sequence on a wrong answer, which re-arms sec_pending for a fresh modal).
+                if (sec == sec_pending && on_prompt_secret) { sec = sec_shown; on_prompt_secret(sec_req); }
                 if (!session.alive() && (stage == s_greeting || stage == s_opening))
                 {
                     trace(dbg_warning, "Backend exited during " + text{ stage == s_greeting ? "greeting" : "authentication" } + ".");
@@ -1152,7 +1279,9 @@ namespace netxs::app::parvion
             restoring = true; // restore resume_path after auth (see complete()/c_open)
             mark("Reconnecting to " + host + " (attempt " + std::to_string(reconnect_tries) + ")...");
             session.runargs = runargs;
+            if (cfg.compression) session.runargs.push_back("-C"); // SFTP compression (Settings -> SFTP).
             if (!session.launch(exe)) { stage = s_failed; retry_at = steady_clock::now() + std::chrono::seconds{ reconnect_delay_sec }; return; }
+            pass_asked.clear(); account_asked = faux; last_preamble.clear(); last_instruction.clear(); // Fresh backend auth (keep cached passphrases for this server).
             stage = s_greeting;
             last_activity = steady_clock::now();
         }
@@ -1591,6 +1720,8 @@ namespace netxs::app::parvion
         {
             w.exe = exe; w.host = host; w.user = user; w.pass = pass; w.port = port;
             w.runargs = runargs;
+            if (cfg.compression) w.runargs.push_back("-C"); // SFTP compression for the transfer connection.
+            w.keyfiles = cfg.keyfiles;                      // Public-key auth on the transfer connection.
             w.download = item.download;
             w.remote_path = item.remote_path;
             w.local_path = item.local_path;
@@ -1599,6 +1730,9 @@ namespace netxs::app::parvion
             // shared message log, exactly as FileZilla routes every control socket
             // through the one StatusView.
             w.logsink = [this](logtype t, text s, si32 level){ log_line(t, std::move(s), level); };
+            // Resolve a key passphrase from the controller's session cache (workers never prompt; the
+            // control connection authenticates first and fills it). Mirrors logsink's controller hand-off.
+            w.passphrase_provider = [this](text const& keyfile, text& out){ return lookup_passphrase(keyfile, out); };
         }
         void start_item(si32 i)
         {
@@ -1841,8 +1975,40 @@ namespace netxs::app::parvion
                 case sftp_evt::ask_hostkey_betteralg:
                     session.write_line("y"); // Accept (trust) the host key.
                     break;
+                // FileZilla console_get_userpass_input emits the prompt's preamble/instruction before
+                // ask_password. The preamble "SSH key passphrase" (ssh2userauth.c) distinguishes a key
+                // passphrase from the account password; remember it to route the answer below.
+                case sftp_evt::request_preamble:    last_preamble    = m.line.empty() ? text{} : text{ m.first() }; break;
+                case sftp_evt::request_instruction: last_instruction = m.line.empty() ? text{} : text{ m.first() }; break;
                 case sftp_evt::ask_password:
-                    session.write_line(pass);
+                    if (last_preamble == "SSH key passphrase") // SSH key passphrase.
+                    {
+                        auto kf = sftp_keyfile_from_prompt(m.first());
+                        if (pass_asked.count(kf)) // Re-ask: the previous answer (typed or cached) was wrong.
+                        {
+                            key_passphrases.erase(kf);
+                            sec_req = { true, text{ m.first() }, kf, true };
+                            sec = sec_pending;
+                        }
+                        else
+                        {
+                            pass_asked.insert(kf);
+                            auto pp = text{};
+                            if (lookup_passphrase(kf, pp)) session.write_line(pp);          // Cached from a prior backend.
+                            else { sec_req = { true, text{ m.first() }, kf, faux }; sec = sec_pending; } // Ask the user.
+                        }
+                    }
+                    else // Account password.
+                    {
+                        if (!account_asked)
+                        {
+                            account_asked = true;
+                            if (!pass.empty()) session.write_line(pass);                    // Quick Connect bar password.
+                            else { sec_req = { false, text{ m.first() }, text{}, faux }; sec = sec_pending; }
+                        }
+                        else { sec_req = { false, text{ m.first() }, text{}, true }; sec = sec_pending; } // Wrong password: re-ask.
+                    }
+                    last_preamble.clear(); last_instruction.clear();
                     break;
                 case sftp_evt::listentry:
                     if (await == c_ls || await == c_rls) // Plain browse listing or a recursive-walk listing.
@@ -1868,7 +2034,8 @@ namespace netxs::app::parvion
                 // A recursive-walk `ls` and a recop one-shot (mkdir/rm/rmdir) advance the operation
                 // regardless of the result code: a failed/empty ls is just an empty level, and a
                 // mkdir-exists / rmdir-nonempty must not stall the rest of the command sequence.
-                case sftp_evt::done:  if (await == c_rls || await == c_recop) complete();
+                case sftp_evt::done:  if (await == c_keyfile) send_next_keyfile_or_open(); // Key registered; next key or open.
+                                      else if (await == c_rls || await == c_recop) complete();
                                       else if (m.first() == "1") complete();
                                       else { await = c_none; path_pending = faux; ls_deferred = faux; } // Failed browse
                                           // cmd (cd/ls/op): it still terminated, so release the control session (else
@@ -1878,14 +2045,36 @@ namespace netxs::app::parvion
             }
         }
 
+        // Send the next existing private key as a `keyfile <path>` command (await c_keyfile) or,
+        // once every configured key is registered, the `open` command. The backend emits a Done
+        // for EVERY command (psftp.c do_sftp), so each keyfile's Done must be consumed before the
+        // next command is sent — they cannot be pipelined ahead of `open` (that premature Done
+        // would fire complete() for c_open before auth). Mirrors FileZilla connect.cpp's
+        // connect_keys -> connect_open state sequence.
+        void send_next_keyfile_or_open()
+        {
+            while (connect_keyfile_i < cfg.keyfiles.size())
+            {
+                auto& kf = cfg.keyfiles[connect_keyfile_i++];
+                if (kf.empty()) continue;
+                auto ec = std::error_code{};
+                if (!fs::is_regular_file(fs::path{ kf }, ec)) { log_line(logtype::status, "Skipping non-existing key file " + kf); continue; }
+                await = c_keyfile;
+                send_cmd("keyfile " + quote_name(kf));
+                return;
+            }
+            await = c_open;
+            mark("Authenticating...");
+            send_cmd("open " + quote_name(user + "@" + host) + " " + std::to_string(port));
+        }
+
         void on_reply(sftp_msg const& m)
         {
-            if (stage == s_greeting) // The startup banner.
+            if (stage == s_greeting) // The startup banner: register key files (if any), then open.
             {
                 stage = s_opening;
-                await = c_open;
-                mark("Authenticating...");
-                send_cmd("open " + quote_name(user + "@" + host) + " " + std::to_string(port));
+                connect_keyfile_i = 0;
+                send_next_keyfile_or_open();
                 return;
             }
             last_reply = text{ m.first() };

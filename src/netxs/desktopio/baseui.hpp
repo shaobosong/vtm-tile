@@ -27,6 +27,7 @@ namespace netxs
             X(infopage  ) \
             X(list      ) \
             X(mock      ) \
+            X(parvion   ) \
             X(postfx    ) \
             X(rail      ) \
             X(taskbar   ) \

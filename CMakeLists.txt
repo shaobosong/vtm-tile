@@ -145,6 +145,38 @@ endif()
 
 target_link_libraries(vtm-tile PRIVATE parvionsftp_be)
 
+# ── pvputtygen backend (private-key Comment/Data parsing; vtm-tile -r pvputtygen) ──
+# FileZilla's ufxputtygen is just cmdgen.c over the shared PuTTY crypto/key code that
+# parvionsftp_be already vendors and compiles. To avoid linking a second copy of that
+# code (duplicate symbols in the one multi-call binary), pvputtygen_be holds ONLY
+# cmdgen.c and links parvionsftp_be for everything else (crypto, key loaders, PuTTY
+# globals, platform stubs). cmdgen.c's own main() is renamed to pvputtygen_main and
+# dispatched from vtm-tile's main(). Listed BEFORE parvionsftp_be on vtm-tile's link
+# line (via the dependency below) so cmdgen.o's references resolve into it.
+add_library(pvputtygen_be STATIC "${PUTTY_DIR}/cmdgen.c")
+target_include_directories(pvputtygen_be PRIVATE
+    "${PUTTY_DIR}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/external/filezilla")
+target_compile_definitions(pvputtygen_be PRIVATE NO_GSSAPI)
+set_source_files_properties("${PUTTY_DIR}/cmdgen.c"
+    TARGET_DIRECTORY pvputtygen_be
+    PROPERTIES COMPILE_DEFINITIONS "main=pvputtygen_main")
+if(WIN32)
+    target_compile_definitions(pvputtygen_be PRIVATE _WINDOWS SECURITY_WIN32 _ISOC99_SOURCE)
+    if(MSVC)
+        target_compile_options(pvputtygen_be PRIVATE /w)
+    else()
+        target_compile_options(pvputtygen_be PRIVATE -w)
+    endif()
+else()
+    target_include_directories(pvputtygen_be PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/external/filezilla/FileZilla3/config")
+    target_compile_definitions(pvputtygen_be PRIVATE HAVE_CONFIG_H _FILE_OFFSET_BITS=64)
+    target_compile_options(pvputtygen_be PRIVATE -w)
+endif()
+target_link_libraries(pvputtygen_be PRIVATE parvionsftp_be nettle_aes)
+target_link_libraries(vtm-tile PRIVATE pvputtygen_be)
+
 option(VTM_BUILD_TESTS "Build vtm regression tests" OFF)
 if(VTM_BUILD_TESTS)
     enable_testing()

@@ -288,4 +288,18 @@ if(Python3_FOUND)
         ENVIRONMENT "VTM_TILE_BINARY=$<TARGET_FILE:vtm-tile>"
         TIMEOUT 300
         LABELS "tui;tile;maximize")
+
+    # The Parvion Edit -> Settings dialog (SFTP subset of FileZilla's Connection
+    # pages): the top-tabbed modal persists to <XDG_CONFIG_HOME>/parvion/settings,
+    # the SFTP tab's compression/threshold/key-table widgets, the pvputtygen
+    # public-key parse and encrypted-key -> .ppk conversion flow (save picker,
+    # overwrite confirm, wrong-passphrase retry), and Esc handling. Each case runs
+    # against an isolated XDG_CONFIG_HOME; key cases self-skip without ssh-keygen
+    # or /root/.ssh/id_rsa.
+    add_test(NAME parvion_settings_test
+             COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test_parvion_settings.py")
+    set_tests_properties(parvion_settings_test PROPERTIES
+        ENVIRONMENT "VTM_TILE_BINARY=$<TARGET_FILE:vtm-tile>"
+        TIMEOUT 300
+        LABELS "tui;tile;parvion;settings")
 endif()

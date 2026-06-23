@@ -15,6 +15,10 @@ enum class code { noaccess, noserver, nodaemon, nosrvlog, interfer, errormsg };
 // own platform main(), renamed to parvionsftp_main via a per-file compile define in
 // CMake (parvionsftp_be lib) so it links alongside vtm-tile's main() without clashing.
 extern "C" int parvionsftp_main(int argc, char** argv);
+// In-process pvputtygen entry point (FileZilla cmdgen.c), renamed to pvputtygen_main via
+// the same per-file compile define (pvputtygen_be lib). Parses private-key Comment/Data
+// (fingerprint) for the Settings dialog's key picker; reached via `vtm-tile -r pvputtygen`.
+extern "C" int pvputtygen_main(int argc, char** argv);
 
 namespace tile_session_reg
 {
@@ -254,7 +258,15 @@ int main(int argc, char* argv[])
                 args.push_back(nullptr);
                 return parvionsftp_main((int)args.size() - 1, args.data());
             }
-            break; // A run flag was given but not parvionsftp: fall through to normal handling.
+            if (view{ argv[i + 1] }.starts_with("pvputtygen"))
+            {
+                static char arg0[] = "pvputtygen";
+                auto args = std::vector<char*>{ arg0 };
+                for (auto j = i + 2; j < argc; j++) args.push_back(argv[j]);
+                args.push_back(nullptr);
+                return pvputtygen_main((int)args.size() - 1, args.data());
+            }
+            break; // A run flag was given but not a known backend: fall through to normal handling.
         }
     }
     auto whoami = type::client;

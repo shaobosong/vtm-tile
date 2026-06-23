@@ -29,6 +29,8 @@
 #include "parvion/panes.hpp"
 #include "parvion/connectbar.hpp"
 #include "parvion/queue.hpp"
+#include "parvion/settings_dialog.hpp"
+#include "parvion/prompts.hpp" // make_secret_dialog (live passphrase / password login modal)
 
 namespace netxs::app::parvion
 {
@@ -191,7 +193,8 @@ namespace netxs::app::parvion
                 // (padding, slim, autohide) just like the other applets do.
                 {
                     auto parvion_context = config.settings::push_context("/config/parvion/");
-                    root->attach(slot::_1, app::shared::menu::demo(config));
+                    auto [menu_block, cover, menu_data] = app::shared::menu::load(config);
+                    root->attach(slot::_1, menu_block);
                 }
                 auto body = root->attach(slot::_2, ui::fork::ctor(axis::Y));
                     // Quick-connect bar: interactive Host/User/Pass/Port + Connect.
@@ -223,6 +226,56 @@ namespace netxs::app::parvion
                         // Its empty top handle bar drags the panes/queue split.
                         auto queue_panel = workspace->attach(slot::_2, make_queue_panel(ctrl.get(), ptr::shadow(workspace), window));
                             queue_panel->limits({ -1, min_queue_h });
+            // Edit -> Settings: register the OpenSettingsDialog lua method on the window so the
+            // menu's ParvionOpenSettings script (vtm.xml) opens the settings overlay. ctrl is
+            // captured by value (a shared_ptr copy) so it outlives this build() call.
+            window->invoke([ctrl](auto& boss)
+            {
+                auto& luafx = boss.bell::indexer.luafx;
+                boss.base::add_methods(basename::parvion,
+                {
+                    { "OpenSettingsDialog", [&, ctrl]
+                    {
+                        auto& active = boss.base::property("parvion.settings.active", faux);
+                        if (!active) // Toggle guard: don't stack multiple settings overlays.
+                        {
+                            active = true;
+                            auto card = ui::sptr{};
+                            boss.base::attach(make_settings_dialog(ctrl.get(), ptr::shadow(boss.This()), &card));
+                            boss.base::reflow();
+                            // Grab keyboard focus on the dialog so Esc closes it immediately (without a
+                            // click to focus first). Focus is keyed to the activating gear (the same
+                            // gear.id the card's own click handler uses) and enqueued so it runs AFTER
+                            // the menu dropdown that launched us finishes dismissing — grabbing during
+                            // the menu script races the popup's focus teardown and the grab is lost.
+                            auto gid = luafx.get_gear().id;
+                            boss.base::enqueue([card_wp = ptr::shadow(card), gid](auto&)
+                            {
+                                if (auto c = card_wp.lock()) pro::focus::set(c, gid, solo::on);
+                            });
+                        }
+                        luafx.set_return();
+                    }},
+                });
+                // Live login prompts: when the SFTP controller needs an SSH key passphrase or the
+                // account password, pop the shared masked-input modal over the window (enqueued so it
+                // attaches outside the poll/timer tick). OK feeds the secret back to the waiting backend
+                // (caching a passphrase for reconnects + parallel workers); Cancel/Esc aborts the connect.
+                // cp is a raw pointer (not a shared_ptr) to avoid a controller<->callback ownership cycle;
+                // the controller outlives the window's timer/panes, which keep it alive.
+                ctrl->on_prompt_secret = [wp = ptr::shadow(boss.This()), cp = ctrl.get()](sftp_remote::secret_req_t const& req)
+                {
+                    auto w = wp.lock();
+                    if (!w) return;
+                    w->base::enqueue([wp, cp, req](auto& win)
+                    {
+                        auto title  = req.is_passphrase ? text{ "SSH key passphrase" } : text{ "Password" };
+                        auto submit = [cp](text v){ cp->provide_secret(std::move(v)); };
+                        auto cancel = [cp]{ cp->cancel_secret(); };
+                        win.base::attach(make_secret_dialog(wp, {}, title, req.prompt, submit, cancel, req.is_retry, /*secret*/true));
+                    });
+                };
+            });
             // Test/demo seam ($PARVION_DEMO_LOG_TICK=N): append a Status line every N polls (each ~50ms)
             // so the Python regression tests can verify the Message-log selection survives live log
             // updates. Off (0) unless the env var is set, so normal runs are unaffected.

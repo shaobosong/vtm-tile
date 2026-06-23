@@ -110,10 +110,7 @@ namespace netxs::app::parvion
 
     struct connect_state
     {
-        std::array<text, 4> val{};      // Field contents (host/user/pass/port).
-        std::array<si32, 4> caret{};    // Caret grapheme-cluster index per field.
-        std::array<si32, 4> off{};      // Horizontal scroll offset (display cells) per field.
-        std::array<rect, 4> box{};      // Cached field input boxes (row-local).
+        std::array<input_field, 4> fld{}; // Host/User/Pass/Port input boxes (shared input_field; see panes.hpp).
         rect connect_box{};             // Cached Connect button box.
         si32 active = cf_host;          // Field receiving input.
         si32 drag_field = -1;           // Field whose caret a left-drag is scrubbing (-1 = none).
@@ -127,26 +124,13 @@ namespace netxs::app::parvion
     };
 
     // Field editing delegates to the shared single-line editor core (panes.hpp).
-    inline void cb_insert(connect_state& st, view ins)
-    {
-        auto digits = text{}; // The Port field is numeric: keep ASCII digits only (typed or pasted).
-        if (st.active == cf_port)
-        {
-            for (auto c : ins) if (c >= '0' && c <= '9') digits += c;
-            ins = digits;
-        }
-        edit_insert(st.val[st.active], st.caret[st.active], ins);
-    }
-    inline void cb_backspace(connect_state& st) { edit_backspace(st.val[st.active], st.caret[st.active]); }
-    inline void cb_delete(connect_state& st)    { edit_delete(st.val[st.active], st.caret[st.active]); }
-    // Map the cursor's cell column `mx` (scroll + in-box offset) to field i's caret cluster.
-    // Secret fields map through the painted mask so the caret matches what's on screen.
-    inline void cb_caret_to(connect_state& st, si32 i, si32 mx)
-    {
-        auto disp = connect_fields[i].secret ? text((size_t)cluster_count(st.val[i]), '*') : st.val[i];
-        auto col  = st.off[i] + (mx - st.box[i].coor.x);
-        st.caret[i] = std::min(cell_to_cluster(disp, col), cluster_count(st.val[i]));
-    }
+    // Field editing delegates to the shared input_field core (panes.hpp). The Port field's digits-only
+    // filter and the Pass field's '*' mask live on the field (fld.digits / fld.secret), set at init.
+    inline void cb_insert(connect_state& st, view ins) { field_insert(st.fld[st.active], ins); }
+    inline void cb_backspace(connect_state& st) { edit_backspace(st.fld[st.active].val, st.fld[st.active].caret); }
+    inline void cb_delete(connect_state& st)    { edit_delete(st.fld[st.active].val, st.fld[st.active].caret); }
+    // Map the cursor's cell column `mx` to field i's caret cluster (through the secret mask).
+    inline void cb_caret_to(connect_state& st, si32 i, si32 mx) { field_caret_to(st.fld[i], mx); }
     // Set the bar's status hint and repaint the (separate) status strip widget.
     inline void cb_set_status(connect_state& st, text msg)
     {
@@ -155,12 +139,12 @@ namespace netxs::app::parvion
     }
     inline void cb_connect(connect_state& st)
     {
-        if (st.val[cf_host].empty()) { cb_set_status(st, "Enter a host name."); return; }
-        if (!st.ctrl)                { cb_set_status(st, "No SFTP controller."); return; }
+        if (st.fld[cf_host].val.empty()) { cb_set_status(st, "Enter a host name."); return; }
+        if (!st.ctrl)                    { cb_set_status(st, "No SFTP controller."); return; }
         auto port = si32{ 0 };
-        for (auto c : st.val[cf_port]) if (c >= '0' && c <= '9') port = port * 10 + (c - '0');
+        for (auto c : st.fld[cf_port].val) if (c >= '0' && c <= '9') port = port * 10 + (c - '0');
         if (port <= 0 || port > 65535) port = 22;
-        st.ctrl->connect(st.val[cf_host], port, st.val[cf_user], st.val[cf_pass]);
+        st.ctrl->connect(st.fld[cf_host].val, port, st.fld[cf_user].val, st.fld[cf_pass].val);
         cb_set_status(st, {}); // The controller drives status from here on.
     }
 
@@ -178,37 +162,11 @@ namespace netxs::app::parvion
             put_str(canvas, x, 0, lbl, theme::subtext, theme::surface, std::max(0, w - x));
             x += cell_width(lbl) + 1; // Advance by the nominal label width (+ the trailing space).
             auto fw = layout.field[i];
-            st.box[i] = rect{{ x, 0 }, { fw, 1 }};
-            // Fields share the labels' background; an underline marks the editable
-            // extent. When the bar is focused, the active field's whole foreground
-            // (text + underline) turns accent blue together; otherwise the bar stays
-            // calm (muted underline, default text) so it avoids extra color blocks.
-            auto sel     = st.focused && st.active == i;
-            auto und_clr = sel ? ui32{ theme::sel_bg_act } : ui32{ theme::subtext };
-            canvas.fill(rect{{ x, 0 }, { fw, 1 }}, [&](cell& c){ c.bgc(theme::surface).und(unln::line).unc(argb{ und_clr }); });
-            // Scroll the field horizontally so the caret stays inside its fw-cell
-            // window; without this, text typed past the field width is invisible and
-            // the view stays pinned to the start (mirrors command_bar in tile.hpp).
-            auto& caret = st.caret[i];           // Grapheme-cluster index.
-            auto& off   = st.off[i];             // Cell-column scroll offset.
-            // Display string: one '*' per cluster for secret fields keeps caret indices
-            // consistent between the real value and the mask (each '*' is one cell wide).
-            auto disp  = connect_fields[i].secret ? text((size_t)cluster_count(st.val[i]), '*') : st.val[i];
-            auto total = cell_width(disp);
-            auto ccell = connect_fields[i].secret ? caret : caret_cell(disp, caret); // Caret cell column.
-            if (off > ccell)        off = ccell;
-            if (ccell - off >= fw)  off = ccell - fw + 1;
-            off = std::clamp(off, si32{ 0 }, std::max(si32{ 0 }, total - fw + 1));
-            auto shown = view{ disp }.substr(byte_at_cell(disp, off));
-            put_str(canvas, x, 0, shown, sel ? ui32{ theme::sel_bg_act } : ui32{ theme::text_fg }, theme::surface, fw);
-            if (st.focused && st.active == i)
-            {
-                auto cx = ccell - off;
-                if (cx >= 0 && cx < fw)
-                {
-                    canvas.fill(rect{{ x + cx, 0 }, { 1, 1 }}, [&](cell& c){ c.bgc(theme::sel_bg_act).fgc(theme::surface); });
-                }
-            }
+            // Fields share the labels' background; an underline marks the editable extent. When the bar
+            // is focused, the active field's whole foreground (text + underline) turns accent blue;
+            // otherwise the bar stays calm. The paint + caret scroll is the shared input_field core.
+            auto sel = st.focused && st.active == i;
+            field_paint(canvas, st.fld[i], rect{{ x, 0 }, { fw, 1 }}, sel);
             x += fw + 1; // One-cell gap after each field.
         }
         auto& label = layout.connect;
@@ -239,8 +197,8 @@ namespace netxs::app::parvion
         auto clear_bar = m::item{ .alive = true, .label = "Clear Quickconnect bar" };
         clear_bar.action = [sp, deface_form](hids&)
         {
-            for (auto i = 0; i < 4; ++i) { sp->val[i].clear(); sp->caret[i] = 0; sp->off[i] = 0; }
-            sp->val[cf_port] = "22"; sp->caret[cf_port] = 2;
+            for (auto i = 0; i < 4; ++i) { sp->fld[i].val.clear(); sp->fld[i].caret = 0; sp->fld[i].off = 0; }
+            sp->fld[cf_port].val = "22"; sp->fld[cf_port].caret = 2;
             cb_set_status(*sp, {});
             deface_form();
         };
@@ -258,10 +216,10 @@ namespace netxs::app::parvion
                 auto row = m::item{ .alive = true, .label = label };
                 row.action = [sp, deface_form, entry = r](hids&)
                 {
-                    sp->val[cf_host] = entry.host; sp->caret[cf_host] = cluster_count(entry.host); sp->off[cf_host] = 0;
-                    sp->val[cf_user] = entry.user; sp->caret[cf_user] = cluster_count(entry.user); sp->off[cf_user] = 0;
-                    sp->val[cf_pass] = entry.pass; sp->caret[cf_pass] = cluster_count(entry.pass); sp->off[cf_pass] = 0;
-                    sp->val[cf_port] = std::to_string(entry.port); sp->caret[cf_port] = cluster_count(sp->val[cf_port]); sp->off[cf_port] = 0;
+                    sp->fld[cf_host].val = entry.host; sp->fld[cf_host].caret = cluster_count(entry.host); sp->fld[cf_host].off = 0;
+                    sp->fld[cf_user].val = entry.user; sp->fld[cf_user].caret = cluster_count(entry.user); sp->fld[cf_user].off = 0;
+                    sp->fld[cf_pass].val = entry.pass; sp->fld[cf_pass].caret = cluster_count(entry.pass); sp->fld[cf_pass].off = 0;
+                    sp->fld[cf_port].val = std::to_string(entry.port); sp->fld[cf_port].caret = cluster_count(sp->fld[cf_port].val); sp->fld[cf_port].off = 0;
                     cb_connect(*sp);
                     deface_form();
                 };
@@ -275,9 +233,11 @@ namespace netxs::app::parvion
     {
         // One shared connect_state drives both the painted form and the ▾ dropdown's row actions.
         auto sp = std::make_shared<connect_state>();
+        for (auto i = 0; i < 4; ++i) sp->fld[i].secret = connect_fields[i].secret; // Pass field masks with '*'.
+        sp->fld[cf_port].digits = true;                                            // Port accepts digits only.
         sp->ctrl = ctrl;
-        sp->val[cf_port] = "22";
-        sp->caret[cf_port] = 2;
+        sp->fld[cf_port].val = "22";
+        sp->fld[cf_port].caret = 2;
 
         // The editable Host/User/Pass/Port + Connect form (painted directly, per command_bar).
         auto form = ui::mock::ctor()
@@ -333,7 +293,7 @@ namespace netxs::app::parvion
                 auto mx = (si32)gear.coord.x;
                 for (auto i = si32{}; i < 4; ++i)
                 {
-                    auto& b = st.box[i];
+                    auto& b = st.fld[i].box;
                     if (mx >= b.coor.x && mx < b.coor.x + b.size.x)
                     {
                         st.active = i;
@@ -359,7 +319,7 @@ namespace netxs::app::parvion
                 st.drag_field = -1;
                 for (auto i = si32{}; i < 4; ++i)
                 {
-                    auto& b = st.box[i];
+                    auto& b = st.fld[i].box;
                     if (px >= b.coor.x && px < b.coor.x + b.size.x) { st.drag_field = i; break; }
                 }
             };
@@ -387,8 +347,8 @@ namespace netxs::app::parvion
                 if (gear.keystat == input::key::released) return;
                 auto k = gear.keybd::generic();
                 auto shift = !!(gear.ctlstat & hids::anyShift);
-                auto& v = st.val[st.active];
-                auto& c = st.caret[st.active];
+                auto& v = st.fld[st.active].val;
+                auto& c = st.fld[st.active].caret;
                 auto act = true;
                      if (k == input::key::Backspace)     cb_backspace(st);
                 else if (k == input::key::KeyDelete)     cb_delete(st);

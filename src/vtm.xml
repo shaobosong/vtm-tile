@@ -403,8 +403,11 @@ R"==(
         </menu>
     </defapp>
     <parvion>  <!-- Parvion applet (vtm-tile -r parvion). -->
-        <menu>
+        <menu item*>
             <padding=/Menu/Defaults/padding/>  <!-- Horizontal cell padding on each side of every Parvion menu-bar button. -->
+            <item type="dropdown" label="Edit" tooltip=" Edit menu ">  <!-- Edit dropdown: Settings opens the SFTP/Connection settings dialog. -->
+                <item label="Settings" tooltip=" Open the Parvion settings dialog (Connection & SFTP) " script=OnLeftClick|ParvionOpenSettings/>
+            </item>
         </menu>
     </parvion>
     <events>  <!-- The required key combination sequence can be generated on the Info page, accessible by clicking on the label in the lower right corner of the vtm desktop. -->
@@ -1495,6 +1498,7 @@ R"==(
     <TileSetManagerTitle   ="vtm.tile.SetTitle();"/>               <!-- Set tiling window manager title using clipboard data. -->
     <TileZoomPane          ="vtm.tile.ZoomPane();"/>               <!-- Zoom active application. -->
     <TileClosePane         ="vtm.tile.ClosePane();"/>              <!-- Close active application. -->
+    <ParvionOpenSettings   ="vtm.parvion.OpenSettingsDialog();"/>  <!-- Open the Parvion Edit -> Settings dialog (Connection & SFTP). -->
     <TileCloseSlot         ="vtm.tile.CloseSlot();"/>              <!-- Close active application and empty slot. -->
     <TileDisconnect        ="vtm.tile.Disconnect();"/>             <!-- Disconnect tile manager. -->
     <TileShutdown          ="vtm.tile.Shutdown();"/>               <!-- Shutdown tile manager. -->

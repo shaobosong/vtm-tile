@@ -187,6 +187,37 @@ namespace netxs::app::parvion
     }
 #endif
 
+    // Classify a path typed into a LOCAL file pane's address bar on Windows, so the pickers only
+    // navigate to UNAMBIGUOUS targets (drive-letter + root-separator semantics are Windows-specific;
+    // consulted only under _WIN32). Pure string analysis — no std::filesystem — so it behaves the same
+    // everywhere (and is testable off-Windows). Cases:
+    //   drive_list : ""            -> the drive list ("Computer").
+    //                "/"  "\"      -> a bare root separator also opens the drive list.
+    //   invalid    : "C:" "C:dir"  -> drive-relative: the *current* directory on a drive (hidden state).
+    //                "/dir" "\dir" -> rooted but drive-less: the drive is unknown.
+    //   navigate   : "C:\..." "C:/..."   -> absolute on a named drive.
+    //                "\\srv\share"        -> UNC (let std::filesystem resolve / report it).
+    //                "dir" ".." "a/b"     -> relative to the current directory.
+    enum class win_addr { navigate, drive_list, invalid };
+    inline auto classify_win_addr(view s) -> win_addr
+    {
+        auto is_sep   = [](char c){ return c == '/' || c == '\\'; };
+        auto is_alpha = [](char c){ return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); };
+        if (s.empty()) return win_addr::drive_list;
+        if (s.size() == 1 && is_sep(s[0])) return win_addr::drive_list;     // bare "/" or "\"
+        if (s.size() >= 2 && is_alpha(s[0]) && s[1] == ':')                 // drive-letter prefix "X:"
+        {
+            if (s.size() == 2 || !is_sep(s[2])) return win_addr::invalid;   // "C:" / "C:dir" (drive-relative)
+            return win_addr::navigate;                                      // "C:\..." / "C:/..."
+        }
+        if (is_sep(s[0]))
+        {
+            if (s.size() >= 2 && is_sep(s[1])) return win_addr::navigate;   // "\\..." / "//..." (UNC)
+            return win_addr::invalid;                                       // "\dir" / "/dir" (drive-less rooted)
+        }
+        return win_addr::navigate;                                         // relative path
+    }
+
     // Read a local directory into entries, sorted directories-first then by
     // case-insensitive name. Errors are swallowed (returns what was readable).
     inline auto read_local_dir(fs::path const& dir) -> std::vector<direntry>

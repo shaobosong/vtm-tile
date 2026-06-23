@@ -132,6 +132,19 @@ namespace netxs::app::parvion
         netxs::wptr<ui::base> window_wp;        // App top-level window cake: anchor for confirm dialogs.
         ui64                  seen_gen = ~0ull; // Last remote listing generation seen (selection reset).
         ui64                  seen_local_gen = 0; // Last local refresh generation seen (post-download re-list); matches ctrl->local_gen's initial 0.
+        // File-picker mode (Settings dialog's "Add key file..."): when set, activating a FILE
+        // (double-click / Enter / Open button) invokes this with the file's full path instead of
+        // enqueueing a transfer; directory navigation is unchanged. Lets the picker reuse the whole
+        // Local Site browser (path bar, resizable columns, scrollbars, selection) verbatim.
+        std::function<void(text const&)> on_pick;
+        // File-picker mode: Esc (when not editing the path / a name) cancels the picker. The picker
+        // wires this to a deferred close; it is unset for the Local/Remote site panes (Esc is a no-op
+        // there). on_cancel must enqueue/defer its work — it tears down the pane that is calling it.
+        std::function<void()> on_cancel;
+        // Save-picker mode: fired whenever the selection moves to a FILE (single click / arrow nav),
+        // with the file's full path, so the picker copies its name into the Name field (overwrite
+        // target). Unset for the Local/Remote site panes and the Open picker.
+        std::function<void(text const&)> on_select;
 
         // Effective data source: the SFTP controller for a remote pane, else self.
         auto const& cur_items() const { return remote ? remote->items : items; }
@@ -301,6 +314,108 @@ namespace netxs::app::parvion
         v.erase(b, e - b);
     }
 
+    // --- Reusable Connect-bar-style widgets ------------------------------------------
+    // Painted by both the Quick Connect bar (connectbar.hpp) and the Settings dialog so
+    // their input fields and buttons are pixel-identical. Free functions over a canvas +
+    // box keep them callable from deferred render handlers (no widget coupling).
+
+    // Paint one editable single-line field into `box`: the shared surface background, an
+    // underline marking the editable extent (accent when active, else muted), the value
+    // scrolled so the caret stays inside the box, optional secret '*' masking, and the
+    // caret cell when active. `off` (the horizontal scroll offset) is updated in place,
+    // exactly as connect_render does. `active` means "focused and receiving input".
+    inline void paint_field(auto& canvas, rect box, view value, si32 caret, si32& off,
+                            bool active, bool secret = faux)
+    {
+        auto x  = box.coor.x;
+        auto y  = box.coor.y;
+        auto fw = box.size.x;
+        if (fw <= 0) return;
+        auto und_clr = active ? ui32{ theme::sel_bg_act } : ui32{ theme::subtext };
+        canvas.fill(box, [&](cell& c){ c.bgc(theme::surface).und(unln::line).unc(argb{ und_clr }); });
+        auto disp  = secret ? text((size_t)cluster_count(value), '*') : text{ value };
+        auto total = cell_width(disp);
+        auto ccell = secret ? caret : caret_cell(disp, caret);
+        if (off > ccell)       off = ccell;
+        if (ccell - off >= fw) off = ccell - fw + 1;
+        off = std::clamp(off, si32{ 0 }, std::max(si32{ 0 }, total - fw + 1));
+        auto shown = view{ disp }.substr(byte_at_cell(disp, off));
+        put_str(canvas, x, y, shown, active ? ui32{ theme::sel_bg_act } : ui32{ theme::text_fg }, theme::surface, fw);
+        if (active)
+        {
+            auto cx = ccell - off;
+            if (cx >= 0 && cx < fw) canvas.fill(rect{{ x + cx, y }, { 1, 1 }}, [&](cell& c){ c.bgc(theme::sel_bg_act).fgc(theme::surface); });
+        }
+    }
+
+    // Paint a Connect-style button: muted slate fill + light centered label, brightened
+    // by the cell::xlight overlay on hover and doubly on press (the same effect as the
+    // menu-bar buttons in application.hpp). `label` may carry its own padding.
+    inline void paint_button(auto& canvas, rect box, view label, bool hover, bool press)
+    {
+        if (box.size.x <= 0 || box.size.y <= 0) return;
+        canvas.fill(box, [&](cell& c){ c.bgc(theme::sel_bg); });
+        auto lw = cell_width(label);
+        auto lx = box.coor.x + std::max(0, (box.size.x - lw) / 2);
+        put_str(canvas, lx, box.coor.y, label, theme::text_fg, theme::sel_bg, box.size.x);
+        if      (press) canvas.fill(box, [](cell& c){ c.xlight(2); });
+        else if (hover) canvas.fill(box, [](cell& c){ c.xlight(); });
+    }
+
+    // Point-in-rect hit test (shared by the settings dialog, the file/save pickers and the
+    // secret-prompt modal). Boxes are widget-local; mx/my are gear.coord in the same space.
+    inline auto sd_hit(rect const& b, si32 mx, si32 my) -> bool
+    {
+        return mx >= b.coor.x && mx < b.coor.x + b.size.x && my >= b.coor.y && my < b.coor.y + b.size.y;
+    }
+
+    // --- Generalized single-line input field (the Quick Connect bar's input box) -------------------
+    // One reusable text field with the connect bar's exact behavior: shared paint_field rendering
+    // (muted/accent underline, secret '*' mask, caret auto-scroll), click + left-drag caret placement
+    // (the caret follows a drag that began in the box, auto-scrolling at the edges), and the standard
+    // editing keys. Widgets compose one (passphrase prompt, save-as Name) or several (connect bar,
+    // Settings) of these; the free helpers below are the single source of that behavior.
+    struct input_field
+    {
+        text val;           // Field contents.
+        si32 caret = 0;     // Caret grapheme-cluster index.
+        si32 off   = 0;     // Horizontal scroll offset (display cells).
+        rect box{};         // Painted box (render -> mouse), widget-local; refreshed by field_paint.
+        bool secret = faux; // Mask the content with '*' (passwords / passphrases).
+        bool digits = faux; // Accept ASCII digits only (e.g. a port number).
+    };
+    // Paint the field at `box` (caching it for hit-testing); `active` means focused/receiving input.
+    inline void field_paint(auto& canvas, input_field& f, rect box, bool active)
+    {
+        f.box = box;
+        paint_field(canvas, box, f.val, f.caret, f.off, active, f.secret);
+    }
+    inline auto field_hit(input_field const& f, si32 mx, si32 my) -> bool { return sd_hit(f.box, mx, my); }
+    // Map a cursor cell-x (widget-local) to the caret, through the secret mask (mirrors cb_caret_to).
+    inline void field_caret_to(input_field& f, si32 mx)
+    {
+        auto disp = f.secret ? text((size_t)cluster_count(f.val), '*') : f.val;
+        f.caret = std::min(cell_to_cluster(disp, f.off + (mx - f.box.coor.x)), cluster_count(f.val));
+    }
+    inline void field_insert(input_field& f, view ins)
+    {
+        if (f.digits) { auto d = text{}; for (auto c : ins) if (c >= '0' && c <= '9') d += c; edit_insert(f.val, f.caret, d); }
+        else edit_insert(f.val, f.caret, ins);
+    }
+    // Apply one key press to the field. Returns true if it was an editing/navigation key (the caller
+    // then set_handled + defaces); false for anything else (e.g. a printable filtered to empty).
+    inline auto field_key(input_field& f, si32 k, view cluster) -> bool
+    {
+             if (k == input::key::Backspace)     edit_backspace(f.val, f.caret);
+        else if (k == input::key::KeyDelete)     edit_delete(f.val, f.caret);
+        else if (k == input::key::KeyLeftArrow)  f.caret = std::max(0, f.caret - 1);
+        else if (k == input::key::KeyRightArrow) f.caret = std::min(cluster_count(f.val), f.caret + 1);
+        else if (k == input::key::KeyHome)       f.caret = 0;
+        else if (k == input::key::KeyEnd)        f.caret = cluster_count(f.val);
+        else { auto ins = edit_filter(cluster); if (!ins.empty()) field_insert(f, ins); else return faux; }
+        return true;
+    }
+
     // Make `boss` a vertical drag-resize handle for `target` fork's split: dragging the
     // widget up/down moves the boundary (drag down → the region above grows). When
     // `row_gate >= 0`, only a press landing on that local row begins a resize, so the rest
@@ -423,7 +538,28 @@ namespace netxs::app::parvion
         #endif
             pane_relist(st, child_path(st.path, e.name, st.is_local));
         }
-        else if (st.ctrl) st.ctrl->enqueue_upload(child_path(st.path, e.name, true), e.name, e.size);
+        else if (st.on_pick) st.on_pick(child_path(st.path, e.name, st.is_local));
+        else if (st.ctrl)    st.ctrl->enqueue_upload(child_path(st.path, e.name, true), e.name, e.size);
+    }
+    // Full path of the activatable file under the row cursor, or empty when the cursor is on
+    // ".." or a directory. Used by the picker's Open button (which activates the selection).
+    inline auto pane_selected_file(pane_state const& st) -> text
+    {
+        if (st.sel <= 0) return {};
+        auto idx = st.sel - 1;
+        auto& its = st.cur_items();
+        if (idx < 0 || idx >= (si32)its.size()) return {};
+        auto& e = its[idx];
+        if (e.is_dir) return {};
+        return child_path(st.cur_path(), e.name, st.is_local);
+    }
+    // Save-picker hook: when a FILE is selected, hand its path to on_select so the picker's Name field
+    // tracks the clicked file (overwrite target). A no-op for ".."/directories and panes without it.
+    inline void pane_fire_select(pane_state& st)
+    {
+        if (!st.on_select) return;
+        auto p = pane_selected_file(st);
+        if (!p.empty()) st.on_select(p);
     }
     // Display name of a logical row (row 0 == "..", else items[row-1].name).
     inline auto pane_row_name(pane_state const& st, si32 row) -> view
@@ -485,7 +621,22 @@ namespace netxs::app::parvion
             return;
         }
     #if defined(_WIN32)
-        if (dest.empty()) { pane_relist(st, {}); return; } // The drive list ("Computer").
+        // Windows: only follow unambiguous targets. A bare "/" or "\" (and empty input) opens the
+        // drive list; a bare drive letter ("C:"), a drive-relative path ("C:dir") or a drive-less
+        // rooted path ("\dir") is ambiguous — we don't guess a drive. Such inputs are reported the
+        // same way an unreadable directory is (log the error, then re-list the current directory).
+        switch (classify_win_addr(dest))
+        {
+            case win_addr::drive_list: pane_relist(st, {}); return; // "" / "/" / "\" -> "Computer".
+            case win_addr::invalid:
+                // Match the not-a-directory fallback: log the error, then re-list the current
+                // directory (the reverted address bar is the on-pane feedback). The input is a
+                // pure-string reject, so there is nothing to attempt — refresh in place.
+                if (st.ctrl) st.ctrl->log_line(logtype::error, "Invalid path: " + dest);
+                pane_relist(st, st.path);
+                return;
+            case win_addr::navigate: break; // Absolute-with-drive, UNC, or relative: navigate below.
+        }
     #else
         if (dest.empty()) return;
     #endif
@@ -1138,6 +1289,7 @@ namespace netxs::app::parvion
                         st.sel = row; st.sel_anchor = row;
                     }
                     else { st.marked = { row }; st.sel = row; st.sel_anchor = row; }
+                    pane_fire_select(st); // Save picker: clicking a file copies its name into the Name field.
                     boss.base::deface();
                 }
                 // A plain press in the blank body area clears the selection; a Ctrl press keeps it so a
@@ -1433,6 +1585,10 @@ namespace netxs::app::parvion
                     boss.base::deface();
                     return;
                 }
+                // Picker mode: Esc cancels/closes the picker. on_cancel is deferred (it tears down
+                // this very pane), so copy it, mark the key handled, fire it, and return without
+                // touching st/boss again.
+                if (k == input::key::Esc && st.on_cancel) { auto cb = st.on_cancel; gear.set_handled(); cb(); return; }
                 auto page = std::max(1, st.rows - 1);
                 auto act = true;
                      if (k == input::key::KeyUpArrow)   st.sel -= 1;
@@ -1456,6 +1612,7 @@ namespace netxs::app::parvion
                     pane_clamp(st);
                     st.marked = { st.sel }; // Keyboard navigation collapses to a single selection at the cursor.
                     st.sel_anchor = st.sel;
+                    pane_fire_select(st); // Save picker: arrow-navigating onto a file tracks it in the Name field.
                     gear.set_handled();
                     boss.base::deface();
                 }
@@ -1470,5 +1627,228 @@ namespace netxs::app::parvion
             }
         });
         return pane;
+    }
+
+    // The user's home directory as a local path: $HOME (POSIX), %USERPROFILE% (Windows, falling back
+    // to %HOMEDRIVE%%HOMEPATH%); empty -> the Windows drive list / POSIX root. Seeds the key picker,
+    // mirroring how the Local Site pane seeds from cwd(); both navigate Windows drive letters via
+    // local_lister() / read_local_drives() + child_path(is_local=true).
+    inline auto user_home_dir() -> text
+    {
+        #if defined(_WIN32)
+        if (auto up = std::getenv("USERPROFILE"); up && *up) return text{ up };
+        auto hd = std::getenv("HOMEDRIVE");
+        auto hp = std::getenv("HOMEPATH");
+        if (hd && *hd && hp) return text{ hd } + hp;
+        return {}; // drive list
+        #else
+        auto h = std::getenv("HOME");
+        return h && *h ? text{ h } : text{ "/" };
+        #endif
+    }
+
+    // --- Reusable modal file picker (Open / Save) over the Local Site browser ---------------------
+    // Wraps make_file_pane in a dimming overlay, inheriting its path bar, resizable columns,
+    // scrollbars, selection and Windows drive-letter navigation. Two modes:
+    //   open : activating a file (double-click / Enter / Open) -> on_accept(full path); dirs navigate.
+    //   save : a "Name:" field (prefilled `name`) + Save button -> on_accept(<current dir>/<name>);
+    //          clicking a file fills the name; dirs navigate. The name field holds keyboard focus.
+    enum class picker_mode { open, save };
+    struct picker_btn
+    {
+        bool saving = faux;
+        text accept_label;            // " Open " or " Save ".
+        rect accept_box{}, cancel_box{};
+        std::array<bool, 2> hov{}, prs{}; // [accept, cancel] hover / press.
+        bool focused = faux;          // The bottom bar (save-mode Name field) has keyboard focus.
+    };
+    // Attaches itself over `window_wp`; restores focus to `focus_back_wp` on close. `on_accept` receives
+    // the chosen path; `on_cancel` (optional) fires on Cancel / Esc / click-outside.
+    inline void open_file_picker(netxs::wptr<ui::base> window_wp, netxs::wptr<ui::base> focus_back_wp, id_t gear_id,
+                                 picker_mode mode, text title, text initial_dir, text name,
+                                 std::function<void(text const&)> on_accept, std::function<void()> on_cancel = {})
+    {
+        auto window = window_wp.lock();
+        if (!window) return;
+        if (!gear_id) gear_id = window->bell::indexer.luafx.get_gear().id; // Active gear for the focus grab.
+        auto saving = mode == picker_mode::save;
+        auto overlay = ui::cake::ctor()->alignment({ snap::both, snap::both });
+        auto overlay_wp = ptr::shadow(overlay);
+        auto close = [overlay_wp, focus_back_wp, gear_id]
+        {
+            if (auto o = overlay_wp.lock()) o->base::detach();
+            if (auto c = focus_back_wp.lock()) { pro::focus::set(c, gear_id, solo::on); c->base::deface(); }
+        };
+        auto close_deferred = [window_wp, close]{ if (auto w = window_wp.lock()) w->base::enqueue([close](auto&){ close(); }); else close(); };
+        auto do_cancel = [close_deferred, on_cancel]{ if (on_cancel) on_cancel(); close_deferred(); };
+        // Dimming backdrop (click outside cancels).
+        overlay->attach(ui::mock::ctor())->invoke([do_cancel](auto& boss)
+        {
+            auto myid = boss.bell::id;
+            boss.LISTEN(tier::release, e2::render::background::any, parent_canvas, -, (myid))
+            {
+                parent_canvas.fill([myid](cell& c){ c.bgc().faint(); c.fgc().faint(); c.link(myid); });
+            };
+            boss.on(tier::mouserelease, input::key::LeftClick, [do_cancel](hids& gear){ do_cancel(); gear.dismiss(); });
+        });
+        // Centered card: [ file pane | Open|Save / Cancel row ].
+        auto frame = overlay->attach(ui::fork::ctor(axis::Y))
+            ->alignment({ snap::center, snap::center })
+            ->limits({ 50, 14 }, { 90, 32 })
+            ->colors(theme::text_fg, theme::bg);
+        auto fname = ptr::shared(input_field{ name, cluster_count(name) }); // The Save-as Name field.
+        pane_state* pane_st = nullptr;
+        auto pane = frame->attach(slot::_1, make_file_pane(title, true, local_lister(), initial_dir, /*grab*/ !saving, nullptr, nullptr, &pane_st, window_wp));
+        // Accept the chosen path: open -> the selected file; save -> <current dir>/<Name>.
+        auto do_accept = [saving, pane_st, fname, on_accept, close, window_wp]
+        {
+            if (!pane_st) { close(); return; }
+            auto path = text{};
+            if (saving)
+            {
+                if (fname->val.empty()) return;
+                path = child_path(pane_st->cur_path(), fname->val, true);
+                // Overwrite confirmation when the chosen Name already exists as a file (this is also the
+                // double-click-a-file path). Mirrors the queue/pane delete prompts (show_close_confirmation).
+                auto ec = std::error_code{};
+                if (fs::is_regular_file(fs::path{ path }, ec))
+                {
+                    auto window = window_wp.lock();
+                    if (!window) return;
+                    auto base  = fs::path{ path }.filename().string();
+                    auto texts = app::shared::confirm_dialog_text{ "The file \"" + base + "\" already exists. Overwrite it?", "Overwrite", "Cancel" };
+                    auto cb = on_accept; auto closer = close; auto target = path; // Captured by value for the deferred confirm.
+                    app::shared::show_close_confirmation(*window, [cb, closer, target]{ if (cb) cb(target); closer(); }, {}, texts);
+                    return; // Cancel just dismisses the prompt; the picker stays open.
+                }
+            }
+            else { path = pane_selected_file(*pane_st); if (path.empty()) { close(); return; } }
+            if (on_accept) on_accept(path);
+            close();
+        };
+        auto bs = ptr::shared(picker_btn{ saving, saving ? text{ " Save " } : text{ " Open " } });
+        auto bottom = frame->attach(slot::_2, ui::mock::ctor())->limits({ -1, 1 }, { -1, 1 });
+        bottom->active()->plugin<pro::mouse>();
+        if (saving) bottom->plugin<pro::focus>(pro::focus::mode::focused)->plugin<pro::keybd>();
+        bottom->invoke([bs, fname, do_accept, do_cancel](auto& boss)
+        {
+            boss.LISTEN(tier::release, e2::render::any, parent_canvas, -, (bs, fname))
+            {
+                auto sz = boss.base::size();
+                parent_canvas.fill(rect{{ 0, 0 }, sz }, [&](cell& c){ c.bgc(theme::surface); });
+                auto cnw = si32{ 8 }, acw = si32{ 6 };
+                bs->cancel_box = rect{{ sz.x - 1 - cnw, 0 }, { cnw, 1 }};
+                bs->accept_box = rect{{ bs->cancel_box.coor.x - 1 - acw, 0 }, { acw, 1 }};
+                if (bs->saving)
+                {
+                    put_str(parent_canvas, 0, 0, "Name:", theme::text_fg, theme::surface, 5);
+                    auto fx = si32{ 6 };
+                    auto fw = std::max(0, bs->accept_box.coor.x - 1 - fx);
+                    field_paint(parent_canvas, *fname, rect{{ fx, 0 }, { fw, 1 }}, bs->focused);
+                }
+                paint_button(parent_canvas, bs->accept_box, bs->accept_label, bs->hov[0], bs->prs[0]);
+                paint_button(parent_canvas, bs->cancel_box, " Cancel ",       bs->hov[1], bs->prs[1]);
+            };
+            boss.LISTEN(tier::release, e2::form::state::focus::count, count, -, (bs))
+            {
+                bs->focused = !!count;
+                boss.base::deface();
+            };
+            boss.on(tier::mouserelease, input::key::MouseMove, [&boss, bs](hids& gear)
+            {
+                auto mx = (si32)gear.coord.x, my = (si32)gear.coord.y;
+                auto a = sd_hit(bs->accept_box, mx, my), c = sd_hit(bs->cancel_box, mx, my);
+                auto dirty = faux;
+                if (bs->hov[0] != a) { bs->hov[0] = a; dirty = true; }
+                if (bs->hov[1] != c) { bs->hov[1] = c; dirty = true; }
+                if (bs->prs[0] && !a) { bs->prs[0] = faux; dirty = true; } // Drag-off cancels press.
+                if (bs->prs[1] && !c) { bs->prs[1] = faux; dirty = true; }
+                if (dirty) boss.base::deface();
+            });
+            boss.on(tier::mouserelease, input::key::LeftDown, [&boss, bs, fname](hids& gear)
+            {
+                auto mx = (si32)gear.coord.x, my = (si32)gear.coord.y;
+                if (bs->saving) pro::focus::set(boss.This(), gear.id, solo::on); // Click the bar -> edit the name.
+                if (sd_hit(bs->accept_box, mx, my)) bs->prs[0] = true;
+                if (sd_hit(bs->cancel_box, mx, my)) bs->prs[1] = true;
+                if (bs->saving && field_hit(*fname, mx, my)) field_caret_to(*fname, mx);
+                boss.base::deface();
+            });
+            boss.on(tier::mouserelease, input::key::LeftUp, [&boss, bs](hids&)
+            {
+                if (bs->prs[0] || bs->prs[1]) { bs->prs[0] = bs->prs[1] = faux; boss.base::deface(); }
+            });
+            boss.on(tier::mouserelease, input::key::MouseLeave, [&boss, bs](hids&)
+            {
+                if (bs->hov[0] || bs->hov[1] || bs->prs[0] || bs->prs[1]) { bs->hov = {}; bs->prs = {}; boss.base::deface(); }
+            });
+            boss.on(tier::mouserelease, input::key::LeftClick, [bs, do_accept, do_cancel](hids& gear)
+            {
+                auto mx = (si32)gear.coord.x, my = (si32)gear.coord.y;
+                if      (sd_hit(bs->accept_box, mx, my)) do_accept();
+                else if (sd_hit(bs->cancel_box, mx, my)) do_cancel();
+                gear.dismiss();
+            });
+            if (bs->saving)
+            {
+                // Connect-bar caret scrubbing: a left-drag that began in the Name field keeps the caret
+                // under the cursor (auto-scrolling at the edges); enabling draggable adds pointer capture.
+                boss.base::signal(tier::release, e2::form::draggable::_<hids::buttons::left>, true);
+                auto dragging = ptr::shared(faux);
+                boss.LISTEN(tier::release, e2::form::drag::start::_<hids::buttons::left>, gear, -, (fname, dragging))
+                {
+                    *dragging = field_hit(*fname, (si32)gear.click.x, (si32)gear.click.y);
+                };
+                boss.LISTEN(tier::release, e2::form::drag::pull::_<hids::buttons::left>, gear, -, (fname, dragging))
+                {
+                    if (*dragging) { field_caret_to(*fname, (si32)gear.coord.x); boss.base::deface(); }
+                };
+                boss.LISTEN(tier::release, e2::form::drag::stop::_<hids::buttons::left>,   gear, -, (dragging)) { *dragging = faux; };
+                boss.LISTEN(tier::release, e2::form::drag::cancel::_<hids::buttons::left>, gear, -, (dragging)) { *dragging = faux; };
+                boss.LISTEN(tier::preview, input::events::keybd::any, gear, -, (bs, fname, do_accept, do_cancel))
+                {
+                    if (!bs->focused) return;
+                    if (gear.payload == input::keybd::type::keypaste) { field_insert(*fname, edit_filter(gear.cluster)); boss.base::deface(); gear.set_handled(); return; }
+                    if (gear.payload != input::keybd::type::keypress) return;
+                    if (gear.keystat == input::key::released || gear.keystat == input::key::interrupted) return;
+                    if (gear.keybd::handled) return;
+                    auto k = gear.keybd::generic();
+                    auto act = true;
+                         if (k == input::key::Esc)      do_cancel();
+                    else if (k == input::key::KeyEnter)  do_accept();
+                    else if (field_key(*fname, k, gear.cluster)) {} // Editing/navigation handled by the field.
+                    else act = faux;
+                    if (act) { gear.set_handled(); boss.base::deface(); }
+                };
+            }
+        });
+        // Wire the pane callbacks now that the bottom bar exists (its weak_ptr lets on_pick/on_select
+        // repaint the Name field). Save: clicking or activating a file copies its name into the field
+        // (overwrite target); Open: activating a file accepts it. Esc in the pane cancels the picker.
+        if (pane_st)
+        {
+            if (saving)
+            {
+                auto fill = [fname, bottom_wp = ptr::shadow(bottom)](text const& path)
+                {
+                    fname->val = fs::path{ path }.filename().string();
+                    fname->caret = cluster_count(fname->val);
+                    fname->off = 0;
+                    if (auto b = bottom_wp.lock()) b->base::deface();
+                };
+                pane_st->on_select = fill; // Single click / arrow-nav onto a file: just track the Name.
+                // Double-click / Enter on a file: set the Name to it, then Save (do_accept overwrite-confirms).
+                pane_st->on_pick   = [fill, do_accept](text const& path){ fill(path); do_accept(); };
+            }
+            else pane_st->on_pick = [on_accept, close](text const& path){ if (on_accept) on_accept(path); close(); };
+            pane_st->on_cancel = do_cancel; // Esc in the file list cancels the picker.
+        }
+        window->base::attach(overlay);
+        // Grab keyboard focus on the file list (open) or the name-field bar (save), keyed to the gear.
+        auto target = saving ? bottom : pane;
+        window->base::enqueue([target_wp = ptr::shadow(target), gear_id](auto&)
+        {
+            if (auto t = target_wp.lock()) pro::focus::set(t, gear_id, solo::on);
+        });
     }
 }
