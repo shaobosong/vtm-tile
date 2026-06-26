@@ -257,10 +257,13 @@ struct WFile {
     int size_;
     bool direct_;
     HANDLE h;
+    size_t cur_off_;     /* offset of the ring slot currently being filled (credit-IO download) */
+    int    cur_off_set_; /* 0 until the first slot has been granted (credit-IO download) */
 };
 
 WFile *open_new_file(const char *name, long perms)
 {
+    grant_fifo_reset(); /* fresh credit window for this download */
     fznotify1(sftp_io_open, 0);
     char * s = priority_read();
 
@@ -330,6 +333,7 @@ WFile *open_new_file_at_offset(const char *name, uint64_t offset, long perms)
 
 WFile *open_existing_wfile(const char *name, uint64_t *size)
 {
+    grant_fifo_reset(); /* fresh credit window for this (resumed) download */
     fzprintf(sftp_io_open, "%"PRIu64, (uint64_t)-1);
     char * s = priority_read();
 
@@ -380,23 +384,44 @@ int write_to_file(WFile *f, void *buffer, int length)
     }
 
     if (f->state == ok && !f->remaining_) {
-        fznotify1(sftp_io_nextbuf, f->size_ - f->remaining_);
-        char * s = priority_read();
-        if (s[1] == '-') {
-            f->state = error;
-            sfree(s);
-            return -1;
-        }
-        else if (s[1] == 0) {
-            f->state = eof;
+        /* Credit-IO: fire-and-forget completion carrying (offset, bytes); the next grant
+         * is pre-sent so priority_read() returns without a round-trip. First call has no
+         * prior slot. See uxsftp.c for the full rationale. */
+        if (credit_io_enabled()) {
+            size_t off = 0;
+            int len = 0;
+            if (f->cur_off_set_)
+                fzprintf(sftp_io_nextbuf, "%llu %d",
+                         (unsigned long long)f->cur_off_, f->size_ - f->remaining_);
+            if (!next_grant(&off, &len)) {  /* EOF / applet error -> fail the write */
+                f->state = error;
+                return -1;
+            }
+            f->buffer_ = f->memory_ + off;
+            f->remaining_ = len;
+            f->size_ = len;
+            f->cur_off_ = off;
+            f->cur_off_set_ = 1;
         }
         else {
-            char * p = s + 1;
-            f->buffer_ = f->memory_ + next_int(&p);
-            f->remaining_ = (int)next_int(&p);
-            f->size_ = f->remaining_;
+            fznotify1(sftp_io_nextbuf, f->size_ - f->remaining_);
+            char * s = priority_read();
+            if (s[1] == '-') {
+                f->state = error;
+                sfree(s);
+                return -1;
+            }
+            else if (s[1] == 0) {
+                f->state = eof;
+            }
+            else {
+                char * p = s + 1;
+                f->buffer_ = f->memory_ + next_int(&p);
+                f->remaining_ = (int)next_int(&p);
+                f->size_ = f->remaining_;
+            }
+            sfree(s);
         }
-        sfree(s);
     }
     if (f->state == eof) {
         return 0;
@@ -427,7 +452,13 @@ int finalize_wfile(WFile *f)
     if (f->state != ok) {
         return 0;
     }
-    fznotify1(sftp_io_finalize, f->size_ - f->remaining_);
+    /* priority_read() siphons in-flight "-G" grants into the FIFO, so the line it
+     * returns is the finalize reply ("-1"/"-0"). */
+    if (credit_io_enabled())
+        fzprintf(sftp_io_finalize, "%llu %d",
+                 (unsigned long long)f->cur_off_, f->size_ - f->remaining_);
+    else
+        fznotify1(sftp_io_finalize, f->size_ - f->remaining_);
     char const* s = priority_read();
     if (s[1] != '1') {
         f->state = error;

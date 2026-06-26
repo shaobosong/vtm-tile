@@ -102,8 +102,14 @@ namespace netxs::app::parvion
         // Zero-copy shared-memory transfer path (the helper's native io_* protocol).
         // The helper mmaps this region; the applet exchanges file data through a ring
         // of buffers, pipelined by a per-transfer I/O thread (disk overlaps network).
-        static constexpr size_t buf_bytes = 32u * 1024; // per-buffer (matches FXP_READ/WRITE_REQUEST_SIZE)
-        size_t ring_count = 32;            // buffers in the ring (env PARVION_SHM_BUFS; 32 = 1 MiB)
+        // Ring slot size = the granularity of the helper<->applet io_* IPC round-trip, NOT the
+        // SFTP request size (which stays 32 KiB for sftpgo). The helper drains/fills a whole slot
+        // across several 32 KiB FXP_READ/WRITE ops before doing one io_nextbuf, so a 256 KiB slot
+        // means one IPC per 8 SFTP ops instead of one per op — the synchronous per-32 KiB IPC was
+        // the dominant single-channel overhead vs an in-process client on loopback. Must be a
+        // multiple of FXP_READ_REQUEST_SIZE (32 KiB) so reads pack without mid-read truncation.
+        static constexpr size_t buf_bytes = 256u * 1024; // per-buffer (8 x 32 KiB SFTP ops per IPC)
+        size_t ring_count = 32;            // buffers in the ring (env PARVION_SHM_BUFS; 32 x 256 KiB = 8 MiB)
         size_t shm_size = 0;               // = ring_count * buf_bytes (set in create_shm)
         void*  shm_base = nullptr;
         // Per-transfer I/O context, set by the worker before issuing get/put.
@@ -348,6 +354,25 @@ namespace netxs::app::parvion
             for (auto c : s) if (c >= '0' && c <= '9') v = v * 10 + (ui64)(c - '0');
             return v;
         }
+        // Parse two space-separated unsigned integers "<a> <b>" (credit-IO io_nextbuf /
+        // io_finalize payloads). parse_u64 can't be reused — it would concatenate the
+        // two numbers across the separator.
+        static void parse_two(view s, ui64& a, ui64& b)
+        {
+            a = 0; b = 0;
+            auto i = size_t{ 0 };
+            while (i < s.size() && (s[i] < '0' || s[i] > '9')) ++i;
+            while (i < s.size() &&  s[i] >= '0' && s[i] <= '9') a = a * 10 + (ui64)(s[i++] - '0');
+            while (i < s.size() && (s[i] < '0' || s[i] > '9')) ++i;
+            while (i < s.size() &&  s[i] >= '0' && s[i] <= '9') b = b * 10 + (ui64)(s[i++] - '0');
+        }
+        // Proactive-grant download flow control (default on; PARVION_CREDIT_IO=0 disables).
+        // The helper inherits this env via posix_spawn, so both ends agree on the mode.
+        static auto credit_io_enabled() -> bool
+        {
+            static auto v = []{ auto e = std::getenv("PARVION_CREDIT_IO"); return !(e && e[0] == '0'); }();
+            return v;
+        }
         auto slot_off(int idx) const -> size_t { return (size_t)idx * buf_bytes; }
         void reset_ring()
         {
@@ -374,6 +399,7 @@ namespace netxs::app::parvion
         {
             if (io_download)
             {
+                auto credit = credit_io_enabled();
                 for (;;)
                 {
                     auto item = std::pair<int, size_t>{ -1, 0 };
@@ -386,10 +412,17 @@ namespace netxs::app::parvion
                     }
                     auto ok = !io_file || !item.second
                            || std::fwrite((char*)shm_base + slot_off(item.first), 1, item.second, io_file) == item.second;
-                    auto lk = std::lock_guard{ io_mtx };
-                    if (!ok) io_err = true;
-                    free_slots.push_back(item.first);
-                    io_cv.notify_all();
+                    {
+                        auto lk = std::lock_guard{ io_mtx };
+                        if (!ok) io_err = true;
+                        if (!credit) free_slots.push_back(item.first); // legacy: on_io_nextbuf hands it back
+                        io_cv.notify_all();
+                    }
+                    // Credit mode: re-grant the just-flushed slot to the helper as fresh
+                    // credit (or signal error). write_line takes write_mtx only, never
+                    // under io_mtx — released above to preserve io_mtx -> write_mtx order.
+                    if (credit) write_line(ok ? "-G" + std::to_string(slot_off(item.first)) + " " + std::to_string(buf_bytes)
+                                              : "--1");
                     if (!ok) return;
                 }
             }
@@ -449,6 +482,22 @@ namespace netxs::app::parvion
             #else
             write_line("-3 " + std::to_string(shm_size) + " " + std::to_string(cur)); // child mmaps its inherited fd 3
             #endif
+            // Credit-IO download: pre-grant every free ring slot now (after the open
+            // reply, so the helper reads the mapping first). Each grant is the same
+            // "-<offset> <buf_bytes>" line the legacy on_io_nextbuf used to reply with;
+            // the helper's existing priority_read() consumes them and the OS pipe buffer
+            // acts as the credit FIFO. The io_thread then replenishes one grant per slot
+            // it flushes. The io_thread can't grant yet (download ready_slots is empty),
+            // so no interleaving with this batch.
+            if (io_download && credit_io_enabled())
+            {
+                auto grants = std::vector<size_t>{};
+                { auto lk = std::lock_guard{ io_mtx };
+                  for (auto idx : free_slots) grants.push_back(slot_off(idx));
+                  free_slots.clear(); }
+                for (auto off : grants)
+                    write_line("-G" + std::to_string(off) + " " + std::to_string(buf_bytes));
+            }
         }
         void on_io_size()
         {
@@ -464,6 +513,22 @@ namespace netxs::app::parvion
         void on_io_nextbuf(view arg)
         {
             if (!shm_base) { write_line("--1"); return; }
+            if (io_download && credit_io_enabled())
+            {
+                // One-way completion: "<off> <bytes>" -> queue the filled slot for disk
+                // flush. No io_cv.wait, no reply — the reader thread never blocks, and the
+                // next grant was pre-sent / comes from io_loop. bytes==0 is the helper's
+                // first/empty notify (no prior slot) -> ignore.
+                auto off = ui64{}, bytes = ui64{};
+                parse_two(arg, off, bytes);
+                if (bytes)
+                {
+                    auto lk = std::lock_guard{ io_mtx };
+                    ready_slots.push_back({ (int)(off / buf_bytes), (size_t)bytes });
+                    io_cv.notify_all();
+                }
+                return;
+            }
             auto reply = text{};
             if (io_download)
             {
@@ -494,10 +559,23 @@ namespace netxs::app::parvion
         }
         void on_io_finalize(view arg)
         {
-            auto last = (size_t)parse_u64(arg);
-            { auto lk = std::lock_guard{ io_mtx };
-              if (io_cur >= 0) { if (last) ready_slots.push_back({ io_cur, last }); io_cur = -1; }
-              io_done = true; io_cv.notify_all(); }
+            if (io_download && credit_io_enabled())
+            {
+                // Trailing partial slot carried as "<off> <bytes>" (io_cur is unused on
+                // credit-IO download). Queue it, then drain the flush queue via join.
+                auto off = ui64{}, last = ui64{};
+                parse_two(arg, off, last);
+                { auto lk = std::lock_guard{ io_mtx };
+                  if (last) ready_slots.push_back({ (int)(off / buf_bytes), (size_t)last });
+                  io_done = true; io_cv.notify_all(); }
+            }
+            else
+            {
+                auto last = (size_t)parse_u64(arg);
+                { auto lk = std::lock_guard{ io_mtx };
+                  if (io_cur >= 0) { if (last) ready_slots.push_back({ io_cur, last }); io_cur = -1; }
+                  io_done = true; io_cv.notify_all(); }
+            }
             if (io_thread.joinable()) io_thread.join(); // drain the flush queue to disk
             if (io_file) { std::fclose(io_file); io_file = nullptr; }
             write_line(io_err ? "-0" : "-1");

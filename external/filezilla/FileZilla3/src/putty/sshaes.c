@@ -196,8 +196,70 @@ static void increment_iv_step32(uint8_t *iv, int i)
     }
 }
 
+/*
+ * Hardware-accelerated GCM: drive nettle's GHASH/GCM-mode logic with PuTTY's
+ * AES-NI block cipher instead of nettle's table-based software AES (which pinned a
+ * single SFTP channel at ~62 MiB/s). nettle's generic gcm_* API takes a cipher
+ * context + ECB-encrypt callback, so we feed it AES-NI when available and fall back
+ * to nettle's software AES otherwise. The fz*_setkey/encrypt/decrypt/digest helpers
+ * are defined after the AES-NI block routines below (forward-declared here); set_iv
+ * and update (AAD) are plain gcm_* calls that need no cipher callback. The ni_e round
+ * key schedule must be 16-byte aligned for AES-NI's aligned loads.
+ */
+/* Portable 16-byte alignment (prefix form) and 32-bit byte-swap, for the GCM state
+ * below — MSVC has neither __attribute__((aligned)) nor __builtin_bswap32. */
+#if defined(_MSC_VER)
+#  define FZ_ALIGN16 __declspec(align(16))
+#else
+#  define FZ_ALIGN16 __attribute__((aligned(16)))
+#endif
+#define FZ_BSWAP32(x) ((uint32_t)(((uint32_t)(x) >> 24) | (((uint32_t)(x) >> 8) & 0xff00u) | \
+                                  (((uint32_t)(x) << 8) & 0xff0000u) | ((uint32_t)(x) << 24)))
+
+/* hw: 0 = nettle software fallback; 1 = AES-NI (block) + PCLMULQDQ (GHASH) custom GCM.
+ * The custom-GCM state (rounds, H, Xs, J0, ctr, lengths) is used only when hw==1; the
+ * 16-byte __m128i-shaped buffers are 16-byte aligned for AES-NI/CLMUL aligned loads. */
+typedef struct fzgcm128 {
+    struct gcm_key    gkey;
+    struct gcm_ctx    gctx;
+    int               hw;
+    int               rounds;
+    struct aes128_ctx sw;
+    FZ_ALIGN16 unsigned char ni_e[11 * 16]; /* AES-128: 11 round keys */
+    FZ_ALIGN16 unsigned char Hr[16];        /* hash subkey, byte-reflected */
+    FZ_ALIGN16 unsigned char Xs[16];        /* GHASH accumulator (reflected) */
+    FZ_ALIGN16 unsigned char J0[16];        /* pre-counter block */
+    FZ_ALIGN16 unsigned char ctr[16];       /* running counter */
+    unsigned long long aadbytes, txtbytes;
+} fzgcm128;
+typedef struct fzgcm256 {
+    struct gcm_key    gkey;
+    struct gcm_ctx    gctx;
+    int               hw;
+    int               rounds;
+    struct aes256_ctx sw;
+    FZ_ALIGN16 unsigned char ni_e[15 * 16]; /* AES-256: 15 round keys */
+    FZ_ALIGN16 unsigned char Hr[16];
+    FZ_ALIGN16 unsigned char Xs[16];
+    FZ_ALIGN16 unsigned char J0[16];
+    FZ_ALIGN16 unsigned char ctr[16];
+    unsigned long long aadbytes, txtbytes;
+} fzgcm256;
+static void fzgcm128_setkey(fzgcm128 *c, const uint8_t *key);
+static void fzgcm256_setkey(fzgcm256 *c, const uint8_t *key);
+static void fzgcm128_setiv(fzgcm128 *c, const uint8_t *iv);
+static void fzgcm256_setiv(fzgcm256 *c, const uint8_t *iv);
+static void fzgcm128_update(fzgcm128 *c, size_t l, const uint8_t *d);
+static void fzgcm256_update(fzgcm256 *c, size_t l, const uint8_t *d);
+static void fzgcm128_encrypt(fzgcm128 *c, size_t l, uint8_t *dst, const uint8_t *src);
+static void fzgcm256_encrypt(fzgcm256 *c, size_t l, uint8_t *dst, const uint8_t *src);
+static void fzgcm128_decrypt(fzgcm128 *c, size_t l, uint8_t *dst, const uint8_t *src);
+static void fzgcm256_decrypt(fzgcm256 *c, size_t l, uint8_t *dst, const uint8_t *src);
+static void fzgcm128_digest(fzgcm128 *c, size_t l, uint8_t *out);
+static void fzgcm256_digest(fzgcm256 *c, size_t l, uint8_t *out);
+
 struct AES128GCMContext {
-    struct gcm_aes128_ctx ctx;
+    fzgcm128 ctx;
     uint8_t iv[12];
     bool encrypt;
     int skip;
@@ -224,9 +286,9 @@ static void aes128_gcm_BinarySink_write(BinarySink *bs, const void *blkv, size_t
         if (!ctx->skip && len) {
             unsigned char adata[4];
             PUT_32BIT_MSB_FIRST(adata, (unsigned int)(len - 4));
-            nettle_gcm_aes128_set_iv(&ctx->ctx, 12, ctx->iv);
-            nettle_gcm_aes128_update(&ctx->ctx, 4, adata);
-            nettle_gcm_aes128_decrypt(&ctx->ctx, len - 4, blk + 4, blk + 4);
+            fzgcm128_setiv(&ctx->ctx, ctx->iv);
+            fzgcm128_update(&ctx->ctx, 4, adata);
+            fzgcm128_decrypt(&ctx->ctx, len - 4, blk + 4, blk + 4);
         }
     }
 }
@@ -253,7 +315,7 @@ static void aes128_gcm_free_context(ssh_cipher *cipher)
 void aes128_gcm_key(ssh_cipher *cipher, const void *vkey)
 {
     struct AES128GCMContext *ctx = container_of(cipher, struct AES128GCMContext, ciph);
-    nettle_gcm_aes128_set_key(&ctx->ctx, vkey);
+    fzgcm128_setkey(&ctx->ctx, vkey);
 }
 
 
@@ -268,9 +330,9 @@ void aes128_gcm_encrypt(ssh_cipher *cipher, void *blk, int len)
     struct AES128GCMContext *ctx = container_of(cipher, struct AES128GCMContext, ciph);
     unsigned char adata[4];
     PUT_32BIT_MSB_FIRST(adata, (unsigned int)len);
-    nettle_gcm_aes128_set_iv(&ctx->ctx, 12, ctx->iv);
-    nettle_gcm_aes128_update(&ctx->ctx, 4, adata);
-    nettle_gcm_aes128_encrypt(&ctx->ctx, len, blk, blk);
+    fzgcm128_setiv(&ctx->ctx, ctx->iv);
+    fzgcm128_update(&ctx->ctx, 4, adata);
+    fzgcm128_encrypt(&ctx->ctx, len, blk, blk);
     ctx->encrypt = true;
 }
 
@@ -313,7 +375,7 @@ static void aes128_gcm_mac_genresult(ssh2_mac *mac, unsigned char *blk)
 {
     struct AES128GCMContext *ctx = container_of(mac, struct AES128GCMContext, mac_if);
 
-    nettle_gcm_aes128_digest(&ctx->ctx, 16, blk);
+    fzgcm128_digest(&ctx->ctx, 16, blk);
     increment_iv_step32(ctx->iv + 4, 2);
 }
 
@@ -339,7 +401,7 @@ static const ssh2_macalg ssh2_aes128_gcm_mac = {
 
 
 struct AES256GCMContext {
-    struct gcm_aes256_ctx ctx;
+    fzgcm256 ctx;
     uint8_t iv[12];
     bool encrypt;
     int skip;
@@ -366,9 +428,9 @@ static void aes256_gcm_BinarySink_write(BinarySink *bs, const void *blkv, size_t
         if (!ctx->skip && len) {
             unsigned char adata[4];
             PUT_32BIT_MSB_FIRST(adata, (unsigned int)(len - 4));
-            nettle_gcm_aes256_set_iv(&ctx->ctx, 12, ctx->iv);
-            nettle_gcm_aes256_update(&ctx->ctx, 4, adata);
-            nettle_gcm_aes256_decrypt(&ctx->ctx, len - 4, blk + 4, blk + 4);
+            fzgcm256_setiv(&ctx->ctx, ctx->iv);
+            fzgcm256_update(&ctx->ctx, 4, adata);
+            fzgcm256_decrypt(&ctx->ctx, len - 4, blk + 4, blk + 4);
         }
     }
 }
@@ -395,7 +457,7 @@ static void aes256_gcm_free_context(ssh_cipher *cipher)
 void aes256_gcm_key(ssh_cipher *cipher, const void *vkey)
 {
     struct AES256GCMContext *ctx = container_of(cipher, struct AES256GCMContext, ciph);
-    nettle_gcm_aes256_set_key(&ctx->ctx, vkey);
+    fzgcm256_setkey(&ctx->ctx, vkey);
 }
 
 
@@ -410,9 +472,9 @@ void aes256_gcm_encrypt(ssh_cipher *cipher, void *blk, int len)
     struct AES256GCMContext *ctx = container_of(cipher, struct AES256GCMContext, ciph);
     unsigned char adata[4];
     PUT_32BIT_MSB_FIRST(adata, (unsigned int)len);
-    nettle_gcm_aes256_set_iv(&ctx->ctx, 12, ctx->iv);
-    nettle_gcm_aes256_update(&ctx->ctx, 4, adata);
-    nettle_gcm_aes256_encrypt(&ctx->ctx, len, blk, blk);
+    fzgcm256_setiv(&ctx->ctx, ctx->iv);
+    fzgcm256_update(&ctx->ctx, 4, adata);
+    fzgcm256_encrypt(&ctx->ctx, len, blk, blk);
     ctx->encrypt = true;
 }
 
@@ -455,7 +517,7 @@ static void aes256_gcm_mac_genresult(ssh2_mac *mac, unsigned char *blk)
 {
     struct AES256GCMContext *ctx = container_of(mac, struct AES256GCMContext, mac_if);
 
-    nettle_gcm_aes256_digest(&ctx->ctx, 16, blk);
+    fzgcm256_digest(&ctx->ctx, 16, blk);
     increment_iv_step32(ctx->iv + 4, 2);
 }
 
@@ -1621,12 +1683,15 @@ SW_ENC_DEC(256)
 
 #if defined(__clang__) || (defined(__GNUC__) && (__GNUC__ > 4 || (__GNUC__ == 4 && __GNUC_MINOR__ >= 8)))
 #    define FUNC_ISA __attribute__ ((target("sse4.1,aes")))
+#    define FUNC_ISA_CLMUL __attribute__ ((target("sse4.1,ssse3,aes,pclmul")))
 #else
 #    define FUNC_ISA
+#    define FUNC_ISA_CLMUL
 #endif
 
 #include <wmmintrin.h>
 #include <smmintrin.h>
+#include <tmmintrin.h>
 
 #if defined(__clang__) || defined(__GNUC__)
 #include <cpuid.h>
@@ -1732,6 +1797,201 @@ static FUNC_ISA void aes_ni_key_expand(
             rkey = _mm_aesimc_si128(rkey);
         keysched_d[dround] = rkey;
     }
+}
+
+/* ----------------------------------------------------------------------
+ * FZ GCM hardware path: a self-contained GCM built from PuTTY's AES-NI block cipher
+ * (CTR keystream) and a PCLMULQDQ GHASH, replacing nettle's table-based software
+ * GHASH (the remaining single-channel bottleneck once AES became hardware). All field
+ * elements are kept byte-reflected (the GCM bit-order convention) so one PSHUFB on
+ * load/store suffices; gcore_* implement set_key/iv, AAD, crypt and digest, and the
+ * dispatchers after the HW_AES #endif select this path only when AES-NI + PCLMULQDQ
+ * are both present (else nettle software).
+ */
+static bool aes_clmul_available_cached(void)
+{
+    static bool checked = false, ok = false;
+    if (!checked) {
+        unsigned int info[4];
+        GET_CPU_ID(info);
+        /* PCLMULQDQ (ECX bit 1) + AES-NI (bit 25) + SSE4.1 (bit 19) + SSSE3 (bit 9) */
+        ok = (info[2] & (1u << 1)) && (info[2] & (1u << 25)) &&
+             (info[2] & (1u << 19)) && (info[2] & (1u << 9));
+        checked = true;
+    }
+    return ok;
+}
+
+/* Variable-round AES-NI block encrypt (rounds = 10 for AES-128, 14 for AES-256). */
+FUNC_ISA static __m128i fzgcm_aes_enc(__m128i v, const __m128i *ks, int rounds)
+{
+    v = _mm_xor_si128(v, ks[0]);
+    for (int i = 1; i < rounds; i++)
+        v = _mm_aesenc_si128(v, ks[i]);
+    return _mm_aesenclast_si128(v, ks[rounds]);
+}
+
+/* Byte-reverse a 16-byte value (maps the GCM big-endian block to/from the reflected
+ * little-endian representation the CLMUL multiply operates on). */
+FUNC_ISA_CLMUL static __m128i fzgcm_bswap(__m128i x)
+{
+    const __m128i mask = _mm_set_epi8(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+    return _mm_shuffle_epi8(x, mask);
+}
+
+/* Increment the big-endian 32-bit counter held in the top 4 bytes of the block. */
+FUNC_ISA static __m128i fzgcm_inc32(__m128i c)
+{
+    uint32_t v = (uint32_t)_mm_extract_epi32(c, 3);
+    v = FZ_BSWAP32(FZ_BSWAP32(v) + 1);
+    return _mm_insert_epi32(c, (int)v, 3);
+}
+
+/* Carry-less GF(2^128) multiply a*b mod (x^128 + x^7 + x^2 + x + 1), operands in the
+ * byte-reflected domain (Intel "Carry-Less Multiplication ... GCM" whitepaper). */
+FUNC_ISA_CLMUL static __m128i fzgcm_clmul(__m128i a, __m128i b)
+{
+    __m128i t3 = _mm_clmulepi64_si128(a, b, 0x00);
+    __m128i t4 = _mm_clmulepi64_si128(a, b, 0x10);
+    __m128i t5 = _mm_clmulepi64_si128(a, b, 0x01);
+    __m128i t6 = _mm_clmulepi64_si128(a, b, 0x11);
+    t4 = _mm_xor_si128(t4, t5);
+    t5 = _mm_slli_si128(t4, 8);
+    t4 = _mm_srli_si128(t4, 8);
+    t3 = _mm_xor_si128(t3, t5);
+    t6 = _mm_xor_si128(t6, t4);
+    __m128i t7 = _mm_srli_epi32(t3, 31);
+    __m128i t8 = _mm_srli_epi32(t6, 31);
+    t3 = _mm_slli_epi32(t3, 1);
+    t6 = _mm_slli_epi32(t6, 1);
+    __m128i t9 = _mm_srli_si128(t7, 12);
+    t8 = _mm_slli_si128(t8, 4);
+    t7 = _mm_slli_si128(t7, 4);
+    t3 = _mm_or_si128(t3, t7);
+    t6 = _mm_or_si128(t6, t8);
+    t6 = _mm_or_si128(t6, t9);
+    t7 = _mm_slli_epi32(t3, 31);
+    t8 = _mm_slli_epi32(t3, 30);
+    t9 = _mm_slli_epi32(t3, 25);
+    t7 = _mm_xor_si128(t7, t8);
+    t7 = _mm_xor_si128(t7, t9);
+    t8 = _mm_srli_si128(t7, 4);
+    t7 = _mm_slli_si128(t7, 12);
+    t3 = _mm_xor_si128(t3, t7);
+    __m128i t2 = _mm_srli_epi32(t3, 1);
+    t4 = _mm_srli_epi32(t3, 2);
+    t5 = _mm_srli_epi32(t3, 7);
+    t2 = _mm_xor_si128(t2, t4);
+    t2 = _mm_xor_si128(t2, t5);
+    t2 = _mm_xor_si128(t2, t8);
+    t3 = _mm_xor_si128(t3, t2);
+    t6 = _mm_xor_si128(t6, t3);
+    return t6;
+}
+
+/* GHASH one already-byte-reflected block into the (reflected) accumulator X. */
+FUNC_ISA_CLMUL static __m128i fzgcm_ghash(__m128i X, __m128i H, __m128i blk_reflected)
+{
+    return fzgcm_clmul(_mm_xor_si128(X, blk_reflected), H);
+}
+
+FUNC_ISA_CLMUL static void gcore_setkey(
+    unsigned char *ni_e, int *rounds, unsigned char *Hr, const uint8_t *key, size_t kw)
+{
+    __m128i d[MAXROUNDKEYS];     /* decrypt schedule required by the API; unused */
+    aes_ni_key_expand(key, kw, (__m128i *)ni_e, d);
+    smemclr(d, sizeof(d));
+    *rounds = (int)(kw + 6);
+    __m128i H = fzgcm_aes_enc(_mm_setzero_si128(), (const __m128i *)ni_e, *rounds);
+    _mm_store_si128((__m128i *)Hr, fzgcm_bswap(H));
+}
+
+static void gcore_setiv(
+    unsigned char *J0, unsigned char *ctr, unsigned char *Xs,
+    unsigned long long *aadb, unsigned long long *txtb, const uint8_t *iv)
+{
+    /* 96-bit IV: J0 = IV || 0x00000001 (big-endian). */
+    memcpy(J0, iv, 12);
+    J0[12] = 0; J0[13] = 0; J0[14] = 0; J0[15] = 1;
+    memcpy(ctr, J0, 16);
+    memset(Xs, 0, 16);
+    *aadb = 0; *txtb = 0;
+}
+
+FUNC_ISA_CLMUL static void gcore_aad(
+    const unsigned char *Hr, unsigned char *Xs, unsigned long long *aadb,
+    size_t len, const uint8_t *data)
+{
+    __m128i H = _mm_load_si128((const __m128i *)Hr);
+    __m128i X = _mm_load_si128((const __m128i *)Xs);
+    *aadb += len;
+    while (len >= 16) {
+        X = fzgcm_ghash(X, H, fzgcm_bswap(_mm_loadu_si128((const __m128i *)data)));
+        data += 16; len -= 16;
+    }
+    if (len) {                          /* zero-pad the final partial AAD block */
+        unsigned char blk[16] = { 0 };
+        memcpy(blk, data, len);
+        X = fzgcm_ghash(X, H, fzgcm_bswap(_mm_loadu_si128((const __m128i *)blk)));
+    }
+    _mm_store_si128((__m128i *)Xs, X);
+}
+
+FUNC_ISA_CLMUL static void gcore_crypt(
+    const unsigned char *ni_e, int rounds, const unsigned char *Hr,
+    unsigned char *ctr_, unsigned char *Xs, unsigned long long *txtb,
+    size_t len, uint8_t *dst, const uint8_t *src, int enc)
+{
+    const __m128i *ks = (const __m128i *)ni_e;
+    __m128i H = _mm_load_si128((const __m128i *)Hr);
+    __m128i X = _mm_load_si128((const __m128i *)Xs);
+    __m128i C = _mm_load_si128((const __m128i *)ctr_);
+    *txtb += len;
+    while (len >= 16) {
+        C = fzgcm_inc32(C);
+        __m128i ks_blk = fzgcm_aes_enc(C, ks, rounds);
+        __m128i in = _mm_loadu_si128((const __m128i *)src);
+        __m128i out = _mm_xor_si128(in, ks_blk);
+        _mm_storeu_si128((__m128i *)dst, out);
+        X = fzgcm_ghash(X, H, fzgcm_bswap(enc ? out : in)); /* GHASH the ciphertext */
+        src += 16; dst += 16; len -= 16;
+    }
+    if (len) {                          /* partial tail (not expected in SSH GCM) */
+        C = fzgcm_inc32(C);
+        unsigned char kb[16], ib[16] = { 0 }, ob[16] = { 0 };
+        _mm_storeu_si128((__m128i *)kb, fzgcm_aes_enc(C, ks, rounds));
+        memcpy(ib, src, len);
+        for (size_t i = 0; i < len; i++) ob[i] = ib[i] ^ kb[i];
+        memcpy(dst, ob, len);
+        unsigned char ct[16] = { 0 };
+        memcpy(ct, enc ? ob : ib, len);
+        X = fzgcm_ghash(X, H, fzgcm_bswap(_mm_loadu_si128((const __m128i *)ct)));
+    }
+    _mm_store_si128((__m128i *)Xs, X);
+    _mm_store_si128((__m128i *)ctr_, C);
+}
+
+FUNC_ISA_CLMUL static void gcore_digest(
+    const unsigned char *ni_e, int rounds, const unsigned char *Hr,
+    const unsigned char *J0, unsigned char *Xs,
+    unsigned long long aadb, unsigned long long txtb, size_t outlen, uint8_t *out)
+{
+    const __m128i *ks = (const __m128i *)ni_e;
+    __m128i H = _mm_load_si128((const __m128i *)Hr);
+    __m128i X = _mm_load_si128((const __m128i *)Xs);
+    unsigned char lb[16];               /* len block: BE64(aad bits) || BE64(text bits) */
+    unsigned long long ab = aadb * 8, tb = txtb * 8;
+    for (int i = 0; i < 8; i++) {
+        lb[i]     = (unsigned char)(ab >> (56 - 8 * i));
+        lb[8 + i] = (unsigned char)(tb >> (56 - 8 * i));
+    }
+    X = fzgcm_ghash(X, H, fzgcm_bswap(_mm_loadu_si128((const __m128i *)lb)));
+    __m128i S = fzgcm_bswap(X);         /* GHASH result, normal byte order */
+    __m128i tag = _mm_xor_si128(S, fzgcm_aes_enc(_mm_load_si128((const __m128i *)J0), ks, rounds));
+    unsigned char tb16[16];
+    _mm_storeu_si128((__m128i *)tb16, tag);
+    if (outlen > 16) outlen = 16;
+    memcpy(out, tb16, outlen);
 }
 
 /*
@@ -2247,3 +2507,105 @@ STUB_ENC_DEC(192)
 STUB_ENC_DEC(256)
 
 #endif /* HW_AES */
+
+/* ----------------------------------------------------------------------
+ * FZ GCM dispatchers (always compiled). When AES-NI + PCLMULQDQ are present, use the
+ * self-contained AES-NI/CLMUL GCM (gcore_* above); otherwise fall back to nettle's
+ * software GCM. The hardware branch is guarded so non-x86 / non-AES-NI targets link.
+ */
+static void fzgcm128_setkey(fzgcm128 *c, const uint8_t *key)
+{
+#if HW_AES == HW_AES_NI
+    if (aes_clmul_available_cached()) {
+        c->hw = 1;
+        gcore_setkey(c->ni_e, &c->rounds, c->Hr, key, 4);
+        return;
+    }
+#endif
+    c->hw = 0;
+    aes128_set_encrypt_key(&c->sw, key);
+    gcm_set_key(&c->gkey, &c->sw, (nettle_cipher_func *)aes128_encrypt);
+}
+static void fzgcm256_setkey(fzgcm256 *c, const uint8_t *key)
+{
+#if HW_AES == HW_AES_NI
+    if (aes_clmul_available_cached()) {
+        c->hw = 1;
+        gcore_setkey(c->ni_e, &c->rounds, c->Hr, key, 8);
+        return;
+    }
+#endif
+    c->hw = 0;
+    aes256_set_encrypt_key(&c->sw, key);
+    gcm_set_key(&c->gkey, &c->sw, (nettle_cipher_func *)aes256_encrypt);
+}
+static void fzgcm128_setiv(fzgcm128 *c, const uint8_t *iv)
+{
+#if HW_AES == HW_AES_NI
+    if (c->hw) { gcore_setiv(c->J0, c->ctr, c->Xs, &c->aadbytes, &c->txtbytes, iv); return; }
+#endif
+    gcm_set_iv(&c->gctx, &c->gkey, 12, iv);
+}
+static void fzgcm256_setiv(fzgcm256 *c, const uint8_t *iv)
+{
+#if HW_AES == HW_AES_NI
+    if (c->hw) { gcore_setiv(c->J0, c->ctr, c->Xs, &c->aadbytes, &c->txtbytes, iv); return; }
+#endif
+    gcm_set_iv(&c->gctx, &c->gkey, 12, iv);
+}
+static void fzgcm128_update(fzgcm128 *c, size_t l, const uint8_t *d)
+{
+#if HW_AES == HW_AES_NI
+    if (c->hw) { gcore_aad(c->Hr, c->Xs, &c->aadbytes, l, d); return; }
+#endif
+    gcm_update(&c->gctx, &c->gkey, l, d);
+}
+static void fzgcm256_update(fzgcm256 *c, size_t l, const uint8_t *d)
+{
+#if HW_AES == HW_AES_NI
+    if (c->hw) { gcore_aad(c->Hr, c->Xs, &c->aadbytes, l, d); return; }
+#endif
+    gcm_update(&c->gctx, &c->gkey, l, d);
+}
+static void fzgcm128_encrypt(fzgcm128 *c, size_t l, uint8_t *dst, const uint8_t *src)
+{
+#if HW_AES == HW_AES_NI
+    if (c->hw) { gcore_crypt(c->ni_e, c->rounds, c->Hr, c->ctr, c->Xs, &c->txtbytes, l, dst, src, 1); return; }
+#endif
+    gcm_encrypt(&c->gctx, &c->gkey, &c->sw, (nettle_cipher_func *)aes128_encrypt, l, dst, src);
+}
+static void fzgcm256_encrypt(fzgcm256 *c, size_t l, uint8_t *dst, const uint8_t *src)
+{
+#if HW_AES == HW_AES_NI
+    if (c->hw) { gcore_crypt(c->ni_e, c->rounds, c->Hr, c->ctr, c->Xs, &c->txtbytes, l, dst, src, 1); return; }
+#endif
+    gcm_encrypt(&c->gctx, &c->gkey, &c->sw, (nettle_cipher_func *)aes256_encrypt, l, dst, src);
+}
+static void fzgcm128_decrypt(fzgcm128 *c, size_t l, uint8_t *dst, const uint8_t *src)
+{
+#if HW_AES == HW_AES_NI
+    if (c->hw) { gcore_crypt(c->ni_e, c->rounds, c->Hr, c->ctr, c->Xs, &c->txtbytes, l, dst, src, 0); return; }
+#endif
+    gcm_decrypt(&c->gctx, &c->gkey, &c->sw, (nettle_cipher_func *)aes128_encrypt, l, dst, src);
+}
+static void fzgcm256_decrypt(fzgcm256 *c, size_t l, uint8_t *dst, const uint8_t *src)
+{
+#if HW_AES == HW_AES_NI
+    if (c->hw) { gcore_crypt(c->ni_e, c->rounds, c->Hr, c->ctr, c->Xs, &c->txtbytes, l, dst, src, 0); return; }
+#endif
+    gcm_decrypt(&c->gctx, &c->gkey, &c->sw, (nettle_cipher_func *)aes256_encrypt, l, dst, src);
+}
+static void fzgcm128_digest(fzgcm128 *c, size_t l, uint8_t *out)
+{
+#if HW_AES == HW_AES_NI
+    if (c->hw) { gcore_digest(c->ni_e, c->rounds, c->Hr, c->J0, c->Xs, c->aadbytes, c->txtbytes, l, out); return; }
+#endif
+    gcm_digest(&c->gctx, &c->gkey, &c->sw, (nettle_cipher_func *)aes128_encrypt, l, out);
+}
+static void fzgcm256_digest(fzgcm256 *c, size_t l, uint8_t *out)
+{
+#if HW_AES == HW_AES_NI
+    if (c->hw) { gcore_digest(c->ni_e, c->rounds, c->Hr, c->J0, c->Xs, c->aadbytes, c->txtbytes, l, out); return; }
+#endif
+    gcm_digest(&c->gctx, &c->gkey, &c->sw, (nettle_cipher_func *)aes256_encrypt, l, out);
+}

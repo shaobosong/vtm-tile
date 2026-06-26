@@ -301,13 +301,18 @@ struct sftp_packet *sftp_recv(void);
  *
  * 32 KiB per FXP_READ/FXP_WRITE: the de-facto interoperable SFTP data size
  * (the filexfer drafts recommend 32768 as the largest read/write a client
- * should issue). OpenSSH accepts up to ~255 KiB, but other servers reject or
- * short-serve single reads larger than 32 KiB, so larger requests trade
- * compatibility for packet rate. Throughput comes from pipelining (the
- * outstanding-byte budget below), not from the per-request size.
+ * should issue). The production target sftpgo (Go pkg/sftp, maxPacket 32768)
+ * short-serves single reads larger than 32 KiB, so this stays at 32 KiB. Per-byte
+ * throughput on loopback comes from packet coalescing (OUR_V2_MAXPKT in ssh.h) and
+ * deep pipelining (the outstanding-byte budget below + FXP_PENDING_RECV_BREAK), not
+ * from a larger per-request size.
  *
  * The 32 MiB outstanding-byte budget covers BDP on fat pipes (e.g. 1 Gbps ×
  * 100 ms RTT ≈ 12 MB) with margin.
+ *
+ * FXP_PENDING_RECV_BREAK bounds how many 32 KiB writes the upload loop queues before
+ * yielding to process acks. 64 (~2 MiB) keeps the SSH send pipe full; at 5 only
+ * ~160 KiB was in flight per burst, throttling single-channel upload on loopback.
  */
 #define FXP_READ_REQUEST_SIZE  (32 * 1024)
 #define FXP_WRITE_REQUEST_SIZE (32 * 1024)

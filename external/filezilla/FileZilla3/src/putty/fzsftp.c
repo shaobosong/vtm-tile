@@ -13,57 +13,95 @@ char* input_pushback = 0;
 
 #ifndef _WINDOWS
 #include <unistd.h>
+#endif
 
+/* Line-assembly buffer for read_input_line(). Available on both platforms: on Windows
+ * ReadFile() does NOT respect line boundaries (it can coalesce several protocol lines
+ * into one read, or split one across reads), which corrupts line-oriented parsing once
+ * the applet sends unsolicited "-G" credit grants. Reading one byte at a time and
+ * stopping exactly at '\n' (as on Unix) guarantees line boundaries and never over-reads,
+ * so it stays consistent with any other consumer of stdin. */
 char *input_buf = 0;
 int input_buflen = 0, input_bufsize = 0;
-#endif
+
+/* ---- Proactive-grant download credit FIFO (PARVION_CREDIT_IO) -------------------- *
+ * The applet pre-grants free ring slots as unsolicited "-G<off> <len>" lines on the
+ * same stdin pipe that carries quota / io_open / io_finalize replies. Every consumer
+ * of that pipe (priority_read and next_grant) funnels raw lines through
+ * route_async_line(), which siphons grant lines into this FIFO so a grant can never be
+ * mistaken for a quota reply (ProcessQuotaCmd would abort) or land in an RPC's reply
+ * slot. The OS pipe buffer plus this FIFO form the credit window; write_to_file drains
+ * it via next_grant() and only blocks when it is empty (ring full = disk behind). */
+#define PARVION_CREDIT_MAX 257            /* > max ring_count (256) */
+static size_t grant_off_[PARVION_CREDIT_MAX];
+static int    grant_len_[PARVION_CREDIT_MAX];
+static int    grant_head_ = 0, grant_tail_ = 0;
+
+int credit_io_enabled(void)
+{
+    static int v = -1;
+    if (v < 0) {
+        const char* e = getenv("PARVION_CREDIT_IO");
+        v = (e && e[0] == '0') ? 0 : 1;
+    }
+    return v;
+}
+
+/* Discard any leftover grants. A helper process can serve several transfers (reused
+ * connection), and a finished download leaves ~ring_count grants siphoned into the FIFO
+ * (or buffered in the pipe and read by finalize's priority_read). Call at each download
+ * open, before requesting io_open, so a fresh batch of grants isn't mixed with stale
+ * offsets from the previous transfer. */
+void grant_fifo_reset(void)
+{
+    grant_head_ = grant_tail_ = 0;
+}
+
+/* If `line` is a credit grant ("-G<off> <len>"), queue it and return 1; else 0. */
+static int route_async_line(char* line)
+{
+    if (line[0] == '-' && line[1] == 'G') {
+        char* p = line + 2;
+        size_t off = (size_t)next_int(&p);
+        int    len = (int)next_int(&p);
+        int    i   = grant_tail_ % PARVION_CREDIT_MAX;
+        grant_off_[i] = off;
+        grant_len_[i] = len;
+        ++grant_tail_;
+        return 1;
+    }
+    return 0;
+}
+
+int next_grant(size_t* off, int* len)
+{
+    while (grant_head_ == grant_tail_) {
+        int error = 0;
+        char* line = read_input_line(1, &error);
+        if (line == NULL || error)
+            return 0;
+        if (route_async_line(line)) { sfree(line); break; } /* a grant -> FIFO; stop reading */
+        if (line[0] == '-' && line[1] == '-') { sfree(line); return 0; } /* "--1" error grant */
+        else if (line[0] == '-' && (line[1] == '0' || line[1] == '1') &&
+                 (line[2] == '-' || (line[2] >= '0' && line[2] <= '9')))
+            { ProcessQuotaCmd(line); sfree(line); }      /* a quota reply arriving mid-wait */
+        else { if (input_pushback == 0) input_pushback = line; else sfree(line); }
+    }
+    {
+        int i = grant_head_ % PARVION_CREDIT_MAX;
+        *off = grant_off_[i];
+        *len = grant_len_[i];
+        ++grant_head_;
+    }
+    return 1;
+}
 
 char* priority_read()
 {
-#ifdef _WINDOWS
-    char* ret = 0;
-    HANDLE hin;
-    DWORD savemode, newmode;
-
-    hin = GetStdHandle(STD_INPUT_HANDLE);
-
-    GetConsoleMode(hin, &savemode);
-    newmode = savemode | ENABLE_PROCESSED_INPUT | ENABLE_LINE_INPUT;
-    newmode &= ~ENABLE_ECHO_INPUT;
-    SetConsoleMode(hin, newmode);
-
-    char buffer[256];
-
-    while (!ret) {
-        DWORD read;
-        BOOL r;
-
-        r = ReadFile(hin, buffer, 255, &read, 0);
-        if (!r || read == 0) {
-                fzprintf(sftpError, "ReadFile failed in priority_read");
-                cleanup_exit(1);
-        }
-        while (read && (buffer[read - 1] == '\r' || buffer[read - 1] == '\n')) {
-            --read;
-        }
-        buffer[read] = 0;
-
-        if (buffer[0] != '-') {
-            if (input_pushback != 0) {
-                fzprintf(sftpError, "input_pushback not null!");
-                cleanup_exit(1);
-            }
-            else {
-                input_pushback = dupstr(buffer);
-            }
-        }
-        else {
-            ret = dupstr(buffer);
-        }
-    }
-
-    SetConsoleMode(hin, savemode);
-#else
+    /* Unified across platforms via the line-buffered read_input_line() (see its note):
+     * the old Windows path used a 255-byte ReadFile that ignored line boundaries, which
+     * coalesced/split the unsolicited "-G" credit grants and tripped 'input_pushback
+     * not null!'. Siphon grants into the FIFO; return the next '-' reply. */
     char* ret = 0;
     while (!ret) {
         int error = 0;
@@ -73,6 +111,10 @@ char* priority_read()
             cleanup_exit(1);
         }
 
+        if (route_async_line(line)) {  /* siphon credit grants into the FIFO */
+            sfree(line);
+            continue;
+        }
         if (line[0] != '-') {
             if (input_pushback != 0) {
                 sfree(line);
@@ -85,7 +127,6 @@ char* priority_read()
         }
         ret = line;
     }
-#endif //_WINDOWS
     return ret;
 }
 
@@ -217,7 +258,6 @@ int has_input_pushback()
         return 0;
 }
 
-#ifndef _WINDOWS
 static void clear_input_buffers(int free)
 {
     if (free && input_buf != NULL)
@@ -227,6 +267,9 @@ static void clear_input_buffers(int free)
     input_buflen = 0;
 }
 
+/* Read one '\n'-terminated line, one byte at a time, so we stop exactly at the line
+ * boundary and never consume bytes belonging to the next line (which would desync any
+ * other reader of stdin). Cross-platform: read(2) on Unix, ReadFile on Windows. */
 char* read_input_line(int force, int* error)
 {
     int ret;
@@ -235,9 +278,19 @@ char* read_input_line(int force, int* error)
             input_bufsize = input_buflen + 512;
             input_buf = sresize(input_buf, input_bufsize, char);
         }
+#ifdef _WINDOWS
+        {
+            DWORD nread = 0;
+            BOOL ok = ReadFile(GetStdHandle(STD_INPUT_HANDLE),
+                               input_buf + input_buflen, 1, &nread, NULL);
+            ret = !ok ? -1 : (int)nread;
+        }
+#else
         ret = read(0, input_buf+input_buflen, 1);
-        if (ret < 0) {
+        if (ret < 0)
             perror("read");
+#endif
+        if (ret < 0) {
             *error = 1;
             clear_input_buffers(1);
             return NULL;
@@ -263,7 +316,6 @@ char* read_input_line(int force, int* error)
 
     return NULL;
 }
-#endif
 
 void fz_timer_init(_fztimer *timer)
 {

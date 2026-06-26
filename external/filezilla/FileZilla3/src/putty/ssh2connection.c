@@ -12,6 +12,27 @@
 #include "sshcr.h"
 #include "ssh2connection.h"
 
+/* Bounded "simple-mode" channel window. is_simple advertises OUR_V2_BIGWIN (2 GiB),
+ * which lets a fast strict server (OpenSSH) flood the kernel TCP receive buffer faster
+ * than the helper drains it -> zero-window persist/backoff stall. Capping the window to
+ * a few hundred KiB paces the server to the consumer (the SSH window tracks app
+ * consumption) without losing loopback throughput (the BDP is tiny). Tunable via
+ * PARVION_SSHWIN (bytes; 0 or unset = the baked default). */
+static unsigned parvion_simple_winsize(void)
+{
+    static unsigned w = 0;
+    if (!w) {
+        const char *e = getenv("PARVION_SSHWIN");
+        long v = e ? atol(e) : 0;
+        /* 8 MiB: swept against sftpgo (lenient) and OpenSSH (strict) on loopback, 5 GiB.
+         * sftpgo 205 MiB/s (= BIGWIN's 206; no regression) and sshd:22 187 MiB/s (vs a
+         * <21 MiB/s persist/backoff stall under BIGWIN). Smaller throttles sftpgo;
+         * larger (16 MiB) regresses both. */
+        w = (v > 0) ? (unsigned)v : (8u * 1024u * 1024u); /* default 8 MiB */
+    }
+    return w;
+}
+
 static void ssh2_connection_free(PacketProtocolLayer *);
 static void ssh2_connection_process_queue(PacketProtocolLayer *);
 static bool ssh2_connection_get_specials(
@@ -556,12 +577,20 @@ static bool ssh2_connection_filter_queue(struct ssh2_connection_state *s)
                     /*
                      * If it looks like the remote end hit the end of
                      * its window, and we didn't want it to do that,
-                     * think about using a larger window.
+                     * think about using a larger window. In simple mode
+                     * the window is intentionally bounded (so a strict
+                     * fast server can't flood the kernel receive buffer),
+                     * so cap the growth there instead of letting it climb
+                     * back toward the 1 GiB ceiling.
                      */
-                    if (c->remlocwin <= 0 &&
-                        c->throttle_state == UNTHROTTLED &&
-                        c->locmaxwin < 0x40000000)
-                        c->locmaxwin += OUR_V2_WINSIZE;
+                    {
+                        unsigned grow_cap = s->ssh_is_simple
+                            ? parvion_simple_winsize() : 0x40000000;
+                        if (c->remlocwin <= 0 &&
+                            c->throttle_state == UNTHROTTLED &&
+                            c->locmaxwin < grow_cap)
+                            c->locmaxwin += OUR_V2_WINSIZE;
+                    }
 
                     /*
                      * If we are not buffering too much data, enlarge
@@ -1288,7 +1317,7 @@ void ssh2_channel_init(struct ssh2_channel *c)
     c->throttled_by_backlog = false;
     c->sharectx = NULL;
     c->locwindow = c->locmaxwin = c->remlocwin =
-        s->ssh_is_simple ? OUR_V2_BIGWIN : OUR_V2_WINSIZE;
+        s->ssh_is_simple ? parvion_simple_winsize() : OUR_V2_WINSIZE;
     c->chanreq_head = NULL;
     c->throttle_state = UNTHROTTLED;
     bufchain_init(&c->outbuffer);
@@ -1446,7 +1475,7 @@ static void ssh2channel_window_override_removed(SshChannel *sc)
      * stopped requiring an initial fixed-size window.
      */
     assert(!c->chan->initial_fixed_window_size);
-    ssh2_set_window(c, s->ssh_is_simple ? OUR_V2_BIGWIN : OUR_V2_WINSIZE);
+    ssh2_set_window(c, s->ssh_is_simple ? parvion_simple_winsize() : OUR_V2_WINSIZE);
 }
 
 static void ssh2channel_hint_channel_is_simple(SshChannel *sc)

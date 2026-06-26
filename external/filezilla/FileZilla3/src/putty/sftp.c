@@ -1147,7 +1147,17 @@ struct fxp_xfer *xfer_upload_init(struct fxp_handle *fh, uint64_t offset)
 
 bool xfer_upload_ready(struct fxp_xfer *xfer)
 {
-    return sftp_sendbuffer() == 0;
+    /*
+     * Keep the SSH send pipe full instead of draining it to zero between bursts.
+     * The old `== 0` gate only queued more writes once the backend's unsent buffer
+     * was completely empty, producing a stop/start bubble that capped single-channel
+     * upload throughput on loopback. Allow more writes to queue while the unsent
+     * buffer stays under a high-water mark (~2 MiB); FXP_PENDING_RECV_BREAK still
+     * bounds how many we queue before yielding to ack processing, so outstanding
+     * data stays bounded.
+     */
+    (void)xfer;
+    return sftp_sendbuffer() < (size_t)(64 * FXP_WRITE_REQUEST_SIZE);
 }
 
 void xfer_upload_data(struct fxp_xfer *xfer, char *buffer, int len)

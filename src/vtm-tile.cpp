@@ -240,6 +240,203 @@ namespace tile_session_reg
     }
 }
 
+// Multi-call perf harness: `vtm-tile -r parvionbench <get|put> <host> <port> <user> <pass>
+// <remote> <local> [<parallel> <offset> <length>]`. Drives ONE parvionsftp transfer through
+// the production xfer_worker (real shared-memory io_* ring + crypto/SFTP path), printing
+// elapsed seconds and MiB/s. Headless (no UI/gate init); for single-channel benchmarking only.
+// Set PARVIONBENCH_QUIET=1 to suppress per-line status logging.
+static int parvionbench_main(int argc, char** argv)
+{
+    using xw = app::parvion::xfer_worker;
+    if (argc < 7)
+    {
+        std::fprintf(stderr, "usage: -r parvionbench <get|put> <host> <port> <user> <pass>"
+                             " <remote> <local> [<parallel> <offset> <length>]\n");
+        return 2;
+    }
+    auto dir = view{ argv[0] };
+    auto w = xw{};
+    if (auto e = std::getenv("PARVION_SFTP_BIN"); e && *e) { w.exe = text{ e }; w.runargs.clear(); } // external helper (e.g. an -O2 build)
+    else { w.exe = os::process::binary(); w.runargs = { "-r", "parvionsftp" }; }
+    w.host        = argv[1];
+    w.port        = std::atoi(argv[2]);
+    w.user        = argv[3];
+    w.pass        = argv[4];
+    w.remote_path = argv[5];
+    w.local_path  = argv[6];
+    w.download    = dir == "get";
+    if (auto e = std::getenv("PARVIONBENCH_KEYFILE"); e && *e) // public-key auth (register before open)
+    {
+        w.keyfiles = { text{ e } };
+        w.passphrase_provider = [](text const&, text& out) { out.clear(); return true; }; // unencrypted key
+    }
+    if (argc >= 10) // ranged single chunk (for parallel-path measurement)
+    {
+        w.parallel   = std::atoi(argv[7]) != 0;
+        w.offset     = (si64)std::atoll(argv[8]);
+        w.length     = (si64)std::atoll(argv[9]);
+        w.initialize = w.offset == 0; // lone chunk is its own leader (truncate+create)
+    }
+    auto quiet = std::getenv("PARVIONBENCH_QUIET") != nullptr;
+    w.logsink = [quiet](app::parvion::logtype t, text s, si32)
+    {
+        if (!quiet || t == app::parvion::logtype::error) std::fprintf(stderr, "[%d] %s\n", (si32)t, s.c_str());
+    };
+    auto t0 = std::chrono::steady_clock::now();
+    auto t_open = t0;
+    auto seen_open = faux;
+    w.begin();
+    while (!w.finished())
+    {
+        w.poll();
+        if (!seen_open && w.opened) { t_open = std::chrono::steady_clock::now(); seen_open = true; }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1)); // bulk data runs on the session reader thread, not here
+    }
+    auto t1    = std::chrono::steady_clock::now();
+    auto total = std::chrono::duration<double>(t1 - t0).count();
+    auto xfer  = std::chrono::duration<double>(t1 - (seen_open ? t_open : t0)).count();
+    // The helper's transfer-progress deltas under-count on the download path, so derive the
+    // transferred byte count from ground truth: the ranged chunk length, else the local file
+    // size (= bytes received for a whole-file download / sent for a whole-file upload).
+    auto bytes = w.done;
+    if (argc >= 10 && w.length > 0) bytes = w.length;
+    else { auto ec = std::error_code{}; auto fsz = (si64)std::filesystem::file_size(std::filesystem::path{ w.local_path }, ec); if (!ec && fsz > 0) bytes = fsz; }
+    auto mib = (double)bytes / 1048576.0;
+    std::fprintf(stdout, "RESULT dir=%s state=%s bytes=%lld done_counter=%lld total_s=%.3f xfer_s=%.3f MiBps_total=%.2f MiBps_xfer=%.2f\n",
+                 w.download ? "get" : "put", w.state == xw::s_ok ? "ok" : "err",
+                 (long long)bytes, (long long)w.done, total, xfer, mib / (total > 0 ? total : 1), mib / (xfer > 0 ? xfer : total));
+    std::fflush(stdout);
+    if (w.state != xw::s_ok && !w.error.empty()) std::fprintf(stderr, "ERROR: %s\n", w.error.c_str());
+    w.stop();
+    return w.state == xw::s_ok ? 0 : 1;
+}
+
+// Headless harness for the REAL applet transfer orchestration (sftp_remote + queue +
+// pump_queue), unlike parvionbench which drives a bare xfer_worker. Drives a single-channel
+// download/upload exactly as the UI does, at a configurable poll cadence (last arg, ms), to
+// isolate whether throughput depends on the applet's driving rather than the worker itself.
+// `-r parvionxfer <get|put> <host> <port> <user> <pass> <remote> <local> <size> [poll_ms]`
+static int parvionxfer_main(int argc, char** argv)
+{
+    using namespace std::chrono;
+    using sr = app::parvion::sftp_remote;
+    using qi = app::parvion::queue_item;
+    if (argc < 8) { std::fprintf(stderr, "usage: -r parvionxfer <get|put> <host> <port> <user> <pass> <remote> <local> <size> [poll_ms]\n"); return 2; }
+    auto dir     = view{ argv[0] };
+    auto port    = std::atoi(argv[2]);
+    auto user    = text{ argv[3] };
+    auto pass    = text{ argv[4] };
+    auto remote  = text{ argv[5] };
+    auto local   = text{ argv[6] };
+    auto size    = (si64)std::atoll(argv[7]);
+    auto poll_ms = argc >= 9 ? std::atoi(argv[8]) : 5;
+    auto ctrl = std::make_unique<sr>();
+    if (auto e = std::getenv("PARVION_SFTP_BIN"); e && *e) { ctrl->exe = text{ e }; ctrl->runargs.clear(); }
+    else { ctrl->exe = os::process::binary(); ctrl->runargs = { "-r", "parvionsftp" }; }
+    ctrl->use_parallel = faux; // force single-channel (as the user runs it)
+    ctrl->connect(text{ argv[1] }, port, user, pass);
+    auto t0 = steady_clock::now();
+    while (!ctrl->connected() && ctrl->stage != sr::s_failed
+           && duration_cast<seconds>(steady_clock::now() - t0).count() < 25)
+    { ctrl->poll(); std::this_thread::sleep_for(milliseconds(5)); }
+    if (!ctrl->connected()) { std::fprintf(stderr, "connect failed (stage=%d)\n", (int)ctrl->stage); return 1; }
+    if (dir == "get") ctrl->enqueue_download_path(remote, local, size);
+    else              ctrl->enqueue_upload(local, remote, size);
+    auto tstart = steady_clock::now();
+    auto last_done = si64{ 0 };
+    for (;;)
+    {
+        ctrl->poll();
+        auto busy = faux;
+        for (auto& it : ctrl->queue) { last_done = it.done; if (it.status == qi::queued || it.status == qi::transferring) busy = true; }
+        if (!busy) break;
+        std::this_thread::sleep_for(milliseconds(poll_ms));
+        if (duration_cast<seconds>(steady_clock::now() - tstart).count() > 600) break;
+    }
+    auto secs = duration<double>(steady_clock::now() - tstart).count();
+    auto ec = std::error_code{};
+    auto fsz = (si64)std::filesystem::file_size(std::filesystem::path{ local }, ec);
+    auto bytes = (!ec && fsz > 0) ? fsz : (last_done > 0 ? last_done : size);
+    auto mib = (double)bytes / 1048576.0;
+    std::fprintf(stdout, "XFER dir=%s poll_ms=%d secs=%.3f MiBps=%.2f bytes=%lld done_counter=%lld\n",
+                 dir == "get" ? "get" : "put", poll_ms, secs, mib / (secs > 0 ? secs : 1),
+                 (long long)bytes, (long long)last_done);
+    std::fflush(stdout);
+    ctrl->disconnect();
+    return 0;
+}
+
+// Headless DUAL-/MULTI-channel transfer benchmark. Drives the REAL parallel orchestration
+// (sftp_remote + pump_queue): the file is split into <channels> chunks, each transferred by
+// its own parvionsftp connection through its own shared-memory io_* ring, exactly as the UI
+// does for large files. Reports aggregate MiB/s. "Dual-channel" = <channels> 2.
+// `-r parvionmc <get|put> <host> <port> <user> <pass> <remote> <local> <size> <channels> [poll_ms]`
+// PARVIONBENCH_KEYFILE=<path> selects public-key auth (e.g. sshd:22); PARVION_SFTP_BIN picks
+// an external -O2 helper. The local target dir must exist.
+static int parvionmc_main(int argc, char** argv)
+{
+    using namespace std::chrono;
+    using sr = app::parvion::sftp_remote;
+    using qi = app::parvion::queue_item;
+    if (argc < 9) { std::fprintf(stderr, "usage: -r parvionmc <get|put> <host> <port> <user> <pass> <remote> <local> <size> <channels> [poll_ms]\n"); return 2; }
+    auto dir      = view{ argv[0] };
+    auto port     = std::atoi(argv[2]);
+    auto user     = text{ argv[3] };
+    auto pass     = text{ argv[4] };
+    auto remote   = text{ argv[5] };
+    auto local    = text{ argv[6] };
+    auto size     = (si64)std::atoll(argv[7]);
+    auto channels = std::clamp(std::atoi(argv[8]), 1, 16);
+    auto poll_ms  = argc >= 10 ? std::atoi(argv[9]) : 2;
+    auto ctrl = std::make_unique<sr>();
+    if (auto e = std::getenv("PARVION_SFTP_BIN"); e && *e) { ctrl->exe = text{ e }; ctrl->runargs.clear(); }
+    else { ctrl->exe = os::process::binary(); ctrl->runargs = { "-r", "parvionsftp" }; }
+    if (auto e = std::getenv("PARVIONBENCH_KEYFILE"); e && *e) ctrl->cfg.keyfiles = { text{ e } }; // public-key auth (unencrypted)
+    // Force exactly <channels> chunks: a threshold of size/channels makes part_count's
+    // ceil(size/threshold) land on <channels>, then it's clamped to max_connections.
+    ctrl->use_parallel       = channels > 1;
+    ctrl->max_connections    = (ui32)channels;
+    ctrl->parallel_threshold = std::max<si64>(1, size / channels);
+    ctrl->connect(text{ argv[1] }, port, user, pass);
+    auto t0 = steady_clock::now();
+    while (!ctrl->connected() && ctrl->stage != sr::s_failed
+           && duration_cast<seconds>(steady_clock::now() - t0).count() < 25)
+    { ctrl->poll(); std::this_thread::sleep_for(milliseconds(5)); }
+    if (!ctrl->connected()) { std::fprintf(stderr, "connect failed (stage=%d)\n", (int)ctrl->stage); return 1; }
+    if (dir == "get") ctrl->enqueue_download_path(remote, local, size);
+    else              ctrl->enqueue_upload(local, remote, size);
+    auto tstart = steady_clock::now();
+    auto last_done = si64{ 0 };
+    auto chunks = 0;
+    auto failed = faux;
+    for (;;)
+    {
+        ctrl->poll();
+        auto busy = faux;
+        for (auto& it : ctrl->queue)
+        {
+            last_done = it.done; chunks = (int)it.chunk_count;
+            if (it.status == qi::queued || it.status == qi::transferring) busy = true;
+            if (it.status == qi::failed) failed = true;
+        }
+        if (!busy) break;
+        std::this_thread::sleep_for(milliseconds(poll_ms));
+        if (duration_cast<seconds>(steady_clock::now() - tstart).count() > 900) break;
+    }
+    auto secs = duration<double>(steady_clock::now() - tstart).count();
+    // Ground truth: the local file size (received bytes for a download, full source for an upload).
+    auto ec = std::error_code{};
+    auto fsz = (si64)std::filesystem::file_size(std::filesystem::path{ local }, ec);
+    auto bytes = (!ec && fsz > 0) ? fsz : (last_done > 0 ? last_done : size);
+    auto mib = (double)bytes / 1048576.0;
+    std::fprintf(stdout, "MC dir=%s channels=%d chunks=%d state=%s secs=%.3f MiBps=%.2f bytes=%lld\n",
+                 dir == "get" ? "get" : "put", channels, chunks, failed ? "err" : "ok",
+                 secs, mib / (secs > 0 ? secs : 1), (long long)bytes);
+    std::fflush(stdout);
+    ctrl->disconnect();
+    return failed ? 1 : 0;
+}
+
 int main(int argc, char* argv[])
 {
     // Multi-call entry: `vtm-tile -r parvionsftp [opts]` runs the in-process parvionsftp
@@ -265,6 +462,18 @@ int main(int argc, char* argv[])
                 for (auto j = i + 2; j < argc; j++) args.push_back(argv[j]);
                 args.push_back(nullptr);
                 return pvputtygen_main((int)args.size() - 1, args.data());
+            }
+            if (view{ argv[i + 1] }.starts_with("parvionbench"))
+            {
+                return parvionbench_main(argc - (i + 2), argv + (i + 2));
+            }
+            if (view{ argv[i + 1] }.starts_with("parvionxfer"))
+            {
+                return parvionxfer_main(argc - (i + 2), argv + (i + 2));
+            }
+            if (view{ argv[i + 1] }.starts_with("parvionmc"))
+            {
+                return parvionmc_main(argc - (i + 2), argv + (i + 2));
             }
             break; // A run flag was given but not a known backend: fall through to normal handling.
         }

@@ -268,10 +268,13 @@ struct WFile {
     int size_;
     bool direct_;
     int fd;
+    size_t cur_off_;     /* offset of the ring slot currently being filled (credit-IO download) */
+    int    cur_off_set_; /* 0 until the first slot has been granted (credit-IO download) */
 };
 
 WFile *open_new_file(const char *name, long perms)
 {
+    grant_fifo_reset(); /* fresh credit window for this download */
     fznotify1(sftp_io_open, 0);
     char * s = priority_read();
     if (s[1] == '-') {
@@ -331,6 +334,7 @@ WFile *open_new_file_at_offset(const char *name, uint64_t offset, long perms)
 
 WFile *open_existing_wfile(const char *name, uint64_t *size)
 {
+    grant_fifo_reset(); /* fresh credit window for this (resumed) download */
     fzprintf(sftp_io_open, "%"PRIu64, (uint64_t)-1);
     char * s = priority_read();
     if (s[1] == '-') {
@@ -392,23 +396,48 @@ int write_to_file(WFile *f, void *buffer, int length)
     }
 
     if (f->state == ok && !f->remaining_) {
-        fznotify1(sftp_io_nextbuf, f->size_ - f->remaining_);
-        char * s = priority_read();
-        if (s[1] == '-') {
-            f->state = error;
-            sfree(s);
-            return -1;
-        }
-        else if (s[1] == 0) {
-            f->state = eof;
+        /* Hand the slot we just filled back to the applet. In credit mode this is a
+         * fire-and-forget completion carrying (offset, bytes) — we do NOT wait for a
+         * reply to it; the next grant was pre-sent by the applet and is already in our
+         * input pipe, so priority_read() below returns without a round-trip and the
+         * caller keeps draining the SSH socket. The first call has no prior slot
+         * (cur_off_set_==0) and only fetches the first grant. Legacy mode keeps the
+         * original notify-then-block-for-reply ping-pong. */
+        if (credit_io_enabled()) {
+            size_t off = 0;
+            int len = 0;
+            if (f->cur_off_set_)
+                fzprintf(sftp_io_nextbuf, "%llu %d",
+                         (unsigned long long)f->cur_off_, f->size_ - f->remaining_);
+            if (!next_grant(&off, &len)) {  /* EOF / applet error -> fail the write */
+                f->state = error;
+                return -1;
+            }
+            f->buffer_ = f->memory_ + off;
+            f->remaining_ = len;
+            f->size_ = len;
+            f->cur_off_ = off;
+            f->cur_off_set_ = 1;
         }
         else {
-            char * p = s + 1;
-            f->buffer_ = f->memory_ + next_int(&p);
-            f->remaining_ = (int)next_int(&p);
-            f->size_ = f->remaining_;
+            fznotify1(sftp_io_nextbuf, f->size_ - f->remaining_);
+            char * s = priority_read();
+            if (s[1] == '-') {
+                f->state = error;
+                sfree(s);
+                return -1;
+            }
+            else if (s[1] == 0) {
+                f->state = eof;
+            }
+            else {
+                char * p = s + 1;
+                f->buffer_ = f->memory_ + next_int(&p);
+                f->remaining_ = (int)next_int(&p);
+                f->size_ = f->remaining_;
+            }
+            sfree(s);
         }
-        sfree(s);
     }
     if (f->state == eof) {
         return 0;
@@ -439,7 +468,19 @@ int finalize_wfile(WFile *f)
     if (f->state != ok) {
         return 0;
     }
-    fznotify1(sftp_io_finalize, f->size_ - f->remaining_);
+    /* Report the trailing partial slot (offset + bytes) so the applet attaches it to
+     * the right ring slot; this is the one remaining blocking RPC (it drains the disk
+     * queue and returns the final success/error verdict). */
+    /* Report the trailing partial slot (offset + bytes) so the applet attaches it to
+     * the right ring slot; this is the one remaining blocking RPC (it drains the disk
+     * queue and returns the final success/error verdict). priority_read() siphons any
+     * in-flight "-G" grants into the FIFO, so the line it returns is the finalize
+     * reply ("-1"/"-0"). */
+    if (credit_io_enabled())
+        fzprintf(sftp_io_finalize, "%llu %d",
+                 (unsigned long long)f->cur_off_, f->size_ - f->remaining_);
+    else
+        fznotify1(sftp_io_finalize, f->size_ - f->remaining_);
     char * s = priority_read();
     if (s[1] != '1') {
         f->state = error;
