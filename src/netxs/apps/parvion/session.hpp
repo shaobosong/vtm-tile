@@ -2073,10 +2073,22 @@ namespace netxs::app::parvion
                 auto total = si64{};
                 auto all_ok = true;
                 auto any_err = faux;
+                // Full byte budget of a worker's chunk, mirroring start_item()/chunk_ranges() csz math.
+                // A finished-OK chunk has moved all of its bytes; the download helper's progress deltas
+                // under-count (see vtm-tile.cpp), so credit it the full chunk size rather than its
+                // under-counted done. This keeps the running total advancing per completed chunk (and
+                // reaching item.size as the last one finishes) without touching w->done, which resume +
+                // state persistence rely on.
+                auto chunk_full = [&](xfer_worker const& w) -> si64
+                {
+                    if (item.chunk_count <= 1) return item.size; // single stream = whole file
+                    auto csz = (item.size + item.chunk_count - 1) / item.chunk_count;
+                    return std::min(csz, item.size - (si64)w.chunk_index * csz);
+                };
                 for (auto& w : workers)
                 {
                     w->poll();
-                    total += w->done;
+                    total += (w->state == xfer_worker::s_ok) ? chunk_full(*w) : w->done;
                     if (!w->finished()) all_ok = faux;
                     if (w->state == xfer_worker::s_err) { any_err = true; if (item.error.empty()) item.error = w->error; }
                 }

@@ -977,9 +977,15 @@ namespace netxs::app::parvion
                             {
                                 auto& wkr = *st.ctrl->workers[child];
                                 auto full = (double)(end - start);
-                                cprog = pct_str(full > 0.0 ? 100.0 * (double)wkr.done / full : 0.0);
-                                if      (wkr.state == xfer_worker::s_ok)  cc = theme::dir_fg;
-                                else if (wkr.state == xfer_worker::s_err) cc = theme::err_fg;
+                                // A finished chunk has moved all of its bytes; the download helper's
+                                // progress deltas under-count (see vtm-tile.cpp), so snap to 100% on
+                                // s_ok rather than trusting wkr.done. Otherwise clamp to ≤100%.
+                                if (wkr.state == xfer_worker::s_ok) { cprog = "100.00%"; cc = theme::dir_fg; }
+                                else
+                                {
+                                    cprog = pct_str(full > 0.0 ? std::min(100.0, 100.0 * (double)wkr.done / full) : 0.0);
+                                    if (wkr.state == xfer_worker::s_err) cc = theme::err_fg;
+                                }
                             }
                             else if (it.status == queue_item::succeeded) { cprog = "100.00%"; cc = theme::dir_fg; }
                             else if (it.status == queue_item::queued)    { cprog = "queued";  cc = theme::subtext; }
