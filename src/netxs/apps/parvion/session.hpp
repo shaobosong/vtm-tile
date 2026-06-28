@@ -41,6 +41,10 @@
     #include <sys/mman.h>
     #include <sys/syscall.h>
     extern char** environ;
+#else
+    #include <io.h>       // _open/_close/_fdopen for io_open_chunk
+    #include <fcntl.h>    // _O_CREAT/_O_RDWR/_O_BINARY
+    #include <sys/stat.h> // _S_IREAD/_S_IWRITE
 #endif
 #include <cstdio>
 
@@ -308,6 +312,13 @@ namespace netxs::app::parvion
         {
             stop_io_thread();
             if (io_file) { std::fclose(io_file); io_file = nullptr; }
+            // Publish the io context under io_mtx. on_io_open reads these on the reader thread;
+            // the helper's io_open only arrives after this call (via the command round-trip), so
+            // pairing this lock with on_io_open's lock gives a happens-before edge. Without it the
+            // reader thread could see a stale io_download=faux and route a download chunk into the
+            // upload branch (which sends no credit grants) -> the helper blocks in next_grant
+            // forever -> a parallel-download chunk stuck at progress 0.
+            auto lk = std::lock_guard{ io_mtx };
             io_download = download;
             io_local_path = std::move(path);
             io_length = length;
@@ -374,6 +385,74 @@ namespace netxs::app::parvion
             return v;
         }
         auto slot_off(int idx) const -> size_t { return (size_t)idx * buf_bytes; }
+        // 64-bit file seek (std::fseek's `long` offset is 32-bit on Win32, so a chunk start
+        // past 2 GiB would truncate; use _fseeki64 there).
+        static void io_seek64(std::FILE* f, ui64 off)
+        {
+            #if defined(_WIN32)
+            ::_fseeki64(f, (long long)off, SEEK_SET);
+            #else
+            std::fseek(f, (long)off, SEEK_SET);
+            #endif
+        }
+        // Open a parallel-download chunk's shared target for positioned writes: create if
+        // absent, NEVER truncate, read/write. O_CREAT (no O_TRUNC/O_EXCL) is idempotent, so
+        // the chunks can open the same file concurrently without a pre-creation step and
+        // without clobbering each other (a resumed chunk keeps its partial data).
+        static auto io_open_chunk(text const& path) -> std::FILE*
+        {
+            #if defined(_WIN32)
+            auto fd = ::_open(path.c_str(), _O_CREAT | _O_RDWR | _O_BINARY, _S_IREAD | _S_IWRITE);
+            if (fd < 0) return nullptr;
+            auto f = ::_fdopen(fd, "r+b");
+            if (!f) ::_close(fd);
+            return f;
+            #else
+            auto fd = ::open(path.c_str(), O_CREAT | O_RDWR, 0666);
+            if (fd < 0) return nullptr;
+            auto f = ::fdopen(fd, "r+b");
+            if (!f) ::close(fd);
+            return f;
+            #endif
+        }
+        // Download write-back pacing (PARVION_WB_PACE; default on, Linux only) — see uxsftp.c.
+        // Spread a single-channel download's page-cache write-back across the transfer and bound
+        // the dirty footprint, so the kernel doesn't burst-write the whole file at completion
+        // (which saturates the disk and makes the machine feel sluggish right after the transfer).
+        #if defined(__linux__)
+        static auto wb_pace_enabled() -> bool
+        {
+            static auto v = []{ auto e = std::getenv("PARVION_WB_PACE"); return !(e && e[0] == '0'); }();
+            return v;
+        }
+        static void io_pace(std::FILE* file, ui64& synced, ui64& paced, ui64 wr, bool final)
+        {
+            if (!file || !wb_pace_enabled()) return;
+            auto fd = ::fileno(file);
+            if (fd < 0) return;
+            constexpr ui64 STEP = 4u << 20, LAG = 16u << 20; // drop in 4 MiB units; keep ~16 MiB cached
+            while (wr - synced >= STEP || (final && wr > synced))
+            {
+                auto len = final ? (wr - synced) : std::min<ui64>(wr - synced, STEP);
+                if (!len) break;
+                #if defined(SYS_sync_file_range) && (defined(__x86_64__) || defined(__aarch64__))
+                ::syscall(SYS_sync_file_range, fd, (long long)synced, (long long)len,
+                          final ? (1u | 2u | 4u) : 2u); // WAIT_BEFORE|WRITE|WAIT_AFTER : WRITE
+                #endif
+                synced += len;
+            }
+            while (wr - paced >= LAG + STEP || (final && synced > paced))
+            {
+                auto len = final ? (synced - paced) : std::min<ui64>(synced - paced, STEP);
+                if (!len) break;
+                ::posix_fadvise(fd, (off_t)paced, (off_t)len, POSIX_FADV_DONTNEED);
+                paced += len;
+            }
+        }
+        #else
+        static auto wb_pace_enabled() -> bool { return false; }
+        static void io_pace(std::FILE*, ui64&, ui64&, ui64, bool) {}
+        #endif
         void reset_ring()
         {
             auto lk = std::lock_guard{ io_mtx };
@@ -400,18 +479,31 @@ namespace netxs::app::parvion
             if (io_download)
             {
                 auto credit = credit_io_enabled();
+                // Write-back pacing state (positioned at the file's start offset = chunk/resume start).
+                auto wpos = (ui64)(io_file ? std::ftell(io_file) : 0);
+                auto synced = wpos, paced = wpos;
                 for (;;)
                 {
                     auto item = std::pair<int, size_t>{ -1, 0 };
+                    auto finish = faux;
                     {
                         auto lk = std::unique_lock{ io_mtx };
                         io_cv.wait(lk, [&]{ return io_stop || io_err || !ready_slots.empty() || io_done; });
-                        if (io_stop || io_err) return;
-                        if (ready_slots.empty()) return; // finalize requested + drained
-                        item = ready_slots.front(); ready_slots.pop_front();
+                        if (io_stop || io_err) return;        // abort: leave partial data, no final flush
+                        if (ready_slots.empty()) finish = true; // finalize requested + drained
+                        else { item = ready_slots.front(); ready_slots.pop_front(); }
+                    }
+                    if (finish)
+                    {
+                        // Clean completion: flush stdio + force/drop this file's trailing dirty range
+                        // so there is no write-back burst when the transfer finishes.
+                        if (io_file) std::fflush(io_file);
+                        io_pace(io_file, synced, paced, wpos, true);
+                        return;
                     }
                     auto ok = !io_file || !item.second
                            || std::fwrite((char*)shm_base + slot_off(item.first), 1, item.second, io_file) == item.second;
+                    if (ok && item.second) { wpos += item.second; io_pace(io_file, synced, paced, wpos, faux); }
                     {
                         auto lk = std::lock_guard{ io_mtx };
                         if (!ok) io_err = true;
@@ -459,17 +551,33 @@ namespace netxs::app::parvion
         void on_io_open(view arg)
         {
             auto off = parse_u64(arg);
+            // Read the io context published by set_io_context (poll thread) UNDER io_mtx — this
+            // pairs with set_io_context's lock for a happens-before edge, so we never observe a
+            // stale io_download/io_local_path/io_length. (A stale io_download=faux on a download
+            // chunk would take the upload branch below, which sends no credit grants, and the
+            // helper would then block forever in next_grant — a chunk stuck at progress 0.)
+            auto dl = bool{}; auto lpath = text{}; auto ilen = si64{};
+            { auto lk = std::lock_guard{ io_mtx }; dl = io_download; lpath = io_local_path; ilen = io_length; }
             stop_io_thread();
             if (io_file) { std::fclose(io_file); io_file = nullptr; }
-            if (io_download)
+            if (dl)
             {
-                if (off == (ui64)-1) { io_file = std::fopen(io_local_path.c_str(), "r+b"); if (io_file) std::fseek(io_file, 0, SEEK_END); } // resume
-                else                 { io_file = std::fopen(io_local_path.c_str(), "wb"); } // fresh (truncate)
+                if (off == (ui64)-1) { io_file = std::fopen(lpath.c_str(), "r+b"); if (io_file) std::fseek(io_file, 0, SEEK_END); } // resume
+                else if (ilen >= 0)
+                {
+                    // Parallel-download chunk: open the shared target create-if-absent / no-truncate
+                    // and seek to this chunk's start. The io_thread then writes the chunk's bytes
+                    // sequentially from there; several chunks open the same file concurrently
+                    // without clobbering, and a resumed chunk keeps its partial data.
+                    io_file = io_open_chunk(lpath);
+                    if (io_file) io_seek64(io_file, off);
+                }
+                else { io_file = std::fopen(lpath.c_str(), "wb"); } // fresh whole-file (truncate)
             }
             else
             {
-                io_file = std::fopen(io_local_path.c_str(), "rb");
-                if (io_file && off) std::fseek(io_file, (long)off, SEEK_SET); // chunk/resume start
+                io_file = std::fopen(lpath.c_str(), "rb");
+                if (io_file && off) io_seek64(io_file, off); // chunk/resume start (64-bit)
             }
             if (!io_file) { write_line("--"); return; }
             auto cur = (ui64)std::ftell(io_file);
@@ -489,14 +597,14 @@ namespace netxs::app::parvion
             // acts as the credit FIFO. The io_thread then replenishes one grant per slot
             // it flushes. The io_thread can't grant yet (download ready_slots is empty),
             // so no interleaving with this batch.
-            if (io_download && credit_io_enabled())
+            if (dl && credit_io_enabled())
             {
                 auto grants = std::vector<size_t>{};
                 { auto lk = std::lock_guard{ io_mtx };
                   for (auto idx : free_slots) grants.push_back(slot_off(idx));
                   free_slots.clear(); }
-                for (auto off : grants)
-                    write_line("-G" + std::to_string(off) + " " + std::to_string(buf_bytes));
+                for (auto goff : grants)
+                    write_line("-G" + std::to_string(goff) + " " + std::to_string(buf_bytes));
             }
         }
         void on_io_size()
@@ -1937,7 +2045,22 @@ namespace netxs::app::parvion
                 // Download is ready immediately (no remote-open wait); upload waits
                 // until its leader truncates+opens the remote target.
                 write_state_file(spath, (ui64)item.size, parts, dl ? state_ready : state_waiting, metadata);
-                if (dl) std::remove(item.local_path.c_str()); // fresh: clear stale local target
+                if (dl)
+                {
+                    // Size the existing local target to the download length instead of unlinking it.
+                    // setup_parallel_state runs on the UI thread, and unlinking a multi-GB file (freeing
+                    // all its blocks) can stall the UI for ~1s+ — the cause of the lag at the start of a
+                    // download that overwrites an existing large file (and, back-to-back, at the "end" of
+                    // the previous one). The chunks overwrite [0, size) in place (their opens are
+                    // no-truncate), so a resize to the final length is correct and instant for a same-size
+                    // re-download (only a size delta is ever touched). Fall back to remove if resize fails.
+                    auto ec = std::error_code{};
+                    if (fs::exists(item.local_path, ec))
+                    {
+                        fs::resize_file(item.local_path, (uintmax_t)std::max<si64>(0, item.size), ec);
+                        if (ec) std::remove(item.local_path.c_str());
+                    }
+                }
             }
             active_state_path = spath;
             active_md_size = (ui32)metadata.size();

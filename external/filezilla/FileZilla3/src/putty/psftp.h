@@ -101,6 +101,7 @@ int read_from_file(RFile *f, void *buffer, int length);
 void close_rfile(RFile *f);
 WFile *open_new_file(const char *name, long perms);
 WFile *open_new_file_at_offset(const char *name, uint64_t offset, long perms);
+WFile *open_chunk_wfile(const char *name, uint64_t offset); /* parallel-download chunk via the shm-ring */
 /* Returns <0 on error, 0 on eof, or number of bytes written, as usual */
 int write_to_file(WFile *f, void *buffer, int length);
 int finalize_wfile(WFile *);

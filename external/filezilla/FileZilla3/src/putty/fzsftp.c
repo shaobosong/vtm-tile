@@ -47,6 +47,21 @@ int credit_io_enabled(void)
     return v;
 }
 
+/* Route parallel-download chunks through the shm-ring/credit-IO io_thread (overlaps the
+ * disk write with the network, ~+25% on loopback) instead of the legacy inline write(fd).
+ * DEFAULT OFF: the ring path can occasionally wedge a channel at progress 0 under heavy
+ * parallelism (16 channels in the UI). Enable with PARVION_CHUNK_RING=1. Both the helper
+ * (psftp.c open path) and the applet inherit the same env, so they always agree. */
+int chunk_ring_enabled(void)
+{
+    static int v = -1;
+    if (v < 0) {
+        const char* e = getenv("PARVION_CHUNK_RING");
+        v = (e && (e[0] == '1' || e[0] == 'y' || e[0] == 'Y')) ? 1 : 0;
+    }
+    return v;
+}
+
 /* Discard any leftover grants. A helper process can serve several transfers (reused
  * connection), and a finished download leaves ~ring_count grants siphoned into the FIFO
  * (or buffered in the pipe and read by finalize's priority_read). Call at each download

@@ -331,6 +331,42 @@ WFile *open_new_file_at_offset(const char *name, uint64_t offset, long perms)
     return ret;
 }
 
+/* See uxsftp.c open_chunk_wfile: parallel-download chunk via the shm-ring (async io_thread
+ * positioned write) instead of the inline direct write. Sends this chunk's start offset. */
+WFile *open_chunk_wfile(const char *name, uint64_t offset)
+{
+    grant_fifo_reset(); /* fresh credit window for this chunk */
+    fzprintf(sftp_io_open, "%"PRIu64, offset);
+    char * s = priority_read();
+    if (s[1] == '-') {
+        sfree(s);
+        return NULL;
+    }
+
+    char * p = s + 1;
+    HANDLE mapping = (HANDLE)next_int(&p);
+    size_t memory_size = next_int(&p);
+    sfree(s);
+
+    uint8_t* memory = MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, memory_size);
+    CloseHandle(mapping);
+    if (!memory) {
+        return NULL;
+    }
+
+    WFile *ret = snew(WFile);
+    memset(ret, 0, sizeof(*ret));
+    ret->memory_ = memory;
+    ret->memory_size_ = memory_size;
+    ret->remaining_ = 0;
+    ret->buffer_ = NULL;
+    ret->state = ok;
+    ret->size_ = 0;
+    ret->direct_ = false; /* ring path */
+    ret->h = INVALID_HANDLE_VALUE;
+    return ret;
+}
+
 WFile *open_existing_wfile(const char *name, uint64_t *size)
 {
     grant_fifo_reset(); /* fresh credit window for this (resumed) download */

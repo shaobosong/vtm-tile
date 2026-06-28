@@ -403,25 +403,56 @@ static int parvionmc_main(int argc, char** argv)
            && duration_cast<seconds>(steady_clock::now() - t0).count() < 25)
     { ctrl->poll(); std::this_thread::sleep_for(milliseconds(5)); }
     if (!ctrl->connected()) { std::fprintf(stderr, "connect failed (stage=%d)\n", (int)ctrl->stage); return 1; }
-    if (dir == "get") ctrl->enqueue_download_path(remote, local, size);
-    else              ctrl->enqueue_upload(local, remote, size);
+    // PARVIONMC_ITERS>1 runs the transfer repeatedly on the SAME live control session, so
+    // the 2nd+ iterations reuse the pooled connections (rearm path) — the UI scenario.
+    auto iters = 1; if (auto e = std::getenv("PARVIONMC_ITERS")) { if (auto n = std::atoi(e); n > 0) iters = n; }
     auto tstart = steady_clock::now();
     auto last_done = si64{ 0 };
     auto chunks = 0;
     auto failed = faux;
-    for (;;)
+    auto prof = std::getenv("PARVIONMC_PROFILE") != nullptr; // report slow poll() calls (UI-thread stalls)
+    for (auto it_n = 0; it_n < iters; ++it_n)
     {
-        ctrl->poll();
-        auto busy = faux;
-        for (auto& it : ctrl->queue)
+        if (dir == "get") ctrl->enqueue_download_path(remote, local, size);
+        else              ctrl->enqueue_upload(local, remote, size);
+        auto istart = steady_clock::now();
+        auto npoll = 0; auto pidx = 0;
+        for (;;)
         {
-            last_done = it.done; chunks = (int)it.chunk_count;
-            if (it.status == qi::queued || it.status == qi::transferring) busy = true;
-            if (it.status == qi::failed) failed = true;
+            auto pstart = steady_clock::now();
+            ctrl->poll();
+            auto pms = duration<double, std::milli>(steady_clock::now() - pstart).count();
+            ++pidx;
+            auto busy = faux; auto done_now = si64{ 0 };
+            for (auto& it : ctrl->queue)
+            {
+                last_done = it.done; done_now = it.done; chunks = (int)it.chunk_count;
+                if (it.status == qi::queued || it.status == qi::transferring) busy = true;
+                if (it.status == qi::failed) failed = true;
+            }
+            if (prof && pms > 8.0) // flag any poll() that stalls the UI thread > 8 ms
+                std::fprintf(stderr, "    [poll #%d] %.1f ms  done=%lld MiB  busy=%d\n",
+                             pidx, pms, (long long)(done_now / 1048576), (int)busy);
+            ++npoll;
+            if (!busy) break;
+            std::this_thread::sleep_for(milliseconds(poll_ms));
+            if (duration_cast<seconds>(steady_clock::now() - istart).count() > 120)
+            { std::fprintf(stderr, "ITER %d TIMEOUT/HANG (done=%lld)\n", it_n, (long long)last_done); failed = true; break; }
         }
-        if (!busy) break;
-        std::this_thread::sleep_for(milliseconds(poll_ms));
-        if (duration_cast<seconds>(steady_clock::now() - tstart).count() > 900) break;
+        std::fprintf(stderr, "  iter %d done (state=%s, polls=%d)\n", it_n, failed ? "err" : "ok", npoll);
+        if (prof) // a few post-completion polls: catch any end-of-transfer stall (re-list, teardown)
+            for (auto k = 0; k < 30; ++k)
+            {
+                auto pstart = steady_clock::now();
+                ctrl->poll();
+                auto pms = duration<double, std::milli>(steady_clock::now() - pstart).count();
+                if (pms > 8.0) std::fprintf(stderr, "    [post-poll #%d] %.1f ms\n", k, pms);
+                std::this_thread::sleep_for(milliseconds(poll_ms));
+            }
+        if (failed) break;
+        auto cstart = steady_clock::now();
+        ctrl->clear_finished(); // clear succeeded items so the next iteration's queue is fresh
+        if (prof) std::fprintf(stderr, "    [clear_finished] %.1f ms\n", duration<double, std::milli>(steady_clock::now() - cstart).count());
     }
     auto secs = duration<double>(steady_clock::now() - tstart).count();
     // Ground truth: the local file size (received bytes for a download, full source for an upload).

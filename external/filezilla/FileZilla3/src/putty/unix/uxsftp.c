@@ -270,7 +270,67 @@ struct WFile {
     int fd;
     size_t cur_off_;     /* offset of the ring slot currently being filled (credit-IO download) */
     int    cur_off_set_; /* 0 until the first slot has been granted (credit-IO download) */
+    uint64_t wr_off;     /* direct path: current write offset (write-back pacing) */
+    uint64_t synced_off; /* direct path: async write-back kicked off up to here */
+    uint64_t paced_off;  /* direct path: page cache dropped up to here */
 };
+
+/* ---- Download write-back pacing (PARVION_WB_PACE; default on, Linux only) -------------------- *
+ * A large download writes the whole file into the page cache and leaves it dirty; the kernel then
+ * writes ~all of it back in one burst at completion, saturating the disk and making the machine
+ * feel sluggish right after the transfer. Pace it: kick off async write-back of freshly written
+ * data and, lagging a window behind, drop the already-written ranges from the cache. This spreads
+ * the write-back across the transfer and bounds the dirty footprint, without polluting the cache
+ * with the whole file. */
+#if defined(__linux__)
+#include <sys/syscall.h>
+#ifndef SYNC_FILE_RANGE_WRITE
+# define SYNC_FILE_RANGE_WAIT_BEFORE 1u
+# define SYNC_FILE_RANGE_WRITE       2u
+# define SYNC_FILE_RANGE_WAIT_AFTER  4u
+#endif
+static int wb_pace_enabled(void)
+{
+    static int v = -1;
+    if (v < 0) { const char* e = getenv("PARVION_WB_PACE"); v = (e && e[0] == '0') ? 0 : 1; }
+    return v;
+}
+/* The sync_file_range syscall takes (fd, loff_t off, loff_t len, flags) on x86-64/aarch64; other
+ * arches reorder the args (sync_file_range2), so skip the async hint there and rely on fadvise. */
+static void wb_sync_range(int fd, uint64_t off, uint64_t len, unsigned flags)
+{
+#if defined(SYS_sync_file_range) && (defined(__x86_64__) || defined(__aarch64__))
+    (void)syscall(SYS_sync_file_range, fd, (long long)off, (long long)len, flags);
+#else
+    (void)fd; (void)off; (void)len; (void)flags;
+#endif
+}
+static void pace_writeback(struct WFile* f, int final)
+{
+    enum { STEP = 4u << 20, LAG = 16u << 20 }; /* drop in 4 MiB units; keep ~16 MiB cached */
+    if (f->fd < 0 || !wb_pace_enabled()) return;
+    /* Kick off async write-back of newly written data in STEP batches (or flush+wait on close). */
+    while (f->wr_off - f->synced_off >= STEP || (final && f->wr_off > f->synced_off)) {
+        uint64_t len = f->wr_off - f->synced_off;
+        if (!final && len > STEP) len = STEP;
+        if (!len) break;
+        wb_sync_range(f->fd, f->synced_off, len, final
+            ? (SYNC_FILE_RANGE_WAIT_BEFORE | SYNC_FILE_RANGE_WRITE | SYNC_FILE_RANGE_WAIT_AFTER)
+            : SYNC_FILE_RANGE_WRITE);
+        f->synced_off += len;
+    }
+    /* Drop ranges a full LAG behind the write head (async write-back has had time to finish). */
+    while (f->wr_off - f->paced_off >= LAG + STEP || (final && f->synced_off > f->paced_off)) {
+        uint64_t len = f->synced_off - f->paced_off;
+        if (!final && len > STEP) len = STEP;
+        if (!len) break;
+        (void)posix_fadvise(f->fd, (off_t)f->paced_off, (off_t)len, POSIX_FADV_DONTNEED);
+        f->paced_off += len;
+    }
+}
+#else
+static void pace_writeback(struct WFile* f, int final) { (void)f; (void)final; }
+#endif
 
 WFile *open_new_file(const char *name, long perms)
 {
@@ -329,6 +389,49 @@ WFile *open_new_file_at_offset(const char *name, uint64_t offset, long perms)
     ret->state = ok;
     ret->direct_ = true;
     ret->fd = fd;
+    ret->wr_off = ret->synced_off = ret->paced_off = offset; /* write-back pacing baseline */
+    return ret;
+}
+
+/* Parallel-download chunk via the shm-ring (async io_thread positioned write) instead of the
+ * legacy direct write(fd): the applet opens the shared target and seeks to `offset`, and its
+ * io_thread writes this chunk's bytes off the helper's recv loop. So a stalled disk write
+ * (e.g. ext4 inode-lock contention with the other chunks) no longer stalls the socket drain,
+ * and credit-IO + the bounded SSH window apply per chunk. Mirrors open_existing_wfile but
+ * sends the chunk start offset (not -1) and ignores the reply's position field. */
+WFile *open_chunk_wfile(const char *name, uint64_t offset)
+{
+    grant_fifo_reset(); /* fresh credit window for this chunk */
+    fzprintf(sftp_io_open, "%"PRIu64, offset);
+    char * s = priority_read();
+    if (s[1] == '-') {
+        sfree(s);
+        return NULL;
+    }
+
+    char * p = s + 1;
+    int mapping = next_int(&p);
+    size_t memory_size = next_int(&p);
+    sfree(s);
+
+    uint8_t* memory = mmap(0, memory_size, PROT_READ|PROT_WRITE, MAP_SHARED, mapping, 0);
+    if (!memory || memory == MAP_FAILED) {
+        int err = errno;
+        fzprintf(sftpError, "mmap failed: %d %s", err, strerror(err));
+        return NULL;
+    }
+
+    WFile *ret = snew(WFile);
+    memset(ret, 0, sizeof(*ret));
+    ret->mapping_ = mapping;
+    ret->memory_ = memory;
+    ret->memory_size_ = memory_size;
+    ret->remaining_ = 0;
+    ret->buffer_ = NULL;
+    ret->state = ok;
+    ret->size_ = 0;
+    ret->direct_ = false; /* ring path */
+    ret->fd = -1;
     return ret;
 }
 
@@ -392,6 +495,8 @@ int write_to_file(WFile *f, void *buffer, int length)
             length -= ret;
             so_far += ret;
         }
+        f->wr_off += (uint64_t)so_far;
+        pace_writeback(f, 0); /* spread this chunk's write-back across the transfer */
         return so_far;
     }
 
@@ -511,6 +616,7 @@ void close_wfile(WFile *f)
         return;
     }
     if (f->direct_) {
+        pace_writeback(f, 1); /* flush + drop this chunk's trailing dirty range (no end-of-transfer burst) */
         close(f->fd);
     } else {
         munmap(f->memory_, f->memory_size_);

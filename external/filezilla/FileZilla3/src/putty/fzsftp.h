@@ -9,6 +9,9 @@ char* priority_read();
  * next_grant) siphons grant lines into a shared FIFO so they never reach
  * ProcessQuotaCmd or an RPC's reply slot. */
 int credit_io_enabled(void);
+/* Parallel-download chunks via the shm-ring io_thread (PARVION_CHUNK_RING=1; default OFF =
+ * the stable inline-write path). See fzsftp.c. */
+int chunk_ring_enabled(void);
 /* Block until a credit grant is available; returns 1 with (*off,*len) set, or 0 on
  * EOF / applet error ("--1"). Routes any quota replies that arrive while waiting. */
 int next_grant(size_t* off, int* len);

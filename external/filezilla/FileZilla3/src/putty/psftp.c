@@ -307,10 +307,18 @@ int sftp_get_file(char *fname, char *outfname, bool restart, uint64_t start_offs
     offset = start_offset;
     if (length != UINT64_MAX) {
         /*
-         * Parallel chunk downloads write into arbitrary offsets of the
-         * same target file, so do not use resume-style open semantics.
+         * Parallel chunk download. With PARVION_CHUNK_RING=1, route through the
+         * shm-ring (async io_thread positioned write) so the disk write (and any
+         * inode-lock wait shared with the other chunks) happens off this
+         * connection's receive loop, keeping the socket draining (~+25% on
+         * loopback). Default OFF: the legacy inline direct write is used, which is
+         * stable under heavy parallelism (the ring path can occasionally wedge a
+         * channel at progress 0 at high channel counts).
          */
-        file = open_new_file_at_offset(outfname, offset, GET_PERMISSIONS(attrs, -1));
+        if (chunk_ring_enabled())
+            file = open_chunk_wfile(outfname, offset);
+        else
+            file = open_new_file_at_offset(outfname, offset, GET_PERMISSIONS(attrs, -1));
     } else if (restart) {
         file = open_existing_wfile(outfname, &offset);
     } else {
