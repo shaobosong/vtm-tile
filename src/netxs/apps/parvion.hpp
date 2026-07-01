@@ -69,6 +69,11 @@ namespace netxs::app::parvion
         // directly, no run-prefix) for debugging / bring-your-own-backend.
         auto configure_backend = [](sftp_remote& ctrl)
         {
+            // The checksum backend is always a mode of the multi-call self (`-r parvionhash`),
+            // independent of $PARVION_SFTP_BIN (which only overrides the inner SFTP helper; the
+            // remote-hash path reads that env itself when it spawns parvionsftp).
+            ctrl.hash_exe = os::process::binary();
+            ctrl.hash_runargs = { "-r", "parvionhash" };
             if (auto e = std::getenv("PARVION_SFTP_BIN")) if (*e)
             {
                 ctrl.exe = text{ e };
@@ -164,12 +169,49 @@ namespace netxs::app::parvion
                 "a very long status line that overflows the message-log width to force the horizontal scrollbar for testing");
         };
 
+        // Test/demo seam: when $PARVION_DEMO_HASH is set, seed the Checksums tab with synthetic
+        // hash_items spanning every state (queued / hashing / succeeded / failed), so the new tab,
+        // its progress/result rendering, and its right-click menu can be driven without a backend
+        // or network. no_autostart is set so pump_hash never spawns a real parvionhash child.
+        auto seed_demo_hash = [](sftp_remote& ctrl)
+        {
+            auto e = std::getenv("PARVION_DEMO_HASH");
+            if (!(e && *e && *e != '0')) return;
+            ctrl.no_autostart = true;
+            // host empty = local origin; else the Source column shows "user@host:port".
+            auto mk = [&](text user, text host, si32 port, text path, si32 algo, si64 size, si64 done,
+                          hash_item::status_t status, text digest = {}, text err = {}) -> hash_item
+            {
+                auto it = hash_item{};
+                it.id     = ++ctrl.hash_id_seq;
+                it.remote = !host.empty();
+                it.user   = user;
+                it.host   = host;
+                it.port   = port;
+                it.path   = path;                 // Full path (shown verbatim in the Path column).
+                it.algo   = algo;
+                it.size   = size;
+                it.done   = done;
+                it.status = status;
+                it.digest = std::move(digest);
+                it.error  = std::move(err);
+                return it;
+            };
+            ctrl.hash_queue.push_back(mk("", "", 0,                       "/home/user/report.pdf",       2, 4ll << 20,   4ll << 20, hash_item::succeeded,
+                                         "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"));
+            ctrl.hash_queue.push_back(mk("deploy", "192.168.0.5", 22,     "/srv/backup/backup.tar.gz",   2, 200ll << 20, 90ll << 20, hash_item::hashing));
+            ctrl.hash_queue.push_back(mk("", "", 0,                       "/home/user/images/image.iso", 0, 700ll << 20, 0,          hash_item::queued));
+            ctrl.hash_queue.push_back(mk("admin", "files.example.com", 2222, "/data/missing.bin",        3, -1,          0,          hash_item::failed, {}, "No such file or directory"));
+            ctrl.dirty = true;
+        };
+
         auto build = [](eccc /*appcfg*/, settings& config)
         {
             auto ctrl = std::make_shared<sftp_remote>();
             configure_backend(*ctrl);
             seed_demo_queue(*ctrl);
             seed_demo_log(*ctrl);
+            seed_demo_hash(*ctrl);
             auto window = ui::cake::ctor();
             window->plugin<pro::focus>(pro::focus::mode::hub)
                   ->plugin<pro::keybd>()

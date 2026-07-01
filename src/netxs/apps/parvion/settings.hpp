@@ -36,6 +36,21 @@ namespace netxs::app::parvion
         return m;
     }
 
+    // Hash-verification algorithms (Settings dropdown + right-click submenu). The index is
+    // persisted (parvion_settings::hash_algo) and mapped to a coreutils-style name passed to
+    // the `parvionhash` backend. Order is fixed; SHA-256 (index 2) is the default.
+    inline constexpr auto hash_algo_count = si32{ 4 };
+    inline auto hash_algo_label(si32 a) -> view // UI label
+    {
+        static constexpr auto names = std::array<view, hash_algo_count>{{ "MD5", "SHA-1", "SHA-256", "SHA-512" }};
+        return names[(size_t)std::clamp(a, 0, hash_algo_count - 1)];
+    }
+    inline auto hash_algo_name(si32 a) -> view // backend arg / hash.hpp make_hasher id
+    {
+        static constexpr auto names = std::array<view, hash_algo_count>{{ "md5", "sha1", "sha256", "sha512" }};
+        return names[(size_t)std::clamp(a, 0, hash_algo_count - 1)];
+    }
+
     // <config>/parvion/ — $XDG_CONFIG_HOME (else $HOME/.config) on POSIX, %APPDATA%
     // on Windows; created on demand. Shared by recent_servers and settings.
     inline auto parvion_config_dir() -> fs::path
@@ -69,6 +84,9 @@ namespace netxs::app::parvion
         si32 threshold_unit  = 2;    // OPTION_SFTP_PARALLEL_THRESHOLD_UNIT  : 0..4 (default MiB).
         si32 max_connections = 4;    // OPTION_SFTP_PARALLEL_MAX_CONNECTIONS : 1..10.
         std::vector<text> keyfiles;  // OPTION_SFTP_KEYFILES (one private-key path per entry).
+        // Hash verification page (Edit -> Settings -> SFTP -> "Hash verification").
+        bool hash_on_transfer = faux; // Auto-hash the target of every completed transfer.
+        si32 hash_algo        = 2;    // Algorithm index 0..3 (md5/sha1/sha256/sha512); SHA-256 default.
 
         // Bytes form of the "enable parallel transfers for files larger than" gate.
         auto threshold_bytes() const -> si64 { return (si64)threshold_value * sftp_unit_mul(threshold_unit); }
@@ -83,6 +101,7 @@ namespace netxs::app::parvion
             threshold_value = std::clamp(threshold_value, 1, 1024 * 1024);
             threshold_unit  = std::clamp(threshold_unit, 0, sftp_unit_count - 1);
             max_connections = std::clamp(max_connections, 1, 10);
+            hash_algo       = std::clamp(hash_algo, 0, hash_algo_count - 1);
         }
 
         // Restore from <config>/parvion/settings; missing file leaves defaults.
@@ -111,6 +130,8 @@ namespace netxs::app::parvion
                 else if (key == "SFTP parallel transfer threshold value") threshold_value = std::atoi(val.c_str());
                 else if (key == "SFTP parallel transfer threshold unit")  threshold_unit  = std::atoi(val.c_str());
                 else if (key == "SFTP parallel max connections")          max_connections = std::atoi(val.c_str());
+                else if (key == "Hash on transfer")                       hash_on_transfer = std::atoi(val.c_str()) != 0;
+                else if (key == "Hash algorithm")                         hash_algo        = std::atoi(val.c_str());
                 else if (key == "SFTP keyfile")                           { if (!val.empty()) keyfiles.push_back(val); }
             }
             clamp();
@@ -130,6 +151,8 @@ namespace netxs::app::parvion
             put("SFTP parallel transfer threshold value", std::to_string(threshold_value));
             put("SFTP parallel transfer threshold unit", std::to_string(threshold_unit));
             put("SFTP parallel max connections", std::to_string(max_connections));
+            put("Hash on transfer", std::to_string(hash_on_transfer ? 1 : 0));
+            put("Hash algorithm", std::to_string(hash_algo));
             for (auto& k : keyfiles) put("SFTP keyfile", k);
             std::fclose(f);
             #if !defined(_WIN32)

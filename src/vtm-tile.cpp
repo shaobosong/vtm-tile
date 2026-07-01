@@ -5,6 +5,7 @@
 #include "netxs/apps/desk.hpp"
 #include "vtm-common.hpp"
 #include "netxs/apps/tile.hpp"
+#include "netxs/apps/parvion/hash.hpp" // make_hasher for the `-r parvionhash` backend
 
 using namespace netxs;
 
@@ -468,43 +469,171 @@ static int parvionmc_main(int argc, char** argv)
     return failed ? 1 : 0;
 }
 
+// Independent checksum backend: `vtm-tile -r parvionhash <algo> <local <path> |
+// remote <host> <port> <user> <remote_path> [keyfile...]>`. Computes a digest in its own
+// process so hashing never blocks the UI and runs concurrently with transfers. The line
+// protocol on stdout is consumed by hash_worker (hashing.hpp):
+//     S <total-bytes>   P <bytes-done>   R <hex-digest>   E <message>
+// `local` reads the file directly; `remote` drives ONE single-stream parvionsftp download
+// through the production xfer_worker with the streaming-hash tap set, so the remote file is
+// hashed while it downloads and nothing is written to disk. The account password is read
+// from stdin (kept off argv / `ps`).
+static int parvionhash_main(int argc, char** argv)
+{
+    namespace ph = app::parvion::hashing;
+    if (argc < 2)
+    {
+        std::fprintf(stderr, "usage: -r parvionhash <algo> <local <path> | remote <host> <port> <user> <remote_path> [keyfile...]>\n");
+        return 2;
+    }
+    auto algo = view{ argv[0] };
+    auto mode = view{ argv[1] };
+    auto hasher = ph::make_hasher(algo);
+    if (!hasher) { std::fprintf(stdout, "E unknown algorithm: %s\n", text{ algo }.c_str()); std::fflush(stdout); return 2; }
+    auto report_step = si64{ 4 << 20 }; // emit a P line roughly every 4 MiB
+
+    if (mode == "local")
+    {
+        if (argc < 3) { std::fprintf(stdout, "E missing path\n"); std::fflush(stdout); return 2; }
+        auto path = argv[2];
+        auto f = std::fopen(path, "rb");
+        if (!f) { std::fprintf(stdout, "E cannot open %s\n", path); std::fflush(stdout); return 1; }
+        std::fseek(f, 0, SEEK_END);
+        auto total = (si64)std::ftell(f);
+        std::fseek(f, 0, SEEK_SET);
+        if (total >= 0) { std::fprintf(stdout, "S %lld\n", (long long)total); std::fflush(stdout); }
+        auto buf = std::vector<char>(1u << 20);
+        auto done = si64{ 0 }, last = si64{ 0 };
+        for (;;)
+        {
+            auto n = std::fread(buf.data(), 1, buf.size(), f);
+            if (n == 0) break;
+            hasher->update(buf.data(), n);
+            done += (si64)n;
+            if (done - last >= report_step) { std::fprintf(stdout, "P %lld\n", (long long)done); std::fflush(stdout); last = done; }
+        }
+        auto err = std::ferror(f) != 0;
+        std::fclose(f);
+        if (err) { std::fprintf(stdout, "E read error\n"); std::fflush(stdout); return 1; }
+        std::fprintf(stdout, "P %lld\n", (long long)done);
+        std::fprintf(stdout, "R %s\n", hasher->hex().c_str());
+        std::fflush(stdout);
+        return 0;
+    }
+    if (mode == "remote")
+    {
+        using xw = app::parvion::xfer_worker;
+        if (argc < 6) { std::fprintf(stdout, "E missing remote args\n"); std::fflush(stdout); return 2; }
+        auto w = xw{};
+        if (auto e = std::getenv("PARVION_SFTP_BIN"); e && *e) { w.exe = text{ e }; w.runargs.clear(); }
+        else { w.exe = os::process::binary(); w.runargs = { "-r", "parvionsftp" }; }
+        w.host        = argv[2];
+        w.port        = std::atoi(argv[3]);
+        w.user        = argv[4];
+        w.remote_path = argv[5];
+        w.local_path  = "-";     // unused: hash-only download writes nothing to disk
+        w.download    = true;
+        w.parallel    = faux;    // single sequential stream so the hash sees bytes in order
+        for (auto i = 6; i < argc; ++i) w.keyfiles.push_back(text{ argv[i] });
+        if (!w.keyfiles.empty()) w.passphrase_provider = [](text const&, text& out){ out.clear(); return true; }; // unencrypted keys
+        // Account password from stdin (one line); kept off argv so it never shows in `ps`.
+        auto pbuf = std::array<char, 4096>{};
+        if (std::fgets(pbuf.data(), (int)pbuf.size(), stdin))
+        {
+            w.pass = pbuf.data();
+            while (!w.pass.empty() && (w.pass.back() == '\n' || w.pass.back() == '\r')) w.pass.pop_back();
+        }
+        // Hash the downloaded bytes in the io thread and discard them (no local file).
+        w.session.io_hash_only = true;
+        w.session.io_download_tap = [&](char const* p, size_t n){ hasher->update(p, n); };
+        w.begin();
+        auto last = si64{ 0 };
+        while (!w.finished())
+        {
+            w.poll();
+            if (w.done - last >= report_step) { std::fprintf(stdout, "P %lld\n", (long long)w.done); std::fflush(stdout); last = w.done; }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1)); // bulk data runs on the session reader thread
+        }
+        if (w.state == xw::s_ok)
+        {
+            std::fprintf(stdout, "P %lld\n", (long long)w.done);
+            std::fprintf(stdout, "R %s\n", hasher->hex().c_str());
+            std::fflush(stdout);
+            w.stop();
+            return 0;
+        }
+        std::fprintf(stdout, "E %s\n", w.error.empty() ? "remote hash failed" : w.error.c_str());
+        std::fflush(stdout);
+        w.stop();
+        return 1;
+    }
+    std::fprintf(stdout, "E unknown mode: %s\n", text{ mode }.c_str());
+    std::fflush(stdout);
+    return 2;
+}
+
 int main(int argc, char* argv[])
 {
     // Multi-call entry: `vtm-tile -r parvionsftp [opts]` runs the in-process parvionsftp
     // backend (its renamed main) and exits — handled before any vtm console/log
     // init runs, because the backend owns stdout for its fzprintf protocol.
-    for (auto i = 1; i + 1 < argc; i++)
+    //
+    // Reconstruct the argument vector as UTF-8 before dispatching: on Windows the CRT builds
+    // argv in the ANSI codepage, which mangles (or '?'-replaces) non-ASCII path arguments — so a
+    // backend that receives a path via argv (e.g. `parvionhash local <path>`) could not open a
+    // file with non-ASCII characters in its name. Re-read the wide command line and convert to
+    // UTF-8 so backend paths survive. (The normal, non-backend path below goes through
+    // os::process::args, which already does this same GetCommandLineW re-read.)
+    auto bin_args = std::vector<text>{};
+    #if defined(_WIN32)
+        auto wargc = 0;
+        if (auto wargv = ::CommandLineToArgvW(::GetCommandLineW(), &wargc))
+        {
+            for (auto i = 0; i < wargc; i++) bin_args.emplace_back(utf::to_utf(wargv[i]));
+            ::LocalFree(wargv);
+        }
+    #endif
+    if (bin_args.empty()) for (auto i = 0; i < argc; i++) bin_args.emplace_back(argv[i]); // POSIX (bytes already UTF-8) / Win fallback.
+    auto bin_argv = std::vector<char*>{};
+    for (auto& a : bin_args) bin_argv.push_back(a.data());
+    bin_argv.push_back(nullptr); // argv[argc] == nullptr, mirroring a real argv.
+    auto bin_argc = (int)bin_args.size();
+    for (auto i = 1; i + 1 < bin_argc; i++)
     {
-        auto flag = view{ argv[i] };
+        auto flag = view{ bin_argv[i] };
         if (flag == "-r" || flag == "--run" || flag == "--")
         {
-            if (view{ argv[i + 1] }.starts_with("parvionsftp"))
+            if (view{ bin_argv[i + 1] }.starts_with("parvionsftp"))
             {
                 static char arg0[] = "parvionsftp";
                 auto args = std::vector<char*>{ arg0 };
-                for (auto j = i + 2; j < argc; j++) args.push_back(argv[j]);
+                for (auto j = i + 2; j < bin_argc; j++) args.push_back(bin_argv[j]);
                 args.push_back(nullptr);
                 return parvionsftp_main((int)args.size() - 1, args.data());
             }
-            if (view{ argv[i + 1] }.starts_with("pvputtygen"))
+            if (view{ bin_argv[i + 1] }.starts_with("pvputtygen"))
             {
                 static char arg0[] = "pvputtygen";
                 auto args = std::vector<char*>{ arg0 };
-                for (auto j = i + 2; j < argc; j++) args.push_back(argv[j]);
+                for (auto j = i + 2; j < bin_argc; j++) args.push_back(bin_argv[j]);
                 args.push_back(nullptr);
                 return pvputtygen_main((int)args.size() - 1, args.data());
             }
-            if (view{ argv[i + 1] }.starts_with("parvionbench"))
+            if (view{ bin_argv[i + 1] }.starts_with("parvionbench"))
             {
-                return parvionbench_main(argc - (i + 2), argv + (i + 2));
+                return parvionbench_main(bin_argc - (i + 2), bin_argv.data() + (i + 2));
             }
-            if (view{ argv[i + 1] }.starts_with("parvionxfer"))
+            if (view{ bin_argv[i + 1] }.starts_with("parvionxfer"))
             {
-                return parvionxfer_main(argc - (i + 2), argv + (i + 2));
+                return parvionxfer_main(bin_argc - (i + 2), bin_argv.data() + (i + 2));
             }
-            if (view{ argv[i + 1] }.starts_with("parvionmc"))
+            if (view{ bin_argv[i + 1] }.starts_with("parvionmc"))
             {
-                return parvionmc_main(argc - (i + 2), argv + (i + 2));
+                return parvionmc_main(bin_argc - (i + 2), bin_argv.data() + (i + 2));
+            }
+            if (view{ bin_argv[i + 1] }.starts_with("parvionhash"))
+            {
+                return parvionhash_main(bin_argc - (i + 2), bin_argv.data() + (i + 2));
             }
             break; // A run flag was given but not a known backend: fall through to normal handling.
         }

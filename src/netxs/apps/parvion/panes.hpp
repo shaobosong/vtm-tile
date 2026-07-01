@@ -840,6 +840,19 @@ namespace netxs::app::parvion
         }
     }
 
+    inline void pane_hash_selection(pane_state& st, si32 algo) // Enqueue a checksum task per marked file (skips dirs).
+    {
+        if (!st.ctrl) return;
+        auto& its = st.cur_items();
+        for (auto row : st.marked) if (row > 0 && row - 1 < (si32)its.size())
+        {
+            auto& e = its[(size_t)(row - 1)];
+            if (e.is_dir) continue; // Checksums apply to files only.
+            auto full = child_path(st.cur_path(), e.name, st.is_local);
+            st.ctrl->enqueue_hash(full, e.name, /*remote*/ st.remote != nullptr, algo, e.size);
+        }
+    }
+
     // Right-click menu for the blank area: Refresh + Create Directory (mirrors the queue's menus).
     inline auto build_pane_blank_menu(pane_state& st, netxs::wptr<ui::base> panel_wp) -> std::vector<app::shared::menu::item>
     {
@@ -906,6 +919,27 @@ namespace netxs::app::parvion
             st.input_buf = text{ its[(size_t)idx].name };
             if (auto p = panel_wp.lock()) pro::focus::set(p, id_t{}, solo::on);
         });
+        // "Calculate Checksum" — a nested submenu of algorithms (the secondary menu). Each leaf
+        // enqueues a hash task for every selected file; remote files stream-and-hash while
+        // downloading (no local copy), local files are read directly. Shown only when the selection
+        // contains at least one regular file — checksums don't apply to folders.
+        {
+            auto& its = st.cur_items();
+            auto has_file = faux;
+            for (auto row : st.marked)
+                if (row > 0 && row - 1 < (si32)its.size() && !its[(size_t)(row - 1)].is_dir) { has_file = true; break; }
+            if (has_file)
+            {
+                auto sub = m::item{ .alive = true, .label = "Calculate Checksum", .type = m::kind::dropdown };
+                for (auto a = si32{}; a < hash_algo_count; ++a)
+                {
+                    auto row = m::item{ .alive = true, .label = text{ hash_algo_label(a) } };
+                    row.action = [panel_wp, &st, a](hids&){ if (auto p = panel_wp.lock()) { pane_hash_selection(st, a); p->base::deface(); } };
+                    sub.children.push_back(std::move(row));
+                }
+                items.push_back(std::move(sub));
+            }
+        }
         return items;
     }
 

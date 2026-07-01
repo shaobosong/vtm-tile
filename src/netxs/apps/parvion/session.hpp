@@ -17,6 +17,7 @@
 #include "settings.hpp"
 #include "reorder.hpp"
 #include "proto.hpp"
+#include "hashing.hpp"
 
 #include <thread>
 #include <mutex>
@@ -121,6 +122,12 @@ namespace netxs::app::parvion
         text       io_local_path;          // local file the io_* requests operate on.
         si64       io_length = -1;          // upload prefill byte budget (chunk size; -1 = whole file).
         std::FILE* io_file = nullptr;       // opened on io_open, closed on finalize/stop.
+        // Streaming-hash tap (the `parvionhash` remote path, set before the transfer begins):
+        // when io_hash_only is set, a download never opens io_file — instead each flushed buffer
+        // is fed to io_download_tap and discarded, so a remote file can be hashed while it streams
+        // in without ever touching the disk. The credit-IO ring/grant flow is unaffected.
+        bool                                io_hash_only = faux;
+        std::function<void(char const*, size_t)> io_download_tap;
         // Ring pipeline: the I/O thread produces (upload) / consumes (download) buffers;
         // the io_* handlers on the reader thread hand them to / take them from the helper.
         std::thread             io_thread;
@@ -501,9 +508,15 @@ namespace netxs::app::parvion
                         io_pace(io_file, synced, paced, wpos, true);
                         return;
                     }
-                    auto ok = !io_file || !item.second
+                    // Hash-only download: feed the buffer to the tap and discard it (no io_file).
+                    if (io_hash_only)
+                    {
+                        if (item.second && io_download_tap) io_download_tap((char*)shm_base + slot_off(item.first), item.second);
+                        wpos += item.second;
+                    }
+                    auto ok = io_hash_only || !io_file || !item.second
                            || std::fwrite((char*)shm_base + slot_off(item.first), 1, item.second, io_file) == item.second;
-                    if (ok && item.second) { wpos += item.second; io_pace(io_file, synced, paced, wpos, faux); }
+                    if (ok && !io_hash_only && item.second) { wpos += item.second; io_pace(io_file, synced, paced, wpos, faux); }
                     {
                         auto lk = std::lock_guard{ io_mtx };
                         if (!ok) io_err = true;
@@ -560,7 +573,12 @@ namespace netxs::app::parvion
             { auto lk = std::lock_guard{ io_mtx }; dl = io_download; lpath = io_local_path; ilen = io_length; }
             stop_io_thread();
             if (io_file) { std::fclose(io_file); io_file = nullptr; }
-            if (dl)
+            if (dl && io_hash_only)
+            {
+                // Hash-only download (parvionhash remote): no local target. io_file stays null;
+                // io_loop feeds each flushed buffer to io_download_tap and discards it.
+            }
+            else if (dl)
             {
                 if (off == (ui64)-1) { io_file = std::fopen(lpath.c_str(), "r+b"); if (io_file) std::fseek(io_file, 0, SEEK_END); } // resume
                 else if (ilen >= 0)
@@ -579,8 +597,8 @@ namespace netxs::app::parvion
                 io_file = std::fopen(lpath.c_str(), "rb");
                 if (io_file && off) io_seek64(io_file, off); // chunk/resume start (64-bit)
             }
-            if (!io_file) { write_line("--"); return; }
-            auto cur = (ui64)std::ftell(io_file);
+            if (!io_file && !io_hash_only) { write_line("--"); return; }
+            auto cur = io_file ? (ui64)std::ftell(io_file) : (ui64)0;
             start_io_thread(); // begins prefill (upload) / awaits flush queue (download)
             #if defined(_WIN32)
             auto target = HANDLE{};
@@ -996,6 +1014,9 @@ namespace netxs::app::parvion
         // Transfer-table column visibility (Local Name, Remote Name, Size, Progress, Speed, Reason),
         // toggled from the table-header right-click menu; all shown by default. Size == parvion q_ncol+1.
         std::array<bool, 6>   col_shown{ true, true, true, true, true, true };
+        // Checksums-table column visibility (Source, Path, Algorithm, Size, Progress, Result), toggled
+        // from that tab's header right-click menu; all shown by default. Size == parvion hash_headers.
+        std::array<bool, 6>   hash_col_shown{ true, true, true, true, true, true };
         ui64                  gen = 0; // Bumped on each new listing (pane resets selection).
         std::vector<recent_server> recent;          // Quick Connect history (most-recent-first), persisted to disk.
         static constexpr auto recent_cap = size_t{ 16 };
@@ -1011,6 +1032,16 @@ namespace netxs::app::parvion
         std::vector<std::unique_ptr<xfer_worker>> idle_pool;
         si32  xfer_idle_sec = 60;    // FileZilla uses a 60s idle-disconnect timer for queue engines.
         bool  no_autostart = faux;   // Demo/test seam: hold the queue (never auto-start a backend).
+        // Hash/checksum tasks (Calculate Checksum + auto-hash-on-transfer). A SEPARATE queue and
+        // worker pool from transfers, so checksums run concurrently and never share a slot with a
+        // transfer (requirement 5). hash_exe/hash_runargs point at the `parvionhash` backend (the
+        // multi-call self); configure_backend (parvion.hpp) sets them.
+        std::vector<hash_item>                    hash_queue;
+        std::vector<std::unique_ptr<hash_worker>> hash_workers;
+        text  hash_exe;                                  // parvionhash backend executable (the self binary).
+        std::vector<text> hash_runargs;                  // {"-r","parvionhash"} for the multi-call self.
+        si32  max_hash_jobs = 2;     // Concurrent hash workers (the rest stay `queued`).
+        ui64  hash_id_seq = 0;       // Monotonic hash_item id allocator.
         bool  holding_followers = faux; // Parallel upload: leader started, followers parked.
         text  active_state_path;      // PARVIONC2 state file for the active parallel upload.
         ui32  active_md_size = 0;     // Cached metadata size (for per-chunk transferred offsets).
@@ -1392,6 +1423,7 @@ namespace netxs::app::parvion
             maybe_keepalive(); // Keep an idle control link warm so the server doesn't time it out.
             pump_queue(); // Drive transfer workers (independent of the control session).
             reap_idle_workers(); // Close pooled transfer connections that have gone idle (or were dropped).
+            pump_hash(); // Drive checksum workers (own queue/pool; runs even when disconnected for local files).
             // A completed upload landed in the displayed remote dir: re-list it. Only when
             // the control session is idle, so we don't clobber an in-flight cd/ls (checked
             // here, after pump_queue, so `await` reflects this tick's drained replies).
@@ -2065,6 +2097,110 @@ namespace netxs::app::parvion
             active_state_path = spath;
             active_md_size = (ui32)metadata.size();
         }
+    public: // Checksum entry points called from the panes/queue UI.
+        auto find_hash(ui64 id) -> hash_item*
+        {
+            for (auto& it : hash_queue) if (it.id == id) return &it;
+            return nullptr;
+        }
+        // Enqueue a checksum task (own queue; runs concurrently with transfers). `remote` selects a
+        // stream-while-downloading hash of a remote file (no local copy) vs a local-file hash; both
+        // run in the independent `parvionhash` backend. Credentials are snapshotted for remote tasks.
+        void enqueue_hash(text filepath, text name, bool remote, si32 algo, si64 size)
+        {
+            auto it = hash_item{};
+            it.id     = ++hash_id_seq;
+            it.remote = remote;
+            it.path   = std::move(filepath);
+            it.name   = std::move(name);
+            it.algo   = std::clamp(algo, 0, hash_algo_count - 1);
+            it.size   = size;
+            it.status = hash_item::queued;
+            if (remote) { it.host = host; it.user = user; it.pass = pass; it.port = port; it.keyfiles = cfg.keyfiles; }
+            log_line(logtype::status, "Queued " + text{ hash_algo_label(it.algo) } + " checksum of " + it.name + ".");
+            hash_queue.push_back(std::move(it));
+            dirty = true;
+        }
+        // Checksums-tab actions. Removing an item whose worker is still running is safe: the next
+        // pump_hash finds no matching item for that worker and stops+drops it.
+        void hash_remove(ui64 id) { std::erase_if(hash_queue, [&](auto& it){ return it.id == id; }); dirty = true; }
+        void hash_remove_selected() { std::erase_if(hash_queue, [](auto& it){ return it.selected; }); dirty = true; }
+        auto hash_selected_count() const { auto n = si32{}; for (auto& it : hash_queue) if (it.selected) ++n; return n; }
+        void hash_clear_finished()
+        {
+            std::erase_if(hash_queue, [](auto& it){ return it.status == hash_item::succeeded || it.status == hash_item::failed; });
+            dirty = true;
+        }
+    private:
+        // Drive the checksum workers: fold each active worker's progress/result into its item, reap
+        // finished workers, then start queued items up to max_hash_jobs. Independent of pump_queue.
+        void pump_hash()
+        {
+            for (auto& w : hash_workers)
+            {
+                w->poll();
+                auto it = find_hash(w->item_id);
+                if (!it) continue;
+                if (w->total > 0 && it->size < 0) it->size = w->total;
+                if (it->status == hash_item::hashing)
+                {
+                    if (w->done > it->done) { it->done = w->done; it->rate.sample(it->done, std::chrono::steady_clock::now()); dirty = true; }
+                    if (w->state == hash_worker::s_ok)
+                    {
+                        it->status = hash_item::succeeded;
+                        it->digest = w->digest;
+                        if (it->size > 0) it->done = it->size;
+                        it->rate.speed = 0.0;
+                        log_line(logtype::status, text{ hash_algo_label(it->algo) } + " " + it->name + " = " + it->digest);
+                        dirty = true;
+                    }
+                    else if (w->state == hash_worker::s_err)
+                    {
+                        it->status = hash_item::failed;
+                        it->error  = w->error.empty() ? text{ "Checksum failed" } : w->error;
+                        it->rate.speed = 0.0;
+                        log_line(logtype::error, "Checksum of " + it->name + " failed: " + it->error);
+                        dirty = true;
+                    }
+                }
+            }
+            // Drop workers whose item finished (or was removed from the queue).
+            std::erase_if(hash_workers, [&](auto& w)
+            {
+                auto it = find_hash(w->item_id);
+                if (!it || it->status == hash_item::succeeded || it->status == hash_item::failed) { w->stop(); return true; }
+                return faux;
+            });
+            // Start queued items up to the concurrency cap (held back entirely in demo/test mode).
+            if (no_autostart) return;
+            auto running = (si32)hash_workers.size();
+            for (auto& it : hash_queue)
+            {
+                if (running >= max_hash_jobs) break;
+                if (it.status != hash_item::queued) continue;
+                auto w = std::make_unique<hash_worker>();
+                w->item_id = it.id;
+                w->exe = hash_exe; w->runargs = hash_runargs;
+                w->remote = it.remote; w->algo = it.algo; w->path = it.path;
+                w->host = it.host; w->user = it.user; w->pass = it.pass; w->port = it.port; w->keyfiles = it.keyfiles;
+                it.status  = hash_item::hashing;
+                it.started = std::time(nullptr);
+                it.rate.start(0, std::chrono::steady_clock::now());
+                w->begin();
+                hash_workers.push_back(std::move(w));
+                ++running;
+                dirty = true;
+            }
+        }
+        // Auto-verify a completed transfer's destination (Settings -> Hash verification):
+        //   download -> hash the saved LOCAL file; upload -> stream the REMOTE target back and hash it
+        //   (verify-after-upload). Both run as ordinary hash tasks in the Checksums tab.
+        void enqueue_transfer_hash(queue_item const& item)
+        {
+            auto basename = [](text const& p) -> text { auto pos = p.find_last_of("/\\"); return pos == text::npos ? p : p.substr(pos + 1); };
+            if (item.download) enqueue_hash(item.local_path,  basename(item.local_path),  faux, cfg.hash_algo, item.size);
+            else               enqueue_hash(item.remote_path, basename(item.remote_path), true, cfg.hash_algo, item.size);
+        }
         void pump_queue()
         {
             if (active >= 0 && active < (si32)queue.size())
@@ -2149,7 +2285,9 @@ namespace netxs::app::parvion
                                     // Refresh the panes still showing the dirs the transfer touched (FileZilla
                                     // refreshes displayed directories only): the destination, and for an upload
                                     // the local source dir, whose resume-state file was just removed.
-                                    refresh_panes(item); }
+                                    refresh_panes(item);
+                                    // Settings -> Hash verification: auto-checksum the transfer's target.
+                                    if (cfg.hash_on_transfer) enqueue_transfer_hash(item); }
             }
             if (active == -1 && !no_autostart)
             {

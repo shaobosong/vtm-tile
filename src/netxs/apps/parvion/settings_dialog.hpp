@@ -48,6 +48,7 @@ namespace netxs::app::parvion
             std::array<rect, tab_count> tab_box{};   // Top tab buttons.
             rect compression{};                       // "Enable compression" checkbox row.
             rect unit{};                              // Threshold unit dropdown.
+            rect hash_algo{};                         // Hash-on-transfer algorithm dropdown ("None" = disabled).
             rect addkey{}, removekey{};               // Key management buttons.
             rect ok{}, cancel{};                      // Dialog buttons.
         };
@@ -96,13 +97,15 @@ namespace netxs::app::parvion
         si32               active = -1;       // Field receiving input (-1 = none).
         bool               compression = faux;
         si32               threshold_unit = 2;
+        bool               hash_on_transfer = faux; // "Calculate target file hash during transfers".
+        si32               hash_algo = 2;           // Algorithm index (md5/sha1/sha256/sha512).
         sd::keytbl_state   kt;                // Private-key table (file-browser-style; selection/scroll/columns).
         // Parsed key metadata, parallel to draft.keyfiles (filled by pvputtygen).
         std::vector<text>  key_comment;
         std::vector<text>  key_data;
         rect               card{};            // Cached card rect within the overlay (render -> mouse).
         sd::hitboxes       hit{};
-        bool               hover_ok = faux, hover_cancel = faux, hover_add = faux, hover_remove = faux, hover_unit = faux;
+        bool               hover_ok = faux, hover_cancel = faux, hover_add = faux, hover_remove = faux, hover_unit = faux, hover_hashalgo = faux;
         bool               press_ok = faux, press_cancel = faux, press_add = faux, press_remove = faux;
         bool               focused = faux;
         si32               drag_field = -1;   // Field whose caret a left-drag is scrubbing.
@@ -114,8 +117,10 @@ namespace netxs::app::parvion
         void seed()
         {
             if (ctrl) draft = ctrl->cfg;
-            compression    = draft.compression;
-            threshold_unit = draft.threshold_unit;
+            compression      = draft.compression;
+            threshold_unit   = draft.threshold_unit;
+            hash_on_transfer = draft.hash_on_transfer;
+            hash_algo        = draft.hash_algo;
             auto setf = [&](sd::field_t i, si32 v, si32 lo, si32 hi, si32 tab)
             {
                 auto& f = fields[i];
@@ -147,8 +152,10 @@ namespace netxs::app::parvion
             draft.reconnect_delay = field_int(sd::f_delay);
             draft.threshold_value = field_int(sd::f_threshold);
             draft.max_connections = field_int(sd::f_maxconn);
-            draft.threshold_unit  = threshold_unit;
-            draft.compression     = compression;
+            draft.threshold_unit     = threshold_unit;
+            draft.compression        = compression;
+            draft.hash_on_transfer   = hash_on_transfer;
+            draft.hash_algo          = hash_algo;
             draft.clamp();
         }
     };
@@ -321,6 +328,9 @@ namespace netxs::app::parvion
         inline constexpr auto lbl_threshold = view{ "Enable parallel transfers for files larger than:" };
         inline constexpr auto lbl_maxconn   = view{ "Maximum parallel connections for a single file:" };
         inline constexpr auto hnt_maxconn   = view{ "(1-10)" };
+        // Hash verification group (single dropdown; "None" disables transfer hashing).
+        inline constexpr auto lbl_hash_xfer = view{ "Calculate target file hash during transfers:" };
+        inline constexpr auto hash_none     = view{ "None" };
         inline constexpr auto unit_widest   = view{ " Byte \xE2\x96\xBE " }; // The widest unit-dropdown caption.
         inline constexpr auto kt_min_w      = si32{ 24 }; // Key table negotiates a small floor (it scrolls horizontally).
     }
@@ -352,6 +362,7 @@ namespace netxs::app::parvion
                                                           { sd::lbl_maxconn,   sd::hnt_maxconn } })));
         w = std::max(w, sd_box_dialog_w((si32)cell_width(sd::btn_addkey) + 1 + (si32)cell_width(sd::btn_removekey)));
         w = std::max(w, sd_box_dialog_w((si32)cell_width(sd::chk_compress)));
+        w = std::max(w, sd_box_dialog_w((si32)cell_width(sd::lbl_hash_xfer) + 1 + 12)); // label + algorithm dropdown.
         w = std::max(w, sd_box_dialog_w(sd::kt_min_w));
         // Tab strip and the right-aligned OK/Cancel block.
         w = std::max(w, (si32)cell_width("Connection") + 2 + (si32)cell_width("SFTP") + 2 + 2 * sd::pad_x);
@@ -806,10 +817,12 @@ namespace netxs::app::parvion
             // Authentication box expand to fill the remaining space (its key table grows with it).
             auto par_h   = si32{ 2 + 2 };       // Parallel transfers: borders + 2 field rows.
             auto other_h = si32{ 2 + 1 };       // Other SFTP options: borders + checkbox row.
+            auto hash_h  = si32{ 2 + 1 };       // Hash verification: borders + one dropdown row.
             auto par_y   = (H - 1) - 1 - par_h; // Above the (blank + button) rows.
             auto other_y = par_y - 1 - other_h;
+            auto hash_y  = other_y - 1 - hash_h;
             auto pk_y    = si32{ 3 };
-            auto pk_h    = std::max(6, (other_y - 1) - pk_y); // Fill the gap above Other SFTP.
+            auto pk_h    = std::max(6, (hash_y - 1) - pk_y); // Fill the gap above Hash verification.
 
             // Public Key Authentication group.
             sd_box(canvas, rect{{ ix, pk_y }, { iw, pk_h }}, "Public Key Authentication");
@@ -830,6 +843,15 @@ namespace netxs::app::parvion
             sd_box(canvas, rect{{ ix, other_y }, { iw, other_h }}, "Other SFTP options");
             st.hit.compression = rect{{ ix + 2, other_y + 1 }, { inner, 1 }};
             put_str(canvas, ix + 2, other_y + 1, st.compression ? "\xE2\x96\xA3 Enable compression" : "\xE2\x96\xA1 Enable compression", theme::text_fg, theme::bg, inner);
+
+            // Hash verification group: a single dropdown selects the transfer hash algorithm;
+            // "None" (the default) disables hashing during transfers.
+            sd_box(canvas, rect{{ ix, hash_y }, { iw, hash_h }}, "Hash verification");
+            put_str(canvas, ix + 2, hash_y + 1, sd::lbl_hash_xfer, theme::text_fg, theme::bg, std::max(0, std::min((si32)cell_width(sd::lbl_hash_xfer), cr - (ix + 2))));
+            auto hax     = ix + 2 + (si32)cell_width(sd::lbl_hash_xfer) + 1;
+            auto halabel = text{ " " } + text{ st.hash_on_transfer ? hash_algo_label(st.hash_algo) : sd::hash_none } + " \xE2\x96\xBE "; // " None ▾ " / " SHA-256 ▾ "
+            st.hit.hash_algo = rect{{ hax, hash_y + 1 }, { std::max(0, std::min((si32)cell_width(halabel), cr - hax)), 1 }};
+            paint_button(canvas, st.hit.hash_algo, halabel, st.hover_hashalgo, faux);
 
             // Parallel transfers group — both input fields aligned to the longer label (item 4).
             // Label/field/control all clip to the box content edge (cr) so nothing bleeds out.
@@ -1008,6 +1030,26 @@ namespace netxs::app::parvion
         return items;
     }
 
+    // Transfer-hash dropdown (Settings -> SFTP -> Hash verification): "None" disables hashing on
+    // transfer; any algorithm enables it with that algorithm. Index 0 = None, 1..N = algorithms.
+    inline auto sd_build_hash_menu(settings_state& st, netxs::wptr<ui::base> card_wp) -> std::vector<app::shared::menu::item>
+    {
+        namespace m = app::shared::menu;
+        auto items = std::vector<m::item>{};
+        auto stp = &st;
+        auto deface = [card_wp]{ if (auto c = card_wp.lock()) c->base::deface(); };
+        auto none = m::item{ .alive = true, .label = text{ sd::hash_none }, .checked = !st.hash_on_transfer };
+        none.action = [stp, deface](hids&){ stp->hash_on_transfer = faux; deface(); };
+        items.push_back(std::move(none));
+        for (auto i = si32{}; i < hash_algo_count; ++i)
+        {
+            auto row = m::item{ .alive = true, .label = text{ hash_algo_label(i) }, .checked = (st.hash_on_transfer && i == st.hash_algo) };
+            row.action = [stp, deface, i](hids&){ stp->hash_on_transfer = true; stp->hash_algo = i; deface(); };
+            items.push_back(std::move(row));
+        }
+        return items;
+    }
+
     // "Add key file..." picker: the reusable Open-mode file picker (panes.hpp open_file_picker),
     // seeded at the user's home and Windows drive-aware. Activating a file (double-click / Enter /
     // Open) adds it as a key; an encrypted non-ppk key then converts (see sd_add_key). The settings
@@ -1137,6 +1179,13 @@ namespace netxs::app::parvion
                         app::shared::menu::open_dropdown_popup(boss, sd_build_unit_menu(st, st.card_wp), true, st.threshold_unit, at);
                         fired = true;
                     }
+                    else if (sd_hit(st.hit.hash_algo, mx, my)) // Open the transfer-hash dropdown (None + algorithms).
+                    {
+                        auto at  = twod{ st.hit.hash_algo.coor.x, st.hit.hash_algo.coor.y + 1 };
+                        auto sel = st.hash_on_transfer ? st.hash_algo + 1 : 0; // 0 = None.
+                        app::shared::menu::open_dropdown_popup(boss, sd_build_hash_menu(st, st.card_wp), true, sel, at);
+                        fired = true;
+                    }
                     else if (kt_in_area(st, mx, my)) // Scrollbar rail paging.
                     {
                         if (kt_on_click(st, mx - st.kt.area.coor.x, my - st.kt.area.coor.y)) fired = true;
@@ -1178,6 +1227,7 @@ namespace netxs::app::parvion
                     upd(st.hover_add, st.hit.addkey);
                     upd(st.hover_remove, st.hit.removekey);
                     upd(st.hover_unit, st.hit.unit);
+                    upd(st.hover_hashalgo, st.hit.hash_algo);
                     if (kt_in_area(st, mx, my)) { if (kt_on_move(st, mx - st.kt.area.coor.x, my - st.kt.area.coor.y)) dirty = true; }
                     else if (kt_clear_hover(st)) dirty = true;
                 }
