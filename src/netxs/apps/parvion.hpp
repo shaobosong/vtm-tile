@@ -199,6 +199,8 @@ namespace netxs::app::parvion
             };
             ctrl.hash_queue.push_back(mk("", "", 0,                       "/home/user/report.pdf",       2, 4ll << 20,   4ll << 20, hash_item::succeeded,
                                          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"));
+            ctrl.hash_queue.push_back(mk("", "", 0,                       "/home/user/notes.txt",        0, 12ll << 10,  12ll << 10, hash_item::succeeded,
+                                         "d41d8cd98f00b204e9800998ecf8427e"));
             ctrl.hash_queue.push_back(mk("deploy", "192.168.0.5", 22,     "/srv/backup/backup.tar.gz",   2, 200ll << 20, 90ll << 20, hash_item::hashing));
             ctrl.hash_queue.push_back(mk("", "", 0,                       "/home/user/images/image.iso", 0, 700ll << 20, 0,          hash_item::queued));
             ctrl.hash_queue.push_back(mk("admin", "files.example.com", 2222, "/data/missing.bin",        3, -1,          0,          hash_item::failed, {}, "No such file or directory"));

@@ -79,6 +79,18 @@ namespace netxs::app::parvion
         cfg.key_of_row = [ctrl](si32 i){ return i >= 0 && i < (si32)ctrl->hash_queue.size() ? i : -1; };
         return cfg;
     }
+    inline auto hash_copy_digest_payload(sftp_remote* ctrl) -> text
+    {
+        auto out = text{};
+        if (!ctrl) return out;
+        for (auto& it : ctrl->hash_queue)
+        {
+            if (!it.selected || it.status != hash_item::succeeded || it.digest.empty()) continue;
+            if (!out.empty()) out += '\n';
+            out += it.digest;
+        }
+        return out;
+    }
     inline auto hash_menu(sftp_remote* ctrl, netxs::wptr<ui::base> panel_wp) -> qmenu_cfg
     {
         namespace m = app::shared::menu;
@@ -90,10 +102,9 @@ namespace netxs::app::parvion
             auto items = std::vector<m::item>{};
             if (hit >= 0 && hit < (si32)ctrl->hash_queue.size())
             {
-                auto& it = ctrl->hash_queue[(size_t)hit];
-                auto digest = it.status == hash_item::succeeded ? it.digest : text{};
-                auto copy = m::item{ .alive = true, .label = "Copy digest", .disabled = digest.empty() };
-                copy.action = [digest](hids& g){ if (!digest.empty()) g.set_clipboard(dot_00, digest, mime::textonly); };
+                auto payload = hash_copy_digest_payload(ctrl);
+                auto copy = m::item{ .alive = true, .label = "Copy digest", .disabled = payload.empty() };
+                copy.action = [payload](hids& g){ if (!payload.empty()) g.set_clipboard(dot_00, payload, mime::textonly); };
                 items.push_back(std::move(copy));
                 auto n = ctrl->hash_selected_count();
                 auto rm = m::item{ .alive = true, .label = n > 1 ? "Remove " + std::to_string(n) + " checksums" : text{ "Remove" } };

@@ -8,17 +8,20 @@ Checksums tab + hashing.hpp). Driven via the same pty + SGR-mouse harness as
 test_parvion_queue.py, whose helpers are imported here.
 
 The app is launched as `vtm-tile -r parvion` with PARVION_DEMO_HASH=1, which seeds the
-hash queue with four synthetic tasks (succeeded / hashing / queued / failed) and sets
+hash queue with five synthetic tasks (succeeded / hashing / queued / failed) and sets
 no_autostart so no real parvionhash backend is spawned. We verify:
 
-  1. The bottom tab strip shows "Checksums (4)"; clicking it lists every seeded task,
+  1. The bottom tab strip shows "Checksums (5)"; clicking it lists every seeded task,
      its algorithm, a final digest, and a failure reason.
   2. Right-clicking a finished task opens the Copy digest / Remove / Clear finished menu.
+  3. Copy digest on a multi-selection writes newline-separated successful digests.
 """
 
 import os
 import sys
 import time
+import base64
+import re
 import tempfile
 import subprocess
 
@@ -29,11 +32,14 @@ from test_parvion_queue import (  # noqa: E402
 import test_parvion_panes as P  # noqa: E402  (ParvionSession that sets the launch cwd)
 
 DEMO_ENV = {"PARVION_DEMO_HASH": "1"}
+DEMO_REPORT_DIGEST = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+DEMO_NOTES_DIGEST = "d41d8cd98f00b204e9800998ecf8427e"
+_OSC52 = re.compile(rb"\x1b\]52;[^;]*;([A-Za-z0-9+/=]+)(?:\x07|\x1b\\)")
 
 
 def _open_checksums_tab(s):
     chars, _ = s.screen()
-    assert grid_contains(chars, "Checksums (4)"), "Checksums tab label missing from the tab strip"
+    assert grid_contains(chars, "Checksums (5)"), "Checksums tab label missing from the tab strip"
     pos = find_text(chars, "Checksums (")
     assert pos, "could not locate the Checksums tab"
     r, c = pos
@@ -48,6 +54,7 @@ def test_checksums_tab_lists_tasks():
             "Source",             # new origin column header
             "Path",               # path column header
             "/home/user/report.pdf",  # full path (local, succeeded)
+            "notes.txt",          # second finished checksum for multi-copy coverage
             "backup.tar.gz",      # remote, hashing
             "image.iso",          # local, queued
             "missing.bin",        # remote, failed
@@ -80,6 +87,39 @@ def test_checksums_context_menu():
             print(f"FAIL test_checksums_context_menu: missing menu items {missing}")
             return False
         print("OK test_checksums_context_menu")
+        return True
+
+
+def test_checksums_multiselect_copy_digest():
+    with ParvionSession(DEMO_ENV) as s:
+        chars = _open_checksums_tab(s)
+        report = find_text(chars, "report.pdf")
+        notes = find_text(chars, "notes.txt")
+        backup = find_text(chars, "backup.tar.gz")
+        if not report or not notes or not backup:
+            print("FAIL test_checksums_multiselect_copy_digest: rows not found")
+            return False
+        s.click(report[1] + 1, report[0] + 1)
+        s.click(backup[1] + 1, backup[0] + 1, button=16)  # Include a non-finished row; it has no digest.
+        s.click(notes[1] + 1, notes[0] + 1, button=16)
+        s.click(report[1] + 1, report[0] + 1, button=2)   # Right-click a row already in the selection.
+        cp = find_text(s.screen()[0], "Copy digest")
+        if not cp:
+            print("FAIL test_checksums_multiselect_copy_digest: Copy digest menu item missing")
+            return False
+        before = len(s._buf)
+        s.click(cp[1] + 1, cp[0] + 1)
+        s.feed(0.6)
+        hits = _OSC52.findall(s._buf[before:])
+        if not hits:
+            print("FAIL test_checksums_multiselect_copy_digest: no clipboard sequence emitted")
+            return False
+        got = base64.b64decode(hits[-1]).decode("utf-8", "replace")
+        want = DEMO_REPORT_DIGEST + "\n" + DEMO_NOTES_DIGEST
+        if got != want:
+            print(f"FAIL test_checksums_multiselect_copy_digest: clipboard {got!r} != {want!r}")
+            return False
+        print("OK test_checksums_multiselect_copy_digest")
         return True
 
 
@@ -277,6 +317,7 @@ def test_hash_settings_single_dropdown():
 TESTS = [
     test_checksums_tab_lists_tasks,
     test_checksums_context_menu,
+    test_checksums_multiselect_copy_digest,
     test_local_file_hash_end_to_end,
     test_backend_hash_non_ascii_path,
     test_no_checksum_on_folder,
