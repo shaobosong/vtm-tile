@@ -58,6 +58,7 @@ namespace netxs::app::parvion
         const void*  anchor_id = nullptr;
         const void*  head_id   = nullptr;
         si32         base_lo_ln = 0, base_lo_cl = 0, base_hi_ln = 0, base_hi_cl = 0;
+        si32         drag_x = 0, drag_y = 0;
         ui64         seen_epoch = 0;
     };
 
@@ -238,6 +239,55 @@ namespace netxs::app::parvion
         if (auto sb = tb_hsb(st); sb.ok && my == sb.top && mx >= sb.x && mx < sb.x + sb.track_h) return true;
         return faux;
     }
+    inline auto tb_drag_step(si32 distance) -> si32
+    {
+        return std::clamp(distance, si32{ 1 }, si32{ 8 });
+    }
+    inline auto tb_drag_head(textbox_state& st, textbox_cfg const& cfg, si32 mx, si32 my) -> bool
+    {
+        auto n = cfg.line_count ? cfg.line_count() : 0;
+        if (!st.dragging || n == 0) return faux;
+        auto p = tb_hit(st, cfg, mx, my);
+        if (st.selm == textbox_state::sel_char)
+        {
+            st.head_ln = p.ln; st.head_cl = p.cl; st.head_id = cfg.line_id ? cfg.line_id(p.ln) : nullptr;
+        }
+        else
+        {
+            auto [elo, ehi] = st.selm == textbox_state::sel_word ? tb_word_span(cfg, p) : tb_line_span(cfg, p);
+            auto blo = tb_pos{ st.base_lo_ln, st.base_lo_cl }, bhi = tb_pos{ st.base_hi_ln, st.base_hi_cl };
+            auto lo = elo < blo ? elo : blo, hi = bhi < ehi ? ehi : bhi;
+            st.anchor_ln = lo.ln; st.anchor_cl = lo.cl; st.head_ln = hi.ln; st.head_cl = hi.cl;
+            st.anchor_id = cfg.line_id ? cfg.line_id(lo.ln) : nullptr;
+            st.head_id   = cfg.line_id ? cfg.line_id(hi.ln) : nullptr;
+        }
+        return true;
+    }
+    inline auto tb_drag_autoscroll(textbox_state& st, textbox_cfg const& cfg) -> bool
+    {
+        if (!st.dragging) return faux;
+        auto changed = faux;
+        if (st.body_rows > 0)
+        {
+            auto maxv = std::max(0, st.total - st.body_rows);
+            auto next = st.scroll;
+            if      (st.drag_y <  st.body_top)                next -= tb_drag_step(st.body_top - st.drag_y);
+            else if (st.drag_y >= st.body_top + st.body_rows) next += tb_drag_step(st.drag_y - (st.body_top + st.body_rows - 1));
+            next = std::clamp(next, 0, maxv);
+            if (next != st.scroll) { st.scroll = next; st.follow = faux; changed = true; }
+        }
+        if (st.disp_w > 0)
+        {
+            auto maxh = std::max(0, st.content_w - st.disp_w);
+            auto next = st.hscroll;
+            if      (st.drag_x <  1)         next -= tb_drag_step(1 - st.drag_x);
+            else if (st.drag_x >= st.disp_w) next += tb_drag_step(st.drag_x - st.disp_w + 1);
+            next = std::clamp(next, 0, maxh);
+            if (next != st.hscroll) { st.hscroll = next; changed = true; }
+        }
+        if (changed) tb_drag_head(st, cfg, st.drag_x, st.drag_y);
+        return changed;
+    }
 
     // ---- Render ------------------------------------------------------------------------------------
     inline void textbox_render(textbox_state& st, textbox_cfg const& cfg, auto& canvas, twod size)
@@ -310,7 +360,7 @@ namespace netxs::app::parvion
     {
         auto state_ref = std::make_shared<textbox_state*>(nullptr);
         auto form = ui::mock::ctor()->active()
-            ->plugin<pro::mouse>()->plugin<pro::focus>(pro::focus::mode::focusable)->plugin<pro::keybd>();
+            ->plugin<pro::mouse>()->plugin<pro::focus>(pro::focus::mode::focusable)->plugin<pro::keybd>()->plugin<pro::timer>();
         form->invoke([&, cfgv = std::move(cfg), state_ref](auto& boss)
         {
             auto& st  = boss.base::field(textbox_state{});
@@ -318,6 +368,19 @@ namespace netxs::app::parvion
             *state_ref = &st;
             boss.LISTEN(tier::release, e2::render::any, parent_canvas) { textbox_render(st, cfg, parent_canvas, boss.base::size()); };
             boss.LISTEN(tier::release, e2::form::state::focus::count, count) { st.focused = !!count; boss.base::deface(); };
+            auto arm_autoscroll = [&boss, &st, &cfg]
+            {
+                auto& timer = boss.base::template plugin<pro::timer>();
+                timer.pacify();
+                if (!tb_drag_autoscroll(st, cfg)) return;
+                boss.base::deface();
+                timer.actify(ui::skin::globals().repeat_rate, [&boss, &st, &cfg](auto) -> bool
+                {
+                    if (!tb_drag_autoscroll(st, cfg)) return faux;
+                    boss.base::deface();
+                    return true;
+                });
+            };
 
             boss.on(tier::mouserelease, input::key::LeftDown, [&](hids& gear)
             {
@@ -408,6 +471,7 @@ namespace netxs::app::parvion
                 if (n == 0) return;
                 pro::focus::set(boss.This(), gear.id, solo::on);
                 auto p = tb_hit(st, cfg, px, py);
+                st.drag_x = px; st.drag_y = py;
                 st.anchor_ln = st.head_ln = p.ln; st.anchor_cl = st.head_cl = p.cl;
                 st.anchor_id = st.head_id = cfg.line_id ? cfg.line_id(p.ln) : nullptr;
                 st.selm = textbox_state::sel_char; st.sel = true; st.dragging = true;
@@ -415,28 +479,16 @@ namespace netxs::app::parvion
                 st.seen_epoch = cfg.epoch ? cfg.epoch() : 0;
                 boss.base::deface();
             };
-            boss.LISTEN(tier::release, e2::form::drag::pull::_<hids::buttons::left>, gear)
+            boss.LISTEN(tier::release, e2::form::drag::pull::_<hids::buttons::left>, gear, -, (arm_autoscroll))
             {
                 auto mx = (si32)gear.coord.x, my = (si32)gear.coord.y;
                 if (st.dragging)
                 {
-                    auto n = cfg.line_count ? cfg.line_count() : 0;
-                    if (n == 0) return;
-                    auto p = tb_hit(st, cfg, mx, my);
-                    if (st.selm == textbox_state::sel_char)
-                    {
-                        st.head_ln = p.ln; st.head_cl = p.cl; st.head_id = cfg.line_id ? cfg.line_id(p.ln) : nullptr;
-                    }
-                    else
-                    {
-                        auto [elo, ehi] = st.selm == textbox_state::sel_word ? tb_word_span(cfg, p) : tb_line_span(cfg, p);
-                        auto blo = tb_pos{ st.base_lo_ln, st.base_lo_cl }, bhi = tb_pos{ st.base_hi_ln, st.base_hi_cl };
-                        auto lo = elo < blo ? elo : blo, hi = bhi < ehi ? ehi : bhi;
-                        st.anchor_ln = lo.ln; st.anchor_cl = lo.cl; st.head_ln = hi.ln; st.head_cl = hi.cl;
-                        st.anchor_id = cfg.line_id ? cfg.line_id(lo.ln) : nullptr;
-                        st.head_id   = cfg.line_id ? cfg.line_id(hi.ln) : nullptr;
-                    }
-                    boss.base::deface(); return;
+                    st.drag_x = mx; st.drag_y = my;
+                    if (!tb_drag_head(st, cfg, mx, my)) return;
+                    arm_autoscroll();
+                    boss.base::deface();
+                    return;
                 }
                 if      (st.drag == textbox_state::d_vsb) { tb_vsb_to(st, my, tb_vsb(st)); st.follow = st.scroll == std::max(0, st.total - st.body_rows); boss.base::deface(); }
                 else if (st.drag == textbox_state::d_hsb) { tb_hsb_to(st, mx, tb_hsb(st)); boss.base::deface(); }
@@ -444,9 +496,9 @@ namespace netxs::app::parvion
             // A drag ends: keep any text selection, else drop the scrollbar-drag flags (inlined into
             // both events — the LISTEN macro captures by reference, so a shared local would dangle).
             boss.LISTEN(tier::release, e2::form::drag::stop::_<hids::buttons::left>, gear)
-            { if (st.dragging) { st.dragging = faux; boss.base::deface(); return; } auto was = st.drag; st.drag = textbox_state::d_none; st.sb_drag = st.hsb_drag = faux; if (was != textbox_state::d_none) boss.base::deface(); };
+            { if (st.dragging) { boss.base::template plugin<pro::timer>().pacify(); st.dragging = faux; boss.base::deface(); return; } auto was = st.drag; st.drag = textbox_state::d_none; st.sb_drag = st.hsb_drag = faux; if (was != textbox_state::d_none) boss.base::deface(); };
             boss.LISTEN(tier::release, e2::form::drag::cancel::_<hids::buttons::left>, gear)
-            { if (st.dragging) { st.dragging = faux; boss.base::deface(); return; } auto was = st.drag; st.drag = textbox_state::d_none; st.sb_drag = st.hsb_drag = faux; if (was != textbox_state::d_none) boss.base::deface(); };
+            { if (st.dragging) { boss.base::template plugin<pro::timer>().pacify(); st.dragging = faux; boss.base::deface(); return; } auto was = st.drag; st.drag = textbox_state::d_none; st.sb_drag = st.hsb_drag = faux; if (was != textbox_state::d_none) boss.base::deface(); };
 
             auto span_select = [&](hids& gear, textbox_state::selmode mode, bool dragging)
             {
@@ -457,6 +509,7 @@ namespace netxs::app::parvion
                 pro::focus::set(boss.This(), gear.id, solo::on);
                 auto p = tb_hit(st, cfg, mx, my);
                 auto [lo, hi] = mode == textbox_state::sel_word ? tb_word_span(cfg, p) : tb_line_span(cfg, p);
+                st.drag_x = mx; st.drag_y = my;
                 st.base_lo_ln = lo.ln; st.base_lo_cl = lo.cl; st.base_hi_ln = hi.ln; st.base_hi_cl = hi.cl;
                 st.anchor_ln = lo.ln; st.anchor_cl = lo.cl; st.head_ln = hi.ln; st.head_cl = hi.cl;
                 st.anchor_id = cfg.line_id ? cfg.line_id(lo.ln) : nullptr;

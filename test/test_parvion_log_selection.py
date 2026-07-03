@@ -81,6 +81,20 @@ def _multiclick(s, col, row, n, gap=0.05):
     s.feed(0.6)
 
 
+def _drag_hold(s, points, hold=0.9, button=0, settle=0.6):
+    """Press, move through `points`, keep the button down while the app auto-scrolls, then release."""
+    c0, r0 = points[0]
+    os.write(s.master_fd, f"\x1b[<{button};{c0};{r0}M".encode())
+    time.sleep(0.04)
+    for c, r in points[1:]:
+        os.write(s.master_fd, f"\x1b[<{button + 32};{c};{r}M".encode())
+        time.sleep(0.04)
+    _pump(s, hold)
+    cl, rl = points[-1]
+    os.write(s.master_fd, f"\x1b[<{button};{cl};{rl}m".encode())
+    s.feed(settle)
+
+
 def _find_copy_cell(chars):
     """(row, col) of the dedicated 'Copy' menu row (not 'Copy to clipboard' / 'Clear'), or None."""
     for r in range(T.ROWS):
@@ -119,6 +133,58 @@ def test_log_char_drag_selects():
         text = "".join(chars[lr][c] or " " for c in cells)
         if text != "log line":
             print(f"FAIL: highlighted {text!r}, expected 'log line'"); return False
+    print("PASS"); return True
+
+
+def test_log_drag_selection_autoscrolls_vertically():
+    print("TEST: parvion message log - selection drag auto-scrolls vertically ... ", end="", flush=True)
+    with _session() as s:
+        info = _enter_log(s)
+        if info is None:
+            print("FAIL: message log / seeded lines not found"); return False
+        lr, lc, _ = info
+        chars, _ = s.screen()
+        before = "\n".join(T.row_text(chars, r) for r in range(T.ROWS))
+        if "log line 00" in before:
+            print("FAIL: top seeded line already visible before upward drag"); return False
+        _drag_hold(s, [(lc + 1, lr + 1), (lc + 1, 1)], hold=1.0)
+        chars, _ = s.screen()
+        after = "\n".join(T.row_text(chars, r) for r in range(T.ROWS))
+        if "log line 00" not in after:
+            print("FAIL: upward selection drag did not scroll to earlier log lines"); return False
+        if not any(_selbg_cells(s, r) for r in range(T.ROWS)):
+            print("FAIL: selection highlight disappeared after vertical auto-scroll"); return False
+    print("PASS"); return True
+
+
+def test_log_drag_selection_autoscrolls_horizontally():
+    print("TEST: parvion message log - selection drag auto-scrolls horizontally ... ", end="", flush=True)
+    old_cols, old_rows = T.COLS, T.ROWS
+    T.COLS = 100  # Keep the seeded overflow tail off-screen at hscroll=0.
+    try:
+        with _session() as s:
+            if _enter_log(s) is None:
+                print("FAIL: message log / seeded lines not found"); return False
+            chars, _ = s.screen()
+            pos = T.find_text(chars, "a very long")
+            if pos is None:
+                print("FAIL: seeded overflow line not found"); return False
+            lr, lc = pos
+            before = T.row_text(chars, lr)
+            if "horizontal scrollbar" in before:
+                print("FAIL: overflow tail already visible before rightward drag"); return False
+            _drag_hold(s, [(lc + 1, lr + 1), (T.COLS + 24, lr + 1)], hold=1.0)
+            chars, _ = s.screen()
+            after = T.row_text(chars, lr)
+            if "horizontal scrollbar" not in after and "for testing" not in after:
+                print("FAIL: rightward selection drag did not expose the overflow tail"); return False
+            clip = _copy_via_menu(s, lr, min(T.COLS - 5, max(2, lc + 2)))
+            if clip is None:
+                print("FAIL: no clipboard sequence after horizontal auto-scroll selection"); return False
+            if "horizontal scrollbar" not in clip and "for testing" not in clip:
+                print(f"FAIL: copied selection missed overflow text: {clip!r}"); return False
+    finally:
+        T.COLS, T.ROWS = old_cols, old_rows
     print("PASS"); return True
 
 
@@ -259,6 +325,8 @@ def test_log_selection_survives_log_update():
 
 TESTS = [
     test_log_char_drag_selects,
+    test_log_drag_selection_autoscrolls_vertically,
+    test_log_drag_selection_autoscrolls_horizontally,
     test_log_left_click_cancels,
     test_log_right_click_copies_selection,
     test_log_double_click_word,
