@@ -5,7 +5,7 @@
 """
 End-to-end TUI tests for the Parvion local file-preview pane operations:
   - clicking the blank area (right of / below the columns) never selects an item;
-  - right-click context menus (blank: Refresh / Create Directory; item: Upload / Delete / Rename);
+  - right-click context menus (blank: Refresh / Create Directory; item: Upload / Copy full path / Delete / Rename);
   - Create Directory, Delete and Rename act on the real local filesystem.
 
 The app is launched as `vtm-tile -r parvion` with the child's cwd set to a fresh temp directory, so the
@@ -17,6 +17,7 @@ import re
 import sys
 import pty
 import time
+import base64
 import select
 import signal
 import struct
@@ -34,6 +35,7 @@ VTM_TILE_BINARY = os.path.abspath(os.environ.get(
 COLS, ROWS = 120, 44
 SETTLE = 1.5
 _CSI = re.compile(rb"\x1b\[([\x30-\x3f]*)([\x20-\x2f]*)([\x40-\x7e])")
+_OSC52 = re.compile(rb"\x1b\]52;[^;]*;([A-Za-z0-9+/=]+)(?:\x07|\x1b\\)")
 
 
 def kill_all_vtm():
@@ -334,7 +336,7 @@ def test_blank_context_menu():
 
 
 def test_item_context_menu():
-    """Right-click on a file opens Upload / Delete / Rename (local pane)."""
+    """Right-click on a file opens Upload / Copy full path / Delete / Rename (local pane)."""
     print("TEST: parvion pane - item context menu ... ", end="", flush=True)
     d = make_tree()
     try:
@@ -345,9 +347,42 @@ def test_item_context_menu():
                 return False
             s.click(pos[1] + 1, pos[0] + 1, button=2)
             chars = s.screen()[0]
-            missing = [w for w in ("Upload", "Delete", "Rename") if not grid_contains(chars, w)]
+            missing = [w for w in ("Upload", "Copy full path", "Delete", "Rename") if not grid_contains(chars, w)]
             if missing:
                 print(f"FAIL - item menu missing {missing}")
+                return False
+            print("PASS")
+            return True
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_copy_full_path():
+    """Item menu -> Copy full path writes the selected item's absolute path to the clipboard."""
+    print("TEST: parvion pane - Copy full path ... ", end="", flush=True)
+    d = make_tree()
+    try:
+        with ParvionSession(d) as s:
+            pos = find_text(s.screen()[0], "alpha.txt")
+            if pos is None:
+                print("FAIL - alpha.txt not listed")
+                return False
+            s.click(pos[1] + 1, pos[0] + 1, button=2)
+            cp = find_text(s.screen()[0], "Copy full path")
+            if cp is None:
+                print("FAIL - 'Copy full path' not in menu")
+                return False
+            before = len(s._buf)
+            s.click(cp[1] + 1, cp[0] + 1, button=0)
+            s.feed(0.6)
+            hits = _OSC52.findall(s._buf[before:])
+            if not hits:
+                print("FAIL - no clipboard sequence emitted")
+                return False
+            got = base64.b64decode(hits[-1]).decode("utf-8", "replace")
+            want = os.path.join(d, "alpha.txt")
+            if got != want:
+                print(f"FAIL - clipboard {got!r} != {want!r}")
                 return False
             print("PASS")
             return True
@@ -602,6 +637,7 @@ TESTS = [
     test_ctrl_drag_deselects,
     test_blank_context_menu,
     test_item_context_menu,
+    test_copy_full_path,
     test_create_directory,
     test_delete_item,
     test_delete_cancel,

@@ -840,6 +840,18 @@ namespace netxs::app::parvion
         }
     }
 
+    inline auto pane_selection_paths(pane_state const& st) -> text // Full paths for marked real rows, newline-separated.
+    {
+        auto out = text{};
+        auto& its = st.cur_items();
+        for (auto row : st.marked) if (row > 0 && row - 1 < (si32)its.size())
+        {
+            if (!out.empty()) out += '\n';
+            out += child_path(st.cur_path(), its[(size_t)(row - 1)].name, st.is_local);
+        }
+        return out;
+    }
+
     inline void pane_hash_selection(pane_state& st, si32 algo) // Enqueue a checksum task per marked file (skips dirs).
     {
         if (!st.ctrl) return;
@@ -884,6 +896,12 @@ namespace netxs::app::parvion
             items.push_back(std::move(row));
         };
         add(st.remote ? text{ "Download" } : text{ "Upload" }, [&st]{ pane_transfer_selection(st); });
+        {
+            auto paths = pane_selection_paths(st);
+            auto row = m::item{ .alive = true, .label = "Copy full path", .disabled = paths.empty() };
+            row.action = [paths](hids& gear){ if (!paths.empty()) gear.set_clipboard(dot_00, paths, mime::textonly); };
+            items.push_back(std::move(row));
+        }
         add("Delete", [&st, panel_wp]
         {
             // Count the victims exactly like pane_delete_selection (skip row 0 = "..") so the
