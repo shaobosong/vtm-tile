@@ -1083,6 +1083,7 @@ namespace netxs::app::parvion
         bool  use_parallel = true;    // Split large files across parallel connections.
         si64  parallel_threshold = 4ll << 20; // "Larger than" gate / per-chunk target (4 MiB).
         ui32  max_connections = 6;    // Cap on parallel connections (chunks) per transfer.
+        ui32  parallel_connect_burst = 6; // Max fresh SSH handshakes started at once.
 
         // Persisted user settings (Edit -> Settings dialog): the SFTP subset of FileZilla's
         // Connection / Connection-SFTP option pages. load()ed in the constructor and applied onto
@@ -1151,10 +1152,12 @@ namespace netxs::app::parvion
             if (auto e = std::getenv("PARVION_NO_PARALLEL")) { if (*e && *e != '0') use_parallel = faux; }
             if (auto e = std::getenv("PARVION_MAX_CONN")) { if (auto n = std::atoi(e); n > 0) max_connections = (ui32)n; }
             if (auto e = std::getenv("PARVION_CHUNKS"))   { if (auto n = std::atoi(e); n > 0) max_connections = (ui32)n; }
+            if (auto e = std::getenv("PARVION_CONNECT_BURST")) { if (auto n = std::atoi(e); n > 0) parallel_connect_burst = (ui32)n; }
             if (auto e = std::getenv("PARVION_THRESHOLD_MB")) { if (auto n = std::atoll(e); n > 0) parallel_threshold = (si64)n << 20; }
             //   PARVION_THRESHOLD_BYTES=<n> same gate in bytes (test seam: forces small files to chunk)
             if (auto e = std::getenv("PARVION_THRESHOLD_BYTES")) { if (auto n = std::atoll(e); n > 0) parallel_threshold = (si64)n; }
             if (max_connections > 16) max_connections = 16; // sane ceiling
+            parallel_connect_burst = std::clamp(parallel_connect_burst, ui32{ 1 }, ui32{ 16 });
             //   PARVION_KEEPALIVE_SEC=<n> idle seconds before a control keepalive (0 disables)
             //   PARVION_RECONNECT_TRIES=<n> cap on auto-reconnect attempts after a drop (0 = unlimited)
             if (auto e = std::getenv("PARVION_KEEPALIVE_SEC"))   { if (auto n = std::atoi(e); n >= 0) keepalive_sec = n; }
@@ -2011,10 +2014,13 @@ namespace netxs::app::parvion
                         workers.push_back(std::move(w));
                         continue;
                     }
-                    // Downloads (no truncate race) and upload-resume start every chunk at once; a fresh
-                    // upload starts only the leader and parks the followers until pump_queue sees the
-                    // remote truncated+opened.
-                    auto start_now = item.download || active_resume || c == 0;
+                    // Starting many fresh SSH handshakes at the exact same tick can trip OpenSSH
+                    // MaxStartups/per-source throttling on localhost before any bytes move. Start a
+                    // bounded burst, then pump_queue releases parked chunks as those handshakes finish.
+                    // Fresh upload followers still additionally wait for chunk 0 to truncate/open the
+                    // remote target before they can write absolute offsets.
+                    auto burst = (size_t)std::min(max_connections, parallel_connect_burst);
+                    auto start_now = (item.download || active_resume) ? c < burst : c == 0;
                     // Reuse a pooled connection for any chunk (leader or follower). A parked follower
                     // taken from the pool is forced to s_init so it isn't counted as finished; pump_queue
                     // tells a pooled parked worker (still connected) from a fresh one and rearms vs begins.
@@ -2228,19 +2234,29 @@ namespace netxs::app::parvion
                     if (!w->finished()) all_ok = faux;
                     if (w->state == xfer_worker::s_err) { any_err = true; if (item.error.empty()) item.error = w->error; }
                 }
-                // Parallel upload: once the leader (chunk 0) has truncated+opened
-                // the remote file, release the parked follower chunks.
-                if (holding_followers && !any_err && !workers.empty() && workers.front()->leader_ready())
+                // Release parked parallel workers. For a fresh upload, followers must wait until the
+                // leader has truncated/opened the remote file; downloads and upload-resume have no
+                // truncate race, so their parked workers are only the SSH-handshake burst limiter.
+                auto upload_followers_ready = item.download || active_resume
+                                           || (!workers.empty() && workers.front()->leader_ready());
+                if (holding_followers && !any_err && upload_followers_ready)
                 {
-                    // Release each parked follower: a pooled one (still connected) reissues its chunk
-                    // command (rearm); a fresh one connects (begin).
+                    auto connecting = si32{};
+                    for (auto& w : workers) if (w->state == xfer_worker::s_connecting) ++connecting;
+                    auto burst = (si32)std::min(max_connections, parallel_connect_burst);
+                    auto still_parked = faux;
                     for (auto i = size_t{ 1 }; i < workers.size(); ++i)
                     {
+                        if (workers[i]->state != xfer_worker::s_init) continue;
+                        if (connecting >= burst) { still_parked = true; continue; }
+                        // A pooled worker is already authenticated, so rearm it immediately; a fresh
+                        // worker enters s_connecting and counts against this tick's handshake burst.
                         if (workers[i]->session.alive()) workers[i]->rearm();
-                        else                             workers[i]->begin();
+                        else { workers[i]->begin(); ++connecting; }
                     }
-                    holding_followers = faux;
-                    if (!active_state_path.empty()) write_state_status(active_state_path, state_ready);
+                    holding_followers = still_parked;
+                    if (!holding_followers && !active_state_path.empty() && !item.download && !active_resume)
+                        write_state_status(active_state_path, state_ready);
                 }
                 // Persist each chunk's progress so an interrupted upload resumes.
                 if (!active_state_path.empty())
