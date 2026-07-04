@@ -109,6 +109,7 @@ namespace netxs::app::parvion
         si32 hover_border = -1, col_drag = -1;
         si32 sel_anchor = -1;
         si32 rubber_a = -1, rubber_b = -1;
+        si32 drag_y = 0;
         std::set<si32> drag_base;
         bool rubber_ctrl = faux, rubber_add = true;
         dmode drag = d_none;
@@ -320,6 +321,28 @@ namespace netxs::app::parvion
             for (auto i = lo; i <= hi; ++i) { auto k = i >= 0 && i < s.disp() ? s.key_of_row(i) : -1; if (k >= 0) s.set_sel(k, true); }
         }
     }
+    inline auto q_drag_step(si32 distance) -> si32
+    {
+        return std::clamp(distance, si32{ 1 }, si32{ 8 });
+    }
+    inline auto q_rubber_row_at_drag(table_state const& st) -> si32
+    {
+        return st.scroll + std::clamp(st.drag_y - st.body_top, 0, std::max(0, st.body_rows - 1));
+    }
+    inline auto q_rubber_autoscroll(table_state& st, qsel_cfg const& s) -> bool
+    {
+        if (st.drag != table_state::d_rubber || st.body_rows <= 0) return faux;
+        auto maxv = std::max(0, st.total - st.body_rows);
+        auto next = st.scroll;
+        if      (st.drag_y <  st.body_top)                next -= q_drag_step(st.body_top - st.drag_y);
+        else if (st.drag_y >= st.body_top + st.body_rows) next += q_drag_step(st.drag_y - (st.body_top + st.body_rows - 1));
+        next = std::clamp(next, 0, maxv);
+        if (next == st.scroll) return faux;
+        st.scroll = next;
+        st.follow = faux;
+        q_rubber_pull(st, s, q_rubber_row_at_drag(st));
+        return true;
+    }
 
     // ---- Menu layer --------------------------------------------------------------------------------
     inline auto build_columns_menu(std::vector<qtable::col_toggle> const& roster,
@@ -454,7 +477,7 @@ namespace netxs::app::parvion
     inline auto make_table(table_cfg cfg) -> ui::sptr
     {
         auto form = ui::mock::ctor()->active()
-            ->plugin<pro::mouse>()->plugin<pro::focus>(pro::focus::mode::focusable)->plugin<pro::keybd>();
+            ->plugin<pro::mouse>()->plugin<pro::focus>(pro::focus::mode::focusable)->plugin<pro::keybd>()->plugin<pro::timer>();
         form->invoke([&, cfgv = std::move(cfg)](auto& boss)
         {
             auto& st  = boss.base::field(table_state{});
@@ -466,6 +489,19 @@ namespace netxs::app::parvion
                 table_render(st, cfg, parent_canvas, boss.base::size());
             };
             boss.LISTEN(tier::release, e2::form::state::focus::count, count) { st.focused = !!count; boss.base::deface(); };
+            auto arm_autoscroll = [&boss, &st, &cfg]
+            {
+                auto& timer = boss.base::template plugin<pro::timer>();
+                timer.pacify();
+                if (!cfg.selection || !q_rubber_autoscroll(st, cfg.selection())) return;
+                boss.base::deface();
+                timer.actify(ui::skin::globals().repeat_rate, [&boss, &st, &cfg](auto) -> bool
+                {
+                    if (!cfg.selection || !q_rubber_autoscroll(st, cfg.selection())) return faux;
+                    boss.base::deface();
+                    return true;
+                });
+            };
 
             boss.on(tier::mouserelease, input::key::LeftDown, [&](hids& gear)
             {
@@ -587,11 +623,13 @@ namespace netxs::app::parvion
                 if (cfg.selection && py >= st.body_top && py < st.body_top + st.body_rows)
                 {
                     pro::focus::set(boss.This(), gear.id, solo::on);
+                    st.drag_y = py;
+                    st.follow = faux;
                     q_rubber_begin(st, cfg.selection(), st.scroll + (py - st.body_top), !!(gear.ctlstat & hids::anyCtrl));
                     boss.base::deface(); return;
                 }
             };
-            boss.LISTEN(tier::release, e2::form::drag::pull::_<hids::buttons::left>, gear)
+            boss.LISTEN(tier::release, e2::form::drag::pull::_<hids::buttons::left>, gear, -, (arm_autoscroll))
             {
                 auto mx = (si32)gear.coord.x, my = (si32)gear.coord.y;
                 switch (st.drag)
@@ -610,16 +648,20 @@ namespace netxs::app::parvion
                         break;
                     }
                     case table_state::d_rubber:
-                        q_rubber_pull(st, cfg.selection(), st.scroll + std::clamp(my - st.body_top, 0, std::max(0, st.body_rows - 1))); boss.base::deface(); break;
+                        st.drag_y = my;
+                        q_rubber_pull(st, cfg.selection(), q_rubber_row_at_drag(st));
+                        arm_autoscroll();
+                        boss.base::deface();
+                        break;
                     default: break;
                 }
             };
             // A drag ends: drop the gesture mode and transient drag flags (inlined into both events —
             // the LISTEN macro captures by reference, so a shared local lambda would dangle).
             boss.LISTEN(tier::release, e2::form::drag::stop::_<hids::buttons::left>,   gear)
-            { auto was = st.drag; st.drag = table_state::d_none; st.sb_drag = st.hsb_drag = faux; st.col_drag = -1; st.rubber_a = st.rubber_b = -1; if (was != table_state::d_none) boss.base::deface(); };
+            { boss.base::template plugin<pro::timer>().pacify(); auto was = st.drag; st.drag = table_state::d_none; st.sb_drag = st.hsb_drag = faux; st.col_drag = -1; st.rubber_a = st.rubber_b = -1; if (was != table_state::d_none) boss.base::deface(); };
             boss.LISTEN(tier::release, e2::form::drag::cancel::_<hids::buttons::left>, gear)
-            { auto was = st.drag; st.drag = table_state::d_none; st.sb_drag = st.hsb_drag = faux; st.col_drag = -1; st.rubber_a = st.rubber_b = -1; if (was != table_state::d_none) boss.base::deface(); };
+            { boss.base::template plugin<pro::timer>().pacify(); auto was = st.drag; st.drag = table_state::d_none; st.sb_drag = st.hsb_drag = faux; st.col_drag = -1; st.rubber_a = st.rubber_b = -1; if (was != table_state::d_none) boss.base::deface(); };
             boss.on(tier::mouserelease, input::key::LeftDoubleClick, [&](hids& gear)
             {
                 if (!st.ctrl) return;

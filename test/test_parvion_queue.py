@@ -295,6 +295,17 @@ class ParvionSession:
         self._write(f"\x1b[<{button};{cl};{rl}m".encode())
         self.feed(settle)
 
+    def drag_hold(self, start, hold_at, button=0, hold=1.2, settle=0.6):
+        """Drag to hold_at, keep the button down while timers run, then release there."""
+        c0, r0 = start
+        c1, r1 = hold_at
+        self._write(f"\x1b[<{button};{c0};{r0}M".encode())
+        time.sleep(0.04)
+        self._write(f"\x1b[<{button + 32};{c1};{r1}M".encode())
+        self.feed(hold)
+        self._write(f"\x1b[<{button};{c1};{r1}m".encode())
+        self.feed(settle)
+
 
 # ----- grid query helpers (1-based mouse coords, 0-based grid indices) -----
 
@@ -1121,6 +1132,47 @@ def test_queue_ctrl_drag_deselects():
         return True
 
 
+def test_queue_rubber_band_autoscrolls_outside_body():
+    """Holding a rubber-band drag outside the queue body keeps scrolling and extends selection."""
+    print("TEST: parvion - queue rubber-band auto-scrolls outside body ... ", end="", flush=True)
+    env = {"PARVION_DEMO_QUEUE": "1", "PARVION_DEMO_QUEUE_N": "40"}
+    with ParvionSession(env) as s:
+        chars, bg = s.screen()
+        p39 = find_text(chars, "file_39.dat")
+        if p39 is None:
+            print("FAIL - bottom overflow row not visible")
+            return False
+        unsel = bg[p39[0]][10]
+
+        # The queue starts pinned to the bottom. Dragging above the visible table should scroll up
+        # while the button is held and select the newly revealed top rows.
+        s.drag_hold((10, p39[0] + 1), (10, 20), hold=1.3)
+        chars, bg = s.screen()
+        p00 = find_text(chars, "file_00.dat")
+        if p00 is None:
+            print("FAIL - drag above body did not scroll up to early rows")
+            return False
+        up_bg = bg[p00[0]][10]
+        if up_bg is None or up_bg == unsel:
+            print(f"FAIL - row revealed by upward auto-scroll not selected (bg {unsel} -> {up_bg})")
+            return False
+
+        # Now start from the revealed top row and hold below the body; the table should scroll down
+        # and keep extending the same rubber-band selection to bottom rows.
+        s.drag_hold((10, p00[0] + 1), (10, ROWS), hold=1.3)
+        chars, bg = s.screen()
+        p39 = find_text(chars, "file_39.dat")
+        if p39 is None:
+            print("FAIL - drag below body did not scroll back down to later rows")
+            return False
+        down_bg = bg[p39[0]][10]
+        if down_bg is None or down_bg == unsel:
+            print(f"FAIL - row revealed by downward auto-scroll not selected (bg {unsel} -> {down_bg})")
+            return False
+        print("PASS")
+        return True
+
+
 def test_pane_rubber_band_multi_select():
     """A rubber-band drag in the file pane highlights every swept row (multi-select)."""
     print("TEST: parvion - file pane rubber-band multi-select ... ", end="", flush=True)
@@ -1245,6 +1297,7 @@ TESTS = [
     test_queue_rubber_band_blank_deselects_last,
     test_queue_ctrl_drag_adds_to_selection,
     test_queue_ctrl_drag_deselects,
+    test_queue_rubber_band_autoscrolls_outside_body,
     test_pane_rubber_band_multi_select,
     test_pane_ctrl_click_multi_select,
     test_pane_header_has_dividers,
