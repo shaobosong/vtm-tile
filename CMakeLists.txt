@@ -32,6 +32,9 @@ target_include_directories(vtm-tile PRIVATE ${LUA_INCLUDE_DIR})
 
 target_link_libraries(vtm-desk PRIVATE Lua::Lua)
 target_link_libraries(vtm-tile PRIVATE Lua::Lua)
+if(WIN32)
+    target_link_libraries(vtm-tile PRIVATE bcrypt)
+endif()
 # target_link_libraries(term PRIVATE Lua::Lua)
 # target_link_libraries(calc PRIVATE Lua::Lua)
 

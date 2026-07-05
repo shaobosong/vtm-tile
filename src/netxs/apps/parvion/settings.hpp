@@ -39,15 +39,15 @@ namespace netxs::app::parvion
     // Hash-verification algorithms (Settings dropdown + right-click submenu). The index is
     // persisted (parvion_settings::hash_algo) and mapped to a coreutils-style name passed to
     // the `parvionhash` backend. Order is fixed; SHA-256 (index 2) is the default.
-    inline constexpr auto hash_algo_count = si32{ 4 };
+    inline constexpr auto hash_algo_count = si32{ 5 };
     inline auto hash_algo_label(si32 a) -> view // UI label
     {
-        static constexpr auto names = std::array<view, hash_algo_count>{{ "MD5", "SHA-1", "SHA-256", "SHA-512" }};
+        static constexpr auto names = std::array<view, hash_algo_count>{{ "MD5", "SHA-1", "SHA-256", "SHA-384", "SHA-512" }};
         return names[(size_t)std::clamp(a, 0, hash_algo_count - 1)];
     }
     inline auto hash_algo_name(si32 a) -> view // backend arg / hash.hpp make_hasher id
     {
-        static constexpr auto names = std::array<view, hash_algo_count>{{ "md5", "sha1", "sha256", "sha512" }};
+        static constexpr auto names = std::array<view, hash_algo_count>{{ "md5", "sha1", "sha256", "sha384", "sha512" }};
         return names[(size_t)std::clamp(a, 0, hash_algo_count - 1)];
     }
 
@@ -86,7 +86,7 @@ namespace netxs::app::parvion
         std::vector<text> keyfiles;  // OPTION_SFTP_KEYFILES (one private-key path per entry).
         // Hash verification page (Edit -> Settings -> SFTP -> "Hash verification").
         bool hash_on_transfer = faux; // Auto-hash the target of every completed transfer.
-        si32 hash_algo        = 2;    // Algorithm index 0..3 (md5/sha1/sha256/sha512); SHA-256 default.
+        si32 hash_algo        = 2;    // Algorithm index 0..4; SHA-256 default.
 
         // Bytes form of the "enable parallel transfers for files larger than" gate.
         auto threshold_bytes() const -> si64 { return (si64)threshold_value * sftp_unit_mul(threshold_unit); }

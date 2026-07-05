@@ -496,24 +496,57 @@ static int parvionhash_main(int argc, char** argv)
     {
         if (argc < 3) { std::fprintf(stdout, "E missing path\n"); std::fflush(stdout); return 2; }
         auto path = argv[2];
+        auto buf = std::vector<char>(8u << 20);
+        auto done = si64{ 0 }, last = si64{ 0 };
+        auto err = faux;
+        auto report_size = [](si64 total)
+        {
+            if (total >= 0) { std::fprintf(stdout, "S %lld\n", (long long)total); std::fflush(stdout); }
+        };
+        auto report_progress = [&]
+        {
+            if (done - last >= report_step) { std::fprintf(stdout, "P %lld\n", (long long)done); std::fflush(stdout); last = done; }
+        };
+
+        #if defined(_WIN32)
+        auto wpath = utf::to_utf(view{ path });
+        auto f = ::CreateFileW(wpath.c_str(),
+                               GENERIC_READ,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                               nullptr,
+                               OPEN_EXISTING,
+                               FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN,
+                               nullptr);
+        if (f == INVALID_HANDLE_VALUE) { std::fprintf(stdout, "E cannot open %s\n", path); std::fflush(stdout); return 1; }
+        auto size = LARGE_INTEGER{};
+        if (::GetFileSizeEx(f, &size) && size.QuadPart >= 0) report_size((si64)size.QuadPart);
+        for (;;)
+        {
+            auto n = DWORD{};
+            if (!::ReadFile(f, buf.data(), static_cast<DWORD>(buf.size()), &n, nullptr)) { err = true; break; }
+            if (n == 0) break;
+            hasher->update(buf.data(), n);
+            done += (si64)n;
+            report_progress();
+        }
+        ::CloseHandle(f);
+        #else
         auto f = std::fopen(path, "rb");
         if (!f) { std::fprintf(stdout, "E cannot open %s\n", path); std::fflush(stdout); return 1; }
-        std::fseek(f, 0, SEEK_END);
-        auto total = (si64)std::ftell(f);
-        std::fseek(f, 0, SEEK_SET);
-        if (total >= 0) { std::fprintf(stdout, "S %lld\n", (long long)total); std::fflush(stdout); }
-        auto buf = std::vector<char>(1u << 20);
-        auto done = si64{ 0 }, last = si64{ 0 };
+        auto ec = std::error_code{};
+        auto fsz = std::filesystem::file_size(std::filesystem::path{ path }, ec);
+        if (!ec && fsz <= static_cast<uintmax_t>((std::numeric_limits<si64>::max)())) report_size((si64)fsz);
         for (;;)
         {
             auto n = std::fread(buf.data(), 1, buf.size(), f);
             if (n == 0) break;
             hasher->update(buf.data(), n);
             done += (si64)n;
-            if (done - last >= report_step) { std::fprintf(stdout, "P %lld\n", (long long)done); std::fflush(stdout); last = done; }
+            report_progress();
         }
-        auto err = std::ferror(f) != 0;
+        err = std::ferror(f) != 0;
         std::fclose(f);
+        #endif
         if (err) { std::fprintf(stdout, "E read error\n"); std::fflush(stdout); return 1; }
         std::fprintf(stdout, "P %lld\n", (long long)done);
         std::fprintf(stdout, "R %s\n", hasher->hex().c_str());

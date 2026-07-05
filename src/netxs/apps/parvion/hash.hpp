@@ -3,15 +3,15 @@
 
 #pragma once
 
-// parvion/hash.hpp: self-contained MD5 / SHA-1 / SHA-256 / SHA-512 digests behind a
+// parvion/hash.hpp: self-contained MD5 / SHA-1 / SHA-256 / SHA-384 / SHA-512 digests behind a
 // single streaming interface, used by the `parvionhash` backend (vtm-tile.cpp) to
 // compute file/stream checksums. Public-domain-style reference implementations — kept
 // here (rather than reusing the vendored PuTTY crypto, which is exposed via ssh_hash
 // vtables + hardware-accel dispatch + PuTTY globals) so the multi-call binary needs no
 // extra link wiring and the algorithms stay portable and unit-testable.
 //
-// Output hex is lowercase and matches the coreutils md5sum/sha1sum/sha256sum/sha512sum
-// tools, so a Parvion digest can be compared directly against `sha256sum <file>`.
+// Output hex is lowercase and matches the coreutils md5sum/sha1sum/sha256sum/sha384sum/
+// sha512sum tools, so a Parvion digest can be compared directly against `sha256sum <file>`.
 
 #include <cstdint>
 #include <cstddef>
@@ -19,6 +19,19 @@
 #include <string>
 #include <string_view>
 #include <memory>
+#include <vector>
+#include <limits>
+
+#if defined(_WIN32)
+    #ifndef WIN32_LEAN_AND_MEAN
+        #define WIN32_LEAN_AND_MEAN
+    #endif
+    #ifndef NOMINMAX
+        #define NOMINMAX
+    #endif
+    #include <windows.h>
+    #include <bcrypt.h>
+#endif
 
 namespace netxs::app::parvion::hashing
 {
@@ -314,6 +327,36 @@ namespace netxs::app::parvion::hashing
         }
     };
 
+    // --- SHA-384 (FIPS 180-4) -- SHA-512 family with distinct IV and 384-bit output --------
+    struct sha384_algo : sha512_algo
+    {
+        static constexpr size_t digest_size = 48;
+
+        static void init(sha384_algo& s)
+        {
+            static constexpr uint64_t iv[8] = {
+                0xcbbb9d5dc1059ed8ull,0x629a292a367cd507ull,0x9159015a3070dd17ull,0x152fecd8f70e5939ull,
+                0x67332667ffc00b31ull,0x8eb44a8768581511ull,0xdb0c2e0d64f98fa7ull,0x47b5481dbefa4fa4ull };
+            for (int i = 0; i < 8; ++i) s.h[i] = iv[i];
+            s.total = 0; s.buflen = 0;
+        }
+        static void update(sha384_algo& s, uint8_t const* data, size_t len)
+        {
+            sha512_algo::update(s, data, len);
+        }
+        static void final(sha384_algo& s, uint8_t* out)
+        {
+            auto bits = s.total * 8;
+            uint8_t pad = 0x80; update(s, &pad, 1);
+            uint8_t zero = 0; while (s.buflen != 112) update(s, &zero, 1);
+            uint8_t lenbuf[16] = {};
+            for (int i = 0; i < 8; ++i) lenbuf[8 + i] = (uint8_t)(bits >> (8 * (7 - i)));
+            update(s, lenbuf, 16);
+            for (int i = 0; i < 6; ++i)
+                for (int j = 0; j < 8; ++j) out[i*8 + j] = (uint8_t)(s.h[i] >> (8 * (7 - j)));
+        }
+    };
+
     // Streaming hash interface: update() with arbitrary chunks, then hex() to finalize.
     struct hasher
     {
@@ -336,13 +379,100 @@ namespace netxs::app::parvion::hashing
         }
     };
 
-    // Construct a streaming hasher for "md5" | "sha1" | "sha256" | "sha512"; nullptr if unknown.
-    inline auto make_hasher(std::string_view algo) -> std::unique_ptr<hasher>
+    inline auto make_portable_hasher(std::string_view algo) -> std::unique_ptr<hasher>
     {
         if (algo == "md5")    return std::make_unique<hasher_impl<md5_algo>>();
         if (algo == "sha1")   return std::make_unique<hasher_impl<sha1_algo>>();
         if (algo == "sha256") return std::make_unique<hasher_impl<sha256_algo>>();
+        if (algo == "sha384") return std::make_unique<hasher_impl<sha384_algo>>();
         if (algo == "sha512") return std::make_unique<hasher_impl<sha512_algo>>();
         return nullptr;
+    }
+
+    #if defined(_WIN32)
+    // Windows CNG-backed streaming hasher. This mirrors PowerShell Get-FileHash's
+    // platform-backed .NET hashing path, while keeping Parvion's existing interface
+    // and lowercase-hex output.
+    struct cng_hasher : hasher
+    {
+        BCRYPT_ALG_HANDLE  alg = nullptr;
+        BCRYPT_HASH_HANDLE hash = nullptr;
+        std::vector<unsigned char> object;
+        ULONG digest_len = 0;
+        bool failed = false;
+
+        ~cng_hasher() override
+        {
+            if (hash) ::BCryptDestroyHash(hash);
+            if (alg)  ::BCryptCloseAlgorithmProvider(alg, 0);
+        }
+
+        static auto create(LPCWSTR algid) -> std::unique_ptr<hasher>
+        {
+            auto h = std::make_unique<cng_hasher>();
+            if (!h->init(algid)) return {};
+            return h;
+        }
+
+        auto init(LPCWSTR algid) -> bool
+        {
+            if (::BCryptOpenAlgorithmProvider(&alg, algid, nullptr, 0) < 0) return false;
+
+            auto cb = ULONG{};
+            auto object_len = ULONG{};
+            if (::BCryptGetProperty(alg, BCRYPT_OBJECT_LENGTH,
+                                    reinterpret_cast<PUCHAR>(&object_len), sizeof(object_len), &cb, 0) < 0) return false;
+            if (::BCryptGetProperty(alg, BCRYPT_HASH_LENGTH,
+                                    reinterpret_cast<PUCHAR>(&digest_len), sizeof(digest_len), &cb, 0) < 0) return false;
+
+            object.resize(object_len);
+            auto obj = object.empty() ? nullptr : object.data();
+            if (::BCryptCreateHash(alg, &hash, obj, static_cast<ULONG>(object.size()), nullptr, 0, 0) < 0) return false;
+            return true;
+        }
+
+        void update(void const* data, size_t len) override
+        {
+            if (failed || !hash) return;
+            auto p = static_cast<unsigned char*>(const_cast<void*>(data));
+            while (len)
+            {
+                auto n = len > (std::numeric_limits<ULONG>::max)()
+                       ? (std::numeric_limits<ULONG>::max)()
+                       : static_cast<ULONG>(len);
+                if (::BCryptHashData(hash, p, n, 0) < 0) { failed = true; return; }
+                p += n;
+                len -= n;
+            }
+        }
+
+        auto hex() -> std::string override
+        {
+            auto out = std::vector<unsigned char>(digest_len);
+            if (failed || !hash || ::BCryptFinishHash(hash, out.data(), digest_len, 0) < 0) return {};
+            return to_hex(out.data(), out.size());
+        }
+    };
+
+    inline auto make_platform_hasher(std::string_view algo) -> std::unique_ptr<hasher>
+    {
+        auto algid = LPCWSTR{};
+        if      (algo == "md5")    algid = BCRYPT_MD5_ALGORITHM;
+        else if (algo == "sha1")   algid = BCRYPT_SHA1_ALGORITHM;
+        else if (algo == "sha256") algid = BCRYPT_SHA256_ALGORITHM;
+        else if (algo == "sha384") algid = BCRYPT_SHA384_ALGORITHM;
+        else if (algo == "sha512") algid = BCRYPT_SHA512_ALGORITHM;
+        else return {};
+        return cng_hasher::create(algid);
+    }
+    #endif
+
+    // Construct a streaming hasher for "md5" | "sha1" | "sha256" | "sha384" | "sha512"; nullptr if unknown.
+    inline auto make_hasher(std::string_view algo) -> std::unique_ptr<hasher>
+    {
+        #if defined(_WIN32)
+            if (auto h = make_platform_hasher(algo)) return h;
+        #endif
+        return make_portable_hasher(algo);
     }
 }

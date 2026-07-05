@@ -46,7 +46,7 @@ namespace netxs::app::parvion
         bool       remote = faux;   // true: stream-hash a remote file (download+discard); false: local file.
         text       path;            // Local path, or absolute remote path, being hashed.
         text       name;            // Basename for the queue panel's Name column.
-        si32       algo = 2;        // Algorithm index 0..3 (md5/sha1/sha256/sha512); see settings.hpp helpers.
+        si32       algo = 2;        // Algorithm index; see settings.hpp helpers.
         si64       size = -1;       // Total bytes (for the progress %, -1 = unknown).
         si64       done = 0;        // Bytes hashed so far.
         status_t   status = queued;

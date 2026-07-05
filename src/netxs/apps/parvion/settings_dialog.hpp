@@ -98,7 +98,7 @@ namespace netxs::app::parvion
         bool               compression = faux;
         si32               threshold_unit = 2;
         bool               hash_on_transfer = faux; // "Calculate target file hash during transfers".
-        si32               hash_algo = 2;           // Algorithm index (md5/sha1/sha256/sha512).
+        si32               hash_algo = 2;           // Algorithm index; see settings.hpp helpers.
         sd::keytbl_state   kt;                // Private-key table (file-browser-style; selection/scroll/columns).
         // Parsed key metadata, parallel to draft.keyfiles (filled by pvputtygen).
         std::vector<text>  key_comment;

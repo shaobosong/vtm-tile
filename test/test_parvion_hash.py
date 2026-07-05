@@ -21,6 +21,7 @@ import os
 import sys
 import time
 import base64
+import hashlib
 import re
 import tempfile
 import subprocess
@@ -35,6 +36,24 @@ DEMO_ENV = {"PARVION_DEMO_HASH": "1"}
 DEMO_REPORT_DIGEST = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 DEMO_NOTES_DIGEST = "d41d8cd98f00b204e9800998ecf8427e"
 _OSC52 = re.compile(rb"\x1b\]52;[^;]*;([A-Za-z0-9+/=]+)(?:\x07|\x1b\\)")
+
+
+def _digest_file(path, algo):
+    h = hashlib.new(algo)
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _backend_digest(algo, path):
+    out = subprocess.run([VTM_TILE_BINARY, "-r", "parvionhash", algo, "local", path],
+                         capture_output=True, text=True)
+    digest = ""
+    for line in out.stdout.splitlines():
+        if line.startswith("R "):
+            digest = line[2:].strip()
+    return digest, out
 
 
 def _open_checksums_tab(s):
@@ -126,12 +145,12 @@ def test_checksums_multiselect_copy_digest():
 def test_local_file_hash_end_to_end():
     """Real pipeline (no demo seam): right-click a local file -> Calculate Checksum ->
     SHA-256 spawns the parvionhash backend; the computed digest lands in the Checksums
-    tab and matches coreutils' sha256sum."""
+    tab and matches hashlib's SHA-256."""
     d = tempfile.mkdtemp(prefix="pvhash_")
     fpath = os.path.join(d, "payload.bin")
     with open(fpath, "wb") as f:
         f.write(b"parvion checksum end-to-end test\n" * 5000)  # ~165 KiB
-    want = subprocess.run(["sha256sum", fpath], capture_output=True, text=True).stdout.split()[0]
+    want = _digest_file(fpath, "sha256")
     with P.ParvionSession(d, env={"PARVION_DEMO_QUEUE": "0"}) as s:
         pos = find_text(s.screen()[0], "payload.bin")
         if not pos:
@@ -164,23 +183,36 @@ def test_backend_hash_non_ascii_path():
     """Regression: the `parvionhash local <path>` backend must hash a file whose name contains
     non-ASCII characters. The path reaches the backend via argv; the multi-call dispatch in
     main() rebuilds argv as UTF-8 (on Windows from the wide command line, where the CRT's ANSI
-    argv would otherwise mangle the name) so the file opens. Digest must match coreutils."""
+    argv would otherwise mangle the name) so the file opens. Digest must match hashlib."""
     d = tempfile.mkdtemp(prefix="pvhash_")
     fpath = os.path.join(d, "测试-café-Ω.bin")  # 测试-café-Ω.bin
     with open(fpath, "wb") as f:
         f.write(b"parvion non-ascii checksum test\n" * 5000)
-    want = subprocess.run(["sha256sum", fpath], capture_output=True, text=True).stdout.split()[0]
-    out = subprocess.run([VTM_TILE_BINARY, "-r", "parvionhash", "sha256", "local", fpath],
-                         capture_output=True, text=True)
-    digest = ""
-    for line in out.stdout.splitlines():
-        if line.startswith("R "):
-            digest = line[2:].strip()
+    want = _digest_file(fpath, "sha256")
+    digest, out = _backend_digest("sha256", fpath)
     if digest != want:
         print(f"FAIL test_backend_hash_non_ascii_path: got {digest!r} want {want!r} "
               f"(stdout={out.stdout!r})")
         return False
     print("OK test_backend_hash_non_ascii_path")
+    return True
+
+
+def test_backend_hash_all_algorithms():
+    """The backend maps every UI-exposed algorithm to the expected lowercase digest."""
+    d = tempfile.mkdtemp(prefix="pvhashalgo_")
+    fpath = os.path.join(d, "payload.bin")
+    payload = bytes(range(256)) * 4096 + b"parvion hash algorithms\n"
+    with open(fpath, "wb") as f:
+        f.write(payload)
+    for algo in ("md5", "sha1", "sha256", "sha384", "sha512"):
+        want = hashlib.new(algo, payload).hexdigest()
+        digest, out = _backend_digest(algo, fpath)
+        if digest != want:
+            print(f"FAIL test_backend_hash_all_algorithms[{algo}]: got {digest!r} "
+                  f"want {want!r} (stdout={out.stdout!r}, stderr={out.stderr!r})")
+            return False
+    print("OK test_backend_hash_all_algorithms")
     return True
 
 
@@ -299,9 +331,13 @@ def test_hash_settings_single_dropdown():
         nb = find_text(chars, "None")
         s.click(nb[1] + 1, nb[0] + 1); s.feed(0.6)            # open the dropdown
         chars = s.screen()[0]
-        for item in ("None", "MD5", "SHA-1", "SHA-256", "SHA-512"):
+        algos = ("MD5", "SHA-1", "SHA-256", "SHA-384", "SHA-512")
+        for item in ("None",) + algos:
             if not find_text(chars, item):
                 print(f"FAIL test_hash_settings_single_dropdown: dropdown missing {item}"); return False
+        positions = [find_text(chars, item) for item in algos]
+        if positions != sorted(positions):
+            print(f"FAIL test_hash_settings_single_dropdown: wrong algorithm order {positions}"); return False
         a = find_text(chars, "SHA-256")
         s.click(a[1] + 1, a[0] + 1); s.feed(0.6)              # select SHA-256 (enables hashing)
         chars = s.screen()[0]
@@ -320,6 +356,7 @@ TESTS = [
     test_checksums_multiselect_copy_digest,
     test_local_file_hash_end_to_end,
     test_backend_hash_non_ascii_path,
+    test_backend_hash_all_algorithms,
     test_no_checksum_on_folder,
     test_checksums_column_resize,
     test_checksums_row_selection,
