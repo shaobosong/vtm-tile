@@ -839,8 +839,6 @@ namespace netxs::app::parvion
             session.stop();
             done = 0; opened = faux; error.clear(); await = a_none; state = s_connecting;
             pass_asked.clear(); last_preamble.clear(); last_instruction.clear(); // Fresh auth session.
-            auto label = text{ download ? "download" : "upload" } + " of " + (download ? remote_path : local_path);
-            lg(logtype::status, "Starting " + label + "..."); // FileZilla logs each transfer's start.
             session.runargs = runargs;
             if (!session.launch(exe)) { lg(logtype::error, "Failed to launch parvionsftp: " + exe); state = s_err; error = "Failed to launch parvionsftp"; }
         }
@@ -853,8 +851,6 @@ namespace netxs::app::parvion
         {
             done = 0; persisted = -1; opened = faux; error.clear();
             state = s_running; await = a_xfer;
-            lg(logtype::status, text{ "Reusing connection for " } + (download ? "download" : "upload")
-                              + " of " + (download ? remote_path : local_path) + "...");
             send_xfer();
         }
         void poll()
@@ -892,7 +888,7 @@ namespace netxs::app::parvion
                 case sftp_evt::verbose: if (!m.line.empty()) lg(logtype::trace, text{ m.first() }, dbg_info); break;
                 case sftp_evt::info:
                 case sftp_evt::status:
-                    if (!m.line.empty()) lg(logtype::status, text{ m.first() });
+                    if (!m.line.empty()) lg(logtype::trace, text{ m.first() }, dbg_info);
                     if (await == a_xfer) opened = true; // Remote file opened.
                     break;
                 case sftp_evt::reply:
@@ -1065,6 +1061,7 @@ namespace netxs::app::parvion
         size_t                 rec_cmd_i = 0;   // Index of the next command in rec_cmds to run.
         bool                   rec_cmds_built = faux; // delete: rec_cmds assembled once the walk finished.
         std::vector<queue_item> rec_uploads;    // upload: per-file uploads to enqueue once the mkdirs complete.
+        size_t                 rec_download_files = 0; // download: files queued by the active recursive walk.
         bool  remote_refresh_pending = faux; // A completed upload landed in the displayed remote dir; re-list when idle.
         ui64  local_gen = 0;          // Bumped when a download completes into the displayed local dir (pane re-lists).
         // Async local delete (delete_local_async): the detached worker touches only this
@@ -1140,7 +1137,6 @@ namespace netxs::app::parvion
             cfg.clamp();
             apply_settings();
             cfg.save();
-            log_line(logtype::status, "Settings saved.");
         }
 
         sftp_remote()
@@ -1368,13 +1364,7 @@ namespace netxs::app::parvion
             last_activity = steady_clock::now();
             if (host.empty()) { mark("Enter a host name."); stage = s_failed; return; }
             mark("Connecting to " + host + "...");
-            trace(dbg_debug, "Target: " + user + "@" + host + ":" + std::to_string(port)); // Wire-level detail.
             trace(dbg_verbose, "Going to execute " + exe);                                  // FileZilla connect.cpp parity.
-            // Surface the applied SFTP settings (Edit -> Settings) for this connection.
-            if (!cfg.keyfiles.empty()) log_line(logtype::status, "Public-key authentication: " + std::to_string(cfg.keyfiles.size()) + " key file(s) configured.");
-            if (cfg.compression)       log_line(logtype::status, "SFTP compression enabled.");
-            trace(dbg_debug, "Settings: timeout=" + std::to_string(response_timeout_sec) + "s, retries=" + std::to_string(max_reconnect_tries)
-                + ", delay=" + std::to_string(reconnect_delay_sec) + "s, parallel>=" + std::to_string(parallel_threshold) + "B x" + std::to_string(max_connections));
             remember(host, user, pass, port); // Record this target in the Quick Connect history.
             session.runargs = runargs;
             if (cfg.compression) session.runargs.push_back("-C"); // SFTP compression (Settings -> SFTP).
@@ -1502,7 +1492,13 @@ namespace netxs::app::parvion
             mark("Reconnecting to " + host + " (attempt " + std::to_string(reconnect_tries) + ")...");
             session.runargs = runargs;
             if (cfg.compression) session.runargs.push_back("-C"); // SFTP compression (Settings -> SFTP).
-            if (!session.launch(exe)) { stage = s_failed; retry_at = steady_clock::now() + std::chrono::seconds{ reconnect_delay_sec }; return; }
+            if (!session.launch(exe))
+            {
+                trace(dbg_warning, "Failed to launch parvionsftp during reconnect: " + exe);
+                stage = s_failed;
+                retry_at = steady_clock::now() + std::chrono::seconds{ reconnect_delay_sec };
+                return;
+            }
             pass_asked.clear(); account_asked = faux; last_preamble.clear(); last_instruction.clear(); // Fresh backend auth (keep cached passphrases for this server).
             stage = s_greeting;
             last_activity = steady_clock::now();
@@ -1540,7 +1536,6 @@ namespace netxs::app::parvion
             if (now - last_activity < std::chrono::seconds{ keepalive_sec }) return;
             ++keep_skip;
             last_activity = now;
-            trace(dbg_verbose, "Sending keep-alive command (pwd)"); // FileZilla logs keep-alive; keep at Trace to avoid log spam.
             session.write_line("pwd");
         }
 
@@ -1595,6 +1590,7 @@ namespace netxs::app::parvion
             auto r = child_path(path, name, faux);
             auto l = child_path(local_dir, name, true);
             auto ec = std::error_code{}; fs::create_directories(fs::path{ l }, ec);
+            if (recop == rec_none) rec_download_files = 0;
             recop = rec_download;
             rec_stack.push_back({ r, l });
             mark("Downloading directory " + name + "...");
@@ -1843,6 +1839,7 @@ namespace netxs::app::parvion
                 rec_cur = rec_stack.back();
                 rec_stack.pop_back();
                 pending.clear();
+                mark("Retrieving directory listing of \"" + rec_cur.remote + "\"...");
                 await = c_rls;
                 send_cmd("ls " + quote_name(rec_cur.remote));
                 return;
@@ -1866,23 +1863,40 @@ namespace netxs::app::parvion
         {
             recop = rec_none;
             rec_stack.clear(); rec_cmds.clear(); rec_cmd_i = 0; rec_cmds_built = faux;
+            rec_download_files = 0;
             rec_delfiles.clear(); rec_deldirs.clear(); rec_uploads.clear();
         }
         void finish_recop()
         {
             auto was = recop;
+            auto download_files = rec_download_files;
+            auto upload_files = rec_uploads.size();
+            auto delete_items = rec_delfiles.size() + rec_deldirs.size();
             recop = rec_none;
             rec_stack.clear(); rec_cmds.clear(); rec_cmd_i = 0; rec_cmds_built = faux;
+            rec_download_files = 0;
             rec_delfiles.clear(); rec_deldirs.clear();
             if (was == rec_upload)
             {
                 for (auto& it : rec_uploads) queue.push_back(std::move(it)); // Dirs exist now: safe to upload.
                 rec_uploads.clear();
+                auto msg = text{ "Remote directory tree prepared." };
+                if (upload_files) msg = "Remote directory tree prepared; queued " + std::to_string(upload_files) + " upload(s).";
+                mark(std::move(msg));
                 remote_refresh_pending = true; // Show the freshly-created remote tree.
             }
             else if (was == rec_delete)
             {
+                auto msg = text{ "Delete operation finished" };
+                if (delete_items) msg += " (" + std::to_string(delete_items) + " item(s))";
+                msg += ".";
+                mark(std::move(msg));
                 list_dir(); // The subtree is gone: refresh the remote pane.
+            }
+            else if (was == rec_download)
+            {
+                if (download_files) mark("Queued " + std::to_string(download_files) + " download(s).");
+                else                mark("No files found to download.");
             }
             // download: per-file downloads were enqueued during the walk and run on their own
             // connections; each completion bumps local_gen, which re-lists the local pane.
@@ -1917,7 +1931,6 @@ namespace netxs::app::parvion
         }
         // Close pooled connections that have been idle past the timeout or that the server has dropped
         // (FileZilla's 60s idle-disconnect timer). Called from poll() so quiet queues release backends.
-        // Each closure is reported in the message log so released connections are visible to the user.
         void reap_idle_workers()
         {
             if (xfer_idle_sec <= 0) { idle_pool.clear(); return; }
@@ -1927,12 +1940,10 @@ namespace netxs::app::parvion
                 if (!w) return true;
                 if (!w->session.alive())
                 {
-                    log_line(logtype::status, "Pooled transfer connection was closed by the server.");
                     return true;
                 }
                 if (now - w->idle_since > std::chrono::seconds{ xfer_idle_sec })
                 {
-                    log_line(logtype::status, "Disconnecting transfer connection after " + std::to_string(xfer_idle_sec) + "s idle.");
                     return true;
                 }
                 return faux;
@@ -1969,6 +1980,24 @@ namespace netxs::app::parvion
             active_reused = faux;
             auto chunks = part_count(item.size); // size-scaled, clamped to max_connections
             item.chunk_count = chunks;
+            auto label = text{ item.download ? "download" : "upload" } + " of " + (item.download ? item.remote_path : item.local_path);
+            auto start_logged = faux;
+            auto reuse_logged = faux;
+            auto log_start = [&]
+            {
+                if (start_logged) return;
+                auto msg = "Starting " + label;
+                if (chunks > 1) msg += " (" + std::to_string(chunks) + " connections)";
+                log_line(logtype::status, msg + "...");
+                start_logged = true;
+            };
+            auto log_reuse = [&]
+            {
+                if (reuse_logged) return;
+                log_line(logtype::status, "Reusing connection for " + label + "...");
+                reuse_logged = true;
+                start_logged = true;
+            };
             if (chunks <= 1)
             {
                 // Reuse a pooled, already-authenticated connection if one is available (skips the
@@ -1976,6 +2005,7 @@ namespace netxs::app::parvion
                 if (auto w = acquire_worker())
                 {
                     cfg_worker(*w, item, faux, 0, -1);
+                    log_reuse();
                     w->rearm();
                     active_reused = true;
                     workers.push_back(std::move(w));
@@ -1984,6 +2014,7 @@ namespace netxs::app::parvion
                 {
                     auto fresh = std::make_unique<xfer_worker>();
                     cfg_worker(*fresh, item, faux, 0, -1);
+                    log_start();
                     fresh->begin();
                     workers.push_back(std::move(fresh));
                 }
@@ -2032,6 +2063,8 @@ namespace netxs::app::parvion
                     // Upload leader (chunk 0) truncates only on a fresh transfer.
                     cfg_worker(*w, item, true, S + T, Z - T, !item.download && !active_resume && c == 0);
                     w->chunk_index = (si32)c;
+                    if (reused) log_reuse();
+                    else if (start_now) log_start();
                     if (start_now) { if (reused) w->rearm(); else w->begin(); }
                     else { holding_followers = true; if (reused) w->state = xfer_worker::s_init; }
                     // Seed the resumed byte count AFTER begin()/rearm() (which zero done),
@@ -2124,7 +2157,6 @@ namespace netxs::app::parvion
             it.size   = size;
             it.status = hash_item::queued;
             if (remote) { it.host = host; it.user = user; it.pass = pass; it.port = port; it.keyfiles = cfg.keyfiles; }
-            log_line(logtype::status, "Queued " + text{ hash_algo_label(it.algo) } + " checksum of " + it.name + ".");
             hash_queue.push_back(std::move(it));
             dirty = true;
         }
@@ -2314,13 +2346,17 @@ namespace netxs::app::parvion
                 }
             }
         }
-        void list_dir() { pending.clear(); await = c_ls; send_cmd("ls"); }
+        void list_dir()
+        {
+            auto list_path = path_pending && !pending_path.empty() ? pending_path : path;
+            pending.clear();
+            mark("Retrieving directory listing of \"" + list_path + "\"...");
+            await = c_ls;
+            send_cmd("ls");
+        }
 
         void process(sftp_msg const& m)
         {
-            // Deepest level: a raw wire-frame trace of every event the backend
-            // sends (event name + first payload line). Generated only at Debug.
-            trace(dbg_debug, "recv " + text{ sftp_evt_name(m.type) } + (m.line.empty() ? text{} : ": " + text{ m.first() }));
             switch (m.type)
             {
                 case sftp_evt::status:
@@ -2390,7 +2426,7 @@ namespace netxs::app::parvion
                     // machine). psftp emits exactly one terminal event per command -- a
                     // reply OR a done -- and keepalive's is the reply, so this consumes it
                     // even if the user issued a real command in the meantime (FIFO order).
-                    if (keep_skip > 0) { --keep_skip; if (!m.line.empty()) trace(dbg_verbose, text{ m.first() }); break; }
+                    if (keep_skip > 0) { --keep_skip; break; }
                     // The server's reply to the last command (FileZilla: Response).
                     if (!m.line.empty()) log_line(logtype::response, text{ m.first() });
                     on_reply(m);
@@ -2516,7 +2552,7 @@ namespace netxs::app::parvion
                         }
                         else
                         {
-                            if (recop == rec_download) enqueue_download_path(rchild, child_path(rec_cur.local, e.name, true), e.size);
+                            if (recop == rec_download) { enqueue_download_path(rchild, child_path(rec_cur.local, e.name, true), e.size); ++rec_download_files; }
                             else                       rec_delfiles.push_back(rchild); // rec_delete
                         }
                     }

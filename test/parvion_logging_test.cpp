@@ -43,6 +43,17 @@ namespace
         return log.lines.size() == 1 && body(log, 0) == "ok" && log.queued.empty();
     }
 
+    auto test_listing_status_visible_command_queued() -> bool
+    {
+        auto log = message_logger{};
+        log.log(lt::status, "Retrieving directory listing of \"/\"...");
+        log.log(lt::command, "ls");
+        return log.lines.size() == 1
+            && body(log, 0) == "Retrieving directory listing of \"/\"..."
+            && log.queued.size() == 1
+            && log.queued.front().body == "ls";
+    }
+
     auto test_enabling_detailed_flushes_queue() -> bool
     {
         auto log = message_logger{};
@@ -97,6 +108,7 @@ int main()
     {
         { "command_response_queue_until_error", test_command_response_queue_until_error },
         { "status_clears_queued_detail",        test_status_clears_queued_detail },
+        { "listing_status_visible_command_queued", test_listing_status_visible_command_queued },
         { "enabling_detailed_flushes_queue",    test_enabling_detailed_flushes_queue },
         { "debug_level_gates_trace",            test_debug_level_gates_trace },
         { "raw_listing_gate",                   test_raw_listing_gate },

@@ -938,7 +938,6 @@ namespace netxs::app::parvion
         st.key_data.push_back(data);
         st.kt.sel = (si32)st.draft.keyfiles.size() - 1;
         st.kt.marked = { st.kt.sel };
-        if (st.ctrl) st.ctrl->log_line(logtype::status, "Added key file " + path + (comment.empty() ? text{} : " (" + comment + ")"));
     }
 
     // Forward declaration so the conversion can re-trigger the passphrase prompt on a failed attempt.
@@ -962,7 +961,7 @@ namespace netxs::app::parvion
         auto card_wp   = st.card_wp;
         auto base   = fs::path{ path }.filename().string();
         auto prompt = "Enter the passphrase for \"" + base + "\". The key will be converted to PuTTY (.ppk) format, protected with the same passphrase.";
-        auto on_cancel = [stp]{ if (stp->ctrl) stp->ctrl->log_line(logtype::status, "Key conversion cancelled."); };
+        auto on_cancel = []{};
         auto on_pass = [stp, path, window_wp, card_wp](text pass)
         {
             // Decrypt + write the .ppk to a temp file ONCE (async). This both verifies the passphrase
@@ -988,17 +987,15 @@ namespace netxs::app::parvion
                     auto def_dir  = fs::path{ path }.parent_path().string();
                     auto def_name = fs::path{ path }.filename().replace_extension(".ppk").string();
                     open_file_picker(window_wp, card_wp, {}, picker_mode::save, "Save converted key", def_dir, def_name,
-                        [stp, path, tmp, comment, data](text const& chosen)
+                        [stp, tmp, comment, data](text const& chosen)
                         {
                             auto ec1 = std::error_code{};
                             fs::copy_file(fs::path{ tmp }, fs::path{ chosen }, fs::copy_options::overwrite_existing, ec1);
                             auto ec2 = std::error_code{}; fs::remove(fs::path{ tmp }, ec2);
                             if (ec1) { if (stp->ctrl) stp->ctrl->log_line(logtype::error, "Could not save converted key to " + chosen); return; }
                             sd_store_key(*stp, chosen, comment, data); // comment, data (fingerprint) from the convert step.
-                            if (stp->ctrl) stp->ctrl->log_line(logtype::status, "Converted " + path + " -> " + chosen);
                         },
-                        [stp, tmp]{ auto e = std::error_code{}; fs::remove(fs::path{ tmp }, e); // Cancel: drop the temp .ppk.
-                                    if (stp->ctrl) stp->ctrl->log_line(logtype::status, "Key conversion cancelled."); });
+                        [tmp]{ auto e = std::error_code{}; fs::remove(fs::path{ tmp }, e); }); // Cancel: drop the temp .ppk.
                 });
         };
         window->base::attach(make_secret_dialog(window_wp, card_wp, "Convert private key", prompt, on_pass, on_cancel, retry));
@@ -1042,7 +1039,6 @@ namespace netxs::app::parvion
         }
         st.draft.keyfiles = nk; st.key_comment = nc; st.key_data = nd;
         st.kt.sel = -1; st.kt.marked.clear(); st.kt.scroll = 0;
-        if (st.ctrl) st.ctrl->log_line(logtype::status, "Removed selected private key(s).");
     }
 
     // Build the threshold-unit dropdown menu (item 3): one radio row per unit (Byte..TiB). The
