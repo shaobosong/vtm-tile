@@ -748,11 +748,15 @@ namespace netxs::app::parvion
     // Message-log entry classification (FileZilla logmsg::type). Namespace-scoped
     // so transfer workers (below) and the controller (sftp_remote) share it and
     // funnel into the same log — mirroring FileZilla, where every control socket
-    // (browsing or transfer) routes through one StatusView.
-    enum class logtype : si32 { status, error, command, response, trace, listing };
-    // Trace sub-levels, mirroring FileZilla's debug_* logmsg types: a Trace line
-    // shows only when the selected debug level reaches its sub-level.
-    enum dbg : si32 { dbg_warning = 1, dbg_info = 2, dbg_verbose = 3, dbg_debug = 4 };
+    // routes through one StatusView.
+    // Trace sub-levels, mirroring FileZilla's debug_* logmsg types.
+    enum dbg : si32
+    {
+        dbg_warning = log_debug_warning,
+        dbg_info    = log_debug_info,
+        dbg_verbose = log_debug_verbose,
+        dbg_debug   = log_debug_debug,
+    };
 
     // Extract the key file path from a backend "SSH key passphrase" prompt, whose text is
     // 'Passphrase for key "<comment>" in key file "<path>"' (ssh2userauth.c). The comment can
@@ -1001,15 +1005,11 @@ namespace netxs::app::parvion
         std::function<void(secret_req_t const&)> on_prompt_secret; // Raise the UI modal (set by parvion.hpp).
 
         // Message log (FileZilla-style typed protocol log). The queue panel's
-        // "Message log" tab renders the tail of `logbuf`; entries are color-coded
-        // and prefixed by `type`. `status` (above) remains the short connect-bar
-        // hint; every status line is also mirrored into the log. logtype/dbg are
-        // namespace-scoped (above) so transfer workers feed the same log.
-        struct logline { logtype type; text body; text stamp; si32 level = 0; }; // level: Trace sub-level (dbg).
-        std::deque<logline>   logbuf;
-        static constexpr auto log_cap = size_t{ 1000 }; // FileZilla MAX_LINECOUNT.
-        si32                  debug_level   = 0;    // OPTION_LOGGING_DEBUGLEVEL (0=None .. 4=Debug).
-        bool                  show_detailed = faux; // OPTION_LOGGING_SHOW_DETAILED_LOGS.
+        // "Message log" tab renders the committed tail; the logger owns the
+        // FileZilla-like detailed queue and generation gates. `status` (above)
+        // remains the short connect-bar hint and is mirrored into the log.
+        using logline = parvion::logline;
+        message_logger          logger;
         bool                  show_stamps   = true; // OPTION_MESSAGELOG_TIMESTAMP.
         // Transfer-table column visibility (Local Name, Remote Name, Size, Progress, Speed, Reason),
         // toggled from the table-header right-click menu; all shown by default. Size == parvion q_ncol+1.
@@ -1128,6 +1128,8 @@ namespace netxs::app::parvion
             reconnect_delay_sec  = cfg.reconnect_delay;              // OPTION_RECONNECTDELAY.
             parallel_threshold   = std::max<si64>(1, cfg.threshold_bytes());
             max_connections      = (ui32)std::clamp(cfg.max_connections, 1, 16);
+            logger.set_debug_level(cfg.log_debug_level);
+            logger.set_raw_listing(cfg.log_raw_listing);
             // Compression (cfg.compression) and key files (cfg.keyfiles) are read straight
             // from cfg at backend-launch / auth time; no separate live copy is kept.
         }
@@ -1233,8 +1235,7 @@ namespace netxs::app::parvion
         // Append one typed line to the message log (drop-oldest past log_cap).
         void log_line(logtype t, text s, si32 level = 0)
         {
-            logbuf.push_back({ t, std::move(s), make_stamp(), level });
-            while (logbuf.size() > log_cap) logbuf.pop_front();
+            logger.log(t, std::move(s), make_stamp(), level);
             dirty = true;
         }
         // Append a Trace line at debug sub-level `level` (dbg_warning .. dbg_debug).
@@ -2318,8 +2319,7 @@ namespace netxs::app::parvion
         void process(sftp_msg const& m)
         {
             // Deepest level: a raw wire-frame trace of every event the backend
-            // sends (event name + first payload line). Recorded unconditionally;
-            // shown only at the Debug log level.
+            // sends (event name + first payload line). Generated only at Debug.
             trace(dbg_debug, "recv " + text{ sftp_evt_name(m.type) } + (m.line.empty() ? text{} : ": " + text{ m.first() }));
             switch (m.type)
             {
@@ -2380,6 +2380,7 @@ namespace netxs::app::parvion
                 case sftp_evt::listentry:
                     if (await == c_ls || await == c_rls) // Plain browse listing or a recursive-walk listing.
                     {
+                        if (!m.list_text.empty()) log_line(logtype::listing, m.list_text);
                         auto e = to_direntry(m);
                         if (e.name != "." && e.name != "..") pending.push_back(std::move(e));
                     }

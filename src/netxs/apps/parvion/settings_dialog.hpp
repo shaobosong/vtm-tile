@@ -26,7 +26,7 @@ namespace netxs::app::parvion
 {
     namespace sd
     {
-        enum tab_t { tab_connection, tab_sftp, tab_count };
+        enum tab_t { tab_connection, tab_sftp, tab_debug, tab_count };
         // Editable numeric fields (both tabs). Each carries its text plus the connect-bar
         // field editor state (caret/scroll) and its painted box for hit-testing.
         enum field_t { f_timeout, f_retries, f_delay, f_threshold, f_maxconn, f_count };
@@ -49,6 +49,8 @@ namespace netxs::app::parvion
             rect compression{};                       // "Enable compression" checkbox row.
             rect unit{};                              // Threshold unit dropdown.
             rect hash_algo{};                         // Hash-on-transfer algorithm dropdown ("None" = disabled).
+            rect log_level{};                         // Debug information level dropdown.
+            rect raw_listing{};                       // "Show raw directory listing" checkbox row.
             rect addkey{}, removekey{};               // Key management buttons.
             rect ok{}, cancel{};                      // Dialog buttons.
         };
@@ -99,13 +101,15 @@ namespace netxs::app::parvion
         si32               threshold_unit = 2;
         bool               hash_on_transfer = faux; // "Calculate target file hash during transfers".
         si32               hash_algo = 2;           // Algorithm index; see settings.hpp helpers.
+        si32               log_debug_level = log_debug_none;
+        bool               log_raw_listing = faux;
         sd::keytbl_state   kt;                // Private-key table (file-browser-style; selection/scroll/columns).
         // Parsed key metadata, parallel to draft.keyfiles (filled by pvputtygen).
         std::vector<text>  key_comment;
         std::vector<text>  key_data;
         rect               card{};            // Cached card rect within the overlay (render -> mouse).
         sd::hitboxes       hit{};
-        bool               hover_ok = faux, hover_cancel = faux, hover_add = faux, hover_remove = faux, hover_unit = faux, hover_hashalgo = faux;
+        bool               hover_ok = faux, hover_cancel = faux, hover_add = faux, hover_remove = faux, hover_unit = faux, hover_hashalgo = faux, hover_loglevel = faux;
         bool               press_ok = faux, press_cancel = faux, press_add = faux, press_remove = faux;
         bool               focused = faux;
         si32               drag_field = -1;   // Field whose caret a left-drag is scrubbing.
@@ -121,6 +125,8 @@ namespace netxs::app::parvion
             threshold_unit   = draft.threshold_unit;
             hash_on_transfer = draft.hash_on_transfer;
             hash_algo        = draft.hash_algo;
+            log_debug_level  = draft.log_debug_level;
+            log_raw_listing  = draft.log_raw_listing;
             auto setf = [&](sd::field_t i, si32 v, si32 lo, si32 hi, si32 tab)
             {
                 auto& f = fields[i];
@@ -156,6 +162,8 @@ namespace netxs::app::parvion
             draft.compression        = compression;
             draft.hash_on_transfer   = hash_on_transfer;
             draft.hash_algo          = hash_algo;
+            draft.log_debug_level    = log_debug_level;
+            draft.log_raw_listing    = log_raw_listing;
             draft.clamp();
         }
     };
@@ -333,6 +341,10 @@ namespace netxs::app::parvion
         inline constexpr auto hash_none     = view{ "None" };
         inline constexpr auto unit_widest   = view{ " Byte \xE2\x96\xBE " }; // The widest unit-dropdown caption.
         inline constexpr auto kt_min_w      = si32{ 24 }; // Key table negotiates a small floor (it scrolls horizontally).
+        // Debug tab.
+        inline constexpr auto lbl_log_level = view{ "Debug information in message log:" };
+        inline constexpr auto chk_rawlist   = view{ "\xE2\x96\xA1 Show raw directory listing" };
+        inline constexpr auto help_debug    = view{ "The higher the debug level, the more information will be displayed in the message log. Displaying debug information has a negative impact on performance. If reporting bugs, provide logs with Verbose logging level." };
     }
 
     // --- Minimum-width negotiation: internal components -> group box -> dialog -------
@@ -364,8 +376,11 @@ namespace netxs::app::parvion
         w = std::max(w, sd_box_dialog_w((si32)cell_width(sd::chk_compress)));
         w = std::max(w, sd_box_dialog_w((si32)cell_width(sd::lbl_hash_xfer) + 1 + 12)); // label + algorithm dropdown.
         w = std::max(w, sd_box_dialog_w(sd::kt_min_w));
+        // Debug tab group boxes.
+        w = std::max(w, sd_box_dialog_w((si32)cell_width(sd::lbl_log_level) + 1 + 14));
+        w = std::max(w, sd_box_dialog_w((si32)cell_width(sd::chk_rawlist)));
         // Tab strip and the right-aligned OK/Cancel block.
-        w = std::max(w, (si32)cell_width("Connection") + 2 + (si32)cell_width("SFTP") + 2 + 2 * sd::pad_x);
+        w = std::max(w, (si32)cell_width("Connection") + 2 + (si32)cell_width("SFTP") + 2 + (si32)cell_width("Debug") + 2 + 2 * sd::pad_x);
         w = std::max(w, 4 + 1 + 8 + 2 + 2 * sd::pad_x);
         return w;
     }
@@ -767,7 +782,7 @@ namespace netxs::app::parvion
         // between them (matching the queue panel's bottom tab strip: x starts at 0, each
         // tab is label+2 wide with one padding cell per side, and x advances by exactly bw).
         canvas.fill(rect{{ 0, 1 }, { W, 1 }}, [&](cell& c){ c.bgc(theme::header); });
-        auto labels = std::array<view, sd::tab_count>{ "Connection", "SFTP" };
+        auto labels = std::array<view, sd::tab_count>{ "Connection", "SFTP", "Debug" };
         auto tx = si32{ 0 };
         for (auto i = si32{}; i < sd::tab_count; ++i)
         {
@@ -811,7 +826,7 @@ namespace netxs::app::parvion
             }
         }
         // --- SFTP tab -----------------------------------------------------------------
-        else
+        else if (st.tab == sd::tab_sftp)
         {
             // Stack the lower group boxes from the bottom (content-sized) and let the Public Key
             // Authentication box expand to fill the remaining space (its key table grows with it).
@@ -870,6 +885,26 @@ namespace netxs::app::parvion
             st.fields[sd::f_maxconn].box = rect{{ fx, par_y + 2 }, { sd::field_w[sd::f_maxconn], 1 }};
             paint_field(canvas, st.fields[sd::f_maxconn].box, st.fields[sd::f_maxconn].val, st.fields[sd::f_maxconn].caret, st.fields[sd::f_maxconn].off, st.focused && st.active == sd::f_maxconn, faux);
             { auto hx = fx + sd::field_w[sd::f_maxconn] + 2; put_str(canvas, hx, par_y + 2, sd::hnt_maxconn, theme::subtext, theme::bg, std::max(0, cr - hx)); }
+        }
+        // --- Debug tab ---------------------------------------------------------------
+        else
+        {
+            auto y = si32{ 3 };
+            auto help_h = (si32)sd_wrap(sd::help_debug, inner).size();
+            auto info_h = si32{ 2 + 1 + help_h };
+            sd_box(canvas, rect{{ ix, y }, { iw, info_h }}, "Debugging settings");
+            put_str(canvas, ix + 2, y + 1, sd::lbl_log_level, theme::text_fg, theme::bg, std::max(0, std::min((si32)cell_width(sd::lbl_log_level), cr - (ix + 2))));
+            auto lx = ix + 2 + (si32)cell_width(sd::lbl_log_level) + 1;
+            auto level_label = text{ " " } + std::to_string(st.log_debug_level) + " - " + text{ log_debug_label(st.log_debug_level) } + " \xE2\x96\xBE ";
+            st.hit.log_level = rect{{ lx, y + 1 }, { std::max(0, std::min((si32)cell_width(level_label), cr - lx)), 1 }};
+            paint_button(canvas, st.hit.log_level, level_label, st.hover_loglevel, faux);
+            sd_help(canvas, ix + 2, y + 2, inner, sd::help_debug);
+            y += info_h + 1;
+
+            auto raw_h = si32{ 2 + 1 };
+            sd_box(canvas, rect{{ ix, y }, { iw, raw_h }}, "Directory listing");
+            st.hit.raw_listing = rect{{ ix + 2, y + 1 }, { inner, 1 }};
+            put_str(canvas, ix + 2, y + 1, st.log_raw_listing ? "\xE2\x96\xA3 Show raw directory listing" : "\xE2\x96\xA1 Show raw directory listing", theme::text_fg, theme::bg, inner);
         }
         // --- Button row (OK + Cancel; right-aligned block) -----------------------------
         auto okw = si32{ 4 }, cnw = si32{ 8 };
@@ -1050,6 +1085,23 @@ namespace netxs::app::parvion
         return items;
     }
 
+    // Debug-level dropdown (Settings -> Debug): 0=None .. 4=Debug.
+    inline auto sd_build_log_level_menu(settings_state& st, netxs::wptr<ui::base> card_wp) -> std::vector<app::shared::menu::item>
+    {
+        namespace m = app::shared::menu;
+        auto items = std::vector<m::item>{};
+        auto stp = &st;
+        auto deface = [card_wp]{ if (auto c = card_wp.lock()) c->base::deface(); };
+        for (auto i = si32{}; i < 5; ++i)
+        {
+            auto label = std::to_string(i) + " - " + text{ log_debug_label(i) };
+            auto row = m::item{ .alive = true, .label = label, .checked = (st.log_debug_level == i) };
+            row.action = [stp, deface, i](hids&){ stp->log_debug_level = i; deface(); };
+            items.push_back(std::move(row));
+        }
+        return items;
+    }
+
     // "Add key file..." picker: the reusable Open-mode file picker (panes.hpp open_file_picker),
     // seeded at the user's home and Windows drive-aware. Activating a file (double-click / Enter /
     // Open) adds it as a key; an encrypted non-ppk key then converts (see sd_add_key). The settings
@@ -1154,6 +1206,10 @@ namespace netxs::app::parvion
                         kt_on_down(st, mx - st.kt.area.coor.x, my - st.kt.area.coor.y, ctl, shft);
                     }
                 }
+                else if (st.tab == sd::tab_debug)
+                {
+                    if (sd_hit(st.hit.raw_listing, mx, my)) { st.log_raw_listing = !st.log_raw_listing; }
+                }
                 // Field activation (current tab only).
                 for (auto i = si32{}; i < sd::f_count; ++i) if (st.fields[i].tab == st.tab && sd_hit(st.fields[i].box, mx, my))
                 {
@@ -1191,6 +1247,15 @@ namespace netxs::app::parvion
                         if (kt_on_click(st, mx - st.kt.area.coor.x, my - st.kt.area.coor.y)) fired = true;
                     }
                 }
+                else if (st.tab == sd::tab_debug)
+                {
+                    if (sd_hit(st.hit.log_level, mx, my))
+                    {
+                        auto at = twod{ st.hit.log_level.coor.x, st.hit.log_level.coor.y + 1 };
+                        app::shared::menu::open_dropdown_popup(boss, sd_build_log_level_menu(st, st.card_wp), true, st.log_debug_level, at);
+                        fired = true;
+                    }
+                }
                 st.press_ok = st.press_cancel = st.press_add = st.press_remove = faux;
                 if (!fired) boss.base::deface();
                 else boss.base::deface();
@@ -1213,7 +1278,9 @@ namespace netxs::app::parvion
             });
             boss.on(tier::mouserelease, input::key::MouseLeave, [&](hids&)
             {
-                if (kt_clear_hover(st)) boss.base::deface();
+                auto dirty = kt_clear_hover(st);
+                if (st.hover_loglevel) { st.hover_loglevel = faux; dirty = true; }
+                if (dirty) boss.base::deface();
             });
             boss.on(tier::mouserelease, input::key::MouseMove, [&](hids& gear)
             {
@@ -1230,6 +1297,10 @@ namespace netxs::app::parvion
                     upd(st.hover_hashalgo, st.hit.hash_algo);
                     if (kt_in_area(st, mx, my)) { if (kt_on_move(st, mx - st.kt.area.coor.x, my - st.kt.area.coor.y)) dirty = true; }
                     else if (kt_clear_hover(st)) dirty = true;
+                }
+                else if (st.tab == sd::tab_debug)
+                {
+                    upd(st.hover_loglevel, st.hit.log_level);
                 }
                 if (dirty) boss.base::deface();
             });
@@ -1276,17 +1347,21 @@ namespace netxs::app::parvion
                 auto shift = !!(gear.ctlstat & hids::anyShift);
                 auto act = true;
                 // Current tab's field order (for Tab navigation).
-                auto order = st.tab == sd::tab_connection
-                    ? std::vector<si32>{ sd::f_timeout, sd::f_retries, sd::f_delay }
-                    : std::vector<si32>{ sd::f_threshold, sd::f_maxconn };
+                auto order = st.tab == sd::tab_connection ? std::vector<si32>{ sd::f_timeout, sd::f_retries, sd::f_delay }
+                           : st.tab == sd::tab_sftp       ? std::vector<si32>{ sd::f_threshold, sd::f_maxconn }
+                                                           : std::vector<si32>{};
                 if (k == input::key::Esc) { sd_close(st); }
                 else if (k == input::key::KeyEnter) { sd_accept(st); }
                 else if (k == input::key::Tab)
                 {
+                    if (order.empty()) { act = faux; }
+                    else
+                    {
                     auto pos = 0;
                     for (auto i = 0; i < (si32)order.size(); ++i) if (order[i] == st.active) pos = i;
                     auto n = (si32)order.size();
                     st.active = order[(pos + (shift ? n - 1 : 1)) % n];
+                    }
                 }
                 else if (st.active >= 0)
                 {

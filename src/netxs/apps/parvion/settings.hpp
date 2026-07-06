@@ -8,11 +8,13 @@
 //   Connection : Timeout, Reconnect count, Reconnect delay.
 //   SFTP       : private key files, compression, parallel-transfer threshold + unit,
 //                max parallel connections per file.
+//   Debug      : debug information level and raw directory listing.
 // Stored as a flat `key<TAB>value` file next to the Quick Connect history
 // (recent_servers), mirroring sftp_remote::load_recent / save_recent. The engine
 // applies these onto its live fields (see sftp_remote::apply_settings).
 
 #include "model.hpp"
+#include "logging.hpp"
 
 #include <cstdio>
 #include <cstdlib>
@@ -87,6 +89,9 @@ namespace netxs::app::parvion
         // Hash verification page (Edit -> Settings -> SFTP -> "Hash verification").
         bool hash_on_transfer = faux; // Auto-hash the target of every completed transfer.
         si32 hash_algo        = 2;    // Algorithm index 0..4; SHA-256 default.
+        // Debug page.
+        si32 log_debug_level  = log_debug_none; // 0=None .. 4=Debug.
+        bool log_raw_listing  = faux; // Show raw directory listing lines in the message log.
 
         // Bytes form of the "enable parallel transfers for files larger than" gate.
         auto threshold_bytes() const -> si64 { return (si64)threshold_value * sftp_unit_mul(threshold_unit); }
@@ -102,6 +107,7 @@ namespace netxs::app::parvion
             threshold_unit  = std::clamp(threshold_unit, 0, sftp_unit_count - 1);
             max_connections = std::clamp(max_connections, 1, 10);
             hash_algo       = std::clamp(hash_algo, 0, hash_algo_count - 1);
+            log_debug_level = std::clamp(log_debug_level, 0, 4);
         }
 
         // Restore from <config>/parvion/settings; missing file leaves defaults.
@@ -132,6 +138,8 @@ namespace netxs::app::parvion
                 else if (key == "SFTP parallel max connections")          max_connections = std::atoi(val.c_str());
                 else if (key == "Hash on transfer")                       hash_on_transfer = std::atoi(val.c_str()) != 0;
                 else if (key == "Hash algorithm")                         hash_algo        = std::atoi(val.c_str());
+                else if (key == "Logging Debug Level")                    log_debug_level  = std::atoi(val.c_str());
+                else if (key == "Logging Raw Listing")                    log_raw_listing  = std::atoi(val.c_str()) != 0;
                 else if (key == "SFTP keyfile")                           { if (!val.empty()) keyfiles.push_back(val); }
             }
             clamp();
@@ -153,6 +161,8 @@ namespace netxs::app::parvion
             put("SFTP parallel max connections", std::to_string(max_connections));
             put("Hash on transfer", std::to_string(hash_on_transfer ? 1 : 0));
             put("Hash algorithm", std::to_string(hash_algo));
+            put("Logging Debug Level", std::to_string(log_debug_level));
+            put("Logging Raw Listing", std::to_string(log_raw_listing ? 1 : 0));
             for (auto& k : keyfiles) put("SFTP keyfile", k);
             std::fclose(f);
             #if !defined(_WIN32)

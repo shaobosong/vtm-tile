@@ -41,6 +41,11 @@ add_executable(parvion_pin_top_test "parvion_pin_top_test.cpp")
 target_include_directories(parvion_pin_top_test PRIVATE "${CMAKE_SOURCE_DIR}/src")
 add_test(NAME parvion_pin_top_test COMMAND parvion_pin_top_test)
 
+# Unit test for the Parvion message logger (FileZilla-style detailed queueing).
+add_executable(parvion_logging_test "parvion_logging_test.cpp")
+target_include_directories(parvion_logging_test PRIVATE "${CMAKE_SOURCE_DIR}/src")
+add_test(NAME parvion_logging_test COMMAND parvion_logging_test)
+
 # Python TUI regression tests for close confirmation dialog.
 # Requires vtm-desk and vtm-tile binaries to be built first.
 find_package(Python3 COMPONENTS Interpreter)

@@ -167,6 +167,11 @@ namespace netxs::app::parvion
                 ctrl.log_line(logtype::status, "log line " + (i < 10 ? text{ "0" } : text{}) + std::to_string(i));
             ctrl.log_line(logtype::status,
                 "a very long status line that overflows the message-log width to force the horizontal scrollbar for testing");
+            if (auto d = std::getenv("PARVION_DEMO_LOG_DETAIL"); d && *d && *d != '0')
+            {
+                ctrl.log_line(logtype::command, "demo hidden command");
+                ctrl.log_line(logtype::response, "demo hidden response");
+            }
         };
 
         // Test/demo seam: when $PARVION_DEMO_HASH is set, seed the Checksums tab with synthetic

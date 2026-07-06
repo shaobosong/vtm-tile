@@ -4,7 +4,7 @@
 
 """
 End-to-end TUI tests for the Parvion Edit -> Settings dialog (settings_dialog.hpp):
-the SFTP subset of FileZilla's Connection and Connection/SFTP option pages, ported
+the SFTP subset of FileZilla's Connection, Connection/SFTP, and Debug option pages, ported
 into a top-tabbed modal dialog that persists to <XDG_CONFIG_HOME>/parvion/settings
 and feeds the live SFTP engine.
 
@@ -54,6 +54,13 @@ def _goto_sftp(s):
     return s.screen()[0]
 
 
+def _goto_debug(s):
+    chars = s.screen()[0]
+    dbg = T.find_text(chars, "Debug")
+    s.click(dbg[1] + 1, dbg[0] + 1); s.feed(0.7)
+    return s.screen()[0]
+
+
 def _click_label(s, needle, dx=1):
     chars = s.screen()[0]
     pos = T.find_text(chars, needle)
@@ -81,10 +88,39 @@ def test_dialog_opens():
     with _session(cfg) as s:
         chars = _open_dialog(s)
         blob = "\n".join(T.row_text(chars, r) for r in range(len(chars)))
-        for needle in ("Settings", "Connection", "SFTP", "Timeout",
+        for needle in ("Settings", "Connection", "SFTP", "Debug", "Timeout",
                        "Reconnection settings", "OK", "Cancel"):
             if needle not in blob:
                 print(f"FAIL - '{needle}' missing"); return False
+    print("PASS"); return True
+
+
+def test_debug_tab_persists():
+    print("TEST: settings dialog Debug tab persists log controls ... ", end="", flush=True)
+    cfg = tempfile.mkdtemp(prefix="pvset_")
+    with _session(cfg) as s:
+        _open_dialog(s)
+        chars = _goto_debug(s)
+        blob = "\n".join(T.row_text(chars, r) for r in range(len(chars)))
+        for needle in ("Debugging settings", "Debug information in message log",
+                       "0 - None", "Show raw directory listing"):
+            if needle not in blob:
+                print(f"FAIL - '{needle}' missing"); return False
+        level = T.find_text(chars, "0 - None")
+        s.click(level[1] + 1, level[0] + 1); s.feed(0.7)
+        verbose = T.find_text(s.screen()[0], "3 - Verbose")
+        if not verbose:
+            print("FAIL - debug-level dropdown did not open"); return False
+        s.click(verbose[1] + 1, verbose[0] + 1); s.feed(0.7)
+        _click_label(s, "Show raw directory listing", dx=1)
+        chars = s.screen()[0]
+        ok = T.find_text(chars, " OK ")
+        s.click(ok[1] + 2, ok[0] + 1); s.feed(1.0)
+    vals = _settings_file(cfg)
+    if vals.get("Logging Debug Level") != ["3"]:
+        print(f"FAIL - debug level not persisted: {vals.get('Logging Debug Level')}"); return False
+    if vals.get("Logging Raw Listing") != ["1"]:
+        print(f"FAIL - raw listing not persisted: {vals.get('Logging Raw Listing')}"); return False
     print("PASS"); return True
 
 
@@ -556,6 +592,7 @@ def test_encrypted_key_wrong_passphrase_retries():
 TESTS = [
     test_dialog_opens,
     test_sftp_tab,
+    test_debug_tab_persists,
     test_add_encrypted_key_converts_to_ppk,
     test_save_picker_double_click_overwrite,
     test_save_picker_click_updates_name,

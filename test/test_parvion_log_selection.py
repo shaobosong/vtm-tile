@@ -11,7 +11,8 @@ double-click selects the word under the cursor, and a triple-click selects the
 whole line. Selected cells paint with theme::sel_bg. The right-click log menu
 always carries a "Copy" item: enabled (and copying the selection via OSC 52) when
 text is selected, disabled (greyed, inert) otherwise. A plain left-click cancels
-the selection, and a live log update (new lines appended) does NOT clear it.
+the selection, the app menu matches FileZilla's detailed/copy/clear items, and a
+live log update (new lines appended) does NOT clear it.
 
 Driven via a pty using the SGR mouse protocol. The app is launched as
 `vtm-tile -r parvion` with the message log seeded by $PARVION_DEMO_LOG_N=k
@@ -292,6 +293,46 @@ def test_log_copy_present_disabled_no_selection():
     print("PASS"); return True
 
 
+def test_log_context_menu_omits_log_level():
+    print("TEST: parvion message log - context menu omits Log level ... ", end="", flush=True)
+    with _session() as s:
+        info = _enter_log(s)
+        if info is None:
+            print("FAIL: message log / seeded lines not found"); return False
+        lr, lc, _ = info
+        s.click(lc + 2, lr + 1, button=2)
+        chars, _ = s.screen()
+        blob = "\n".join(T.row_text(chars, r) for r in range(len(chars)))
+        for needle in ("Show detailed log", "Copy to clipboard", "Clear all"):
+            if needle not in blob:
+                print(f"FAIL: '{needle}' missing from menu"); return False
+        if "Log level" in blob:
+            print("FAIL: old Log level item is still in the message-log menu"); return False
+    print("PASS"); return True
+
+
+def test_show_detailed_flushes_queued_detail():
+    print("TEST: parvion message log - Show detailed log flushes queued detail ... ", end="", flush=True)
+    with _session({"PARVION_DEMO_LOG_DETAIL": "1"}) as s:
+        info = _enter_log(s)
+        if info is None:
+            print("FAIL: message log / seeded lines not found"); return False
+        chars, _ = s.screen()
+        if T.grid_contains(chars, "demo hidden command") or T.grid_contains(chars, "demo hidden response"):
+            print("FAIL: queued detail was visible before Show detailed log"); return False
+        lr, lc, _ = info
+        s.click(lc + 2, lr + 1, button=2)
+        chars, _ = s.screen()
+        detail = T.find_text(chars, "Show detailed log")
+        if not detail:
+            print("FAIL: Show detailed log menu item missing"); return False
+        s.click(detail[1] + 1, detail[0] + 1); s.feed(0.8)
+        chars, _ = s.screen()
+        if not T.grid_contains(chars, "demo hidden command") or not T.grid_contains(chars, "demo hidden response"):
+            print("FAIL: queued detail did not appear after Show detailed log"); return False
+    print("PASS"); return True
+
+
 def test_log_live_appends_arrive():
     print("TEST: parvion message log - live log appends arrive (tick seam) ... ", end="", flush=True)
     with _session({"PARVION_DEMO_LOG_TICK": "4"}) as s:
@@ -332,6 +373,8 @@ TESTS = [
     test_log_double_click_word,
     test_log_triple_click_line,
     test_log_copy_present_disabled_no_selection,
+    test_log_context_menu_omits_log_level,
+    test_show_detailed_flushes_queued_detail,
     test_log_live_appends_arrive,
     test_log_selection_survives_log_update,
 ]

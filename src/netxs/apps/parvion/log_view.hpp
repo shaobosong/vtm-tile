@@ -40,49 +40,34 @@ namespace netxs::app::parvion
             default:           return theme::subtext;
         }
     }
-    // "Show detailed log" gates Command / Response / Trace; the debug level additionally gates Trace.
-    inline auto log_visible(sftp_remote::logline const& ln, bool show_detailed, si32 debug_level) -> bool
-    {
-        using lt = logtype;
-        if (ln.type == lt::trace)                              return show_detailed && debug_level >= ln.level;
-        if (ln.type == lt::command || ln.type == lt::response) return show_detailed;
-        return true;
-    }
-
-    // Memoized filtered-visible-lines cache: rebuilt only when the log contents or filters change, so
+    // Memoized visible-lines cache: rebuilt only when the committed log changes, so
     // the text-view's per-line queries stay cheap even with a full (1000-line) log.
     struct log_vis_cache
     {
         std::vector<sftp_remote::logline const*> vis;
-        size_t      sig_size = (size_t)-1;
-        bool        sig_detail = faux;
-        si32        sig_level = -1;
-        const void* sig_front = nullptr;
-        const void* sig_back  = nullptr;
+        ui64        sig_epoch = (ui64)-1;
         auto get(sftp_remote* ctrl) -> std::vector<sftp_remote::logline const*> const&
         {
-            auto front = ctrl->logbuf.empty() ? nullptr : (const void*)&ctrl->logbuf.front();
-            auto back  = ctrl->logbuf.empty() ? nullptr : (const void*)&ctrl->logbuf.back();
-            if (sig_size != ctrl->logbuf.size() || sig_detail != ctrl->show_detailed || sig_level != ctrl->debug_level || sig_front != front || sig_back != back)
+            if (sig_epoch != ctrl->logger.epoch)
             {
                 vis.clear();
-                for (auto& ln : ctrl->logbuf) if (log_visible(ln, ctrl->show_detailed, ctrl->debug_level)) vis.push_back(&ln);
-                sig_size = ctrl->logbuf.size(); sig_detail = ctrl->show_detailed; sig_level = ctrl->debug_level; sig_front = front; sig_back = back;
+                for (auto& ln : ctrl->logger.lines) vis.push_back(&ln);
+                sig_epoch = ctrl->logger.epoch;
             }
             return vis;
         }
     };
 
-    // The Message-log right-click menu (Show detailed log / Copy to clipboard / Clear all + a Log
-    // level radio submenu). The text-view core prepends the selection "Copy" item.
+    // The Message-log right-click menu (Show detailed log / Copy to clipboard / Clear all).
+    // The text-view core prepends the selection "Copy" item.
     inline auto build_log_menu(sftp_remote* ctrl, netxs::wptr<ui::base> panel_wp) -> std::vector<app::shared::menu::item>
     {
         namespace m = app::shared::menu;
         auto deface = [panel_wp]{ if (auto p = panel_wp.lock()) p->base::deface(); };
         auto items = std::vector<m::item>{};
 
-        auto detail = m::item{ .alive = true, .label = "Show detailed log", .type = m::kind::check, .checked = ctrl->show_detailed };
-        detail.action = [ctrl, deface](hids&){ ctrl->show_detailed = !ctrl->show_detailed; deface(); };
+        auto detail = m::item{ .alive = true, .label = "Show detailed log", .type = m::kind::check, .checked = ctrl->logger.show_detailed };
+        detail.action = [ctrl, deface](hids&){ ctrl->logger.set_show_detailed(!ctrl->logger.show_detailed); ctrl->dirty = true; deface(); };
         items.push_back(std::move(detail));
         items.push_back(m::item{ .alive = true, .type = m::kind::separator });
 
@@ -90,7 +75,7 @@ namespace netxs::app::parvion
         copy.action = [ctrl](hids& gear)
         {
             auto out = text{};
-            for (auto& ln : ctrl->logbuf) if (log_visible(ln, ctrl->show_detailed, ctrl->debug_level))
+            for (auto& ln : ctrl->logger.lines)
             {
                 if (ctrl->show_stamps) out += ln.stamp + " ";
                 out += text{ log_prefix(ln.type) } + ln.body + "\n";
@@ -100,19 +85,8 @@ namespace netxs::app::parvion
         items.push_back(std::move(copy));
 
         auto clear = m::item{ .alive = true, .label = "Clear all" };
-        clear.action = [ctrl, deface](hids&){ ctrl->logbuf.clear(); ctrl->dirty = true; deface(); };
+        clear.action = [ctrl, deface](hids&){ ctrl->logger.clear(); ctrl->dirty = true; deface(); };
         items.push_back(std::move(clear));
-        items.push_back(m::item{ .alive = true, .type = m::kind::separator });
-
-        auto level = m::item{ .alive = true, .label = "Log level", .type = m::kind::radiomenu };
-        static constexpr auto names = std::array<view, 5>{ "None", "Warning", "Info", "Verbose", "Debug" };
-        for (auto i = si32{}; i < 5; ++i)
-        {
-            auto row = m::item{ .alive = true, .label = text{ names[(size_t)i] }, .checked = (ctrl->debug_level == i) };
-            row.action = [ctrl, deface, i](hids&){ ctrl->debug_level = i; deface(); };
-            level.children.push_back(std::move(row));
-        }
-        items.push_back(std::move(level));
         return items;
     }
 
