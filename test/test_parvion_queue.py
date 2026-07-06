@@ -371,6 +371,28 @@ def header_border_count(s, header_word):
 
 # ----------------------------------- tests -----------------------------------
 
+def test_table_header_paints_scrollbar_corner():
+    """The header strip includes the one-cell corner above the vertical scrollbar."""
+    print("TEST: parvion - table header paints scrollbar corner ... ", end="", flush=True)
+    with ParvionSession({"PARVION_DEMO_QUEUE": "1", "PARVION_DEMO_QUEUE_N": "40"}) as s:
+        chars, bg = s.screen()
+        hdr = find_text(chars, "Local Name")
+        if hdr is None:
+            print("FAIL - header not found")
+            return False
+        hr = hdr[0]
+        if not any(chars[r][COLS - 1] in ("▐", "█") for r in range(hr + 1, ROWS)):
+            print("FAIL - vertical scrollbar not present")
+            return False
+        header_bg = bg[hr][COLS - 2]
+        corner_bg = bg[hr][COLS - 1]
+        if header_bg is None or corner_bg != header_bg:
+            print(f"FAIL - header corner bg {corner_bg}, expected {header_bg}")
+            return False
+        print("PASS")
+        return True
+
+
 def test_reason_column_has_resize_handle():
     """Failed tab's Reason column adds a 5th draggable border vs. the 4 on Transferring."""
     print("TEST: parvion - Reason column has a resize handle ... ", end="", flush=True)
@@ -1268,6 +1290,7 @@ def test_pane_selection_ends_at_last_column():
 
 
 TESTS = [
+    test_table_header_paints_scrollbar_corner,
     test_reason_column_has_resize_handle,
     test_right_click_activates_queue,
     test_selection_highlight_ends_at_last_column,

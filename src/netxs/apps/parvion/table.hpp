@@ -65,9 +65,9 @@ namespace netxs::app::parvion
             }
             else paint_at(canvas, cx, colw, y, s, fg, bg, hscroll, disp_w);
         }
-        void paint_header(auto& canvas, si32 row, si32 hscroll, si32 disp_w) const
+        void paint_header(auto& canvas, si32 row, si32 hscroll, si32 disp_w, si32 strip_w) const
         {
-            canvas.fill(rect{{ 0, row }, { disp_w, 1 }}, [&](cell& c){ c.bgc(theme::header); });
+            canvas.fill(rect{{ 0, row }, { strip_w, 1 }}, [&](cell& c){ c.bgc(theme::header); });
             for (auto i = si32{}; i < (si32)cols.size(); ++i) paint_cell(canvas, i, row, cols[(size_t)i].title, theme::subtext, theme::header, hscroll, disp_w);
         }
         void paint_dividers(auto& canvas, si32 top, si32 bottom, si32 hscroll, si32 disp_w, si32 hover_idx, si32 drag_idx) const
@@ -415,7 +415,7 @@ namespace netxs::app::parvion
         tbl_clamp(st);
 
         auto hs = st.hscroll, clipw = st.disp_w;
-        t.paint_header(canvas, st.body_top - 1, hs, clipw);
+        t.paint_header(canvas, st.body_top - 1, hs, clipw, w);
 
         if (nrows == 0)
         {
