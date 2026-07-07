@@ -806,13 +806,51 @@ namespace netxs::app::parvion
         text last_preamble, last_instruction;
         std::set<text> pass_asked;
 
+        static auto state_name(stt s) -> view
+        {
+            switch (s)
+            {
+                case s_init:       return "init";
+                case s_connecting: return "connecting";
+                case s_running:    return "running";
+                case s_ok:         return "ok";
+                case s_err:        return "error";
+                default:           return "unknown";
+            }
+        }
+        static auto await_name(awt a) -> view
+        {
+            switch (a)
+            {
+                case a_none:    return "none";
+                case a_open:    return "open";
+                case a_xfer:    return "transfer";
+                case a_keyfile: return "keyfile";
+                default:        return "unknown";
+            }
+        }
+
         // Log into the shared message log (FileZilla routes every control socket
         // through one StatusView). lg() no-ops if no sink was attached.
         void lg(logtype t, text s, si32 level = 0) { if (logsink) logsink(t, std::move(s), level); }
         // Send a command on this connection, logging it first (like SendCommand's
         // log_raw(logmsg::command, ...)). Secrets (host-key answer, password) are
         // sent raw and never logged.
-        void wr_cmd(view c) { lg(logtype::command, text{ c }); session.write_line(c); }
+        void wr_cmd(view c)
+        {
+            lg(logtype::trace, "Sending SFTP command: " + text{ c } + " (state " + text{ await_name(await) } + ")", dbg_verbose);
+            lg(logtype::command, text{ c });
+            session.write_line(c);
+        }
+        void trace_event(sftp_msg const& m)
+        {
+            if (m.type == sftp_evt::transfer || m.type == sftp_evt::listentry) return;
+            lg(logtype::trace,
+               "Received SFTP event " + text{ sftp_evt_name(m.type) }
+                   + " state=" + text{ state_name(state) }
+                   + " await=" + text{ await_name(await) },
+               dbg_debug);
+        }
 
         static auto to_i64(view s) -> si64
         {
@@ -840,15 +878,27 @@ namespace netxs::app::parvion
             done = 0; opened = faux; error.clear(); await = a_none; state = s_connecting;
             pass_asked.clear(); last_preamble.clear(); last_instruction.clear(); // Fresh auth session.
             session.runargs = runargs;
-            if (!session.launch(exe)) { lg(logtype::error, "Failed to launch parvionsftp: " + exe); state = s_err; error = "Failed to launch parvionsftp"; }
+            lg(logtype::trace, "Going to execute " + exe, dbg_verbose); // FileZilla connect.cpp parity.
+            if (!session.launch(exe))
+            {
+                lg(logtype::trace, "Could not create process", dbg_warning);
+                lg(logtype::error, "Failed to launch parvionsftp: " + exe);
+                state = s_err;
+                error = "Failed to launch parvionsftp";
+            }
         }
-        void stop() { session.stop(); }
+        void stop()
+        {
+            lg(logtype::trace, "Closing SFTP worker connection", dbg_debug);
+            session.stop();
+        }
         // Reuse this already-connected, authenticated session for a new transfer (single-stream or a
         // parallel chunk): the per-transfer fields (download/remote_path/local_path/parallel/offset/
         // length/initialize) are refreshed by cfg_worker first, then we issue the get/put directly,
         // skipping launch + open + host-key + auth (the costly part). Only progress fields reset here.
         void rearm()
         {
+            lg(logtype::trace, "Reusing connected SFTP worker in state " + text{ state_name(state) }, dbg_verbose);
             done = 0; persisted = -1; opened = faux; error.clear();
             state = s_running; await = a_xfer;
             send_xfer();
@@ -861,6 +911,7 @@ namespace netxs::app::parvion
         }
         void on(sftp_msg const& m)
         {
+            trace_event(m);
             switch (m.type)
             {
                 // FileZilla CSftpControlSocket::OnSftpEvent: Error is a log line
@@ -904,9 +955,31 @@ namespace netxs::app::parvion
                 case sftp_evt::done:
                     if (await == a_keyfile) send_next_keyfile_or_open(); // Key registered; next key or open.
                     else if (m.first() == "1") complete();
-                    else { state = s_err; if (error.empty()) error = "Transfer failed"; }
+                    else
+                    {
+                        lg(logtype::trace, "Transfer command finished with result " + text{ m.first() }, dbg_info);
+                        state = s_err;
+                        if (error.empty()) error = "Transfer failed";
+                    }
                     break;
-                default: break;
+                case sftp_evt::listentry:
+                case sftp_evt::send:
+                case sftp_evt::recv:
+                case sftp_evt::used_quota_recv:
+                case sftp_evt::used_quota_send:
+                case sftp_evt::kex_algorithm:
+                case sftp_evt::kex_hash:
+                case sftp_evt::kex_curve:
+                case sftp_evt::cipher_cts:
+                case sftp_evt::cipher_stc:
+                case sftp_evt::mac_cts:
+                case sftp_evt::mac_stc:
+                case sftp_evt::hostkey:
+                    /* ignore */
+                    break;
+                default:
+                    lg(logtype::trace, "Message type " + text{ sftp_evt_name(m.type) } + " not handled", dbg_warning);
+                    break;
             }
         }
         // Register the next existing key file (await a_keyfile), or send `open` once all are done.
@@ -929,6 +1002,7 @@ namespace netxs::app::parvion
         }
         void complete()
         {
+            lg(logtype::trace, "Parsing SFTP worker response in state " + text{ await_name(await) }, dbg_verbose);
             if (await == a_open) { state = s_running; await = a_xfer; send_xfer(); }
             else if (await == a_xfer) state = s_ok;
         }
@@ -1115,6 +1189,35 @@ namespace netxs::app::parvion
         bool  ls_deferred = faux;     // A post-cd `ls` is currently being held by dbg_ls_delay_ms.
         steady_clock::time_point ls_due{}; // When the held `ls` becomes due.
 
+        static auto stage_name(stage_t s) -> view
+        {
+            switch (s)
+            {
+                case s_idle:      return "idle";
+                case s_greeting:  return "greeting";
+                case s_opening:   return "opening";
+                case s_connected: return "connected";
+                case s_failed:    return "failed";
+                default:          return "unknown";
+            }
+        }
+        static auto cmd_name(cmd_t c) -> view
+        {
+            switch (c)
+            {
+                case c_none:    return "none";
+                case c_open:    return "open";
+                case c_pwd:     return "pwd";
+                case c_ls:      return "list";
+                case c_cd:      return "cwd";
+                case c_op:      return "operation";
+                case c_rls:     return "recursive-list";
+                case c_recop:   return "recursive-operation";
+                case c_keyfile: return "keyfile";
+                default:        return "unknown";
+            }
+        }
+
         // Copy the persisted settings onto the live engine fields so they take effect.
         // Called from the constructor (before the env test-seams, which still win) and
         // whenever the Settings dialog commits a change (update_settings).
@@ -1236,6 +1339,14 @@ namespace netxs::app::parvion
         }
         // Append a Trace line at debug sub-level `level` (dbg_warning .. dbg_debug).
         void trace(si32 level, text s) { log_line(logtype::trace, std::move(s), level); }
+        void trace_event(sftp_msg const& m)
+        {
+            if (m.type == sftp_evt::transfer || m.type == sftp_evt::listentry) return;
+            trace(dbg_debug,
+                  "Received SFTP event " + text{ sftp_evt_name(m.type) }
+                      + " stage=" + text{ stage_name(stage) }
+                      + " await=" + text{ cmd_name(await) });
+        }
         // Short connect-bar hint; mirrored into the log as a Status line.
         void mark(text s) { status = s; log_line(logtype::status, std::move(s)); dirty = true; }
         // Error: short hint on the bar + an Error line in the log.
@@ -1263,6 +1374,7 @@ namespace netxs::app::parvion
         // loop) — tear the connection down. s_failed does not auto-reconnect (only an s_connected drop does).
         void cancel_secret()
         {
+            trace(dbg_debug, "Closing SFTP control connection (authentication cancelled)");
             session.stop();
             sec = sec_idle;
             fail("Authentication cancelled.");
@@ -1270,7 +1382,13 @@ namespace netxs::app::parvion
         }
         // Issue a user-visible SFTP command on the control session, logging it as
         // a Command line first (mirrors FileZilla logging the command it sends).
-        void send_cmd(view c) { last_activity = steady_clock::now(); log_line(logtype::command, text{ c }); session.write_line(c); }
+        void send_cmd(view c)
+        {
+            trace(dbg_verbose, "Sending SFTP command: " + text{ c } + " (state " + text{ cmd_name(await) } + ")");
+            last_activity = steady_clock::now();
+            log_line(logtype::command, text{ c });
+            session.write_line(c);
+        }
         // Per-transfer outcome summary, mirroring CControlSocket::LogTransferResultMessage:
         // a Status "File transfer successful[, transferred X in Y]" or an Error
         // "File transfer failed[ after transferring X in Y]".
@@ -1368,12 +1486,19 @@ namespace netxs::app::parvion
             remember(host, user, pass, port); // Record this target in the Quick Connect history.
             session.runargs = runargs;
             if (cfg.compression) session.runargs.push_back("-C"); // SFTP compression (Settings -> SFTP).
-            if (!session.launch(exe)) { fail("Failed to launch parvionsftp: " + exe); stage = s_failed; return; }
+            if (!session.launch(exe))
+            {
+                trace(dbg_warning, "Could not create process");
+                fail("Failed to launch parvionsftp: " + exe);
+                stage = s_failed;
+                return;
+            }
             stage = s_greeting;
         }
 
         void disconnect()
         {
+            trace(dbg_debug, "Closing SFTP control connection (disconnect)");
             session.stop();
             stage = s_idle;
             await = c_none;
@@ -1462,6 +1587,7 @@ namespace netxs::app::parvion
             retry_at = steady_clock::now();     // first attempt immediately
             stage = s_idle;                     // leave s_connected; drive_reconnect() relaunches
             fail("Control connection lost. Reconnecting...");
+            trace(dbg_debug, "Closing SFTP control connection (connection lost)");
         }
         // While recovering and not mid-attempt, relaunch on the backoff clock until the link
         // is back or we exhaust the attempt cap.
@@ -1494,6 +1620,7 @@ namespace netxs::app::parvion
             if (cfg.compression) session.runargs.push_back("-C"); // SFTP compression (Settings -> SFTP).
             if (!session.launch(exe))
             {
+                trace(dbg_warning, "Could not create process");
                 trace(dbg_warning, "Failed to launch parvionsftp during reconnect: " + exe);
                 stage = s_failed;
                 retry_at = steady_clock::now() + std::chrono::seconds{ reconnect_delay_sec };
@@ -1536,6 +1663,7 @@ namespace netxs::app::parvion
             if (now - last_activity < std::chrono::seconds{ keepalive_sec }) return;
             ++keep_skip;
             last_activity = now;
+            trace(dbg_verbose, "Sending keepalive command");
             session.write_line("pwd");
         }
 
@@ -2357,6 +2485,7 @@ namespace netxs::app::parvion
 
         void process(sftp_msg const& m)
         {
+            trace_event(m);
             switch (m.type)
             {
                 case sftp_evt::status:
@@ -2420,6 +2549,7 @@ namespace netxs::app::parvion
                         auto e = to_direntry(m);
                         if (e.name != "." && e.name != "..") pending.push_back(std::move(e));
                     }
+                    else trace(dbg_warning, "List entry received outside list operation, ignoring.");
                     break;
                 case sftp_evt::reply:
                     // A keepalive `pwd` reply: swallow it (don't log or advance the state
@@ -2429,6 +2559,11 @@ namespace netxs::app::parvion
                     if (keep_skip > 0) { --keep_skip; break; }
                     // The server's reply to the last command (FileZilla: Response).
                     if (!m.line.empty()) log_line(logtype::response, text{ m.first() });
+                    if (await == c_none && stage != s_greeting)
+                    {
+                        trace(dbg_info, "Skipping reply without active operation.");
+                        break;
+                    }
                     on_reply(m);
                     break;
                 // Done carries the command result code (FileZilla OnSftpEvent:
@@ -2438,14 +2573,38 @@ namespace netxs::app::parvion
                 // A recursive-walk `ls` and a recop one-shot (mkdir/rm/rmdir) advance the operation
                 // regardless of the result code: a failed/empty ls is just an empty level, and a
                 // mkdir-exists / rmdir-nonempty must not stall the rest of the command sequence.
-                case sftp_evt::done:  if (await == c_keyfile) send_next_keyfile_or_open(); // Key registered; next key or open.
-                                      else if (await == c_rls || await == c_recop) complete();
-                                      else if (m.first() == "1") complete();
-                                      else { await = c_none; path_pending = faux; ls_deferred = faux; } // Failed browse
-                                          // cmd (cd/ls/op): it still terminated, so release the control session (else
-                                          // the in-flight guard would wedge navigation) and drop any staged path/ls.
-                                      break;
-                default: break;
+                case sftp_evt::done:
+                    if (await == c_none)
+                    {
+                        trace(dbg_info, "Skipping Done without active operation.");
+                    }
+                    else if (await == c_keyfile) send_next_keyfile_or_open(); // Key registered; next key or open.
+                    else if (await == c_rls || await == c_recop) complete();
+                    else if (m.first() == "1") complete();
+                    else
+                    {
+                        trace(dbg_info, "SFTP command in state " + text{ cmd_name(await) } + " finished with result " + text{ m.first() });
+                        await = c_none; path_pending = faux; ls_deferred = faux;
+                    } // Failed browse cmd (cd/ls/op): it still terminated, so release the control session
+                      // (else the in-flight guard would wedge navigation) and drop any staged path/ls.
+                    break;
+                case sftp_evt::send:
+                case sftp_evt::recv:
+                case sftp_evt::used_quota_recv:
+                case sftp_evt::used_quota_send:
+                case sftp_evt::kex_algorithm:
+                case sftp_evt::kex_hash:
+                case sftp_evt::kex_curve:
+                case sftp_evt::cipher_cts:
+                case sftp_evt::cipher_stc:
+                case sftp_evt::mac_cts:
+                case sftp_evt::mac_stc:
+                case sftp_evt::hostkey:
+                    /* ignore */
+                    break;
+                default:
+                    trace(dbg_warning, "Message type " + text{ sftp_evt_name(m.type) } + " not handled");
+                    break;
             }
         }
 
@@ -2487,6 +2646,7 @@ namespace netxs::app::parvion
 
         void complete()
         {
+            trace(dbg_verbose, "Parsing SFTP control response in state " + text{ cmd_name(await) });
             switch (await)
             {
                 case c_open:

@@ -79,6 +79,17 @@ namespace
         return log.lines.size() == 1 && body(log, 0) == "info";
     }
 
+    auto test_debug_level_includes_debug_trace() -> bool
+    {
+        auto log = message_logger{};
+        log.set_debug_level(netxs::app::parvion::log_debug_verbose);
+        log.log(lt::trace, "debug", {}, netxs::app::parvion::log_debug_debug);
+        if (!log.lines.empty()) return faux;
+        log.set_debug_level(netxs::app::parvion::log_debug_debug);
+        log.log(lt::trace, "debug", {}, netxs::app::parvion::log_debug_debug);
+        return log.lines.size() == 1 && body(log, 0) == "debug";
+    }
+
     auto test_raw_listing_gate() -> bool
     {
         auto log = message_logger{};
@@ -111,6 +122,7 @@ int main()
         { "listing_status_visible_command_queued", test_listing_status_visible_command_queued },
         { "enabling_detailed_flushes_queue",    test_enabling_detailed_flushes_queue },
         { "debug_level_gates_trace",            test_debug_level_gates_trace },
+        { "debug_level_includes_debug_trace",    test_debug_level_includes_debug_trace },
         { "raw_listing_gate",                   test_raw_listing_gate },
         { "clear_removes_committed_and_queued", test_clear_removes_committed_and_queued },
     };
