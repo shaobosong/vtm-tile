@@ -254,6 +254,16 @@ if(Python3_FOUND)
         TIMEOUT 600
         LABELS "tui;tile;parvion;panes;folder;network")
 
+    # A resumed transfer with more chunks than the six-at-a-time SSH handshake burst must retain
+    # every part's checkpoint when the initially parked workers are activated. Uses a throttled
+    # loopback SFTP server and covers both 10-channel downloads and uploads.
+    add_test(NAME parvion_parallel_resume_test
+             COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test_parvion_parallel_resume.py")
+    set_tests_properties(parvion_parallel_resume_test PROPERTIES
+        ENVIRONMENT "VTM_TILE_BINARY=$<TARGET_FILE:vtm-tile>"
+        TIMEOUT 300
+        LABELS "tui;tile;parvion;transfer;resume")
+
     # Remote (SFTP) directory navigation timing: the destination path is revealed only with its
     # listing (no premature switch), and a second double-click issued while the first cd/ls is still
     # in flight does not over-descend (enter <dir>/<dir>). Connects to the public read-only

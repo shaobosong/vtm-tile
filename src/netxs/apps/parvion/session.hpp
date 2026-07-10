@@ -2412,8 +2412,15 @@ namespace netxs::app::parvion
                         if (connecting >= burst) { still_parked = true; continue; }
                         // A pooled worker is already authenticated, so rearm it immediately; a fresh
                         // worker enters s_connecting and counts against this tick's handshake burst.
+                        // begin()/rearm() reset their per-run counters, but a parked resumed chunk was
+                        // already seeded from its PARVIONC2 part. Restore that baseline after activation
+                        // so delayed chunks (the ones beyond parallel_connect_burst) do not jump to zero
+                        // and subsequently overwrite their saved progress with a smaller value.
+                        auto resumed = workers[i]->done;
                         if (workers[i]->session.alive()) workers[i]->rearm();
                         else { workers[i]->begin(); ++connecting; }
+                        workers[i]->done = resumed;
+                        workers[i]->persisted = resumed;
                     }
                     holding_followers = still_parked;
                     if (!holding_followers && !active_state_path.empty() && !item.download && !active_resume)
