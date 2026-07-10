@@ -28,7 +28,9 @@ import subprocess
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from test_parvion_queue import (  # noqa: E402
-    ParvionSession, kill_all_vtm, find_text, grid_contains, row_text, ROWS, COLS, VTM_TILE_BINARY,
+    ParvionSession, kill_all_vtm, find_text, grid_contains, row_text,
+    header_field, click_header, named_row_order,
+    ROWS, COLS, VTM_TILE_BINARY,
 )
 import test_parvion_panes as P  # noqa: E402  (ParvionSession that sets the launch cwd)
 
@@ -295,6 +297,73 @@ def test_checksums_row_selection():
         return True
 
 
+def test_checksums_sort_cycle_is_typed_and_stable():
+    """Checksum headers expose the shared sort UI; Size uses raw bytes, default restores source
+    order, and equal Algorithm values retain their original relative order."""
+    with ParvionSession(DEMO_ENV) as s:
+        chars = _open_checksums_tab(s)
+        source = header_field(chars, "Source")
+        if source is None:
+            print("FAIL test_checksums_sort_cycle_is_typed_and_stable: Source header missing")
+            return False
+        hr = source[0]
+        bad = []
+        for title in ("Source", "Path", "Algorithm", "Size", "Progress"):
+            field = header_field(chars, title, hr)
+            if field is None or field[5] != "↕":
+                bad.append((title, None if field is None else field[5]))
+        if bad:
+            print(f"FAIL test_checksums_sort_cycle_is_typed_and_stable: initial glyphs {bad}")
+            return False
+
+        names = ("report.pdf", "notes.txt", "backup.tar.gz", "image.iso", "missing.bin")
+        if not click_header(s, "Size", hr):
+            print("FAIL test_checksums_sort_cycle_is_typed_and_stable: Size header missing")
+            return False
+        chars = s.screen()[0]
+        known_asc = named_row_order(chars, names[:-1])
+        want_asc = ["notes.txt", "report.pdf", "backup.tar.gz", "image.iso"]
+        size = header_field(chars, "Size", hr)
+        if size is None or size[5] != "↑" or known_asc != want_asc:
+            print(f"FAIL test_checksums_sort_cycle_is_typed_and_stable: ascending Size "
+                  f"glyph/order {None if size is None else size[5]!r}/{known_asc}, expected ↑/{want_asc}")
+            return False
+
+        click_header(s, "Size", hr)
+        chars = s.screen()[0]
+        known_desc = named_row_order(chars, names[:-1])
+        size = header_field(chars, "Size", hr)
+        if size is None or size[5] != "↓" or known_desc != list(reversed(want_asc)):
+            print(f"FAIL test_checksums_sort_cycle_is_typed_and_stable: descending Size "
+                  f"glyph/order {None if size is None else size[5]!r}/{known_desc}")
+            return False
+
+        click_header(s, "Size", hr)
+        chars = s.screen()[0]
+        restored = named_row_order(chars, names)
+        size = header_field(chars, "Size", hr)
+        if size is None or size[5] != "↕" or restored != list(names):
+            print(f"FAIL test_checksums_sort_cycle_is_typed_and_stable: default restore "
+                  f"glyph/order {None if size is None else size[5]!r}/{restored}")
+            return False
+
+        # Two MD5 rows and two SHA-256 rows exercise stable ties.
+        if not click_header(s, "Algorithm", hr):
+            print("FAIL test_checksums_sort_cycle_is_typed_and_stable: Algorithm header missing")
+            return False
+        chars = s.screen()[0]
+        got = named_row_order(chars, names)
+        want = ["notes.txt", "image.iso", "report.pdf", "backup.tar.gz", "missing.bin"]
+        algo = header_field(chars, "Algorithm", hr)
+        size = header_field(chars, "Size", hr)
+        if algo is None or algo[5] != "↑" or size is None or size[5] != "↕" or got != want:
+            print(f"FAIL test_checksums_sort_cycle_is_typed_and_stable: Algorithm sort "
+                  f"algo={algo}, size={size}, order={got}, expected={want}")
+            return False
+        print("OK test_checksums_sort_cycle_is_typed_and_stable")
+        return True
+
+
 def _open_settings_sftp(s):
     """Open Edit -> Settings and switch to the SFTP tab; return the rendered screen."""
     chars = s.screen()[0]
@@ -360,6 +429,7 @@ TESTS = [
     test_no_checksum_on_folder,
     test_checksums_column_resize,
     test_checksums_row_selection,
+    test_checksums_sort_cycle_is_typed_and_stable,
     test_hash_settings_single_dropdown,
 ]
 

@@ -61,7 +61,7 @@ def set_winsize(fd, rows, cols):
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
 
 
-def _parse_sgr(params, cur_bg):
+def _parse_sgr(params, cur_bg, cur_fg):
     parts = [p.decode() if p else "0" for p in (params.split(b";") if params else [b"0"])]
     i = 0
     while i < len(parts):
@@ -69,8 +69,13 @@ def _parse_sgr(params, cur_bg):
             n = int(parts[i] or "0")
         except ValueError:
             n = 0
-        if n == 0 or n == 49:
+        if n == 0:
             cur_bg = None
+            cur_fg = None
+        elif n == 49:
+            cur_bg = None
+        elif n == 39:
+            cur_fg = None
         elif n == 48 and i + 1 < len(parts):
             mode = parts[i + 1]
             if mode == "2" and i + 4 < len(parts):
@@ -81,20 +86,32 @@ def _parse_sgr(params, cur_bg):
                 i += 4
             elif mode == "5" and i + 2 < len(parts):
                 i += 2
+        elif n == 38 and i + 1 < len(parts):
+            mode = parts[i + 1]
+            if mode == "2" and i + 4 < len(parts):
+                try:
+                    cur_fg = (int(parts[i + 2]), int(parts[i + 3]), int(parts[i + 4]))
+                except ValueError:
+                    pass
+                i += 4
+            elif mode == "5" and i + 2 < len(parts):
+                i += 2
         i += 1
-    return cur_bg
+    return cur_bg, cur_fg
 
 
-def replay(buf):
-    """Replay *buf* into (chars, bg): per-cell last-painted glyph and bg color.
+def replay(buf, include_fg=False):
+    """Replay *buf* into glyph/background grids, optionally including foregrounds.
 
     chars[r][c] : last visible glyph painted at (r, c), or "" if none.
     bg[r][c]    : last bg color (R,G,B) painted at (r, c), or None.
     """
     chars = [[""] * COLS for _ in range(ROWS)]
     bg = [[None] * COLS for _ in range(ROWS)]
+    fg = [[None] * COLS for _ in range(ROWS)] if include_fg else None
     cur_row = cur_col = 0
     cur_bg = None
+    cur_fg = None
     i, n = 0, len(buf)
     while i < n:
         b = buf[i]
@@ -127,7 +144,7 @@ def replay(buf):
                 elif final == b"D":
                     cur_col = max(0, cur_col - (int(params) if params else 1))
                 elif final == b"m":
-                    cur_bg = _parse_sgr(params, cur_bg)
+                    cur_bg, cur_fg = _parse_sgr(params, cur_bg, cur_fg)
                 continue
             elif c1 == 0x5d:  # OSC
                 j = i + 2
@@ -183,9 +200,11 @@ def replay(buf):
         if 0 <= cur_row < ROWS and 0 <= cur_col < COLS:
             chars[cur_row][cur_col] = ch
             bg[cur_row][cur_col] = cur_bg
+            if fg is not None:
+                fg[cur_row][cur_col] = cur_fg
             if cur_col < COLS - 1:
                 cur_col += 1
-    return chars, bg
+    return (chars, bg, fg) if include_fg else (chars, bg)
 
 
 class ParvionSession:
@@ -251,6 +270,10 @@ class ParvionSession:
 
     def screen(self):
         return replay(self._buf)
+
+    def screen_with_fg(self):
+        """Return the rendered glyph, background, and foreground grids."""
+        return replay(self._buf, include_fg=True)
 
     def _write(self, data):
         os.write(self.master_fd, data)
@@ -369,6 +392,55 @@ def header_border_count(s, header_word):
     return row_text(chars, pos[0]).count("│")
 
 
+SORT_GLYPHS = ("↕", "↑", "↓")
+SORT_ACTIVE_FG = (250, 179, 135)  # 0xFFFAB387, emitted as an RGB SGR foreground.
+
+
+def header_field(chars, title, row=None):
+    """Locate a table header field and its sort glyph.
+
+    The glyph is deliberately found relative to the field's divider rather than
+    at a fixed offset: numeric headers are right-aligned, and users can resize
+    every column.
+    """
+    if row is None:
+        pos = find_text(chars, title)
+        if pos is None:
+            return None
+        row, col = pos
+    else:
+        col = row_text(chars, row).find(title)
+        if col < 0:
+            return None
+    dividers = [c for c in range(COLS) if chars[row][c] == "│"]
+    left = max((c + 1 for c in dividers if c < col), default=0)
+    right = min((c for c in dividers if c >= col + len(title)), default=COLS)
+    markers = [(c, chars[row][c]) for c in range(left, right)
+               if chars[row][c] in SORT_GLYPHS]
+    marker_col, marker = markers[0] if markers else (-1, "")
+    return row, col, left, right, marker_col, marker
+
+
+def click_header(s, title, row=None, settle=0.6):
+    field = header_field(s.screen()[0], title, row)
+    if field is None:
+        return False
+    hr, col, *_ = field
+    s.click(col + 1, hr + 1, settle=settle)
+    return True
+
+
+def named_row_order(chars, names):
+    """Return the names in top-to-bottom display order, or None if one is absent."""
+    found = []
+    for name in names:
+        pos = find_text(chars, name)
+        if pos is None:
+            return None
+        found.append((pos[0], name))
+    return [name for _, name in sorted(found)]
+
+
 # ----------------------------------- tests -----------------------------------
 
 def test_table_header_paints_scrollbar_corner():
@@ -388,6 +460,202 @@ def test_table_header_paints_scrollbar_corner():
         corner_bg = bg[hr][COLS - 1]
         if header_bg is None or corner_bg != header_bg:
             print(f"FAIL - header corner bg {corner_bg}, expected {header_bg}")
+            return False
+        print("PASS")
+        return True
+
+
+def test_sortable_headers_cycle_and_feedback():
+    """Every transfer header starts at ↕; Local Name behaves like a connect-bar button and
+    cycles through ascending, descending, then the original source order."""
+    print("TEST: parvion - sortable header cycle + hover/hold feedback ... ", end="", flush=True)
+    names = ("bigfile.iso", "notes.txt", "queued_00.dat", "queued_01.dat", "queued_02.dat")
+    with ParvionSession(DEMO_ENV) as s:
+        chars, bg, _ = s.screen_with_fg()
+        local = header_field(chars, "Local Name")
+        if local is None:
+            print("FAIL - Local Name header not found")
+            return False
+        hr = local[0]
+        bad = []
+        for title in ("Local Name", "Remote Name", "Size", "Progress", "Speed"):
+            field = header_field(chars, title, hr)
+            if field is None or field[5] != "↕":
+                bad.append((title, None if field is None else field[5]))
+        if bad:
+            print(f"FAIL - initial sort glyphs are not ↕: {bad}")
+            return False
+        original = named_row_order(chars, names)
+        if original != list(names):
+            print(f"FAIL - unexpected source order {original}")
+            return False
+
+        # Seed pointer tracking away from the field, then move onto a title cell.
+        target = local[1] + len("Local Name") // 2
+        resting = bg[hr][target]
+        s._write(f"\x1b[<35;{100};{hr + 1}M".encode())
+        s.feed(0.3)
+        s._write(f"\x1b[<35;{target + 1};{hr + 1}M".encode())
+        s.feed(0.6)
+        hover = s.screen()[1][hr][target]
+        if hover is None or hover == resting:
+            print(f"FAIL - no header hover highlight (bg {resting} -> {hover})")
+            return False
+        s._write(f"\x1b[<0;{target + 1};{hr + 1}M".encode())
+        s.feed(0.6)
+        held = s.screen()[1][hr][target]
+        if held is None or held in (resting, hover):
+            print(f"FAIL - held header press is not distinct (rest {resting}, hover {hover}, held {held})")
+            return False
+        s._write(f"\x1b[<0;{target + 1};{hr + 1}m".encode())
+        s.feed(0.6)
+
+        chars, bg, _ = s.screen_with_fg()
+        local = header_field(chars, "Local Name", hr)
+        if local is None or local[5] != "↑":
+            print(f"FAIL - first click did not select ascending ({None if local is None else local[5]!r})")
+            return False
+        if bg[hr][target] != hover:
+            print(f"FAIL - held shade did not return to hover on release ({bg[hr][target]} vs {hover})")
+            return False
+        # xlight brightens foregrounds as well as backgrounds. Move off the field before
+        # asserting the active arrow's unshaded base orange.
+        s._write(f"\x1b[<35;{100};{hr + 1}M".encode())
+        s.feed(0.6)
+        chars, _, fg = s.screen_with_fg()
+        local = header_field(chars, "Local Name", hr)
+        if fg[hr][local[4]] != SORT_ACTIVE_FG:
+            print(f"FAIL - ascending arrow fg {fg[hr][local[4]]}, expected {SORT_ACTIVE_FG}")
+            return False
+        asc = named_row_order(chars, names)
+        want_asc = ["bigfile.iso", "queued_00.dat", "queued_01.dat", "queued_02.dat", "notes.txt"]
+        if asc != want_asc:
+            print(f"FAIL - ascending Local Name order {asc}, expected {want_asc}")
+            return False
+
+        if not click_header(s, "Local Name", hr):
+            print("FAIL - could not click Local Name for descending sort")
+            return False
+        chars = s.screen()[0]
+        local = header_field(chars, "Local Name", hr)
+        desc = named_row_order(chars, names)
+        if local is None or local[5] != "↓":
+            print(f"FAIL - second click did not select descending (field={local})")
+            return False
+        s._write(f"\x1b[<35;{100};{hr + 1}M".encode())
+        s.feed(0.6)
+        chars, _, fg = s.screen_with_fg()
+        local = header_field(chars, "Local Name", hr)
+        if fg[hr][local[4]] != SORT_ACTIVE_FG:
+            print(f"FAIL - descending arrow fg {fg[hr][local[4]]}, expected {SORT_ACTIVE_FG}")
+            return False
+        if desc != list(reversed(want_asc)):
+            print(f"FAIL - descending Local Name order {desc}, expected {list(reversed(want_asc))}")
+            return False
+
+        if not click_header(s, "Local Name", hr):
+            print("FAIL - could not click Local Name to restore default")
+            return False
+        chars = s.screen()[0]
+        local = header_field(chars, "Local Name", hr)
+        restored = named_row_order(chars, names)
+        if local is None or local[5] != "↕":
+            print(f"FAIL - third click did not restore ↕ ({local})")
+            return False
+        s._write(f"\x1b[<35;{100};{hr + 1}M".encode())
+        s.feed(0.6)
+        chars, _, fg = s.screen_with_fg()
+        local = header_field(chars, "Local Name", hr)
+        if fg[hr][local[4]] == SORT_ACTIVE_FG:
+            print("FAIL - default ↕ retained the active orange foreground")
+            return False
+        if restored != list(names):
+            print(f"FAIL - default sort did not restore source order: {restored}")
+            return False
+        print("PASS")
+        return True
+
+
+def test_queue_numeric_size_sort_and_column_switch():
+    """Size compares raw byte counts, and choosing another column clears the old active arrow."""
+    print("TEST: parvion - numeric Size sort + active-column switch ... ", end="", flush=True)
+    names = ("bigfile.iso", "notes.txt", "queued_00.dat", "queued_01.dat", "queued_02.dat")
+    with ParvionSession(DEMO_ENV) as s:
+        chars = s.screen()[0]
+        local = header_field(chars, "Local Name")
+        if local is None:
+            print("FAIL - Local Name header not found")
+            return False
+        hr = local[0]
+        if not click_header(s, "Size", hr):
+            print("FAIL - Size header not found")
+            return False
+        chars = s.screen()[0]
+        size = header_field(chars, "Size", hr)
+        got = named_row_order(chars, names)
+        want = ["notes.txt", "queued_00.dat", "queued_01.dat", "queued_02.dat", "bigfile.iso"]
+        if size is None or size[5] != "↑":
+            print(f"FAIL - Size did not become ascending ({size})")
+            return False
+        if got != want:
+            print(f"FAIL - numeric Size order {got}, expected {want}")
+            return False
+
+        if not click_header(s, "Local Name", hr):
+            print("FAIL - Local Name header not found for column switch")
+            return False
+        chars = s.screen()[0]
+        local = header_field(chars, "Local Name", hr)
+        size = header_field(chars, "Size", hr)
+        switched = named_row_order(chars, names)
+        want_names = ["bigfile.iso", "queued_00.dat", "queued_01.dat", "queued_02.dat", "notes.txt"]
+        if local is None or local[5] != "↑" or size is None or size[5] != "↕":
+            print(f"FAIL - switch did not activate Local Name and reset Size (local={local}, size={size})")
+            return False
+        if switched != want_names:
+            print(f"FAIL - Local Name order after switch {switched}, expected {want_names}")
+            return False
+        print("PASS")
+        return True
+
+
+def test_sort_keeps_expanded_children_with_parent():
+    """Sorting parent transfers never detaches or independently reorders expanded chunk rows."""
+    print("TEST: parvion - sorting keeps expanded transfer children grouped ... ", end="", flush=True)
+    with ParvionSession(DEMO_ENV) as s:
+        chars = s.screen()[0]
+        parent = find_text(chars, "bigfile.iso")
+        if parent is None:
+            print("FAIL - bigfile.iso row not found")
+            return False
+        plus = row_text(chars, parent[0]).find("+")
+        if plus < 0:
+            print("FAIL - bigfile.iso expand button not found")
+            return False
+        s.click(plus + 1, parent[0] + 1)
+        if not grid_contains(s.screen()[0], "Part 1/4"):
+            print("FAIL - bigfile.iso did not expand")
+            return False
+        chars = s.screen()[0]
+        local = header_field(chars, "Local Name")
+        if local is None:
+            print("FAIL - Local Name header not found")
+            return False
+        hr = local[0]
+        # Two Size clicks select descending, placing the largest parent at the top.
+        if not click_header(s, "Size", hr) or not click_header(s, "Size", hr):
+            print("FAIL - Size header not clickable")
+            return False
+        chars = s.screen()[0]
+        parent = find_text(chars, "bigfile.iso")
+        parts = [find_text(chars, f"Part {i}/4") for i in range(1, 5)]
+        notes = find_text(chars, "notes.txt")
+        if parent is None or notes is None or any(p is None for p in parts):
+            print(f"FAIL - sorted parent/children not all visible (parent={parent}, parts={parts}, notes={notes})")
+            return False
+        rows = [parent[0]] + [p[0] for p in parts]
+        if rows != list(range(parent[0], parent[0] + 5)) or not rows[-1] < notes[0]:
+            print(f"FAIL - expanded rows detached after sort (parent/parts={rows}, notes={notes[0]})")
             return False
         print("PASS")
         return True
@@ -811,8 +1079,8 @@ def test_pin_to_top_reorders_pending():
 
 def progress_text(chars, name_row):
     """Read the right-aligned Progress column content on a row. With columns Local Name(24) +
-    Remote Name(24) + Size(11), Progress content spans cols 66..74; its '│' border at col 75 is excluded."""
-    return "".join(chars[name_row][66:75]).strip()
+    Remote Name(24) + Size(11), Progress content spans cols 66..75; its '│' border at col 76 is excluded."""
+    return "".join(chars[name_row][66:76]).strip()
 
 
 def test_pause_then_start_progress_label():
@@ -912,7 +1180,7 @@ def test_long_content_truncated_with_ellipsis():
 
 
 def test_reason_initial_width_is_20():
-    """The Failed tab's Reason column starts 20 cells wide (right border at col 82)."""
+    """The Failed tab's Reason column starts 20 cells wide (right border at col 107)."""
     print("TEST: parvion - Reason column initial width is 20 ... ", end="", flush=True)
     with ParvionSession(DEMO_ENV) as s:
         if not click_label(s, "Failed ("):
@@ -924,9 +1192,10 @@ def test_reason_initial_width_is_20():
             print("FAIL - Reason header not found")
             return False
         borders = [c for c in range(COLS) if chars[pos[0]][c] == "│"]
-        # reason_cx (86) + width 20 - 1 = 106 is the rightmost border on the Failed header row.
-        if not borders or max(borders) != 106:
-            print(f"FAIL - Reason right border at col {max(borders) if borders else None}, expected 106")
+        # Progress gained one cell for its sort suffix, so Reason now begins at x=88;
+        # its 20-cell width puts the rightmost border at col 107.
+        if not borders or max(borders) != 107:
+            print(f"FAIL - Reason right border at col {max(borders) if borders else None}, expected 107")
             return False
         print("PASS")
         return True
@@ -1291,6 +1560,9 @@ def test_pane_selection_ends_at_last_column():
 
 TESTS = [
     test_table_header_paints_scrollbar_corner,
+    test_sortable_headers_cycle_and_feedback,
+    test_queue_numeric_size_sort_and_column_switch,
+    test_sort_keeps_expanded_children_with_parent,
     test_reason_column_has_resize_handle,
     test_right_click_activates_queue,
     test_selection_highlight_ends_at_last_column,

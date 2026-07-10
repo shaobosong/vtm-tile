@@ -34,6 +34,7 @@ namespace netxs::app::parvion
         static constexpr auto sel_fg_act  = 0xFF1E1E2Eu; // Selection text (focused).
         static constexpr auto title_fg    = 0xFFCDD6F4u;
         static constexpr auto title_fg_act = 0xFF89DCEBu; // Focused pane title.
+        static constexpr auto sort_fg     = 0xFFFAB387u; // Active table sort arrow (bright orange).
         static constexpr auto sb_track    = 0xFF2C3047u; // Scrollbar track.
         static constexpr auto sb_thumb    = 0xFF3B4261u; // Scrollbar thumb.
         static constexpr auto sb_hover    = 0xFF565F89u; // Scrollbar thumb (hover).

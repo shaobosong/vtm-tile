@@ -30,7 +30,7 @@ namespace netxs::app::parvion
     struct disp_row { si32 qi; si32 child; };
 
     // This view's session-only, per-instance column widths (0 override = auto / initial).
-    struct xfer_cols { std::array<si32, q_ncol> col_w{ 24, 24, 11, 10, 11 }; si32 reason_w_override = 0; };
+    struct xfer_cols { std::array<si32, q_ncol> col_w{ 24, 24, 11, 11, 11 }; si32 reason_w_override = 0; };
 
     inline auto tab_status_match(si32 status, queue_item const& it) -> bool
     {
@@ -71,7 +71,7 @@ namespace netxs::app::parvion
     // Widest content in transfer column `col` (for double-click auto-fit).
     inline auto xfer_content_w(sftp_remote* ctrl, si32 status, si32 col) -> si32
     {
-        auto w = (si32)cell_width(q_headers[(size_t)col]);
+        auto w = (si32)cell_width(q_headers[(size_t)col]) + 2; // Space + sort glyph.
         if (!ctrl) return w;
         auto pct = [](double p){ auto b = std::array<char, 24>{}; std::snprintf(b.data(), b.size(), "%.2f%%", p); return text{ b.data() }; };
         for (auto& it : ctrl->queue)
@@ -99,6 +99,44 @@ namespace netxs::app::parvion
             }
         }
         return w;
+    }
+    inline auto xfer_text_order(view a, view b) -> si32
+    {
+        auto al = text{ a }; utf::to_lower(al);
+        auto bl = text{ b }; utf::to_lower(bl);
+        return al < bl ? -1 : bl < al ? 1 : 0;
+    }
+    inline auto xfer_value_order(auto const& a, auto const& b) -> si32
+    {
+        return a < b ? -1 : b < a ? 1 : 0;
+    }
+    inline auto xfer_progress_order(queue_item const& a, queue_item const& b) -> si32
+    {
+        // The active tab mixes queued and transferring rows. Keep status labels together, then
+        // order percentage values numerically within each status.
+        if (auto cmp = xfer_value_order(a.status, b.status)) return cmp;
+        auto ap = a.size > 0 ? (long double)a.done / (long double)a.size : 0.0L;
+        auto bp = b.size > 0 ? (long double)b.done / (long double)b.size : 0.0L;
+        return xfer_value_order(ap, bp);
+    }
+    inline auto xfer_compare(sftp_remote* ctrl, std::vector<disp_row> const& rows,
+                             si32 row_a, si32 row_b, si32 key) -> si32
+    {
+        if (!ctrl) return 0;
+        if (row_a < 0 || row_b < 0 || row_a >= (si32)rows.size() || row_b >= (si32)rows.size()) return 0;
+        // Children deliberately compare as their parent. stable_sort then retains the parent-first,
+        // part-order layout while moving the whole expanded group as one unit.
+        auto& a = ctrl->queue[(size_t)rows[(size_t)row_a].qi];
+        auto& b = ctrl->queue[(size_t)rows[(size_t)row_b].qi];
+        switch (key)
+        {
+            case 0:  return xfer_text_order(a.local_path, b.local_path);
+            case 1:  return xfer_text_order(a.remote_path, b.remote_path);
+            case 2:  return xfer_value_order(a.size, b.size);
+            case 3:  return xfer_progress_order(a, b);
+            case 4:  return xfer_value_order(a.rate.speed, b.rate.speed);
+            default: return xfer_text_order(a.error, b.error); // Failed-tab Reason.
+        }
     }
     // Build the transfer column model (visible columns + roster + width/visibility/autofit hooks).
     inline auto xfer_columns(sftp_remote* ctrl, si32 status, std::shared_ptr<xfer_cols> cols) -> qtable
@@ -238,6 +276,7 @@ namespace netxs::app::parvion
     inline auto make_transfer_view(sftp_remote* ctrl, si32 status, netxs::wptr<ui::base> window_wp) -> tab_page_ptr
     {
         auto cols = std::make_shared<xfer_cols>();
+        auto row_snapshot = std::make_shared<std::vector<disp_row>>();
         auto title = [ctrl, status]
         {
             auto n = si32{}; if (ctrl) for (auto& it : ctrl->queue) if (tab_status_match(status, it)) ++n;
@@ -248,8 +287,16 @@ namespace netxs::app::parvion
         cfg.ctrl = ctrl;
         cfg.window_wp = window_wp;
         cfg.columns   = [ctrl, status, cols]{ return xfer_columns(ctrl, status, cols); };
-        cfg.rows      = [ctrl, status]{ return (si32)xfer_rows(ctrl, status).size(); };
+        cfg.rows      = [ctrl, status, row_snapshot]
+        {
+            *row_snapshot = xfer_rows(ctrl, status);
+            return (si32)row_snapshot->size();
+        };
         cfg.cell      = [ctrl, status](si32 row, si32 key){ return xfer_cell(ctrl, status, row, key); };
+        cfg.compare   = [ctrl, row_snapshot](si32 row_a, si32 row_b, si32 key)
+        {
+            return xfer_compare(ctrl, *row_snapshot, row_a, row_b, key);
+        };
         cfg.gutter    = [ctrl, status](si32 row){ return xfer_gutter(ctrl, status, row); };
         cfg.toggle    = [ctrl](si32 qi){ if (qi >= 0 && qi < (si32)ctrl->queue.size()) ctrl->queue[(size_t)qi].expanded = !ctrl->queue[(size_t)qi].expanded; };
         cfg.selection = [ctrl, status]{ return xfer_sel(ctrl, status); };

@@ -65,10 +65,40 @@ namespace netxs::app::parvion
             }
             else paint_at(canvas, cx, colw, y, s, fg, bg, hscroll, disp_w);
         }
-        void paint_header(auto& canvas, si32 row, si32 hscroll, si32 disp_w, si32 strip_w) const
+        void paint_header(auto& canvas, si32 row, si32 hscroll, si32 disp_w, si32 strip_w,
+                          si32 sort_key, si32 sort_dir, si32 hover_key, si32 press_key) const
         {
             canvas.fill(rect{{ 0, row }, { strip_w, 1 }}, [&](cell& c){ c.bgc(theme::header); });
-            for (auto i = si32{}; i < (si32)cols.size(); ++i) paint_cell(canvas, i, row, cols[(size_t)i].title, theme::subtext, theme::header, hscroll, disp_w);
+            for (auto i = si32{}; i < (si32)cols.size(); ++i)
+            {
+                auto& col = cols[(size_t)i];
+                auto colw = std::max(0, col.width - 1); // Divider is not part of the button.
+                auto sx   = col_x(i) - hscroll;
+                auto x0   = std::max(0, sx);
+                auto x1   = std::min(disp_w, sx + colw);
+                if (x1 <= x0) continue;
+
+                auto active = col.key == sort_key && sort_dir != 0;
+                auto mark   = active ? (sort_dir == 1 ? "\xE2\x86\x91" : "\xE2\x86\x93") : "\xE2\x86\x95"; // ↑ : ↓ : ↕
+                auto markfg = active ? ui32{ theme::sort_fg } : ui32{ theme::subtext };
+                if (colw == 1) paint_at(canvas, col_x(i), 1, row, mark, markfg, theme::header, hscroll, disp_w);
+                else if (colw > 1)
+                {
+                    auto labelw = colw - 2; // Reserve one separating cell and the sort glyph.
+                    if (col.right)
+                    {
+                        auto title = fit_ellipsis(col.title, labelw);
+                        auto tw = (si32)cell_width(title);
+                        paint_at(canvas, col_x(i) + std::max(0, labelw - tw), tw, row, title,
+                                 theme::subtext, theme::header, hscroll, disp_w);
+                    }
+                    else paint_at(canvas, col_x(i), labelw, row, col.title, theme::subtext, theme::header, hscroll, disp_w);
+                    paint_at(canvas, col_x(i) + colw - 1, 1, row, mark, markfg, theme::header, hscroll, disp_w);
+                }
+                auto box = rect{{ x0, row }, { x1 - x0, 1 }};
+                if      (col.key == press_key) canvas.fill(box, [](cell& c){ c.xlight(2); });
+                else if (col.key == hover_key) canvas.fill(box, [](cell& c){ c.xlight(); });
+            }
         }
         void paint_dividers(auto& canvas, si32 top, si32 bottom, si32 hscroll, si32 disp_w, si32 hover_idx, si32 drag_idx) const
         {
@@ -97,6 +127,7 @@ namespace netxs::app::parvion
     struct table_state
     {
         enum dmode { d_none, d_vsb, d_hsb, d_col, d_rubber };
+        enum sort_mode { sort_default, sort_ascending, sort_descending };
 
         sftp_remote*          ctrl = nullptr;
         netxs::wptr<ui::base> window_wp;
@@ -107,6 +138,8 @@ namespace netxs::app::parvion
         bool sb_hover = faux,  sb_drag = faux;  si32 sb_grab = 0;
         bool hsb_hover = faux, hsb_drag = faux; si32 hsb_grab = 0;
         si32 hover_border = -1, col_drag = -1;
+        si32 sort_key = -1, sort_dir = sort_default;
+        si32 hover_header = -1, press_header = -1;
         si32 sel_anchor = -1;
         si32 rubber_a = -1, rubber_b = -1;
         si32 drag_y = 0;
@@ -116,6 +149,7 @@ namespace netxs::app::parvion
 
         std::vector<std::pair<rect, si32>> row_hit{};    // Row rect -> selection key.
         std::vector<std::pair<rect, si32>> expand_hit{}; // Expand-button box -> expand id.
+        std::vector<si32> row_order{};                   // Visual row -> caller/source row.
         si32 hover_expand = -1, press_expand = -1;
 
         si32 body_top = 1, body_rows = 0, tab_row = 0;
@@ -179,6 +213,7 @@ namespace netxs::app::parvion
         std::function<qsel_cfg()>                        selection;   // null => not selectable.
         std::function<qmenu_cfg(netxs::wptr<ui::base>)>  menu;        // Item/blank menus (null => none; header menu still shows).
         std::function<si32()>                            follow;      // -1 => pin to bottom; >=0 => keep that display row visible.
+        std::function<si32(si32, si32, si32)>            compare;     // Source rows a/b + column key -> negative/equal/positive.
         std::function<void(si32 key)>                    on_col_grab; // A column-border drag begins (null => none).
         std::function<text()>                            empty_text;  // Message shown when rows()==0 (null => none).
         std::function<bool(hids&, netxs::wptr<ui::base>)> on_key;     // App keys (Delete clear-finished); null => none.
@@ -272,6 +307,16 @@ namespace netxs::app::parvion
             if (t.cols[(size_t)v].resizable && mx == t.border_cx(v) - hscroll) return v;
         return -1;
     }
+    inline auto q_header_hit(qtable const& t, si32 mx, si32 hscroll) -> si32
+    {
+        auto cx = mx + hscroll;
+        for (auto v = si32{}; v < (si32)t.cols.size(); ++v)
+        {
+            auto x = t.col_x(v);
+            if (cx >= x && cx < x + std::max(0, t.cols[(size_t)v].width - 1)) return v;
+        }
+        return -1;
+    }
     inline void q_set_col_w(qtable const& t, si32 v, si32 w) { if (v >= 0 && v < (si32)t.cols.size() && t.resize) t.resize(t.cols[(size_t)v].key, w); }
     inline auto q_col_autofit(qtable const& t, si32 v) -> si32 { return v >= 0 && v < (si32)t.cols.size() && t.autofit ? t.autofit(t.cols[(size_t)v].key) : 0; }
     inline auto q_row_at(table_state const& st, si32 mx, si32 my) -> si32
@@ -280,6 +325,41 @@ namespace netxs::app::parvion
             if (my == b.coor.y && mx >= b.coor.x && mx < b.coor.x + b.size.x) return key;
         return -1;
     }
+    inline auto q_source_row(table_state const& st, si32 visual_row) -> si32
+    {
+        return visual_row >= 0 && visual_row < (si32)st.row_order.size()
+             ? st.row_order[(size_t)visual_row]
+             : -1;
+    }
+    inline auto q_visual_row(table_state const& st, si32 source_row) -> si32
+    {
+        for (auto i = si32{}; i < (si32)st.row_order.size(); ++i)
+            if (st.row_order[(size_t)i] == source_row) return i;
+        return -1;
+    }
+    inline void q_build_order(table_state& st, table_cfg const& cfg, si32 nrows)
+    {
+        st.row_order.resize((size_t)std::max(0, nrows));
+        for (auto i = si32{}; i < nrows; ++i) st.row_order[(size_t)i] = i;
+        if (!cfg.compare || st.sort_key < 0 || st.sort_dir == table_state::sort_default) return;
+        auto descending = st.sort_dir == table_state::sort_descending;
+        std::stable_sort(st.row_order.begin(), st.row_order.end(), [&](si32 a, si32 b)
+        {
+            auto cmp = cfg.compare(a, b, st.sort_key);
+            return descending ? cmp > 0 : cmp < 0;
+        });
+    }
+    inline auto q_ordered_sel(table_state const& st, qsel_cfg s) -> qsel_cfg
+    {
+        auto key_of_source = s.key_of_row;
+        s.disp = [&st]{ return (si32)st.row_order.size(); };
+        s.key_of_row = [&st, key_of_source](si32 visual_row)
+        {
+            auto source_row = q_source_row(st, visual_row);
+            return source_row >= 0 && key_of_source ? key_of_source(source_row) : -1;
+        };
+        return s;
+    }
 
     // ---- Selection layer ---------------------------------------------------------------------------
     inline auto q_sel_press(table_state& st, qsel_cfg const& s, si32 hit, bool ctl, bool shft) -> bool
@@ -287,8 +367,29 @@ namespace netxs::app::parvion
         if (hit < 0) return faux;
         if (shft && st.sel_anchor >= 0 && st.sel_anchor < s.key_count())
         {
-            auto lo = std::min(st.sel_anchor, hit), hi = std::max(st.sel_anchor, hit);
-            for (auto j = si32{}; j < s.key_count(); ++j) s.set_sel(j, j >= lo && j <= hi && s.in_scope(j));
+            auto anchor_row = si32{ -1 }, hit_row = si32{ -1 };
+            for (auto i = si32{}; i < s.disp(); ++i)
+            {
+                auto key = s.key_of_row(i);
+                if (key == st.sel_anchor) anchor_row = i;
+                if (key == hit)           hit_row = i;
+            }
+            if (anchor_row >= 0 && hit_row >= 0)
+            {
+                auto lo = std::min(anchor_row, hit_row), hi = std::max(anchor_row, hit_row);
+                s.clear();
+                for (auto i = lo; i <= hi; ++i)
+                {
+                    auto key = s.key_of_row(i);
+                    if (key >= 0 && s.in_scope(key)) s.set_sel(key, true);
+                }
+            }
+            else
+            {
+                s.clear();
+                s.set_sel(hit, true);
+                st.sel_anchor = hit;
+            }
         }
         else if (ctl) { s.set_sel(hit, !s.is_sel(hit)); st.sel_anchor = hit; }
         else          { s.clear(); s.set_sel(hit, true); st.sel_anchor = hit; }
@@ -404,18 +505,21 @@ namespace netxs::app::parvion
 
         auto t     = cfg.columns();
         auto nrows = cfg.rows ? cfg.rows() : 0;
+        q_build_order(st, cfg, nrows);
         tbl_layout(st, w, h, nrows, t.content_w(), /*body_top=*/1);
 
         auto maxscroll = std::max(0, st.total - st.body_rows);
         if (st.follow)
         {
-            auto f = cfg.follow ? cfg.follow() : -1;
+            auto source = cfg.follow ? cfg.follow() : -1;
+            auto f = source >= 0 ? q_visual_row(st, source) : -1;
             st.scroll = f >= 0 ? std::clamp(f - st.body_rows + 1, 0, maxscroll) : maxscroll;
         }
         tbl_clamp(st);
 
         auto hs = st.hscroll, clipw = st.disp_w;
-        t.paint_header(canvas, st.body_top - 1, hs, clipw, w);
+        t.paint_header(canvas, st.body_top - 1, hs, clipw, w,
+                       st.sort_key, st.sort_dir, st.hover_header, st.press_header);
 
         if (nrows == 0)
         {
@@ -431,8 +535,9 @@ namespace netxs::app::parvion
             auto first = st.scroll, last = std::min(nrows, st.scroll + st.body_rows);
             for (auto i = first; i < last; ++i)
             {
+                auto source_row = q_source_row(st, i);
                 auto y   = st.body_top + (i - first);
-                auto key = has_sel ? sel.key_of_row(i) : -1;
+                auto key = has_sel && source_row >= 0 ? sel.key_of_row(source_row) : -1;
                 auto selected = key >= 0 && (sel.is_sel(key) || (rubber_on && i >= rlo && i <= rhi));
                 auto row_bg = selected ? ui32{ theme::sel_bg } : ui32{ theme::bg };
                 if (selected)
@@ -442,7 +547,7 @@ namespace netxs::app::parvion
                 }
                 if (cfg.gutter)
                 {
-                    auto g = cfg.gutter(i);
+                    auto g = cfg.gutter(source_row);
                     if (!g.arrow.empty()) qtable::paint_at(canvas, g_arrow_x, g_arrow_w, y, g.arrow, g.arrow_fg, row_bg, hs, clipw);
                     if (g.expand == xp_muted) qtable::paint_at(canvas, g_expand_x, g_expand_w, y, " + ", theme::subtext, row_bg, hs, clipw);
                     else if (g.expand == xp_collapsed || g.expand == xp_expanded)
@@ -461,7 +566,7 @@ namespace netxs::app::parvion
                 }
                 for (auto vc = si32{}; vc < (si32)t.cols.size(); ++vc)
                 {
-                    auto cv = cfg.cell(i, t.cols[(size_t)vc].key);
+                    auto cv = cfg.cell(source_row, t.cols[(size_t)vc].key);
                     if (!cv.s.empty()) t.paint_cell(canvas, vc, y, cv.s, cv.fg, row_bg, hs, clipw);
                 }
                 if (key >= 0) st.row_hit.emplace_back(rect{{ 0, y }, { cfg.wide_hit ? std::max(0, st.disp_w) : q_row_w(st), 1 }}, key);
@@ -493,11 +598,11 @@ namespace netxs::app::parvion
             {
                 auto& timer = boss.base::template plugin<pro::timer>();
                 timer.pacify();
-                if (!cfg.selection || !q_rubber_autoscroll(st, cfg.selection())) return;
+                if (!cfg.selection || !q_rubber_autoscroll(st, q_ordered_sel(st, cfg.selection()))) return;
                 boss.base::deface();
                 timer.actify(ui::skin::globals().repeat_rate, [&boss, &st, &cfg](auto) -> bool
                 {
-                    if (!cfg.selection || !q_rubber_autoscroll(st, cfg.selection())) return faux;
+                    if (!cfg.selection || !q_rubber_autoscroll(st, q_ordered_sel(st, cfg.selection()))) return faux;
                     boss.base::deface();
                     return true;
                 });
@@ -515,21 +620,63 @@ namespace netxs::app::parvion
                     { if (st.press_expand != id) { st.press_expand = id; boss.base::deface(); } return; }
                 if (my >= st.body_top - 1 && my < st.div_bottom)
                     if (q_border_hit(cfg.columns(), mx, st.hscroll) >= 0) return;
+                if (my == st.body_top - 1 && cfg.compare)
+                {
+                    auto tbl = cfg.columns();
+                    auto v = q_header_hit(tbl, mx, st.hscroll);
+                    auto key = v >= 0 ? tbl.cols[(size_t)v].key : -1;
+                    if (st.press_header != key) { st.press_header = key; boss.base::deface(); }
+                    gear.dismiss();
+                    return;
+                }
                 if (cfg.selection)
                 {
                     auto ctl = !!(gear.ctlstat & hids::anyCtrl), shft = !!(gear.ctlstat & hids::anyShift);
-                    auto s = cfg.selection();
+                    auto s = q_ordered_sel(st, cfg.selection());
                     auto hit = q_row_at(st, mx, my);
                     if (hit >= 0) { q_sel_press(st, s, hit, ctl, shft); boss.base::deface(); gear.dismiss(); return; }
                     if (!ctl && my >= st.body_top && my < st.tab_row && q_sel_clear_blank(st, s)) { boss.base::deface(); gear.dismiss(); return; }
                 }
                 boss.base::deface(); gear.dismiss();
             });
-            boss.on(tier::mouserelease, input::key::LeftUp, [&](hids&) { if (st.press_expand != -1) { st.press_expand = -1; boss.base::deface(); } });
+            boss.on(tier::mouserelease, input::key::LeftUp, [&](hids&)
+            {
+                if (st.press_expand != -1 || st.press_header != -1)
+                {
+                    st.press_expand = st.press_header = -1;
+                    boss.base::deface();
+                }
+            });
             boss.on(tier::mouserelease, input::key::LeftClick, [&](hids& gear)
             {
                 pro::focus::set(boss.This(), gear.id, solo::on);
                 auto mx = (si32)gear.coord.x, my = (si32)gear.coord.y;
+                if (my == st.body_top - 1 && cfg.compare)
+                {
+                    auto tbl = cfg.columns();
+                    if (q_border_hit(tbl, mx, st.hscroll) < 0)
+                    {
+                        auto v = q_header_hit(tbl, mx, st.hscroll);
+                        if (v >= 0)
+                        {
+                            auto key = tbl.cols[(size_t)v].key;
+                            if (st.sort_key != key)
+                            {
+                                st.sort_key = key;
+                                st.sort_dir = table_state::sort_ascending;
+                            }
+                            else if (st.sort_dir == table_state::sort_ascending)  st.sort_dir = table_state::sort_descending;
+                            else if (st.sort_dir == table_state::sort_descending) { st.sort_dir = table_state::sort_default; st.sort_key = -1; }
+                            else                                                 st.sort_dir = table_state::sort_ascending;
+                            st.scroll = 0;
+                            st.follow = faux;
+                            st.press_header = -1;
+                            boss.base::deface();
+                            gear.dismiss();
+                            return;
+                        }
+                    }
+                }
                 if (auto sb = tbl_vsb(st); sb.ok && mx == sb.x && my >= sb.top && my < sb.top + sb.track_h)
                 {
                     auto page = std::max(1, st.body_rows);
@@ -569,6 +716,18 @@ namespace netxs::app::parvion
                 if (st.sb_hover != nsb) { st.sb_hover = nsb; boss.base::deface(); }
                 auto hsb = tbl_hsb(st); auto nhsb = hsb.ok && my == hsb.top && mx >= hsb.x && mx < hsb.x + hsb.track_h;
                 if (st.hsb_hover != nhsb) { st.hsb_hover = nhsb; boss.base::deface(); }
+                auto nhdr = si32{ -1 };
+                if (cfg.compare && my == st.body_top - 1)
+                {
+                    auto tbl = cfg.columns();
+                    if (q_border_hit(tbl, mx, st.hscroll) < 0)
+                    {
+                        auto v = q_header_hit(tbl, mx, st.hscroll);
+                        if (v >= 0) nhdr = tbl.cols[(size_t)v].key;
+                    }
+                }
+                if (st.hover_header != nhdr) { st.hover_header = nhdr; boss.base::deface(); }
+                if (st.press_header != -1 && st.press_header != nhdr) { st.press_header = -1; boss.base::deface(); }
                 auto nb = si32{ -1 };
                 if (my >= st.body_top - 1 && my < st.div_bottom) nb = q_border_hit(cfg.columns(), mx, st.hscroll);
                 if (st.hover_border != nb) { st.hover_border = nb; boss.base::deface(); }
@@ -580,6 +739,11 @@ namespace netxs::app::parvion
                 if (st.sb_hover)  { st.sb_hover = faux;  boss.base::deface(); }
                 if (st.hsb_hover) { st.hsb_hover = faux; boss.base::deface(); }
                 if (st.hover_border != -1) { st.hover_border = -1; boss.base::deface(); }
+                if (st.hover_header != -1 || st.press_header != -1)
+                {
+                    st.hover_header = st.press_header = -1;
+                    boss.base::deface();
+                }
             });
             boss.on(tier::mouserelease, input::key::MouseWheel, [&](hids& gear)
             {
@@ -625,7 +789,7 @@ namespace netxs::app::parvion
                     pro::focus::set(boss.This(), gear.id, solo::on);
                     st.drag_y = py;
                     st.follow = faux;
-                    q_rubber_begin(st, cfg.selection(), st.scroll + (py - st.body_top), !!(gear.ctlstat & hids::anyCtrl));
+                    q_rubber_begin(st, q_ordered_sel(st, cfg.selection()), st.scroll + (py - st.body_top), !!(gear.ctlstat & hids::anyCtrl));
                     boss.base::deface(); return;
                 }
             };
@@ -649,7 +813,7 @@ namespace netxs::app::parvion
                     }
                     case table_state::d_rubber:
                         st.drag_y = my;
-                        q_rubber_pull(st, cfg.selection(), q_rubber_row_at_drag(st));
+                        q_rubber_pull(st, q_ordered_sel(st, cfg.selection()), q_rubber_row_at_drag(st));
                         arm_autoscroll();
                         boss.base::deface();
                         break;
@@ -680,7 +844,7 @@ namespace netxs::app::parvion
                 if (cfg.on_key && cfg.on_key(gear, ptr::shadow(boss.This()))) return;
                 if (!cfg.arrow_nav || !cfg.selection) return;
                 auto k = gear.keybd::generic();
-                auto s = cfg.selection();
+                auto s = q_ordered_sel(st, cfg.selection());
                 auto n = cfg.rows ? cfg.rows() : 0;
                 auto maxv = std::max(0, st.total - st.body_rows);
                 auto page = std::max(1, st.body_rows - 1);

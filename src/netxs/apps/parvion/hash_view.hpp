@@ -20,7 +20,7 @@ namespace netxs::app::parvion
 
     inline auto hash_content_w(sftp_remote* ctrl, si32 col) -> si32
     {
-        auto w = (si32)cell_width(hash_headers[(size_t)std::clamp(col, 0, 5)]);
+        auto w = (si32)cell_width(hash_headers[(size_t)std::clamp(col, 0, 5)]) + 2; // Space + sort glyph.
         if (!ctrl) return w;
         auto pct = [](double p){ auto b = std::array<char, 24>{}; std::snprintf(b.data(), b.size(), "%.2f%%", p); return text{ b.data() }; };
         for (auto& it : ctrl->hash_queue)
@@ -39,6 +39,53 @@ namespace netxs::app::parvion
         }
         return w;
     }
+    inline auto hash_text_order(view a, view b) -> si32
+    {
+        auto al = text{ a }; utf::to_lower(al);
+        auto bl = text{ b }; utf::to_lower(bl);
+        return al < bl ? -1 : bl < al ? 1 : 0;
+    }
+    inline auto hash_value_order(auto const& a, auto const& b) -> si32
+    {
+        return a < b ? -1 : b < a ? 1 : 0;
+    }
+    inline auto hash_progress_order(hash_item const& a, hash_item const& b) -> si32
+    {
+        // queued / hashing / succeeded / failed are distinct display domains. Within a live
+        // domain, compare the displayed percentage (or byte count when the total is unknown).
+        if (auto cmp = hash_value_order(a.status, b.status)) return cmp;
+        if (a.status == hash_item::succeeded || a.status == hash_item::failed) return 0;
+        if (a.size > 0 && b.size > 0)
+        {
+            auto ap = (long double)a.done / (long double)a.size;
+            auto bp = (long double)b.done / (long double)b.size;
+            return hash_value_order(ap, bp);
+        }
+        if (a.size > 0 != b.size > 0) return a.size > 0 ? 1 : -1;
+        return hash_value_order(a.done, b.done);
+    }
+    inline auto hash_result_order(hash_item const& a, hash_item const& b) -> si32
+    {
+        if (auto cmp = hash_value_order(a.status, b.status)) return cmp;
+        if (a.status == hash_item::succeeded) return hash_text_order(a.digest, b.digest);
+        if (a.status == hash_item::failed)    return hash_text_order(a.error, b.error);
+        return 0;
+    }
+    inline auto hash_compare(sftp_remote* ctrl, si32 row_a, si32 row_b, si32 key) -> si32
+    {
+        if (!ctrl || row_a < 0 || row_b < 0 || row_a >= (si32)ctrl->hash_queue.size() || row_b >= (si32)ctrl->hash_queue.size()) return 0;
+        auto& a = ctrl->hash_queue[(size_t)row_a];
+        auto& b = ctrl->hash_queue[(size_t)row_b];
+        switch (key)
+        {
+            case 0:  return hash_text_order(a.source(), b.source());
+            case 1:  return hash_text_order(a.path, b.path);
+            case 2:  return hash_value_order(a.algo, b.algo);
+            case 3:  return hash_value_order(a.size, b.size);
+            case 4:  return hash_progress_order(a, b);
+            default: return hash_result_order(a, b);
+        }
+    }
     inline auto hash_columns(sftp_remote* ctrl, std::shared_ptr<hash_cols> cols) -> qtable
     {
         static constexpr auto right = std::array<bool, 6>{ faux, faux, faux, true, true, faux };
@@ -54,6 +101,8 @@ namespace netxs::app::parvion
         }
         path = std::min(path, 48); // Cap the Path column; longer paths scroll horizontally.
         auto autow = std::array<si32, 6>{ src + 1, path + 1, std::max(9, (si32)cell_width("Algorithm")) + 1, 12, 11, res + 1 };
+        for (auto i = si32{}; i < 6; ++i)
+            autow[(size_t)i] = std::max(autow[(size_t)i], (si32)cell_width(hash_headers[(size_t)i]) + 3); // Suffix + divider.
         for (auto i = si32{}; i < 6; ++i)
         {
             if (!ctrl->hash_col_shown[(size_t)i]) continue;
@@ -151,6 +200,7 @@ namespace netxs::app::parvion
         cfg.columns    = [ctrl, cols]{ return hash_columns(ctrl, cols); };
         cfg.rows       = [ctrl]{ return (si32)ctrl->hash_queue.size(); };
         cfg.cell       = [ctrl](si32 row, si32 key){ return hash_cell(ctrl, row, key); };
+        cfg.compare    = [ctrl](si32 row_a, si32 row_b, si32 key){ return hash_compare(ctrl, row_a, row_b, key); };
         cfg.selection  = [ctrl]{ return hash_sel(ctrl); };
         cfg.menu       = [ctrl](netxs::wptr<ui::base> panel_wp){ return hash_menu(ctrl, panel_wp); };
         cfg.follow     = []{ return -1; }; // Tail-follow: pin to the bottom.
