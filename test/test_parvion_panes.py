@@ -216,6 +216,14 @@ class ParvionSession:
         os.write(self.master_fd, f"\x1b[<{button};{col};{row}m".encode())
         self.feed(settle)
 
+    def double_click(self, col, row, button=0, settle=0.6):
+        for _ in range(2):
+            os.write(self.master_fd, f"\x1b[<{button};{col};{row}M".encode())
+            time.sleep(0.02)
+            os.write(self.master_fd, f"\x1b[<{button};{col};{row}m".encode())
+            time.sleep(0.02)
+        self.feed(settle)
+
     def drag_path(self, points, button=0, settle=0.6):
         """Press at points[0], motion (button|32) through the rest, release at points[-1].
         button=16 sends a Ctrl-modified left drag (SGR: left=0 | ctrl=16)."""
@@ -791,12 +799,58 @@ def test_shared_table_keyboard_navigation_scrolls_to_last_row():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_file_activation_preserves_scrolled_viewport():
+    """Enter / double-click file activation must not reset the file pane's vertical scroll."""
+    print("TEST: parvion pane - file activation preserves scrolled viewport ... ", end="", flush=True)
+    d = tempfile.mkdtemp(prefix="parvionpane_activate_")
+    try:
+        for i in range(48):
+            open(os.path.join(d, f"row_{i:02d}.txt"), "w").close()
+        with ParvionSession(d) as s:
+            first = find_text(s.screen()[0], "/..")
+            if first is None:
+                print("FAIL - '..' row not found")
+                return False
+            s.click(first[1] + 1, first[0] + 1)
+            s.write("\x1b[B" * 60, settle=1.0)
+            chars, bg = s.screen()
+            last = find_text(chars, "row_47.txt")
+            if last is None:
+                print("FAIL - keyboard navigation did not reveal the final row")
+                return False
+            selected_bg = bg[last[0]][last[1]]
+            s.write("\r", settle=0.8)
+            chars, bg = s.screen()
+            last = find_text(chars, "row_47.txt")
+            if last is None:
+                print("FAIL - Enter activation reset the viewport to the top")
+                return False
+            if bg[last[0]][last[1]] != selected_bg:
+                print(f"FAIL - final row lost selection after Enter (bg {bg[last[0]][last[1]]})")
+                return False
+
+            s.double_click(last[1] + 1, last[0] + 1, settle=0.8)
+            chars, bg = s.screen()
+            last = find_text(chars, "row_47.txt")
+            if last is None:
+                print("FAIL - double-click activation reset the viewport to the top")
+                return False
+            if bg[last[0]][last[1]] != selected_bg:
+                print(f"FAIL - final row lost selection after double-click (bg {bg[last[0]][last[1]]})")
+                return False
+            print("PASS")
+            return True
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 TESTS = [
     test_shared_table_file_sort_configuration,
     test_ctrl_click_keeps_focus,
     test_right_click_activates_pane,
     test_shared_table_keyboard_activation_and_parent,
     test_shared_table_keyboard_navigation_scrolls_to_last_row,
+    test_file_activation_preserves_scrolled_viewport,
     test_blank_click_does_not_select,
     test_right_click_blank_clears_selection,
     test_ctrl_drag_adds_to_selection,

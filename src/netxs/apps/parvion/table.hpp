@@ -919,8 +919,6 @@ namespace netxs::app::parvion
                     auto hit_w = cfg.wide_hit ? st.disp_w : q_row_w(st);
                     if (source >= 0 && source < st.total && mx >= 0 && mx < hit_w)
                     {
-                        st.scroll = st.hscroll = 0;
-                        st.follow = true;
                         boss.base::deface();
                         gear.dismiss();
                         cfg.activate(source);
@@ -950,8 +948,6 @@ namespace netxs::app::parvion
                         }
                     if (source >= 0)
                     {
-                        st.scroll = st.hscroll = 0;
-                        st.follow = true;
                         gear.set_handled();
                         boss.base::deface();
                         cfg.activate(source);
