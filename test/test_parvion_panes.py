@@ -593,6 +593,34 @@ def test_delete_cancel():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_delete_key_item():
+    """Delete key on a selected pane item uses the same confirmation/delete path as the item menu."""
+    print("TEST: parvion pane - Delete key ... ", end="", flush=True)
+    d = make_tree()
+    try:
+        with ParvionSession(d) as s:
+            pos = find_text(s.screen()[0], "beta.txt")
+            if pos is None:
+                print("FAIL - beta.txt not listed")
+                return False
+            s.click(pos[1] + 1, pos[0] + 1, button=0)
+            s.write("\x1b[3~", settle=0.4)
+            if not grid_contains(s.screen()[0], "Delete 'beta.txt'?"):
+                print("FAIL - confirmation dialog not shown")
+                return False
+            s.write("\r", settle=0.8)
+            if os.path.exists(os.path.join(d, "beta.txt")):
+                print("FAIL - file still on disk after Delete key")
+                return False
+            if grid_contains(s.screen()[0], "beta.txt"):
+                print("FAIL - file still shown after Delete key")
+                return False
+            print("PASS")
+            return True
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_rename_item():
     """Item menu -> Rename -> edit -> Enter renames the file on disk."""
     print("TEST: parvion pane - Rename ... ", end="", flush=True)
@@ -861,6 +889,7 @@ TESTS = [
     test_create_directory,
     test_delete_item,
     test_delete_cancel,
+    test_delete_key_item,
     test_rename_item,
 ]
 
