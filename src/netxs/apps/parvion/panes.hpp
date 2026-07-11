@@ -13,36 +13,14 @@
 // references via the LISTEN/on macros' `[&]` capture).
 
 #include "session.hpp" // brings model.hpp + proto.hpp + sftp_remote
+#include "ui.hpp"
+#include "table.hpp"
 
 #include <functional>
 #include <set>
 
 namespace netxs::app::parvion
 {
-    // Shared palette (aligned with tile.hpp's command_bar tones).
-    namespace theme
-    {
-        static constexpr auto bg          = 0xFF1E1E2Eu; // Pane background.
-        static constexpr auto surface     = 0xFF313244u; // Column-header strip.
-        static constexpr auto header      = 0xFF11111Bu; // Title strip.
-        static constexpr auto text_fg     = 0xFFCDD6F4u; // File names.
-        static constexpr auto subtext     = 0xFF6C7086u; // Size/time/secondary.
-        static constexpr auto dir_fg      = 0xFF89B4FAu; // Directory names.
-        static constexpr auto link_fg     = 0xFF94E2D5u; // Symlinks.
-        static constexpr auto sel_bg      = 0xFF45475Au; // Selection (unfocused).
-        static constexpr auto sel_bg_act  = 0xFF89B4FAu; // Selection (focused pane).
-        static constexpr auto sel_fg_act  = 0xFF1E1E2Eu; // Selection text (focused).
-        static constexpr auto title_fg    = 0xFFCDD6F4u;
-        static constexpr auto title_fg_act = 0xFF89DCEBu; // Focused pane title.
-        static constexpr auto sort_fg     = 0xFFFAB387u; // Active table sort arrow (bright orange).
-        static constexpr auto sb_track    = 0xFF2C3047u; // Scrollbar track.
-        static constexpr auto sb_thumb    = 0xFF3B4261u; // Scrollbar thumb.
-        static constexpr auto sb_hover    = 0xFF565F89u; // Scrollbar thumb (hover).
-        static constexpr auto sb_drag     = 0xFF89B4FAu; // Scrollbar thumb (dragging).
-        static constexpr auto err_fg      = 0xFFF38BA8u;
-        static constexpr auto trace_fg    = 0xFFCBA6F7u; // Message-log Trace/debug lines (mauve).
-    }
-
     // A directory lister: fill `out` with the entries of `path`; on failure set
     // `err` and return faux. Local panes use this with read_local_dir; remote
     // panes plug the SFTP session in later.
@@ -82,19 +60,9 @@ namespace netxs::app::parvion
         std::vector<direntry> items;            // Listing (excludes synthetic "..").
         text                  error;            // Last listing error.
         si32                  sel = 0;          // Cursor / activation target / shift anchor (0 == "..").
-        // Multi-selection (mirrors the queue table): `marked` is the highlighted set of logical rows;
-        // `sel_anchor` is the shift-range anchor; the rubber_* fields track a live left-drag band.
+        // Multi-selection (mirrors the queue table): `marked` is the highlighted set of logical rows.
+        // The shared table owns the transient anchor / rubber-band state.
         std::set<si32>        marked{ 0 };
-        si32                  sel_anchor = 0;
-        bool                  rubber = faux;
-        si32                  rubber_a = -1, rubber_b = -1;
-        // Ctrl+drag rubber-band (additive select / deselect): `drag_base` is the selection captured at
-        // press time (before the click mutates it) that the band is merged onto; `rubber_ctrl` marks a
-        // Ctrl-modified band; `rubber_add` is its mode (true = select swept rows, false = deselect them,
-        // decided from the anchor row's pre-drag state).
-        std::set<si32>        drag_base;
-        bool                  rubber_ctrl = faux;
-        bool                  rubber_add  = true;
         // Inline name entry for the right-click "Create Directory" / "Rename" actions.
         si32                  input_mode = 0;   // 0 = none, 1 = create-directory, 2 = rename.
         text                  input_buf;        // The name being typed.
@@ -105,34 +73,18 @@ namespace netxs::app::parvion
         si32                  addr_off   = 0;    // Horizontal scroll offset (display cells).
         rect                  addr_box;          // Cached field box (render→mouse), like connect_state::box.
         bool                  addr_drag  = faux; // Left-drag from the field scrubs the caret.
-        si32                  scroll = 0;       // First visible logical row.
-        si32                  hscroll = 0;      // Horizontal cell offset (long names overflow).
         // Transfer-table-style columns (Name, Size, Modified): session-only widths + visibility,
-        // resizable by dragging the inter-column border (which runs down the list) and toggled from
-        // the column-header right-click menu. Mirrors parvion/queue.hpp.
+        // persisted by the shared table's resize / show-hide adapters.
         std::array<si32, 3>   col_w{ 24, 10, 17 }; // Name; Size (right-aligned); Modified ("YYYY-MM-DD HH:MM" + border cell).
         std::array<bool, 3>   col_shown{ true, true, true };
-        si32                  hover_border = -1; // Column border under the cursor (-1 = none).
-        si32                  col_drag = -1;     // Column border being width-dragged (-1 = none).
-        si32                  div_bottom = 1;    // Exclusive bottom row of the column dividers (header + visible rows).
         bool                  focused = faux;   // Pane has keyboard focus.
-        rect                  area;             // Cached widget area (render→mouse).
-        si32                  rows = 0;         // Cached visible list rows.
-        si32                  content_w = 0;    // Natural width of the columns (Name+Size+Modified).
-        si32                  disp_w = 0;       // Visible width (pane width minus the VSB column).
-        si32                  hsb_y = 0;        // Row of the horizontal scrollbar.
-        bool                  has_vsb = faux, has_hsb = faux; // Which scrollbars the layout needs.
-        bool                  sb_hover = faux;  // Cursor is over the vertical scrollbar.
-        bool                  sb_drag  = faux;  // Dragging the vertical scrollbar thumb.
-        si32                  sb_grab  = 0;     // V-thumb-drag grab offset (press row - thumb top).
-        bool                  hsb_hover = faux; // Cursor is over the horizontal scrollbar.
-        bool                  hsb_drag  = faux; // Dragging the horizontal scrollbar thumb.
-        si32                  hsb_grab  = 0;    // H-thumb-drag grab offset (press col - thumb left).
         sftp_remote*          remote = nullptr; // Non-null: remote pane backed by the SFTP controller.
         sftp_remote*          ctrl = nullptr;   // SFTP controller (both panes) for enqueueing transfers.
         netxs::wptr<ui::base> window_wp;        // App top-level window cake: anchor for confirm dialogs.
+        netxs::wptr<ui::base> table_wp;         // Shared table widget (picker focus hand-off after overlay attach).
         ui64                  seen_gen = ~0ull; // Last remote listing generation seen (selection reset).
         ui64                  seen_local_gen = 0; // Last local refresh generation seen (post-download re-list); matches ctrl->local_gen's initial 0.
+        ui64                  revision = 0;    // Navigation generation consumed by table_cfg::revision.
         // File-picker mode (Settings dialog's "Add key file..."): when set, activating a FILE
         // (double-click / Enter / Open button) invokes this with the file's full path instead of
         // enqueueing a transfer; directory navigation is unchanged. Lets the picker reuse the whole
@@ -154,126 +106,6 @@ namespace netxs::app::parvion
         // Logical row count = ".." + items.
         auto total() const { return (si32)cur_items().size() + 1; }
     };
-
-    // --- Unicode helpers (grapheme-cluster + display-cell aware) -----------------
-    // Earlier revisions rolled their own codepoint-counting helpers that assumed one
-    // codepoint == one cell; that mangled East-Asian wide glyphs (2 cells) and combining
-    // clusters (many codepoints, 1 cell). These delegate to the netxs utf:: machinery so
-    // measurement, caret math and painting all agree on display cells / grapheme clusters.
-
-    // Byte step of a single UTF-8 codepoint (used for byte-level filtering, not display).
-    inline auto u8_step(view s, size_t i) -> size_t
-    {
-        auto c = (unsigned char)s[i];
-        auto n = c < 0x80 ? 1u : (c & 0xE0) == 0xC0 ? 2u : (c & 0xF0) == 0xE0 ? 3u : 4u;
-        return std::min((size_t)n, s.size() - i);
-    }
-    // Display width of one grapheme cluster (1 for narrow, 2 for wide; >=1 defensively).
-    inline auto gc_cells(utf::frag const& frag) -> si32
-    {
-        auto m = utf::matrix::whxy(frag.attr.cmatrix);
-        return std::max(1, (si32)m.w);
-    }
-    // Total display-cell width of utf8 (grapheme + East-Asian aware; controls skipped).
-    inline auto cell_width(view utf8) -> si32
-    {
-        auto cells = si32{};
-        utf::decode_clusters(utf8, [&](view cl){ cells += gc_cells(utf::cluster(cl)); return true; });
-        return cells;
-    }
-    // Number of grapheme clusters in utf8.
-    inline auto cluster_count(view utf8) -> si32
-    {
-        auto n = si32{};
-        utf::decode_clusters(utf8, [&](view){ ++n; return true; });
-        return n;
-    }
-    // Byte offset of the start of cluster #idx (idx >= count -> s.size()). Steps raw bytes
-    // by cluster length so it stays exact regardless of embedded controls.
-    inline auto cluster_to_byte(view s, si32 idx) -> size_t
-    {
-        auto i = size_t{};
-        for (auto n = si32{}; n < idx && i < s.size(); ++n) i += utf::cluster(s.substr(i)).attr.utf8len;
-        return std::min(i, s.size());
-    }
-    // Cluster index for a target cell column `col` (from the start of s). A click landing on
-    // the right half of a wide glyph snaps to the following boundary (caret after the glyph).
-    inline auto cell_to_cluster(view s, si32 col) -> si32
-    {
-        if (col <= 0) return 0;
-        auto acc  = si32{}; // cells consumed
-        auto n    = si32{}; // clusters consumed
-        auto stop = si32{};
-        auto done = faux;
-        utf::decode_clusters(s, [&](view cl)
-        {
-            auto cw = gc_cells(utf::cluster(cl));
-            if (col < acc + cw) { stop = n + (col - acc >= (cw + 1) / 2 ? 1 : 0); done = true; return faux; }
-            acc += cw; ++n;
-            return true;
-        });
-        return done ? stop : n; // past end -> caret at end.
-    }
-    // Display-cell column of the caret (cluster index) within s.
-    inline auto caret_cell(view s, si32 caret_idx) -> si32
-    {
-        return cell_width(s.substr(0, cluster_to_byte(s, caret_idx)));
-    }
-    // Byte offset of the leftmost cluster whose cell column is >= col (window start).
-    inline auto byte_at_cell(view s, si32 col) -> size_t
-    {
-        return cluster_to_byte(s, cell_to_cluster(s, col));
-    }
-    // Paint up to max_cells display cells of utf8 at (x,y), advancing by each cluster's display
-    // width. Wide (w==2) clusters fill two cells: left half (x=1) and right half (x=2), matching
-    // rich::forward_fill_proc. A wide glyph that would only half-fit is dropped (trailing blank).
-    // Returns cells written.
-    inline auto put_str(auto& canvas, si32 x, si32 y, view utf8, ui32 fg, ui32 bg, si32 max_cells) -> si32
-    {
-        auto xi = si32{};
-        utf::decode_clusters(utf8, [&](view cl) -> bool
-        {
-            auto frag    = utf::cluster(cl);
-            auto m       = utf::matrix::whxy(frag.attr.cmatrix);
-            auto cw      = std::max(1, (si32)m.w);
-            if (xi + cw > max_cells) return faux; // No partial wide glyph at the right edge.
-            if (cw == 1)
-            {
-                canvas.fill(rect{{ x + xi, y }, { 1, 1 }}, [&](cell& c){ c.bgc(bg).fgc(fg).txt(frag.text); });
-            }
-            else
-            {
-                canvas.fill(rect{{ x + xi,     y }, { 1, 1 }}, [&](cell& c){ c.bgc(bg).fgc(fg).txt(frag.text).wdt(m.w, m.h, 1, 1); });
-                canvas.fill(rect{{ x + xi + 1, y }, { 1, 1 }}, [&](cell& c){ c.bgc(bg).fgc(fg).txt(frag.text).wdt(m.w, m.h, 2, 1); });
-            }
-            xi += cw;
-            return true;
-        });
-        return xi;
-    }
-
-    // Fit utf8 into at most `maxw` display cells. When it overflows, keep the leading clusters that
-    // fit in maxw-1 cells and append '…' (U+2026, 1 cell) so the tail signals the truncation. Used
-    // by the queue table so a too-narrow column shows "longna…" instead of a hard clip.
-    inline auto fit_ellipsis(view utf8, si32 maxw) -> text
-    {
-        if (maxw <= 0) return {};
-        if (cell_width(utf8) <= maxw) return text{ utf8 };
-        if (maxw == 1) return text{ "\xE2\x80\xA6" }; // Only room for the ellipsis itself.
-        auto budget = maxw - 1; // Cells available before the trailing '…'.
-        auto used   = si32{};
-        auto out    = text{};
-        utf::decode_clusters(utf8, [&](view cl) -> bool
-        {
-            auto cw = gc_cells(utf::cluster(cl));
-            if (used + cw > budget) return faux;
-            used += cw;
-            out += text{ cl };
-            return true;
-        });
-        out += "\xE2\x80\xA6"; // '…'
-        return out;
-    }
 
     // --- single-line editor core (shared by the connect bar's fields and the panes'
     // address bar): a text value + a grapheme-cluster caret index. ---------------
@@ -476,10 +308,8 @@ namespace netxs::app::parvion
         st.error.clear();
         st.items.clear();
         st.sel = 0;
-        st.sel_anchor = 0;
         st.marked = { 0 };
-        st.scroll = 0;
-        st.hscroll = 0;
+        ++st.revision;
         if (st.lister) { if (!st.lister(newpath, st.items, st.error)) st.items.clear(); }
         else st.error = "Not connected.";
         st.path = newpath;
@@ -488,16 +318,9 @@ namespace netxs::app::parvion
     inline void pane_clamp(pane_state& st)
     {
         auto n = st.total();
-        if (st.sel < 0)  st.sel = 0;
-        if (st.sel >= n) st.sel = n - 1;
-        if (st.rows > 0)
-        {
-            if (st.sel < st.scroll)            st.scroll = st.sel;
-            if (st.sel >= st.scroll + st.rows) st.scroll = st.sel - st.rows + 1;
-            auto maxscroll = std::max(0, n - st.rows);
-            if (st.scroll > maxscroll) st.scroll = maxscroll;
-            if (st.scroll < 0)         st.scroll = 0;
-        }
+        st.sel = std::clamp(st.sel, 0, std::max(0, n - 1));
+        for (auto i = st.marked.begin(); i != st.marked.end(); )
+            if (*i < 0 || *i >= n) i = st.marked.erase(i); else ++i;
     }
     // Reload the current directory in place, preserving the selection/scroll (a completed
     // transfer only adds a row). Used to refresh the destination pane after a transfer.
@@ -662,46 +485,11 @@ namespace netxs::app::parvion
         }
     }
 
-    // local_y is the widget-local mouse row (gear.coord is rebased per-widget).
-    inline auto pane_hit_row(pane_state const& st, si32 local_y) -> si32
-    {
-        auto vis = local_y - 2; // Skip title + column header.
-        if (vis < 0 || vis >= st.rows) return -1;
-        auto row = st.scroll + vis;
-        return row < st.total() ? row : -1;
-    }
-
     // --- transfer-table-style columns (Name / Size / Modified), mirroring parvion/queue.hpp ----------
     static constexpr auto p_ncol    = si32{ 3 };
-    static constexpr auto p_name_x  = si32{ 1 };  // One-cell left margin before the first column.
-    static constexpr auto p_col_min = si32{ 2 };  // Minimum resizable-column width.
-    static constexpr auto p_col_max = si32{ 200 };
     static constexpr auto p_headers = std::array<view, p_ncol>{ "Name", "Size", "Modified" };
 
     inline auto p_col_visible(pane_state const& st, si32 i) -> bool { return i >= 0 && i < p_ncol && st.col_shown[(size_t)i]; }
-    // Content-x of the left edge of column `i`, skipping hidden columns; -1 when `i` is hidden.
-    inline auto p_col_x(pane_state const& st, si32 i) -> si32
-    {
-        if (!p_col_visible(st, i)) return -1;
-        auto x = p_name_x;
-        for (auto j = si32{}; j < i; ++j) if (p_col_visible(st, j)) x += st.col_w[(size_t)j];
-        return x;
-    }
-    // Content-x of the right edge (border cell) of column `i`; -1 when hidden.
-    inline auto p_border_cx(pane_state const& st, si32 i) -> si32
-    {
-        auto x = p_col_x(st, i);
-        return x < 0 ? -1 : x + st.col_w[(size_t)i] - 1;
-    }
-    // Right edge of the last visible column (content width), for layout / HSB / row highlight.
-    inline auto pane_content_w(pane_state const& st) -> si32
-    {
-        auto x = p_name_x;
-        for (auto i = si32{}; i < p_ncol; ++i) if (p_col_visible(st, i)) x += st.col_w[(size_t)i];
-        return x;
-    }
-    // Screen width of a row's selection highlight / hit-box: the visible columns only.
-    inline auto pane_row_w(pane_state const& st) -> si32 { return std::clamp(st.content_w - st.hscroll, 0, st.disp_w); }
     // The text column `col` shows for logical `row` (row 0 == "..", else items[row-1]); mirrors render.
     inline auto pane_cell_text(pane_state const& st, si32 col, si32 row) -> text
     {
@@ -722,46 +510,6 @@ namespace netxs::app::parvion
         for (auto row = si32{}; row < st.total(); ++row) w = std::max(w, cell_width(pane_cell_text(st, col, row)));
         return w;
     }
-    // Build the column-header right-click menu: one kind::check show-hide toggle (▣/□) per column
-    // (mirrors the message log's "Show detailed log"). At least one column stays visible. Toggling
-    // defaces the pane; the action only touches `st` after locking the pane so a torn-down pane is
-    // safe.
-    inline auto build_pane_columns_menu(pane_state& st, netxs::wptr<ui::base> panel_wp) -> std::vector<app::shared::menu::item>
-    {
-        namespace m = app::shared::menu;
-        auto items = std::vector<m::item>{};
-        for (auto i = si32{}; i < p_ncol; ++i)
-        {
-            auto shown = st.col_shown[(size_t)i];
-            auto row = m::item{ .alive = true, .label = text{ p_headers[(size_t)i] },
-                                .type = m::kind::check, .checked = shown };
-            row.action = [&st, panel_wp, i](hids&)
-            {
-                if (auto p = panel_wp.lock())
-                {
-                    if (st.col_shown[(size_t)i]) // Hiding: keep at least one column visible.
-                    {
-                        auto cnt = si32{};
-                        for (auto j = si32{}; j < p_ncol; ++j) if (st.col_shown[(size_t)j]) ++cnt;
-                        if (cnt <= 1) return;
-                    }
-                    st.col_shown[(size_t)i] = !st.col_shown[(size_t)i];
-                    p->base::deface();
-                }
-            };
-            items.push_back(std::move(row));
-        }
-        return items;
-    }
-
-    // Hit-test a body row WITHIN the columns: a press to the right of the last column (mx past the
-    // columns width) or below the list returns -1, so a click there never selects an item.
-    inline auto pane_hit_item(pane_state const& st, si32 mx, si32 my) -> si32
-    {
-        if (mx >= pane_row_w(st)) return -1;
-        return pane_hit_row(st, my);
-    }
-
     // --- file operations (local: std::filesystem, cross-platform; remote: backend verbs) ----------
     inline void pane_reload(pane_state& st)
     {
@@ -807,7 +555,7 @@ namespace netxs::app::parvion
                 else     st.remote->delete_remote_file(nm);
             return;
         }
-        st.marked = { 0 }; st.sel = 0; st.sel_anchor = 0;
+        st.marked = { 0 }; st.sel = 0;
         if (st.ctrl)
         {
             // Local: hand the paths to the controller's detached worker (a big subtree must not
@@ -962,722 +710,406 @@ namespace netxs::app::parvion
         return items;
     }
 
-    // Settle the pane's visible rows and which scrollbars are needed into st's cache, given the
-    // natural content width. Two refine passes settle the VSB<->HSB interplay (each can force the
-    // other by stealing a cell), mirroring the queue panel's queue_layout_core.
-    inline void pane_layout(pane_state& st, si32 w, si32 h, si32 content_w)
+    inline void pane_sync(pane_state& st)
     {
-        st.content_w = content_w;
-        auto n = st.total();
-        auto avail = std::max(0, h - 2); // Rows below the title (row 0) and column header (row 1).
-        for (auto pass = si32{}; pass < 2; ++pass)
+        if (st.remote && st.remote->gen != st.seen_gen)
         {
-            st.has_vsb = avail > 0 && n > avail;
-            st.disp_w  = w - (st.has_vsb ? 1 : 0);
-            st.has_hsb = content_w > st.disp_w;
-            st.rows    = std::max(0, avail - (st.has_hsb ? 1 : 0));
-            st.has_vsb = st.rows > 0 && n > st.rows;
-            st.disp_w  = w - (st.has_vsb ? 1 : 0);
-            st.has_hsb = content_w > st.disp_w;
-            st.rows    = std::max(0, avail - (st.has_hsb ? 1 : 0));
+            st.seen_gen = st.remote->gen;
+            st.sel = 0;
+            st.marked = { 0 };
         }
-        st.hsb_y = 2 + st.rows; // Row directly below the last list row.
-    }
-    // Scrollbar geometry in widget-local coords, matching what pane_render paints. `pane_sb`
-    // doubles for both axes: for the VSB, {x,top} is the track's column/first-row and the thumb
-    // fields run vertically; for the HSB, {top} is the row, {x} the first column, horizontally.
-    struct pane_sb { bool ok = faux; si32 x = 0, top = 0, track_h = 0, thumb_y = 0, thumb_h = 0, maxscroll = 0; };
-    inline auto pane_scrollbar(pane_state const& st) -> pane_sb
-    {
-        auto sb = pane_sb{};
-        auto w = st.area.size.x;
-        auto n = st.total();
-        sb.ok = st.has_vsb && st.rows > 0 && n > st.rows;
-        if (!sb.ok) return sb;
-        sb.x         = w - 1;
-        sb.top       = 2;            // List body starts at row 2 (title + column header above).
-        sb.track_h   = st.rows;
-        sb.thumb_h   = std::max(1, st.rows * st.rows / n);
-        sb.maxscroll = n - st.rows;  // >= 1 when ok.
-        sb.thumb_y   = sb.top + (st.rows - sb.thumb_h) * st.scroll / sb.maxscroll;
-        return sb;
-    }
-    inline auto pane_hsb(pane_state const& st) -> pane_sb
-    {
-        auto sb = pane_sb{};
-        sb.ok = st.has_hsb && st.disp_w > 0 && st.content_w > st.disp_w;
-        if (!sb.ok) return sb;
-        sb.x         = 0;
-        sb.top       = st.hsb_y;
-        sb.track_h   = st.disp_w;
-        sb.thumb_h   = std::max(1, st.disp_w * st.disp_w / st.content_w);
-        sb.maxscroll = st.content_w - st.disp_w;
-        sb.thumb_y   = (st.disp_w - sb.thumb_h) * st.hscroll / sb.maxscroll;
-        return sb;
-    }
-    // Scroll so the thumb (grabbed at st.sb_grab) tracks the cursor row `local_y`.
-    inline void pane_sb_scroll_to(pane_state& st, si32 local_y, pane_sb const& sb)
-    {
-        auto travel = sb.track_h - sb.thumb_h; // Thumb's vertical travel range.
-        if (travel <= 0) return;
-        auto new_thumb_y = local_y - st.sb_grab - sb.top;
-        st.scroll = std::clamp(new_thumb_y * sb.maxscroll / travel, 0, sb.maxscroll);
-    }
-    // Scroll so the H-thumb (grabbed at st.hsb_grab) tracks the cursor column `local_x`.
-    inline void pane_hsb_scroll_to(pane_state& st, si32 local_x, pane_sb const& sb)
-    {
-        auto travel = sb.track_h - sb.thumb_h; // Thumb's horizontal travel range.
-        if (travel <= 0) return;
-        st.hscroll = std::clamp((local_x - st.hsb_grab - sb.x) * sb.maxscroll / travel, 0, sb.maxscroll);
+        pane_clamp(st);
     }
 
-    // Painted in widget-local coordinates: change_basis() has already translated
-    // the canvas to this widget's origin, so (0,0) is the pane's top-left. `size`
-    // is the pane's own size (boss.base::size()), not the full canvas area().
-    inline void pane_render(pane_state& st, auto& parent_canvas, twod size)
+    inline auto pane_columns(std::shared_ptr<pane_state> const& state) -> qtable
     {
-        auto r = rect{ dot_00, size };
-        st.area = r;
-        auto w = r.size.x;
-        auto h = r.size.y;
-        if (w <= 0 || h <= 0) return;
-        auto ox = r.coor.x;
-        auto oy = r.coor.y;
-        parent_canvas.fill(r, [&](cell& c){ c.bgc(theme::bg).fgc(theme::text_fg); });
-
-        // Row 0: title + the path as an editable address field, in the connect-bar field
-        // style (connect_render in connectbar.hpp): an underline marks the editable
-        // extent — muted at rest, accent blue with a block caret while editing.
-        if (st.remote && st.remote->gen != st.seen_gen) { st.seen_gen = st.remote->gen; st.sel = 0; st.sel_anchor = 0; st.marked = { 0 }; st.scroll = 0; st.hscroll = 0; }
-        auto tfg = st.focused ? theme::title_fg_act : theme::title_fg;
-        parent_canvas.fill(rect{{ ox, oy }, { w, 1 }}, [&](cell& c){ c.bgc(theme::header); });
-        auto disp = st.is_local && st.cur_path().empty() ? text{ "Computer" } : st.cur_path();
-        auto lead = ' ' + st.label + ' ';
-        auto fx = cell_width(lead) + 1; // One gap cell between the label and the field.
-        auto fw = w - fx - 1;           // The field spans to a one-cell right margin.
-        if (fw < 2) // Too narrow for a field: plain title, no hitbox.
+        auto& st = *state;
+        auto t = qtable{};
+        t.left = 1;
+        for (auto i = si32{}; i < p_ncol; ++i)
         {
-            st.addr_box = {};
-            if (st.addr_edit) pane_addr_cancel(st);
-            put_str(parent_canvas, ox, oy, lead + ' ' + disp, tfg, theme::header, w);
+            if (st.col_shown[(size_t)i])
+                t.cols.push_back({ text{ p_headers[(size_t)i] }, st.col_w[(size_t)i], i == 1, true, i });
+            t.roster.push_back({ text{ p_headers[(size_t)i] }, i, st.col_shown[(size_t)i] });
+        }
+        t.set_shown = [state](si32 key, bool on)
+        {
+            if (key >= 0 && key < p_ncol) state->col_shown[(size_t)key] = on;
+        };
+        t.resize = [state](si32 key, si32 width)
+        {
+            if (key >= 0 && key < p_ncol) state->col_w[(size_t)key] = width;
+        };
+        t.autofit = [state](si32 key)
+        {
+            return key >= 0 && key < p_ncol ? pane_col_content_w(*state, key) : 0;
+        };
+        return t;
+    }
+
+    inline auto pane_cell(std::shared_ptr<pane_state> const& state, si32 row, si32 key) -> cellval
+    {
+        auto& st = *state;
+        if (row < 0 || row >= st.total() || key < 0 || key >= p_ncol) return {};
+        auto fg = ui32{ theme::subtext };
+        if (key == 0)
+        {
+            if (row == 0) fg = theme::dir_fg;
+            else
+            {
+                auto& e = st.cur_items()[(size_t)(row - 1)];
+                fg = e.is_link ? ui32{ theme::link_fg }
+                               : e.is_dir ? ui32{ theme::dir_fg }
+                                          : ui32{ theme::text_fg };
+            }
+        }
+        return { pane_cell_text(st, key, row), fg };
+    }
+
+    inline auto pane_sort_group(pane_state const& st, si32 row) -> si32
+    {
+        if (row <= 0) return 0; // The synthetic parent entry is always first.
+        auto& items = st.cur_items();
+        return row - 1 < (si32)items.size() && items[(size_t)(row - 1)].is_dir ? 1 : 2;
+    }
+
+    inline auto pane_compare(pane_state const& st, si32 a, si32 b, si32 key) -> si32
+    {
+        if (a <= 0 || b <= 0 || a >= st.total() || b >= st.total()) return 0;
+        auto& lhs = st.cur_items()[(size_t)(a - 1)];
+        auto& rhs = st.cur_items()[(size_t)(b - 1)];
+        if (key == 0)
+        {
+            auto l = lhs.name; utf::to_lower(l);
+            auto r = rhs.name; utf::to_lower(r);
+            return l < r ? -1 : l > r ? 1 : 0;
+        }
+        if (key == 1) return lhs.size < rhs.size ? -1 : lhs.size > rhs.size ? 1 : 0;
+        if (key == 2) return lhs.mtime < rhs.mtime ? -1 : lhs.mtime > rhs.mtime ? 1 : 0;
+        return 0;
+    }
+
+    inline auto pane_selection(std::shared_ptr<pane_state> const& state) -> qsel_cfg
+    {
+        auto s = qsel_cfg{};
+        s.key_count = [state]{ return state->total(); };
+        s.is_sel    = [state](si32 key){ return state->marked.count(key) != 0; };
+        s.set_sel   = [state](si32 key, bool on)
+        {
+            if (key < 0 || key >= state->total()) return;
+            if (on)
+            {
+                state->marked.insert(key);
+                state->sel = key;
+                pane_fire_select(*state);
+            }
+            else state->marked.erase(key);
+        };
+        s.clear      = [state]{ state->marked.clear(); };
+        s.any        = [state]{ return !state->marked.empty(); };
+        s.in_scope   = [state](si32 key){ return key >= 0 && key < state->total(); };
+        s.disp       = [state]{ return state->total(); };
+        s.key_of_row = [state](si32 row){ return row >= 0 && row < state->total() ? row : -1; };
+        return s;
+    }
+
+    inline auto pane_menu(std::shared_ptr<pane_state> const& state, netxs::wptr<ui::base> panel_wp) -> qmenu_cfg
+    {
+        auto menu = qmenu_cfg{};
+        menu.item = [state, panel_wp](si32 hit)
+        {
+            return hit > 0 ? build_pane_item_menu(*state, panel_wp)
+                           : build_pane_blank_menu(*state, panel_wp);
+        };
+        menu.blank = [state, panel_wp]{ return build_pane_blank_menu(*state, panel_wp); };
+        menu.on_item_rclick = [state](si32 hit)
+        {
+            if (hit > 0)
+            {
+                if (!state->marked.count(hit)) state->marked = { hit };
+                state->sel = hit;
+                pane_fire_select(*state);
+            }
+            else state->marked.clear(); // The synthetic ".." row uses the blank-area menu.
+        };
+        menu.on_blank_rclick = [state]{ state->marked.clear(); };
+        return menu;
+    }
+
+    inline auto pane_table_key(std::shared_ptr<pane_state> const& state, hids& gear, netxs::wptr<ui::base> self) -> bool
+    {
+        auto& st = *state;
+        if (gear.payload != input::keybd::type::keypress
+         || gear.keystat == input::key::released
+         || gear.keystat == input::key::interrupted) return faux;
+        auto k = gear.keybd::generic();
+        if (st.input_mode)
+        {
+            if (k == input::key::Esc) { st.input_mode = 0; st.input_buf.clear(); }
+            else if (k == input::key::KeyEnter)
+            {
+                auto mode = st.input_mode;
+                st.input_mode = 0;
+                if      (mode == 1) pane_create_dir(st);
+                else if (mode == 2) pane_rename_sel(st);
+                st.input_buf.clear();
+            }
+            else if (k == input::key::Backspace)
+            {
+                auto n = cluster_count(st.input_buf);
+                if (n > 0) st.input_buf = st.input_buf.substr(0, cluster_to_byte(st.input_buf, n - 1));
+            }
+            else
+            {
+                auto cl = gear.cluster;
+                if (!cl.empty() && (unsigned char)cl[0] >= 0x20 && cl != "\x7f" && cl != "/" && cl != "\\")
+                    st.input_buf += text{ cl };
+            }
+            gear.set_handled();
+            if (auto p = self.lock()) p->base::deface();
+            return true;
+        }
+        if (k == input::key::Esc && st.on_cancel)
+        {
+            auto cb = st.on_cancel;
+            gear.set_handled();
+            cb(); // Deferred by the picker: do not touch st/self afterwards.
+            return true;
+        }
+        auto act = faux;
+        if (k == input::key::Backspace)
+        {
+            pane_goparent(st);
+            act = true;
         }
         else
         {
-            put_str(parent_canvas, ox, oy, lead, tfg, theme::header, w);
-            st.addr_box = rect{{ fx, 0 }, { fw, 1 }};
-            auto und_clr = st.addr_edit ? ui32{ theme::sel_bg_act } : ui32{ theme::subtext };
-            parent_canvas.fill(st.addr_box, [&](cell& c){ c.bgc(theme::header).und(unln::line).unc(argb{ und_clr }); });
-            if (st.addr_edit)
+            auto cl = gear.cluster;
+            if (cl.size() == 1 && (unsigned char)cl[0] > 0x20 && (unsigned char)cl[0] < 0x7f)
             {
-                // Scroll the field so the caret stays inside its fw-cell window (mirrors connect_render).
-                auto total = cell_width(st.addr_buf);
-                auto ccell = caret_cell(st.addr_buf, st.addr_caret);
-                auto& off  = st.addr_off;
-                if (off > ccell)       off = ccell;
-                if (ccell - off >= fw) off = ccell - fw + 1;
-                off = std::clamp(off, si32{ 0 }, std::max(si32{ 0 }, total - fw + 1));
-                auto shown = view{ st.addr_buf }.substr(byte_at_cell(st.addr_buf, off));
-                put_str(parent_canvas, fx, 0, shown, theme::sel_bg_act, theme::header, fw);
-                auto carx = ccell - off;
-                if (carx >= 0 && carx < fw)
-                {
-                    parent_canvas.fill(rect{{ fx + carx, 0 }, { 1, 1 }}, [&](cell& c){ c.bgc(theme::sel_bg_act).fgc(theme::header); });
-                }
-            }
-            else
-            {
-                // Tail-anchored: the current directory name matters most, so a long path
-                // shows "…tail" instead of clipping the tail off.
-                auto off = std::max(0, cell_width(disp) - fw);
-                if (off > 0)
-                {
-                    put_str(parent_canvas, fx, 0, "\xE2\x80\xA6", tfg, theme::header, 1); // …
-                    put_str(parent_canvas, fx + 1, 0, view{ disp }.substr(byte_at_cell(disp, off + 1)), tfg, theme::header, fw - 1);
-                }
-                else put_str(parent_canvas, fx, 0, disp, tfg, theme::header, fw);
+                pane_typeahead(st, cl[0]);
+                pane_clamp(st);
+                st.marked = { st.sel };
+                pane_fire_select(st);
+                ++st.revision; // Bring a type-ahead jump back into view via table_cfg::revision.
+                act = true;
             }
         }
+        if (!act) return faux; // Shared-table navigation / Enter activation handles the rest.
+        gear.set_handled();
+        if (auto p = self.lock()) p->base::deface();
+        return true;
+    }
 
-        // Resizable column content-x positions (Name, Size, Modified); -1 marks a hidden column.
-        auto cx = std::array<si32, p_ncol>{};
-        for (auto i = si32{}; i < p_ncol; ++i) cx[(size_t)i] = p_col_x(st, i);
-        auto content_w = pane_content_w(st);
-
-        pane_layout(st, w, h, content_w);
-        // Clamp ranges only — do NOT force the selection into view here, so wheel/scrollbar
-        // scrolling is free. Keyboard navigation re-centers separately via pane_clamp().
+    inline void pane_title_render(pane_state& st, auto& canvas, twod size)
+    {
+        auto w = size.x;
+        if (w <= 0 || size.y <= 0) return;
+        pane_sync(st);
+        auto tfg = st.focused ? ui32{ theme::title_fg_act } : ui32{ theme::title_fg };
+        canvas.fill(rect{{ 0, 0 }, { w, 1 }}, [&](cell& c){ c.bgc(theme::header); });
+        auto disp = st.is_local && st.cur_path().empty() ? text{ "Computer" } : st.cur_path();
+        auto lead = ' ' + st.label + ' ';
+        auto fx = cell_width(lead) + 1;
+        auto fw = w - fx - 1;
+        if (fw < 2)
         {
-            auto nn = st.total();
-            st.sel     = std::clamp(st.sel,     0, std::max(0, nn - 1));
-            st.scroll  = std::clamp(st.scroll,  0, std::max(0, nn - st.rows));
-            st.hscroll = std::clamp(st.hscroll, 0, std::max(0, st.content_w - st.disp_w));
-        }
-
-        auto hs    = st.hscroll;
-        auto clipw = st.disp_w; // Right clip: keep painted cells off the VSB column.
-        // Paint one column's text, tail-truncated to the column width with '…', shifted by the
-        // horizontal scroll and clipped to [0, clipw). The pane's canvas is rebased to its own origin
-        // but not clipped, so cells scrolled past the left edge (sx < 0) must be *dropped* — drawing
-        // them at a negative x would bleed into the adjacent pane.
-        auto col = [&](si32 content_x, si32 colw, si32 y, view s, ui32 fg, ui32 bg)
-        {
-            auto t  = fit_ellipsis(s, colw);
-            auto v  = view{ t };
-            auto sx = content_x - hs;
-            if (sx >= clipw || sx + colw <= 0) return; // Entirely off-screen right or left.
-            if (sx < 0)
-            {
-                auto cl  = cell_to_cluster(v, -sx);    // First cluster at/after the left edge.
-                auto cut = caret_cell(v, cl);          // Cells actually dropped (snapped to a boundary).
-                v     = v.substr(cluster_to_byte(v, cl));
-                colw -= cut;
-                sx   += cut;
-            }
-            auto room = std::min(colw, clipw - sx);
-            if (room > 0 && sx >= 0 && sx < clipw) put_str(parent_canvas, sx, y, v, fg, bg, room);
-        };
-        // Right-align text within a column (leaves a one-cell gap before the border marker).
-        auto colr = [&](si32 content_x, si32 colw, si32 y, view s, ui32 fg, ui32 bg)
-        {
-            auto avail = std::max(1, colw - 1);
-            auto t     = fit_ellipsis(s, avail);
-            auto tw    = cell_width(t);
-            col(content_x + (avail - tw), tw, y, t, fg, bg);
-        };
-        // Column divider markers (the resize handles, extended down the list), preserving the row bg.
-        auto draw_dividers = [&](si32 y, ui32 bg)
-        {
-            for (auto i = si32{}; i < p_ncol; ++i)
-            {
-                auto bx = p_border_cx(st, i) - hs;
-                if (bx < 0 || bx >= clipw) continue;
-                auto hot = st.hover_border == i || st.col_drag == i;
-                put_str(parent_canvas, bx, y, "\xE2\x94\x82", hot ? ui32{ theme::text_fg } : ui32{ theme::subtext }, bg, 1); // │
-            }
-        };
-
-        // Row 1: column header (scrolls horizontally with the list) + the divider markers — or, while
-        // entering a name, an inline input field (Create Directory / Rename) with a block cursor.
-        if (h > 1 && st.input_mode)
-        {
-            auto prompt = (st.input_mode == 1 ? text{ "New folder: " } : text{ "Rename: " }) + st.input_buf;
-            parent_canvas.fill(rect{{ 0, 1 }, { w, 1 }}, [&](cell& c){ c.bgc(theme::sel_bg_act); });
-            put_str(parent_canvas, 0, 1, prompt, theme::sel_fg_act, theme::sel_bg_act, w);
-            auto curx = std::min(w - 1, cell_width(prompt));
-            parent_canvas.fill(rect{{ curx, 1 }, { 1, 1 }}, [&](cell& c){ c.bgc(theme::sel_fg_act); });
-        }
-        else if (h > 1)
-        {
-            parent_canvas.fill(rect{{ 0, 1 }, { w, 1 }}, [&](cell& c){ c.bgc(theme::surface); });
-            if (cx[0] >= 0) col (cx[0], st.col_w[0] - 1, 1, "Name",      theme::subtext, theme::surface);
-            if (cx[1] >= 0) colr(cx[1], st.col_w[1],     1, "Size",      theme::subtext, theme::surface);
-            if (cx[2] >= 0) col (cx[2], st.col_w[2] - 1, 1, "Modified", theme::subtext, theme::surface);
-            draw_dividers(1, theme::surface);
-        }
-
-        // List body.
-        auto msg = st.cur_msg();
-        if (!msg.empty())
-        {
-            st.div_bottom = 2; // Dividers span the header row only when a status/error message is shown.
-            auto mc = st.remote ? ui32{ theme::subtext } : ui32{ theme::err_fg };
-            put_str(parent_canvas, 1, 2, msg, mc, theme::bg, std::max(1, st.disp_w - 1));
+            st.addr_box = {};
+            if (st.addr_edit) pane_addr_cancel(st);
+            put_str(canvas, 0, 0, lead + ' ' + disp, tfg, theme::header, w);
             return;
         }
-        auto n = st.total();
-        auto rows_drawn = si32{};
-        for (auto vis = si32{}; vis < st.rows; ++vis)
+        put_str(canvas, 0, 0, lead, tfg, theme::header, w);
+        st.addr_box = rect{{ fx, 0 }, { fw, 1 }};
+        auto und_clr = st.addr_edit ? ui32{ theme::sel_bg_act } : ui32{ theme::subtext };
+        canvas.fill(st.addr_box, [&](cell& c){ c.bgc(theme::header).und(unln::line).unc(argb{ und_clr }); });
+        if (st.addr_edit)
         {
-            auto row = st.scroll + vis;
-            if (row >= n) break;
-            ++rows_drawn;
-            auto y = 2 + vis;
-            auto is_sel = st.marked.count(row) != 0;
-            auto rbg = is_sel ? ui32{ theme::sel_bg } : ui32{ theme::bg };
-            // Selection highlight (muted sel_bg, ending at the last column) with a one-cell blue left
-            // accent when the pane is focused — mirrors the queue table (parvion/queue.hpp).
-            if (is_sel)
-            {
-                parent_canvas.fill(rect{{ 0, y }, { pane_row_w(st), 1 }}, [&](cell& c){ c.bgc(theme::sel_bg); });
-                if (st.focused) parent_canvas.fill(rect{{ 0, y }, { 1, 1 }}, [&](cell& c){ c.bgc(theme::sel_bg_act); });
-            }
-
-            auto nm = text{};
-            auto fgc = ui32{ theme::text_fg };
-            auto is_dir = true;
-            auto sz = text{};
-            auto tm = text{};
-            if (row == 0)
-            {
-                nm = "..";
-                fgc = theme::dir_fg;
-            }
-            else
-            {
-                auto& e = st.cur_items()[row - 1];
-                is_dir = e.is_dir;
-                nm  = e.name;
-                fgc = e.is_link ? ui32{ theme::link_fg } : e.is_dir ? ui32{ theme::dir_fg } : ui32{ theme::text_fg };
-                sz  = e.is_dir ? text{} : human_size(e.size);
-                tm  = fmt_time(e.mtime);
-            }
-            // Selected rows keep their natural fg colors (queue-table style: the muted sel_bg stays readable).
-            auto sub = ui32{ theme::subtext };
-            if (cx[0] >= 0)                  col (cx[0], st.col_w[0] - 1, y, (is_dir ? text{ "/" } : text{ " " }) + nm, fgc, rbg);
-            if (cx[1] >= 0 && !sz.empty())   colr(cx[1], st.col_w[1],     y, sz, sub, rbg);
-            if (cx[2] >= 0 && !tm.empty())   col (cx[2], st.col_w[2] - 1, y, tm, sub, rbg);
-            draw_dividers(y, rbg);
+            auto total = cell_width(st.addr_buf);
+            auto ccell = caret_cell(st.addr_buf, st.addr_caret);
+            auto& off = st.addr_off;
+            if (off > ccell)       off = ccell;
+            if (ccell - off >= fw) off = ccell - fw + 1;
+            off = std::clamp(off, 0, std::max(0, total - fw + 1));
+            auto shown = view{ st.addr_buf }.substr(byte_at_cell(st.addr_buf, off));
+            put_str(canvas, fx, 0, shown, theme::sel_bg_act, theme::header, fw);
+            auto carx = ccell - off;
+            if (carx >= 0 && carx < fw)
+                canvas.fill(rect{{ fx + carx, 0 }, { 1, 1 }}, [&](cell& c){ c.bgc(theme::sel_bg_act).fgc(theme::header); });
         }
-        st.div_bottom = 2 + rows_drawn; // Divider span: header (row 1) + the visible list rows.
-
-        // Scrollbars (command_bar half-block glyph design; see queue.hpp / tile.hpp): a thin
-        // foreground glyph over the pane background — ▐/█ vertical, ▂/▄ horizontal — that
-        // brightens on hover and turns accent-blue while dragging (theme::sb_*).
-        if (auto sb = pane_scrollbar(st); sb.ok)
+        else
         {
-            auto mark = (st.sb_drag || st.sb_hover) ? "\xe2\x96\x88" : "\xe2\x96\x90"; // █ : ▐
-            parent_canvas.fill(rect{{ sb.x, sb.top }, { 1, sb.track_h }}, [&](cell& c){ c.bgc(theme::bg).fgc(theme::sb_track).txt(mark); });
-            auto tc = st.sb_drag ? ui32{ theme::sb_drag } : st.sb_hover ? ui32{ theme::sb_hover } : ui32{ theme::sb_thumb };
-            parent_canvas.fill(rect{{ sb.x, sb.thumb_y }, { 1, sb.thumb_h }}, [&](cell& c){ c.bgc(theme::bg).fgc(tc).txt(mark); });
-        }
-        if (auto sb = pane_hsb(st); sb.ok)
-        {
-            auto mark = (st.hsb_drag || st.hsb_hover) ? "\xe2\x96\x84" : "\xe2\x96\x82"; // ▄ : ▂
-            parent_canvas.fill(rect{{ sb.x, sb.top }, { sb.track_h, 1 }}, [&](cell& c){ c.bgc(theme::bg).fgc(theme::sb_track).txt(mark); });
-            auto tc = st.hsb_drag ? ui32{ theme::sb_drag } : st.hsb_hover ? ui32{ theme::sb_hover } : ui32{ theme::sb_thumb };
-            parent_canvas.fill(rect{{ sb.x + sb.thumb_y, sb.top }, { sb.thumb_h, 1 }}, [&](cell& c){ c.bgc(theme::bg).fgc(tc).txt(mark); });
+            auto off = std::max(0, cell_width(disp) - fw);
+            if (off > 0)
+            {
+                put_str(canvas, fx, 0, "\xE2\x80\xA6", tfg, theme::header, 1);
+                put_str(canvas, fx + 1, 0, view{ disp }.substr(byte_at_cell(disp, off + 1)), tfg, theme::header, fw - 1);
+            }
+            else put_str(canvas, fx, 0, disp, tfg, theme::header, fw);
         }
     }
 
-    // Build an interactive file pane. `lister` may be empty for a not-yet-wired
-    // remote pane (shows an error/placeholder until a session is attached).
-    inline auto make_file_pane(text label, bool is_local, lister_t lister, text initial_path, bool grab_focus = faux, sftp_remote* remote = nullptr, sftp_remote* ctrl = nullptr, pane_state** out_state = nullptr, netxs::wptr<ui::base> window_wp = {}) -> ui::sptr
+    inline auto make_pane_title(std::shared_ptr<pane_state> state, netxs::wptr<ui::base> table_wp) -> ui::sptr
     {
-        auto pane = ui::mock::ctor()
-            ->active()
-            ->plugin<pro::mouse>()
-            ->plugin<pro::focus>(grab_focus ? pro::focus::mode::focused : pro::focus::mode::focusable)
-            ->plugin<pro::keybd>();
-        pane->invoke([&](auto& boss)
+        auto title = ui::mock::ctor()->active()
+            ->plugin<pro::mouse>()->plugin<pro::focus>(pro::focus::mode::focusable)->plugin<pro::keybd>();
+        title->invoke([state = std::move(state), table_wp](auto& boss)
         {
-            auto& st = boss.base::field(pane_state{});
-            if (out_state) *out_state = &st; // Stable for the widget's lifetime (base::field); lets the UI timer re-list this pane.
-            st.label    = label;
-            st.is_local = is_local;
-            st.lister   = lister;
-            st.remote   = remote;
-            st.ctrl     = ctrl;
-            st.window_wp = window_wp;
-            st.path     = initial_path;
-            if (!remote) pane_relist(st, initial_path);
-
-            // Enable pointer capture so a scrollbar-thumb drag keeps tracking even when the
-            // cursor leaves the pane (pro::mouse re-emits high-level e2::form::drag::* events).
+            auto& st = *state;
             boss.base::signal(tier::release, e2::form::draggable::_<hids::buttons::left>, true);
-
-            boss.LISTEN(tier::release, e2::render::any, parent_canvas)
-            {
-                pane_render(st, parent_canvas, boss.base::size());
-            };
+            boss.LISTEN(tier::release, e2::render::any, canvas) { pane_title_render(st, canvas, boss.base::size()); };
             boss.LISTEN(tier::release, e2::form::state::focus::count, count)
             {
-                st.focused = !!count;
-                if (!count && st.addr_edit) pane_addr_cancel(st); // Blur (other pane/bar/queue) cancels the address edit.
+                if (!count && st.addr_edit) pane_addr_cancel(st);
                 boss.base::deface();
             };
-            // Select the hit row on press (mousedown), not on the completed click. A press on
-            // the scrollbar is left to the thumb-drag / rail-click handlers.
             boss.on(tier::mouserelease, input::key::LeftDown, [&](hids& gear)
             {
                 pro::focus::set(boss.This(), gear.id, solo::on);
                 auto mx = (si32)gear.coord.x;
-                auto my = (si32)gear.coord.y;
-                // A press on the row-0 path field starts (or continues) the address edit and
-                // places the caret at the clicked column (mirrors the connect bar's fields).
-                // A press anywhere else cancels an active edit.
-                if (my == 0)
+                auto& b = st.addr_box;
+                if (b.size.x > 0 && mx >= b.coor.x && mx < b.coor.x + b.size.x
+                 && !(st.remote && !st.remote->connected()))
                 {
-                    auto& b = st.addr_box;
-                    if (b.size.x > 0 && mx >= b.coor.x && mx < b.coor.x + b.size.x
-                        && !(st.remote && !st.remote->connected())) // No address edit while disconnected.
-                    {
-                        if (!st.addr_edit) pane_addr_begin(st);
-                        st.addr_caret = std::min(cell_to_cluster(st.addr_buf, st.addr_off + (mx - b.coor.x)), cluster_count(st.addr_buf));
-                        boss.base::deface();
-                    }
-                    else if (st.addr_edit) { pane_addr_cancel(st); boss.base::deface(); }
-                    gear.dismiss();
-                    return;
+                    if (!st.addr_edit) pane_addr_begin(st);
+                    st.addr_caret = std::min(cell_to_cluster(st.addr_buf, st.addr_off + mx - b.coor.x), cluster_count(st.addr_buf));
                 }
-                if (st.addr_edit) { pane_addr_cancel(st); boss.base::deface(); } // A press in the body cancels, then selects as usual.
-                // Presses on either scrollbar are left to the thumb-drag / rail-click handlers.
-                if (auto sb = pane_scrollbar(st); sb.ok && mx == sb.x && my >= sb.top && my < sb.top + sb.track_h) return;
-                if (auto sb = pane_hsb(st);       sb.ok && my == sb.top && mx >= sb.x && mx < sb.x + sb.track_h) return;
-                // A press on a column border (the resize handle) is left to the drag handler; never select a row.
-                if (my >= 1 && my < st.div_bottom)
-                    for (auto i = si32{}; i < p_ncol; ++i) if (mx == p_border_cx(st, i) - st.hscroll) return;
-                // Row selection (mirrors the queue table): plain = pick one; Ctrl = toggle; Shift =
-                // range from the anchor; a press on empty body area clears the selection. A press-drag
-                // becomes a rubber-band (drag::start), which clears and re-selects the swept span.
-                auto ctl  = !!(gear.ctlstat & hids::anyCtrl);
-                auto shft = !!(gear.ctlstat & hids::anyShift);
-                // Snapshot the selection before this press mutates it, so a Ctrl+drag that follows can
-                // merge its swept span onto the pre-drag selection (additive select / deselect).
-                st.drag_base = st.marked;
-                // Only the columns area selects an item; the blank area (right of the columns or
-                // below the list) clears the selection instead.
-                auto row  = pane_hit_item(st, mx, my);
-                if (row >= 0)
-                {
-                    if (shft)
-                    {
-                        auto lo = std::min(st.sel_anchor, row), hi = std::max(st.sel_anchor, row);
-                        st.marked.clear();
-                        for (auto j = lo; j <= hi; ++j) st.marked.insert(j);
-                        st.sel = row;
-                    }
-                    else if (ctl)
-                    {
-                        if (st.marked.count(row)) st.marked.erase(row); else st.marked.insert(row);
-                        st.sel = row; st.sel_anchor = row;
-                    }
-                    else { st.marked = { row }; st.sel = row; st.sel_anchor = row; }
-                    pane_fire_select(st); // Save picker: clicking a file copies its name into the Name field.
-                    boss.base::deface();
-                }
-                // A plain press in the blank body area clears the selection; a Ctrl press keeps it so a
-                // Ctrl+drag from blank can add the swept rows to the existing selection.
-                else if (!ctl && my >= 2 && my < 2 + st.rows) { if (!st.marked.empty()) { st.marked.clear(); boss.base::deface(); } }
-                gear.dismiss();
-            });
-            boss.on(tier::mouserelease, input::key::LeftClick, [&](hids& gear)
-            {
-                // Re-assert focus on the click release: the pro::focus plugin's Ctrl+LeftClick handler
-                // toggles focus off when the pane is already focused, so (mirroring the queue panel)
-                // we set it back here, keeping the pane focused through a Ctrl-click select/deselect.
-                pro::focus::set(boss.This(), gear.id, solo::on);
-                auto mx = (si32)gear.coord.x;
-                auto my = (si32)gear.coord.y;
-                // Click on the VSB rail outside the thumb: page up/down toward the click.
-                if (auto sb = pane_scrollbar(st); sb.ok && mx == sb.x && my >= sb.top && my < sb.top + sb.track_h)
-                {
-                    if      (my < sb.thumb_y)               st.scroll = std::max(0, st.scroll - st.rows);
-                    else if (my >= sb.thumb_y + sb.thumb_h) st.scroll = std::min(sb.maxscroll, st.scroll + st.rows);
-                    boss.base::deface();
-                    gear.dismiss();
-                    return;
-                }
-                // Click on the HSB rail outside the thumb: page left/right toward the click.
-                if (auto sb = pane_hsb(st); sb.ok && my == sb.top && mx >= sb.x && mx < sb.x + sb.track_h)
-                {
-                    auto tx = sb.x + sb.thumb_y;
-                    if      (mx < tx)                  st.hscroll = std::max(0, st.hscroll - st.disp_w);
-                    else if (mx >= tx + sb.thumb_h)    st.hscroll = std::min(sb.maxscroll, st.hscroll + st.disp_w);
-                    boss.base::deface();
-                    gear.dismiss();
-                }
-            });
-            boss.on(tier::mouserelease, input::key::LeftDoubleClick, [&](hids& gear)
-            {
-                auto mx = (si32)gear.coord.x;
-                auto my = (si32)gear.coord.y;
-                // Double-click a column border to auto-fit that column to its widest content + header.
-                if (my >= 1 && my < st.div_bottom)
-                    for (auto i = si32{}; i < p_ncol; ++i)
-                        if (mx == p_border_cx(st, i) - st.hscroll)
-                        {
-                            st.col_w[(size_t)i] = std::clamp(pane_col_content_w(st, i) + 1, p_col_min, p_col_max);
-                            boss.base::deface();
-                            gear.dismiss();
-                            return;
-                        }
-                auto row = pane_hit_item(st, mx, my); // Blank area (right of / below the columns) does nothing.
-                if (row >= 0) { st.sel = row; pane_activate(st); boss.base::deface(); }
-                gear.dismiss();
-            });
-            boss.on(tier::mouserelease, input::key::MouseWheel, [&](hids& gear)
-            {
-                if (gear.hzwhl || st.hsb_hover) // Horizontal scroll over/with the HSB.
-                {
-                    auto maxh = std::max(0, st.content_w - st.disp_w);
-                    st.hscroll = std::clamp(st.hscroll - gear.whlsi * 4, 0, maxh);
-                }
-                else
-                {
-                    auto maxv = std::max(0, st.total() - st.rows);
-                    st.scroll = std::clamp(st.scroll - gear.whlsi, 0, maxv);
-                }
+                else if (st.addr_edit) pane_addr_cancel(st);
                 boss.base::deface();
                 gear.dismiss();
             });
-            // Scrollbar hover highlight (both axes).
-            boss.on(tier::mouserelease, input::key::MouseMove, [&](hids& gear)
-            {
-                auto mx = (si32)gear.coord.x;
-                auto my = (si32)gear.coord.y;
-                auto vsb = pane_scrollbar(st);
-                auto vh  = vsb.ok && mx == vsb.x && my >= vsb.top && my < vsb.top + vsb.track_h;
-                if (vh != st.sb_hover) { st.sb_hover = vh; boss.base::deface(); }
-                auto hsb = pane_hsb(st);
-                auto hh  = hsb.ok && my == hsb.top && mx >= hsb.x && mx < hsb.x + hsb.track_h;
-                if (hh != st.hsb_hover) { st.hsb_hover = hh; boss.base::deface(); }
-                // Column-border hover feedback (along the whole divider length).
-                auto nb = si32{ -1 };
-                if (my >= 1 && my < st.div_bottom)
-                    for (auto i = si32{}; i < p_ncol; ++i) if (mx == p_border_cx(st, i) - st.hscroll) { nb = i; break; }
-                if (nb != st.hover_border) { st.hover_border = nb; boss.base::deface(); }
-            });
-            boss.on(tier::mouserelease, input::key::MouseLeave, [&](hids&)
-            {
-                if (st.sb_hover)  { st.sb_hover  = faux; boss.base::deface(); }
-                if (st.hsb_hover) { st.hsb_hover = faux; boss.base::deface(); }
-                if (st.hover_border != -1) { st.hover_border = -1; boss.base::deface(); }
-            });
-            // Right-click context menus (FileZilla-style): the column header opens the show/hide
-            // menu; a selected item opens Upload-or-Download / Delete / Rename; the blank area (and
-            // the ".." row) opens Refresh / Create Directory.
-            boss.on(tier::mouserelease, input::key::RightClick, [&](hids& gear)
-            {
-                pro::focus::set(boss.This(), gear.id, solo::on); // Right-clicking activates this pane.
-                if (st.input_mode || st.addr_edit) { gear.dismiss(); return; } // Ignore while entering text.
-                auto mx = (si32)gear.coord.x;
-                auto my = (si32)gear.coord.y;
-                auto at = twod{ mx, my };
-                auto panel = ptr::shadow(boss.This());
-                if (my == 1)
-                {
-                    app::shared::menu::open_dropdown_popup(boss, build_pane_columns_menu(st, panel), faux, -1, at);
-                }
-                else
-                {
-                    auto row = pane_hit_item(st, mx, my);
-                    if (row > 0) // A real file/dir (".." and blank go to the blank menu).
-                    {
-                        if (!st.marked.count(row)) { st.marked = { row }; st.sel = row; st.sel_anchor = row; boss.base::deface(); }
-                        app::shared::menu::open_dropdown_popup(boss, build_pane_item_menu(st, panel), faux, -1, at);
-                    }
-                    else
-                    {
-                        if (!st.marked.empty()) { st.marked.clear(); boss.base::deface(); } // Right-clicking the blank area clears the selection (like left-click).
-                        app::shared::menu::open_dropdown_popup(boss, build_pane_blank_menu(st, panel), faux, -1, at);
-                    }
-                }
-                gear.dismiss();
-            });
-            // Scrollbar thumb drag (and drag-from-rail = snap then drag) on either axis. gear.click
-            // is the press position localized to this widget (gear.pressxy is not, see hids::pass).
             boss.LISTEN(tier::release, e2::form::drag::start::_<hids::buttons::left>, gear)
             {
                 auto px = (si32)gear.click.x;
-                auto py = (si32)gear.click.y;
-                // A drag that began on the address field scrubs the caret (the press itself
-                // already entered the edit and placed it; pulls keep it under the cursor).
-                if (py == 0)
-                {
-                    auto& b = st.addr_box;
-                    if (st.addr_edit && b.size.x > 0 && px >= b.coor.x && px < b.coor.x + b.size.x) st.addr_drag = true;
-                    return;
-                }
-                if (auto sb = pane_scrollbar(st); sb.ok && px == sb.x && py >= sb.top && py < sb.top + sb.track_h)
-                {
-                    pro::focus::set(boss.This(), gear.id, solo::on);
-                    if (py >= sb.thumb_y && py < sb.thumb_y + sb.thumb_h) st.sb_grab = py - sb.thumb_y; // Grab where pressed.
-                    else { st.sb_grab = sb.thumb_h / 2; pane_sb_scroll_to(st, py, sb); }                // Snap thumb center.
-                    st.sb_drag = st.sb_hover = true;
-                    boss.base::deface();
-                    return;
-                }
-                if (auto sb = pane_hsb(st); sb.ok && py == sb.top && px >= sb.x && px < sb.x + sb.track_h)
-                {
-                    pro::focus::set(boss.This(), gear.id, solo::on);
-                    auto tx = sb.x + sb.thumb_y;
-                    if (px >= tx && px < tx + sb.thumb_h) st.hsb_grab = px - tx;            // Grab where pressed.
-                    else { st.hsb_grab = sb.thumb_h / 2; pane_hsb_scroll_to(st, px, sb); }  // Snap thumb center.
-                    st.hsb_drag = st.hsb_hover = true;
-                    boss.base::deface();
-                    return;
-                }
-                // Grab a column border anywhere along its length to resize that column.
-                if (py >= 1 && py < st.div_bottom)
-                    for (auto i = si32{}; i < p_ncol; ++i)
-                        if (px == p_border_cx(st, i) - st.hscroll)
-                        {
-                            pro::focus::set(boss.This(), gear.id, solo::on);
-                            st.col_drag = i;
-                            boss.base::deface();
-                            return;
-                        }
-                // A press in the list body begins a rubber-band selection. Anchoring on the pressed
-                // display row WITHOUT clamping to the last item lets a press in the blank area below
-                // the list deselect every item once the drag returns there.
-                if (py >= 2 && py < 2 + st.rows)
-                {
-                    pro::focus::set(boss.This(), gear.id, solo::on);
-                    st.rubber_a = st.rubber_b = std::max(0, st.scroll + (py - 2));
-                    st.rubber = true;
-                    // Ctrl+drag merges onto the pre-drag selection (drag_base): selecting the swept rows
-                    // when the anchor was unselected, deselecting them when it was already selected. A
-                    // plain drag replaces the selection with the swept span.
-                    st.rubber_ctrl = !!(gear.ctlstat & hids::anyCtrl);
-                    if (st.rubber_ctrl) { st.rubber_add = !st.drag_base.count(st.rubber_a); st.marked = st.drag_base; }
-                    else                st.marked.clear();
-                    if (st.rubber_a < st.total()) { st.sel = st.rubber_a; st.sel_anchor = st.rubber_a; }
-                    boss.base::deface();
-                    return;
-                }
+                auto& b = st.addr_box;
+                st.addr_drag = st.addr_edit && b.size.x > 0 && px >= b.coor.x && px < b.coor.x + b.size.x;
             };
             boss.LISTEN(tier::release, e2::form::drag::pull::_<hids::buttons::left>, gear)
             {
-                if (st.addr_drag) // Scrub the caret to the cursor column (the render's window clamp auto-scrolls at the edges).
-                {
-                    auto col = st.addr_off + ((si32)gear.coord.x - st.addr_box.coor.x);
-                    st.addr_caret = std::min(cell_to_cluster(st.addr_buf, col), cluster_count(st.addr_buf));
-                    boss.base::deface();
-                }
-                else if (st.sb_drag)  { pane_sb_scroll_to(st,  (si32)gear.coord.y, pane_scrollbar(st)); boss.base::deface(); }
-                else if (st.hsb_drag) { pane_hsb_scroll_to(st, (si32)gear.coord.x, pane_hsb(st));       boss.base::deface(); }
-                else if (st.col_drag >= 0)
-                {
-                    // Position-based resize: drive the border to the cursor's column (clamped) rather
-                    // than accumulating deltas. After the width bottoms/tops out, the handle then waits
-                    // for the cursor to return to it instead of moving at a stale offset.
-                    auto mx = (si32)gear.coord.x;
-                    auto left = p_col_x(st, st.col_drag); // Stable during the drag (sums only earlier columns).
-                    st.col_w[(size_t)st.col_drag] = std::clamp(mx + st.hscroll - left + 1, p_col_min, p_col_max);
-                    boss.base::deface();
-                }
-                else if (st.rubber)
-                {
-                    auto my = (si32)gear.coord.y;
-                    st.rubber_b = st.scroll + std::clamp(my - 2, 0, std::max(0, st.rows - 1));
-                    auto lo = std::min(st.rubber_a, st.rubber_b);
-                    auto hi = std::max(st.rubber_a, st.rubber_b);
-                    if (st.rubber_ctrl) // Merge the swept span onto the pre-drag selection (add or remove).
-                    {
-                        st.marked = st.drag_base;
-                        for (auto i = lo; i <= hi; ++i) if (i >= 0 && i < st.total())
-                            { if (st.rubber_add) st.marked.insert(i); else st.marked.erase(i); }
-                    }
-                    else // Plain band: replace the selection with the swept span.
-                    {
-                        st.marked.clear();
-                        for (auto i = lo; i <= hi; ++i) if (i >= 0 && i < st.total()) st.marked.insert(i);
-                    }
-                    boss.base::deface();
-                }
+                if (!st.addr_drag) return;
+                auto col = st.addr_off + (si32)gear.coord.x - st.addr_box.coor.x;
+                st.addr_caret = std::min(cell_to_cluster(st.addr_buf, col), cluster_count(st.addr_buf));
+                boss.base::deface();
             };
-            boss.LISTEN(tier::release, e2::form::drag::stop::_<hids::buttons::left>,   gear) { if (st.sb_drag || st.hsb_drag || st.col_drag >= 0 || st.rubber || st.addr_drag) { st.sb_drag = st.hsb_drag = faux; st.col_drag = -1; st.rubber = faux; st.addr_drag = faux; boss.base::deface(); } };
-            boss.LISTEN(tier::release, e2::form::drag::cancel::_<hids::buttons::left>, gear) { if (st.sb_drag || st.hsb_drag || st.col_drag >= 0 || st.rubber || st.addr_drag) { st.sb_drag = st.hsb_drag = faux; st.col_drag = -1; st.rubber = faux; st.addr_drag = faux; boss.base::deface(); } };
-            boss.LISTEN(tier::preview, input::events::keybd::any, gear)
+            boss.LISTEN(tier::release, e2::form::drag::stop::_<hids::buttons::left>, gear)   { st.addr_drag = faux; };
+            boss.LISTEN(tier::release, e2::form::drag::cancel::_<hids::buttons::left>, gear) { st.addr_drag = faux; };
+            boss.LISTEN(tier::preview, input::events::keybd::any, gear, -, (table_wp))
             {
-                if (!st.focused) return;
-                if (st.addr_edit && gear.payload == input::keybd::type::keypaste) // Paste into the address field.
+                if (!st.addr_edit || gear.keybd::handled) return;
+                if (gear.payload == input::keybd::type::keypaste)
                 {
                     edit_insert(st.addr_buf, st.addr_caret, edit_filter(gear.cluster));
                     gear.set_handled();
                     boss.base::deface();
                     return;
                 }
-                if (gear.payload != input::keybd::type::keypress) return;
-                if (gear.keystat == input::key::interrupted) return;
-                if (gear.keybd::handled) return;
-                if (gear.keystat == input::key::released) return; // Act on key press only.
+                if (gear.payload != input::keybd::type::keypress
+                 || gear.keystat == input::key::released
+                 || gear.keystat == input::key::interrupted) return;
                 auto k = gear.keybd::generic();
-                // Address edit: a full inline editor (caret moves, mirroring the connect bar's
-                // fields); Enter navigates to the typed path, Esc reverts to the current one.
-                if (st.addr_edit)
-                {
-                    auto& v = st.addr_buf;
-                    auto& c = st.addr_caret;
-                    auto act = true;
-                         if (k == input::key::Esc)           pane_addr_cancel(st);
-                    else if (k == input::key::KeyEnter)      pane_addr_commit(st);
-                    else if (k == input::key::Backspace)     edit_backspace(v, c);
-                    else if (k == input::key::KeyDelete)     edit_delete(v, c);
-                    else if (k == input::key::KeyLeftArrow)  c = std::max(0, c - 1);
-                    else if (k == input::key::KeyRightArrow) c = std::min(cluster_count(v), c + 1);
-                    else if (k == input::key::KeyHome)       c = 0;
-                    else if (k == input::key::KeyEnd)        c = cluster_count(v);
-                    else
-                    {
-                        auto ins = edit_filter(gear.cluster); // '/' and '\\' are path chars: keep them.
-                        if (ins.size()) edit_insert(v, c, ins);
-                        else act = faux;
-                    }
-                    if (act)
-                    {
-                        gear.set_handled();
-                        boss.base::deface();
-                    }
-                    return;
-                }
-                // Inline name entry (Create Directory / Rename): capture text until Enter or Esc.
-                if (st.input_mode)
-                {
-                    if (k == input::key::Esc) { st.input_mode = 0; st.input_buf.clear(); }
-                    else if (k == input::key::KeyEnter)
-                    {
-                        auto mode = st.input_mode;
-                        st.input_mode = 0;
-                        if      (mode == 1) pane_create_dir(st);
-                        else if (mode == 2) pane_rename_sel(st);
-                        st.input_buf.clear();
-                    }
-                    else if (k == input::key::Backspace)
-                    {
-                        auto n = cluster_count(st.input_buf);
-                        if (n > 0) st.input_buf = st.input_buf.substr(0, cluster_to_byte(st.input_buf, n - 1));
-                    }
-                    else
-                    {
-                        auto cl = gear.cluster; // Printable cluster; reject path separators.
-                        if (!cl.empty() && (unsigned char)cl[0] >= 0x20 && cl != "\x7f" && cl != "/" && cl != "\\")
-                            st.input_buf += text{ cl };
-                    }
-                    gear.set_handled();
-                    boss.base::deface();
-                    return;
-                }
-                // Picker mode: Esc cancels/closes the picker. on_cancel is deferred (it tears down
-                // this very pane), so copy it, mark the key handled, fire it, and return without
-                // touching st/boss again.
-                if (k == input::key::Esc && st.on_cancel) { auto cb = st.on_cancel; gear.set_handled(); cb(); return; }
-                auto page = std::max(1, st.rows - 1);
+                auto& v = st.addr_buf;
+                auto& c = st.addr_caret;
                 auto act = true;
-                     if (k == input::key::KeyUpArrow)   st.sel -= 1;
-                else if (k == input::key::KeyDownArrow) st.sel += 1;
-                else if (k == input::key::KeyPageUp)    st.sel -= page;
-                else if (k == input::key::KeyPageDown)  st.sel += page;
-                else if (k == input::key::KeyHome)      st.sel = 0;
-                else if (k == input::key::KeyEnd)       st.sel = st.total() - 1;
-                else if (k == input::key::KeyEnter)     pane_activate(st);
-                else if (k == input::key::Backspace)    pane_goparent(st);
+                     if (k == input::key::Esc)           pane_addr_cancel(st);
+                else if (k == input::key::KeyEnter)      pane_addr_commit(st);
+                else if (k == input::key::Backspace)     edit_backspace(v, c);
+                else if (k == input::key::KeyDelete)     edit_delete(v, c);
+                else if (k == input::key::KeyLeftArrow)  c = std::max(0, c - 1);
+                else if (k == input::key::KeyRightArrow) c = std::min(cluster_count(v), c + 1);
+                else if (k == input::key::KeyHome)       c = 0;
+                else if (k == input::key::KeyEnd)        c = cluster_count(v);
                 else
                 {
-                    // Type-ahead: a printable ASCII key jumps to / cycles matching names.
-                    auto cl = gear.cluster;
-                    if (cl.size() == 1 && (unsigned char)cl[0] > 0x20 && (unsigned char)cl[0] < 0x7f)
-                        pane_typeahead(st, cl[0]);
-                    else act = false;
+                    auto ins = edit_filter(gear.cluster);
+                    if (!ins.empty()) edit_insert(v, c, ins); else act = faux;
                 }
-                if (act)
-                {
-                    pane_clamp(st);
-                    st.marked = { st.sel }; // Keyboard navigation collapses to a single selection at the cursor.
-                    st.sel_anchor = st.sel;
-                    pane_fire_select(st); // Save picker: arrow-navigating onto a file tracks it in the Name field.
-                    gear.set_handled();
-                    boss.base::deface();
-                }
+                if (!act) return;
+                gear.set_handled();
+                boss.base::deface();
+                if (auto p = table_wp.lock()) p->base::deface();
             };
+        });
+        return title;
+    }
 
-            if (grab_focus) // Grab keyboard focus once the UI tree is started.
+    // Build an interactive file pane: a one-row address/title strip wrapped around the reusable table.
+    inline auto make_file_pane(text label, bool is_local, lister_t lister, text initial_path, bool grab_focus = faux, sftp_remote* remote = nullptr, sftp_remote* ctrl = nullptr, pane_state** out_state = nullptr, netxs::wptr<ui::base> window_wp = {}) -> ui::sptr
+    {
+        auto state = std::make_shared<pane_state>();
+        state->label = std::move(label);
+        state->is_local = is_local;
+        state->lister = std::move(lister);
+        state->remote = remote;
+        state->ctrl = ctrl;
+        state->window_wp = window_wp;
+        state->path = initial_path;
+        if (!remote) pane_relist(*state, initial_path);
+        if (out_state) *out_state = state.get();
+
+        auto cfg = table_cfg{};
+        cfg.ctrl = ctrl;
+        cfg.window_wp = window_wp;
+        cfg.palette = table_palette{
+            .bg = theme::bg, .header = theme::surface, .text_fg = theme::text_fg,
+            .subtext = theme::subtext, .sel_bg = theme::sel_bg, .sel_bg_act = theme::sel_bg_act,
+            .sort_fg = theme::sort_fg, .sb_track = theme::sb_track, .sb_thumb = theme::sb_thumb,
+            .sb_hover = theme::sb_hover, .sb_drag = theme::sb_drag };
+        cfg.columns = [state]{ return pane_columns(state); };
+        cfg.rows = [state]
+        {
+            pane_sync(*state);
+            return state->cur_msg().empty() ? state->total() : 0;
+        };
+        cfg.cell = [state](si32 row, si32 key){ return pane_cell(state, row, key); };
+        cfg.selection = [state]{ return pane_selection(state); };
+        cfg.menu = [state](netxs::wptr<ui::base> panel_wp){ return pane_menu(state, panel_wp); };
+        cfg.empty_text = [state]{ return state->cur_msg(); };
+        cfg.on_key = [state](hids& gear, netxs::wptr<ui::base> self){ return pane_table_key(state, gear, self); };
+        cfg.activate = [state](si32 row)
+        {
+            pane_sync(*state);
+            if (row < 0 || row >= state->total()) return;
+            state->sel = row;
+            state->marked = { row };
+            pane_activate(*state);
+        };
+        cfg.revision = [state]{ return state->remote ? state->remote->gen : state->revision; };
+        cfg.sort_group = [state](si32 row){ return pane_sort_group(*state, row); };
+        cfg.compare = [state](si32 a, si32 b, si32 key){ return pane_compare(*state, a, b, key); };
+        cfg.arrow_nav = true;
+        cfg.focus_on_start = grab_focus;
+
+        auto table = make_table(std::move(cfg));
+        auto table_wp = ptr::shadow(table);
+        state->table_wp = table_wp;
+        auto table_layer = ui::cake::ctor()->alignment({ snap::both, snap::both });
+        table_layer->attach(table);
+        table_layer->attach(ui::mock::ctor())->invoke([state](auto& boss)
+        {
+            auto& st = *state;
+            boss.LISTEN(tier::release, e2::render::any, canvas)
             {
-                boss.LISTEN(tier::anycast, e2::form::upon::started, root)
-                {
-                    boss.base::enqueue([](auto& b){ pro::focus::set(b.This(), id_t{}, solo::on, true); });
-                };
-            }
+                if (!st.input_mode || boss.base::size().y <= 0) return;
+                auto w = boss.base::size().x;
+                auto prompt = (st.input_mode == 1 ? text{ "New folder: " } : text{ "Rename: " }) + st.input_buf;
+                canvas.fill(rect{{ 0, 0 }, { w, 1 }}, [&](cell& c){ c.bgc(theme::sel_bg_act); });
+                put_str(canvas, 0, 0, prompt, theme::sel_fg_act, theme::sel_bg_act, w);
+                auto curx = std::min(std::max(0, w - 1), cell_width(prompt));
+                if (w > 0) canvas.fill(rect{{ curx, 0 }, { 1, 1 }}, [&](cell& c){ c.bgc(theme::sel_fg_act); });
+            };
+        });
+
+        auto pane = ui::fork::ctor(axis::Y);
+        pane->attach(slot::_1, make_pane_title(state, table_wp))->limits({ -1, 1 }, { -1, 1 });
+        pane->attach(slot::_2, table_layer);
+        pane->invoke([state](auto& boss)
+        {
+            auto& st = *state;
+            boss.LISTEN(tier::release, e2::form::state::focus::count, count)
+            {
+                st.focused = !!count;
+                boss.base::deface();
+            };
         });
         return pane;
     }
@@ -1897,11 +1329,19 @@ namespace netxs::app::parvion
             pane_st->on_cancel = do_cancel; // Esc in the file list cancels the picker.
         }
         window->base::attach(overlay);
-        // Grab keyboard focus on the file list (open) or the name-field bar (save), keyed to the gear.
-        auto target = saving ? bottom : pane;
-        window->base::enqueue([target_wp = ptr::shadow(target), gear_id](auto&)
+        // These controls are constructed before the overlay joins the window, so an initial-focus
+        // plugin alone cannot reliably displace the Settings card. Hand focus over after attach,
+        // using the initiating gear to keep Esc/Enter inside the topmost modal.
+        auto focus_target = ui::sptr{};
+        if (saving) focus_target = bottom;
+        else if (pane_st) focus_target = pane_st->table_wp.lock();
+        if (focus_target)
         {
-            if (auto t = target_wp.lock()) pro::focus::set(t, gear_id, solo::on);
-        });
+            pro::focus::set(focus_target, gear_id, solo::on);
+            window->base::enqueue([target_wp = ptr::shadow(focus_target), gear_id](auto&)
+            {
+                if (auto target = target_wp.lock()) pro::focus::set(target, gear_id, solo::on);
+            });
+        }
     }
 }

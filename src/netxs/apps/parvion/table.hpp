@@ -16,10 +16,35 @@
 //
 // make_table() returns the independent table widget. Containers can wrap it as needed.
 
-#include "panes.hpp" // ui::sptr, sftp_remote, theme, shared menu utilities.
+#include "ui.hpp"
+
+#include <algorithm>
+#include <functional>
+#include <set>
+#include <vector>
 
 namespace netxs::app::parvion
 {
+    struct sftp_remote;
+
+    // All colors painted by the reusable table. Callers may override individual
+    // fields to make the component fit a surrounding surface; defaults preserve
+    // the transfer/checksum tables' established appearance.
+    struct table_palette
+    {
+        ui32 bg         = theme::bg;
+        ui32 header     = theme::header;
+        ui32 text_fg    = theme::text_fg;
+        ui32 subtext    = theme::subtext;
+        ui32 sel_bg     = theme::sel_bg;
+        ui32 sel_bg_act = theme::sel_bg_act;
+        ui32 sort_fg    = theme::sort_fg;
+        ui32 sb_track   = theme::sb_track;
+        ui32 sb_thumb   = theme::sb_thumb;
+        ui32 sb_hover   = theme::sb_hover;
+        ui32 sb_drag    = theme::sb_drag;
+    };
+
     // Column model + cell/header/divider paint helpers. A caller builds one per render from live
     // state; the width/visibility hooks route a dragged column / auto-fit / header toggle back to the
     // caller's backing store, so the core drives resize + the show/hide menu with no per-tab code.
@@ -66,9 +91,10 @@ namespace netxs::app::parvion
             else paint_at(canvas, cx, colw, y, s, fg, bg, hscroll, disp_w);
         }
         void paint_header(auto& canvas, si32 row, si32 hscroll, si32 disp_w, si32 strip_w,
-                          si32 sort_key, si32 sort_dir, si32 hover_key, si32 press_key) const
+                          si32 sort_key, si32 sort_dir, si32 hover_key, si32 press_key,
+                          bool sortable, table_palette const& pal) const
         {
-            canvas.fill(rect{{ 0, row }, { strip_w, 1 }}, [&](cell& c){ c.bgc(theme::header); });
+            canvas.fill(rect{{ 0, row }, { strip_w, 1 }}, [&](cell& c){ c.bgc(pal.header); });
             for (auto i = si32{}; i < (si32)cols.size(); ++i)
             {
                 auto& col = cols[(size_t)i];
@@ -78,35 +104,36 @@ namespace netxs::app::parvion
                 auto x1   = std::min(disp_w, sx + colw);
                 if (x1 <= x0) continue;
 
-                auto active = col.key == sort_key && sort_dir != 0;
+                auto active = sortable && col.key == sort_key && sort_dir != 0;
                 auto mark   = active ? (sort_dir == 1 ? "\xE2\x86\x91" : "\xE2\x86\x93") : "\xE2\x86\x95"; // ↑ : ↓ : ↕
-                auto markfg = active ? ui32{ theme::sort_fg } : ui32{ theme::subtext };
-                if (colw == 1) paint_at(canvas, col_x(i), 1, row, mark, markfg, theme::header, hscroll, disp_w);
-                else if (colw > 1)
+                auto markfg = active ? pal.sort_fg : pal.subtext;
+                if (sortable && colw == 1) paint_at(canvas, col_x(i), 1, row, mark, markfg, pal.header, hscroll, disp_w);
+                else if (colw > 0)
                 {
-                    auto labelw = colw - 2; // Reserve one separating cell and the sort glyph.
+                    auto labelw = sortable ? std::max(0, colw - 2) : colw;
                     if (col.right)
                     {
                         auto title = fit_ellipsis(col.title, labelw);
                         auto tw = (si32)cell_width(title);
                         paint_at(canvas, col_x(i) + std::max(0, labelw - tw), tw, row, title,
-                                 theme::subtext, theme::header, hscroll, disp_w);
+                                 pal.subtext, pal.header, hscroll, disp_w);
                     }
-                    else paint_at(canvas, col_x(i), labelw, row, col.title, theme::subtext, theme::header, hscroll, disp_w);
-                    paint_at(canvas, col_x(i) + colw - 1, 1, row, mark, markfg, theme::header, hscroll, disp_w);
+                    else paint_at(canvas, col_x(i), labelw, row, col.title, pal.subtext, pal.header, hscroll, disp_w);
+                    if (sortable) paint_at(canvas, col_x(i) + colw - 1, 1, row, mark, markfg, pal.header, hscroll, disp_w);
                 }
                 auto box = rect{{ x0, row }, { x1 - x0, 1 }};
                 if      (col.key == press_key) canvas.fill(box, [](cell& c){ c.xlight(2); });
                 else if (col.key == hover_key) canvas.fill(box, [](cell& c){ c.xlight(); });
             }
         }
-        void paint_dividers(auto& canvas, si32 top, si32 bottom, si32 hscroll, si32 disp_w, si32 hover_idx, si32 drag_idx) const
+        void paint_dividers(auto& canvas, si32 top, si32 bottom, si32 hscroll, si32 disp_w,
+                            si32 hover_idx, si32 drag_idx, table_palette const& pal) const
         {
             for (auto i = si32{}; i < (si32)cols.size(); ++i)
             {
                 auto bx = border_cx(i) - hscroll;
                 if (bx < 0 || bx >= disp_w) continue;
-                auto fg = (hover_idx == i || drag_idx == i) ? ui32{ theme::text_fg } : ui32{ theme::subtext };
+                auto fg = (hover_idx == i || drag_idx == i) ? pal.text_fg : pal.subtext;
                 canvas.fill(rect{{ bx, top }, { 1, bottom - top }}, [&](cell& c){ c.fgc(fg).txt("\xE2\x94\x82"); }); // │
             }
         }
@@ -157,6 +184,7 @@ namespace netxs::app::parvion
         si32 div_bottom = 1;
         si32 total = 0;
         bool has_vsb = faux, has_hsb = faux;
+        ui64 revision = ~ui64{}; // Last caller data/view revision (optional scroll-reset hook).
     };
 
     // Optional left-gutter content for one row: a direction arrow + an expand indicator/button.
@@ -203,7 +231,7 @@ namespace netxs::app::parvion
     // live state each render or hit-test.
     struct table_cfg
     {
-        sftp_remote*          ctrl = nullptr; // Live controller (for the widget's readiness guards).
+        sftp_remote*          ctrl = nullptr; // Optional caller context retained for source compatibility.
         netxs::wptr<ui::base> window_wp;      // App window: anchor for confirm dialogs.
         std::function<qtable()>                          columns;     // Column model (rebuilt each render/hit).
         std::function<si32()>                            rows;        // Number of display rows.
@@ -213,12 +241,17 @@ namespace netxs::app::parvion
         std::function<qsel_cfg()>                        selection;   // null => not selectable.
         std::function<qmenu_cfg(netxs::wptr<ui::base>)>  menu;        // Item/blank menus (null => none; header menu still shows).
         std::function<si32()>                            follow;      // -1 => pin to bottom; >=0 => keep that display row visible.
+        std::function<ui64()>                            revision;    // Change token: reset vertical/horizontal viewport when it changes.
+        std::function<si32(si32 source_row)>             sort_group;  // Fixed ascending group rank; direction only reverses within a group.
         std::function<si32(si32, si32, si32)>            compare;     // Source rows a/b + column key -> negative/equal/positive.
+        std::function<void(si32 source_row)>             activate;    // Double-click/Enter activation (null => none).
         std::function<void(si32 key)>                    on_col_grab; // A column-border drag begins (null => none).
         std::function<text()>                            empty_text;  // Message shown when rows()==0 (null => none).
         std::function<bool(hids&, netxs::wptr<ui::base>)> on_key;     // App keys (Delete clear-finished); null => none.
         bool                                             wide_hit = faux;  // Row hit-box spans full body width (else content width).
         bool                                             arrow_nav = faux; // Single-select arrow-key navigation.
+        bool                                             focus_on_start = faux; // Construct with initial focus (modal picker lists).
+        table_palette                                    palette{};         // Complete table paint palette.
     };
 
     // ---- Scroll layer ------------------------------------------------------------------------------
@@ -278,21 +311,21 @@ namespace netxs::app::parvion
         if (travel <= 0) return;
         st.hscroll = std::clamp((local_x - st.hsb_grab - sb.x) * sb.maxscroll / travel, 0, sb.maxscroll);
     }
-    inline void tbl_paint_scrollbars(table_state const& st, auto& canvas)
+    inline void tbl_paint_scrollbars(table_state const& st, auto& canvas, table_palette const& pal)
     {
         if (auto sb = tbl_vsb(st); sb.ok)
         {
             auto mark = (st.sb_drag || st.sb_hover) ? "\xe2\x96\x88" : "\xe2\x96\x90"; // █ : ▐
-            canvas.fill(rect{{ sb.x, sb.top }, { 1, sb.track_h }}, [&](cell& c){ c.bgc(theme::bg).fgc(theme::sb_track).txt(mark); });
-            auto tc = st.sb_drag ? ui32{ theme::sb_drag } : st.sb_hover ? ui32{ theme::sb_hover } : ui32{ theme::sb_thumb };
-            canvas.fill(rect{{ sb.x, sb.thumb_y }, { 1, sb.thumb_h }}, [&](cell& c){ c.bgc(theme::bg).fgc(tc).txt(mark); });
+            canvas.fill(rect{{ sb.x, sb.top }, { 1, sb.track_h }}, [&](cell& c){ c.bgc(pal.bg).fgc(pal.sb_track).txt(mark); });
+            auto tc = st.sb_drag ? pal.sb_drag : st.sb_hover ? pal.sb_hover : pal.sb_thumb;
+            canvas.fill(rect{{ sb.x, sb.thumb_y }, { 1, sb.thumb_h }}, [&](cell& c){ c.bgc(pal.bg).fgc(tc).txt(mark); });
         }
         if (auto sb = tbl_hsb(st); sb.ok)
         {
             auto mark = (st.hsb_drag || st.hsb_hover) ? "\xe2\x96\x84" : "\xe2\x96\x82"; // ▄ : ▂
-            canvas.fill(rect{{ sb.x, sb.top }, { sb.track_h, 1 }}, [&](cell& c){ c.bgc(theme::bg).fgc(theme::sb_track).txt(mark); });
-            auto tc = st.hsb_drag ? ui32{ theme::sb_drag } : st.hsb_hover ? ui32{ theme::sb_hover } : ui32{ theme::sb_thumb };
-            canvas.fill(rect{{ sb.x + sb.thumb_y, sb.top }, { sb.thumb_h, 1 }}, [&](cell& c){ c.bgc(theme::bg).fgc(tc).txt(mark); });
+            canvas.fill(rect{{ sb.x, sb.top }, { sb.track_h, 1 }}, [&](cell& c){ c.bgc(pal.bg).fgc(pal.sb_track).txt(mark); });
+            auto tc = st.hsb_drag ? pal.sb_drag : st.hsb_hover ? pal.sb_hover : pal.sb_thumb;
+            canvas.fill(rect{{ sb.x + sb.thumb_y, sb.top }, { sb.thumb_h, 1 }}, [&](cell& c){ c.bgc(pal.bg).fgc(tc).txt(mark); });
         }
     }
     inline void tbl_clamp(table_state& st)
@@ -345,6 +378,12 @@ namespace netxs::app::parvion
         auto descending = st.sort_dir == table_state::sort_descending;
         std::stable_sort(st.row_order.begin(), st.row_order.end(), [&](si32 a, si32 b)
         {
+            if (cfg.sort_group)
+            {
+                auto ga = cfg.sort_group(a);
+                auto gb = cfg.sort_group(b);
+                if (ga != gb) return ga < gb;
+            }
             auto cmp = cfg.compare(a, b, st.sort_key);
             return descending ? cmp > 0 : cmp < 0;
         });
@@ -498,10 +537,22 @@ namespace netxs::app::parvion
     inline void table_render(table_state& st, table_cfg const& cfg, auto& canvas, twod size)
     {
         auto w = size.x, h = size.y;
-        if (w <= 0 || h <= 0 || !st.ctrl) return;
-        canvas.fill(rect{{ 0, 0 }, { w, h }}, [&](cell& c){ c.bgc(theme::bg).fgc(theme::text_fg); });
+        if (w <= 0 || h <= 0) return;
+        auto& pal = cfg.palette;
+        canvas.fill(rect{{ 0, 0 }, { w, h }}, [&](cell& c){ c.bgc(pal.bg).fgc(pal.text_fg); });
         st.row_hit.clear();
         st.expand_hit.clear();
+
+        if (cfg.revision)
+        {
+            auto revision = cfg.revision();
+            if (revision != st.revision)
+            {
+                st.revision = revision;
+                st.scroll = st.hscroll = 0;
+                st.follow = true;
+            }
+        }
 
         auto t     = cfg.columns();
         auto nrows = cfg.rows ? cfg.rows() : 0;
@@ -509,9 +560,9 @@ namespace netxs::app::parvion
         tbl_layout(st, w, h, nrows, t.content_w(), /*body_top=*/1);
 
         auto maxscroll = std::max(0, st.total - st.body_rows);
-        if (st.follow)
+        if (st.follow && cfg.follow)
         {
-            auto source = cfg.follow ? cfg.follow() : -1;
+            auto source = cfg.follow();
             auto f = source >= 0 ? q_visual_row(st, source) : -1;
             st.scroll = f >= 0 ? std::clamp(f - st.body_rows + 1, 0, maxscroll) : maxscroll;
         }
@@ -519,12 +570,13 @@ namespace netxs::app::parvion
 
         auto hs = st.hscroll, clipw = st.disp_w;
         t.paint_header(canvas, st.body_top - 1, hs, clipw, w,
-                       st.sort_key, st.sort_dir, st.hover_header, st.press_header);
+                       st.sort_key, st.sort_dir, st.hover_header, st.press_header,
+                       (bool)cfg.compare, pal);
 
         if (nrows == 0)
         {
             if (cfg.empty_text && st.body_rows > 0)
-                put_str(canvas, 1, st.body_top, cfg.empty_text(), theme::subtext, theme::bg, std::max(1, st.disp_w - 1));
+                put_str(canvas, 1, st.body_top, cfg.empty_text(), pal.subtext, pal.bg, std::max(1, st.disp_w - 1));
         }
         else
         {
@@ -539,25 +591,25 @@ namespace netxs::app::parvion
                 auto y   = st.body_top + (i - first);
                 auto key = has_sel && source_row >= 0 ? sel.key_of_row(source_row) : -1;
                 auto selected = key >= 0 && (sel.is_sel(key) || (rubber_on && i >= rlo && i <= rhi));
-                auto row_bg = selected ? ui32{ theme::sel_bg } : ui32{ theme::bg };
+                auto row_bg = selected ? pal.sel_bg : pal.bg;
                 if (selected)
                 {
-                    canvas.fill(rect{{ 0, y }, { q_row_w(st), 1 }}, [&](cell& c){ c.bgc(theme::sel_bg); });
-                    if (st.focused) canvas.fill(rect{{ 0, y }, { 1, 1 }}, [&](cell& c){ c.bgc(theme::sel_bg_act); });
+                    canvas.fill(rect{{ 0, y }, { q_row_w(st), 1 }}, [&](cell& c){ c.bgc(pal.sel_bg); });
+                    if (st.focused) canvas.fill(rect{{ 0, y }, { 1, 1 }}, [&](cell& c){ c.bgc(pal.sel_bg_act); });
                 }
                 if (cfg.gutter)
                 {
                     auto g = cfg.gutter(source_row);
                     if (!g.arrow.empty()) qtable::paint_at(canvas, g_arrow_x, g_arrow_w, y, g.arrow, g.arrow_fg, row_bg, hs, clipw);
-                    if (g.expand == xp_muted) qtable::paint_at(canvas, g_expand_x, g_expand_w, y, " + ", theme::subtext, row_bg, hs, clipw);
+                    if (g.expand == xp_muted) qtable::paint_at(canvas, g_expand_x, g_expand_w, y, " + ", pal.subtext, row_bg, hs, clipw);
                     else if (g.expand == xp_collapsed || g.expand == xp_expanded)
                     {
                         auto bx = g_expand_x - hs;
                         if (bx >= 0 && bx + g_expand_w <= clipw)
                         {
                             auto btn = rect{{ bx, y }, { g_expand_w, 1 }};
-                            canvas.fill(btn, [&](cell& c){ c.bgc(theme::sel_bg); });
-                            put_str(canvas, bx, y, g.expand == xp_expanded ? " - " : " + ", theme::text_fg, theme::sel_bg, g_expand_w);
+                            canvas.fill(btn, [&](cell& c){ c.bgc(pal.sel_bg); });
+                            put_str(canvas, bx, y, g.expand == xp_expanded ? " - " : " + ", pal.text_fg, pal.sel_bg, g_expand_w);
                             if      (st.press_expand == g.expand_id) canvas.fill(btn, [](cell& c){ c.xlight(2); });
                             else if (st.hover_expand == g.expand_id) canvas.fill(btn, [](cell& c){ c.xlight(); });
                             st.expand_hit.emplace_back(btn, g.expand_id);
@@ -574,15 +626,17 @@ namespace netxs::app::parvion
         }
         auto rows_drawn = std::clamp(st.total - st.scroll, 0, st.body_rows);
         st.div_bottom = st.body_top + rows_drawn;
-        t.paint_dividers(canvas, st.body_top - 1, st.div_bottom, hs, clipw, st.hover_border, st.col_drag);
-        tbl_paint_scrollbars(st, canvas);
+        t.paint_dividers(canvas, st.body_top - 1, st.div_bottom, hs, clipw, st.hover_border, st.col_drag, pal);
+        tbl_paint_scrollbars(st, canvas, pal);
     }
 
     // ---- Widget ------------------------------------------------------------------------------------
     inline auto make_table(table_cfg cfg) -> ui::sptr
     {
         auto form = ui::mock::ctor()->active()
-            ->plugin<pro::mouse>()->plugin<pro::focus>(pro::focus::mode::focusable)->plugin<pro::keybd>()->plugin<pro::timer>();
+            ->plugin<pro::mouse>()
+            ->plugin<pro::focus>(cfg.focus_on_start ? pro::focus::mode::focused : pro::focus::mode::focusable)
+            ->plugin<pro::keybd>()->plugin<pro::timer>();
         form->invoke([&, cfgv = std::move(cfg)](auto& boss)
         {
             auto& st  = boss.base::field(table_state{});
@@ -698,7 +752,6 @@ namespace netxs::app::parvion
             });
             boss.on(tier::mouserelease, input::key::RightClick, [&](hids& gear)
             {
-                if (!st.ctrl) { gear.dismiss(); return; }
                 pro::focus::set(boss.This(), gear.id, solo::on);
                 auto mx = (si32)gear.coord.x, my = (si32)gear.coord.y;
                 auto panel_wp = ptr::shadow(boss.This());
@@ -754,7 +807,6 @@ namespace netxs::app::parvion
             boss.base::signal(tier::release, e2::form::draggable::_<hids::buttons::left>, true);
             boss.LISTEN(tier::release, e2::form::drag::start::_<hids::buttons::left>, gear)
             {
-                if (!st.ctrl) return;
                 auto px = (si32)gear.click.x, py = (si32)gear.click.y;
                 if (auto sb = tbl_vsb(st); sb.ok && px == sb.x && py >= sb.top && py < sb.top + sb.track_h)
                 {
@@ -828,22 +880,65 @@ namespace netxs::app::parvion
             { boss.base::template plugin<pro::timer>().pacify(); auto was = st.drag; st.drag = table_state::d_none; st.sb_drag = st.hsb_drag = faux; st.col_drag = -1; st.rubber_a = st.rubber_b = -1; if (was != table_state::d_none) boss.base::deface(); };
             boss.on(tier::mouserelease, input::key::LeftDoubleClick, [&](hids& gear)
             {
-                if (!st.ctrl) return;
                 auto mx = (si32)gear.coord.x, my = (si32)gear.coord.y;
                 if (my < st.body_top - 1 || my >= st.div_bottom) return;
                 auto tbl = cfg.columns();
                 auto v = q_border_hit(tbl, mx, st.hscroll);
-                if (v >= 0) { auto cw = q_col_autofit(tbl, v); q_set_col_w(tbl, v, std::clamp(cw + 1, g_col_min, g_col_max)); boss.base::deface(); gear.dismiss(); }
+                if (v >= 0)
+                {
+                    auto cw = q_col_autofit(tbl, v);
+                    q_set_col_w(tbl, v, std::clamp(cw + 1, g_col_min, g_col_max));
+                    boss.base::deface();
+                    gear.dismiss();
+                    return;
+                }
+                if (cfg.activate && my >= st.body_top)
+                {
+                    auto visual = st.scroll + (my - st.body_top);
+                    auto source = q_source_row(st, visual);
+                    auto hit_w = cfg.wide_hit ? st.disp_w : q_row_w(st);
+                    if (source >= 0 && source < st.total && mx >= 0 && mx < hit_w)
+                    {
+                        st.scroll = st.hscroll = 0;
+                        st.follow = true;
+                        boss.base::deface();
+                        gear.dismiss();
+                        cfg.activate(source);
+                    }
+                }
             });
             boss.LISTEN(tier::preview, input::events::keybd::any, gear)
             {
-                if (!st.focused || !st.ctrl) return;
+                if (!st.focused) return;
                 if (gear.payload != input::keybd::type::keypress) return;
                 if (gear.keystat == input::key::released || gear.keystat == input::key::interrupted) return;
                 if (gear.keybd::handled) return;
                 if (cfg.on_key && cfg.on_key(gear, ptr::shadow(boss.This()))) return;
-                if (!cfg.arrow_nav || !cfg.selection) return;
                 auto k = gear.keybd::generic();
+                if (k == input::key::KeyEnter && cfg.activate && cfg.selection)
+                {
+                    auto s = cfg.selection();
+                    auto n = cfg.rows ? cfg.rows() : 0;
+                    auto source = si32{ -1 };
+                    for (auto row = si32{}; row < n; ++row)
+                        if (s.key_of_row(row) == st.sel_anchor) { source = row; break; }
+                    if (source < 0)
+                        for (auto row = si32{}; row < n; ++row)
+                        {
+                            auto key = s.key_of_row(row);
+                            if (key >= 0 && s.is_sel(key)) { source = row; break; }
+                        }
+                    if (source >= 0)
+                    {
+                        st.scroll = st.hscroll = 0;
+                        st.follow = true;
+                        gear.set_handled();
+                        boss.base::deface();
+                        cfg.activate(source);
+                        return;
+                    }
+                }
+                if (!cfg.arrow_nav || !cfg.selection) return;
                 auto s = q_ordered_sel(st, cfg.selection());
                 auto n = cfg.rows ? cfg.rows() : 0;
                 auto maxv = std::max(0, st.total - st.body_rows);

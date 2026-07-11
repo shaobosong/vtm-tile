@@ -11,10 +11,11 @@
 //
 // Reuse: input fields and buttons are painted by the shared paint_field / paint_button
 // helpers (panes.hpp) so they are identical to the Quick Connect bar's; the private-key
-// file picker instantiates the Local Site browser (make_file_pane); the private-key
-// table mirrors the queue Transferring table.
+// file picker instantiates the Local Site browser (make_file_pane); the private-key list
+// is the shared table component (table.hpp).
 
 #include "panes.hpp"     // theme, put_str, paint_field, paint_button, edit_*, make_file_pane, sd_hit
+#include "table.hpp"     // table_cfg, make_table (Public Key Authentication list).
 #include "connectbar.hpp" // connect-bar field/secret editor conventions
 #include "prompts.hpp"   // make_secret_dialog (passphrase / save-path modal for key conversion)
 
@@ -58,36 +59,9 @@ namespace netxs::app::parvion
         // Default content width inside a group box (matches FileZilla's roomy layout).
         inline constexpr auto pad_x = si32{ 2 };  // Card left/right inner padding.
 
-        // --- Private-key table (strictly matches the Local Site browser table, panes.hpp) -----
-        // A self-contained 3-column table (Filename / Comment / Data) with resizable columns,
-        // advanced H/V scrollbars (thumb/track + click + wheel) and single/ctrl/shift/drag
-        // multi-selection — the same behaviors as the file-browser pane, modeled on pane_state.
+        // --- Private-key shared-table model ----------------------------------------------------
         inline constexpr auto kt_ncol    = si32{ 3 };
-        inline constexpr auto kt_col_min = si32{ 2 };
-        inline constexpr auto kt_col_max = si32{ 200 };
         inline const     auto kt_headers = std::array<view, kt_ncol>{ "Filename", "Comment", "Data" };
-
-        struct keytbl_state
-        {
-            std::array<si32, kt_ncol> col_w{ 18, 18, 28 }; // Resizable column widths.
-            std::set<si32>     marked{};        // Multi-selection (highlighted rows).
-            si32               sel = -1;        // Cursor / shift anchor target.
-            si32               sel_anchor = 0;  // Shift-range anchor.
-            si32               scroll = 0;      // First visible body row.
-            si32               hscroll = 0;     // Horizontal cell offset.
-            si32               hover_border = -1; // Column border under the cursor (-1 = none).
-            si32               col_drag = -1;   // Column border being width-dragged.
-            bool               vsb_hover = faux, vsb_drag = faux; si32 vsb_grab = 0;
-            bool               hsb_hover = faux, hsb_drag = faux; si32 hsb_grab = 0;
-            bool               rubber = faux;   // Live left-drag rubber-band selection.
-            si32               rubber_a = -1, rubber_b = -1;
-            std::set<si32>     drag_base{};     // Selection snapshot for ctrl+drag merge.
-            bool               rubber_ctrl = faux, rubber_add = true;
-            rect               area{};          // Table rect (card-local origin + size), set each render.
-            si32               rows = 0, disp_w = 0, content_w = 0, hsb_y = 0, div_bottom = 1;
-            bool               has_vsb = faux, has_hsb = faux;
-            si32               drag_mode = 0;   // Active drag: 0 none, 1 col, 2 vsb, 3 hsb, 4 rubber.
-        };
     }
 
     struct settings_state
@@ -103,7 +77,12 @@ namespace netxs::app::parvion
         si32               hash_algo = 2;           // Algorithm index; see settings.hpp helpers.
         si32               log_debug_level = log_debug_none;
         bool               log_raw_listing = faux;
-        sd::keytbl_state   kt;                // Private-key table (file-browser-style; selection/scroll/columns).
+        std::array<si32, sd::kt_ncol> key_col_w{ 18, 18, 28 };
+        std::array<bool, sd::kt_ncol> key_col_shown{ true, true, true };
+        std::set<si32>     key_marked{};       // Shared-table row selection (draft.keyfiles indices).
+        ui64               key_table_revision = 0; // Structural changes that reset the shared viewport.
+        rect               key_table_area{};   // Card-local shared-table geometry, refreshed on render.
+        netxs::wptr<ui::base> key_table_wp;    // Independent table widget (second card layer).
         // Parsed key metadata, parallel to draft.keyfiles (filled by pvputtygen).
         std::vector<text>  key_comment;
         std::vector<text>  key_data;
@@ -385,85 +364,8 @@ namespace netxs::app::parvion
         return w;
     }
 
-    // --- Private-key table helpers (mirror panes.hpp's file-browser table) ----------
-    // The table is painted inside the settings card at kt.area.coor (card-local), in
-    // table-local coords: row 0 = column header, rows 1.. = body, hsb at hsb_y, vsb at
-    // the right column. Geometry helpers mirror p_col_x / pane_layout / pane_scrollbar.
-    inline auto kt_col_x(sd::keytbl_state const& kt, si32 i) -> si32
-    {
-        auto x = si32{ 0 };
-        for (auto j = si32{}; j < i; ++j) x += kt.col_w[(size_t)j];
-        return x;
-    }
-    inline auto kt_border_cx(sd::keytbl_state const& kt, si32 i) -> si32 { return kt_col_x(kt, i) + kt.col_w[(size_t)i] - 1; }
-    inline auto kt_content_w(sd::keytbl_state const& kt) -> si32
-    {
-        auto x = si32{ 0 };
-        for (auto i = si32{}; i < sd::kt_ncol; ++i) x += kt.col_w[(size_t)i];
-        return x;
-    }
-    inline auto kt_row_w(sd::keytbl_state const& kt) -> si32 { return std::clamp(kt.content_w - kt.hscroll, 0, kt.disp_w); }
-    // Two-pass VSB<->HSB settling (mirrors pane_layout); body has one header row above it.
-    inline void kt_layout(sd::keytbl_state& kt, si32 w, si32 h, si32 content_w, si32 n)
-    {
-        kt.content_w = content_w;
-        auto avail = std::max(0, h - 1);
-        for (auto pass = si32{}; pass < 2; ++pass)
-        {
-            kt.has_vsb = avail > 0 && n > avail;
-            kt.disp_w  = w - (kt.has_vsb ? 1 : 0);
-            kt.has_hsb = content_w > kt.disp_w;
-            kt.rows    = std::max(0, avail - (kt.has_hsb ? 1 : 0));
-            kt.has_vsb = kt.rows > 0 && n > kt.rows;
-            kt.disp_w  = w - (kt.has_vsb ? 1 : 0);
-            kt.has_hsb = content_w > kt.disp_w;
-            kt.rows    = std::max(0, avail - (kt.has_hsb ? 1 : 0));
-        }
-        kt.hsb_y = 1 + kt.rows;
-    }
-    struct kt_sb { bool ok = faux; si32 x = 0, top = 0, track_h = 0, thumb_y = 0, thumb_h = 0, maxscroll = 0; };
-    inline auto kt_vsb(sd::keytbl_state const& kt, si32 n) -> kt_sb
-    {
-        auto sb = kt_sb{};
-        sb.ok = kt.has_vsb && kt.rows > 0 && n > kt.rows;
-        if (!sb.ok) return sb;
-        sb.x = kt.area.size.x - 1; sb.top = 1; sb.track_h = kt.rows;
-        sb.thumb_h = std::max(1, kt.rows * kt.rows / n);
-        sb.maxscroll = n - kt.rows;
-        sb.thumb_y = sb.top + (kt.rows - sb.thumb_h) * kt.scroll / sb.maxscroll;
-        return sb;
-    }
-    inline auto kt_hsb(sd::keytbl_state const& kt) -> kt_sb
-    {
-        auto sb = kt_sb{};
-        sb.ok = kt.has_hsb && kt.disp_w > 0 && kt.content_w > kt.disp_w;
-        if (!sb.ok) return sb;
-        sb.x = 0; sb.top = kt.hsb_y; sb.track_h = kt.disp_w;
-        sb.thumb_h = std::max(1, kt.disp_w * kt.disp_w / kt.content_w);
-        sb.maxscroll = kt.content_w - kt.disp_w;
-        sb.thumb_y = (kt.disp_w - sb.thumb_h) * kt.hscroll / sb.maxscroll;
-        return sb;
-    }
-    inline void kt_vsb_scroll_to(sd::keytbl_state& kt, si32 ly, kt_sb const& sb)
-    {
-        auto travel = sb.track_h - sb.thumb_h;
-        if (travel <= 0) return;
-        kt.scroll = std::clamp((ly - kt.vsb_grab - sb.top) * sb.maxscroll / travel, 0, sb.maxscroll);
-    }
-    inline void kt_hsb_scroll_to(sd::keytbl_state& kt, si32 lx, kt_sb const& sb)
-    {
-        auto travel = sb.track_h - sb.thumb_h;
-        if (travel <= 0) return;
-        kt.hscroll = std::clamp((lx - kt.hsb_grab - sb.x) * sb.maxscroll / travel, 0, sb.maxscroll);
-    }
-    // Row index for a table-local row `ly` (body rows start at 1); -1 outside the body.
-    inline auto kt_hit_row(sd::keytbl_state const& kt, si32 ly) -> si32
-    {
-        auto vis = ly - 1;
-        if (vis < 0 || vis >= kt.rows) return -1;
-        return kt.scroll + vis;
-    }
-    // Cell text for the key table: col 0 = filename (basename), 1 = comment, 2 = data.
+    // --- Private-key shared-table adapters ------------------------------------------
+    // Cell text: column 0 = filename (basename), 1 = comment, 2 = fingerprint/data.
     inline auto kt_cell(settings_state const& st, si32 col, si32 row) -> text
     {
         if (row < 0 || row >= (si32)st.draft.keyfiles.size()) return {};
@@ -471,265 +373,12 @@ namespace netxs::app::parvion
         if (col == 1) return row < (si32)st.key_comment.size() ? st.key_comment[(size_t)row] : text{};
         return row < (si32)st.key_data.size() ? st.key_data[(size_t)row] : text{};
     }
-    // Paint the key table into the card canvas at kt.area (card-local). Mirrors pane_render.
-    inline void kt_render(auto& canvas, settings_state& st, bool focused)
-    {
-        auto& kt = st.kt;
-        auto ox = kt.area.coor.x, oy = kt.area.coor.y;
-        auto w  = kt.area.size.x, h = kt.area.size.y;
-        if (w <= 0 || h <= 0) return;
-        auto n = (si32)st.draft.keyfiles.size();
-        auto content_w = kt_content_w(kt);
-        kt_layout(kt, w, h, content_w, n);
-        kt.sel     = std::clamp(kt.sel, -1, std::max(-1, n - 1));
-        kt.scroll  = std::clamp(kt.scroll, 0, std::max(0, n - kt.rows));
-        kt.hscroll = std::clamp(kt.hscroll, 0, std::max(0, kt.content_w - kt.disp_w));
-        auto hs = kt.hscroll;
-        auto clipw = kt.disp_w;
-        auto cx = std::array<si32, sd::kt_ncol>{};
-        for (auto i = si32{}; i < sd::kt_ncol; ++i) cx[(size_t)i] = kt_col_x(kt, i);
-        // Paint one column's text, ellipsized + horizontally scrolled + clipped to [0,clipw).
-        auto col = [&](si32 content_x, si32 colw, si32 ry, view s, ui32 fg, ui32 bg)
-        {
-            auto t  = fit_ellipsis(s, colw);
-            auto v  = view{ t };
-            auto sx = content_x - hs;
-            if (sx >= clipw || sx + colw <= 0) return;
-            if (sx < 0)
-            {
-                auto cl  = cell_to_cluster(v, -sx);
-                auto cut = caret_cell(v, cl);
-                v = v.substr(cluster_to_byte(v, cl)); colw -= cut; sx += cut;
-            }
-            auto room = std::min(colw, clipw - sx);
-            if (room > 0 && sx >= 0 && sx < clipw) put_str(canvas, ox + sx, oy + ry, v, fg, bg, room);
-        };
-        auto draw_dividers = [&](si32 ry, ui32 bg)
-        {
-            for (auto i = si32{}; i < sd::kt_ncol; ++i)
-            {
-                auto bx = kt_border_cx(kt, i) - hs;
-                if (bx < 0 || bx >= clipw) continue;
-                auto hot = kt.hover_border == i || kt.col_drag == i;
-                put_str(canvas, ox + bx, oy + ry, "\xE2\x94\x82", hot ? ui32{ theme::text_fg } : ui32{ theme::subtext }, bg, 1);
-            }
-        };
-        // Header (row 0).
-        canvas.fill(rect{{ ox, oy }, { w, 1 }}, [&](cell& c){ c.bgc(theme::surface); });
-        for (auto i = si32{}; i < sd::kt_ncol; ++i) col(cx[(size_t)i], kt.col_w[(size_t)i] - 1, 0, sd::kt_headers[(size_t)i], theme::subtext, theme::surface);
-        draw_dividers(0, theme::surface);
-        // Body.
-        auto rows_drawn = si32{};
-        for (auto vis = si32{}; vis < kt.rows; ++vis)
-        {
-            auto row = kt.scroll + vis;
-            if (row >= n) break;
-            ++rows_drawn;
-            auto ry = 1 + vis;
-            auto is_sel = kt.marked.count(row) != 0;
-            auto rbg = is_sel ? ui32{ theme::sel_bg } : ui32{ theme::bg };
-            if (is_sel)
-            {
-                canvas.fill(rect{{ ox, oy + ry }, { kt_row_w(kt), 1 }}, [&](cell& c){ c.bgc(theme::sel_bg); });
-                if (focused) canvas.fill(rect{{ ox, oy + ry }, { 1, 1 }}, [&](cell& c){ c.bgc(theme::sel_bg_act); });
-            }
-            for (auto i = si32{}; i < sd::kt_ncol; ++i) col(cx[(size_t)i], kt.col_w[(size_t)i] - 1, ry, kt_cell(st, i, row), theme::text_fg, rbg);
-            draw_dividers(ry, rbg);
-        }
-        kt.div_bottom = 1 + rows_drawn;
-        // Scrollbars (same half-block design as the file pane).
-        if (auto sb = kt_vsb(kt, n); sb.ok)
-        {
-            auto mark = (kt.vsb_drag || kt.vsb_hover) ? "\xe2\x96\x88" : "\xe2\x96\x90"; // █ : ▐
-            canvas.fill(rect{{ ox + sb.x, oy + sb.top }, { 1, sb.track_h }}, [&](cell& c){ c.bgc(theme::bg).fgc(theme::sb_track).txt(mark); });
-            auto tc = kt.vsb_drag ? ui32{ theme::sb_drag } : kt.vsb_hover ? ui32{ theme::sb_hover } : ui32{ theme::sb_thumb };
-            canvas.fill(rect{{ ox + sb.x, oy + sb.thumb_y }, { 1, sb.thumb_h }}, [&](cell& c){ c.bgc(theme::bg).fgc(tc).txt(mark); });
-        }
-        if (auto sb = kt_hsb(kt); sb.ok)
-        {
-            auto mark = (kt.hsb_drag || kt.hsb_hover) ? "\xe2\x96\x84" : "\xe2\x96\x82"; // ▄ : ▂
-            canvas.fill(rect{{ ox + sb.x, oy + sb.top }, { sb.track_h, 1 }}, [&](cell& c){ c.bgc(theme::bg).fgc(theme::sb_track).txt(mark); });
-            auto tc = kt.hsb_drag ? ui32{ theme::sb_drag } : kt.hsb_hover ? ui32{ theme::sb_hover } : ui32{ theme::sb_thumb };
-            canvas.fill(rect{{ ox + sb.x + sb.thumb_y, oy + sb.top }, { sb.thumb_h, 1 }}, [&](cell& c){ c.bgc(theme::bg).fgc(tc).txt(mark); });
-        }
-    }
-
     // Widest content + header for column `col` (drives the double-click border auto-fit).
     inline auto kt_col_content_w(settings_state const& st, si32 col) -> si32
     {
         auto w = cell_width(sd::kt_headers[(size_t)col]);
         for (auto row = si32{}; row < (si32)st.draft.keyfiles.size(); ++row) w = std::max(w, cell_width(kt_cell(st, col, row)));
         return w;
-    }
-    inline auto kt_in_area(settings_state const& st, si32 mx, si32 my) -> bool
-    {
-        auto& a = st.kt.area;
-        return a.size.x > 0 && mx >= a.coor.x && mx < a.coor.x + a.size.x && my >= a.coor.y && my < a.coor.y + a.size.y;
-    }
-    // Press selection (table-local lx,ly): mirrors the file pane's LeftDown body logic. Presses on a
-    // scrollbar or a column border are deferred to the drag/click handlers (returns false there).
-    inline auto kt_on_down(settings_state& st, si32 lx, si32 ly, bool ctl, bool shft) -> bool
-    {
-        auto& kt = st.kt;
-        auto n = (si32)st.draft.keyfiles.size();
-        if (auto sb = kt_vsb(kt, n); sb.ok && lx == sb.x && ly >= sb.top && ly < sb.top + sb.track_h) return faux;
-        if (auto sb = kt_hsb(kt);    sb.ok && ly == sb.top && lx >= sb.x && lx < sb.x + sb.track_h) return faux;
-        if (ly >= 0 && ly < kt.div_bottom)
-            for (auto i = si32{}; i < sd::kt_ncol; ++i) if (lx == kt_border_cx(kt, i) - kt.hscroll) return faux;
-        kt.drag_base = kt.marked; // Snapshot for a possible ctrl+drag merge.
-        auto row = (lx < kt_row_w(kt)) ? kt_hit_row(kt, ly) : -1;
-        if (row >= 0 && row < n)
-        {
-            if (shft)
-            {
-                auto lo = std::min(kt.sel_anchor, row), hi = std::max(kt.sel_anchor, row);
-                kt.marked.clear();
-                for (auto j = lo; j <= hi; ++j) kt.marked.insert(j);
-                kt.sel = row;
-            }
-            else if (ctl)
-            {
-                if (kt.marked.count(row)) kt.marked.erase(row); else kt.marked.insert(row);
-                kt.sel = row; kt.sel_anchor = row;
-            }
-            else { kt.marked = { row }; kt.sel = row; kt.sel_anchor = row; }
-            return true;
-        }
-        if (!ctl && ly >= 1 && ly < 1 + kt.rows && !kt.marked.empty()) { kt.marked.clear(); kt.sel = -1; return true; } // Blank press clears.
-        return faux;
-    }
-    // Click on a scrollbar rail outside the thumb: page toward the click (table-local lx,ly).
-    inline auto kt_on_click(settings_state& st, si32 lx, si32 ly) -> bool
-    {
-        auto& kt = st.kt;
-        auto n = (si32)st.draft.keyfiles.size();
-        if (auto sb = kt_vsb(kt, n); sb.ok && lx == sb.x && ly >= sb.top && ly < sb.top + sb.track_h)
-        {
-            if      (ly < sb.thumb_y)               kt.scroll = std::max(0, kt.scroll - kt.rows);
-            else if (ly >= sb.thumb_y + sb.thumb_h) kt.scroll = std::min(sb.maxscroll, kt.scroll + kt.rows);
-            return true;
-        }
-        if (auto sb = kt_hsb(kt); sb.ok && ly == sb.top && lx >= sb.x && lx < sb.x + sb.track_h)
-        {
-            auto tx = sb.x + sb.thumb_y;
-            if      (lx < tx)               kt.hscroll = std::max(0, kt.hscroll - kt.disp_w);
-            else if (lx >= tx + sb.thumb_h) kt.hscroll = std::min(sb.maxscroll, kt.hscroll + kt.disp_w);
-            return true;
-        }
-        return faux;
-    }
-    // Double-click a column border: auto-fit it to its widest content + header (table-local lx,ly).
-    inline auto kt_on_dclick(settings_state& st, si32 lx, si32 ly) -> bool
-    {
-        auto& kt = st.kt;
-        if (ly >= 0 && ly < kt.div_bottom)
-            for (auto i = si32{}; i < sd::kt_ncol; ++i) if (lx == kt_border_cx(kt, i) - kt.hscroll)
-            {
-                kt.col_w[(size_t)i] = std::clamp(kt_col_content_w(st, i) + 1, sd::kt_col_min, sd::kt_col_max);
-                return true;
-            }
-        return faux;
-    }
-    inline auto kt_on_wheel(settings_state& st, si32 whlsi, bool hzwhl) -> void
-    {
-        auto& kt = st.kt;
-        auto n = (si32)st.draft.keyfiles.size();
-        if (hzwhl || kt.hsb_hover) kt.hscroll = std::clamp(kt.hscroll - whlsi * 4, 0, std::max(0, kt.content_w - kt.disp_w));
-        else                       kt.scroll  = std::clamp(kt.scroll  - whlsi,     0, std::max(0, n - kt.rows));
-    }
-    // Hover feedback for both scrollbars and the column borders (table-local lx,ly).
-    inline auto kt_on_move(settings_state& st, si32 lx, si32 ly) -> bool
-    {
-        auto& kt = st.kt;
-        auto n = (si32)st.draft.keyfiles.size();
-        auto dirty = faux;
-        auto vsb = kt_vsb(kt, n);
-        auto vh = vsb.ok && lx == vsb.x && ly >= vsb.top && ly < vsb.top + vsb.track_h;
-        if (vh != kt.vsb_hover) { kt.vsb_hover = vh; dirty = true; }
-        auto hsb = kt_hsb(kt);
-        auto hh = hsb.ok && ly == hsb.top && lx >= hsb.x && lx < hsb.x + hsb.track_h;
-        if (hh != kt.hsb_hover) { kt.hsb_hover = hh; dirty = true; }
-        auto nb = si32{ -1 };
-        if (ly >= 0 && ly < kt.div_bottom)
-            for (auto i = si32{}; i < sd::kt_ncol; ++i) if (lx == kt_border_cx(kt, i) - kt.hscroll) { nb = i; break; }
-        if (nb != kt.hover_border) { kt.hover_border = nb; dirty = true; }
-        return dirty;
-    }
-    inline auto kt_clear_hover(settings_state& st) -> bool
-    {
-        auto& kt = st.kt;
-        auto dirty = kt.vsb_hover || kt.hsb_hover || kt.hover_border != -1;
-        kt.vsb_hover = kt.hsb_hover = faux; kt.hover_border = -1;
-        return dirty;
-    }
-    // Decide the drag mode from the press location (table-local px,py): scrollbar thumb/rail,
-    // a column border, or a rubber-band over the body. Returns true if the table claimed the drag.
-    inline auto kt_drag_start(settings_state& st, si32 px, si32 py, bool ctl) -> bool
-    {
-        auto& kt = st.kt;
-        auto n = (si32)st.draft.keyfiles.size();
-        if (auto sb = kt_vsb(kt, n); sb.ok && px == sb.x && py >= sb.top && py < sb.top + sb.track_h)
-        {
-            if (py >= sb.thumb_y && py < sb.thumb_y + sb.thumb_h) kt.vsb_grab = py - sb.thumb_y;
-            else { kt.vsb_grab = sb.thumb_h / 2; kt_vsb_scroll_to(kt, py, sb); }
-            kt.vsb_drag = kt.vsb_hover = true; kt.drag_mode = 2; return true;
-        }
-        if (auto sb = kt_hsb(kt); sb.ok && py == sb.top && px >= sb.x && px < sb.x + sb.track_h)
-        {
-            auto tx = sb.x + sb.thumb_y;
-            if (px >= tx && px < tx + sb.thumb_h) kt.hsb_grab = px - tx;
-            else { kt.hsb_grab = sb.thumb_h / 2; kt_hsb_scroll_to(kt, px, sb); }
-            kt.hsb_drag = kt.hsb_hover = true; kt.drag_mode = 3; return true;
-        }
-        if (py >= 0 && py < kt.div_bottom)
-            for (auto i = si32{}; i < sd::kt_ncol; ++i) if (px == kt_border_cx(kt, i) - kt.hscroll)
-            {
-                kt.col_drag = i; kt.drag_mode = 1; return true;
-            }
-        if (py >= 1 && py < 1 + kt.rows)
-        {
-            kt.rubber_a = kt.rubber_b = std::max(0, kt.scroll + (py - 1));
-            kt.rubber = true; kt.drag_mode = 4;
-            kt.rubber_ctrl = ctl;
-            if (kt.rubber_ctrl) { kt.rubber_add = !kt.drag_base.count(kt.rubber_a); kt.marked = kt.drag_base; }
-            else                kt.marked.clear();
-            if (kt.rubber_a < n) { kt.sel = kt.rubber_a; kt.sel_anchor = kt.rubber_a; }
-            return true;
-        }
-        return faux;
-    }
-    inline auto kt_drag_pull(settings_state& st, si32 lx, si32 ly) -> bool
-    {
-        auto& kt = st.kt;
-        auto n = (si32)st.draft.keyfiles.size();
-        if (kt.drag_mode == 2)      { kt_vsb_scroll_to(kt, ly, kt_vsb(kt, n)); return true; }
-        else if (kt.drag_mode == 3) { kt_hsb_scroll_to(kt, lx, kt_hsb(kt));    return true; }
-        else if (kt.drag_mode == 1 && kt.col_drag >= 0)
-        {
-            auto left = kt_col_x(kt, kt.col_drag);
-            kt.col_w[(size_t)kt.col_drag] = std::clamp(lx + kt.hscroll - left + 1, sd::kt_col_min, sd::kt_col_max);
-            return true;
-        }
-        else if (kt.drag_mode == 4 && kt.rubber)
-        {
-            kt.rubber_b = kt.scroll + std::clamp(ly - 1, 0, std::max(0, kt.rows - 1));
-            auto lo = std::min(kt.rubber_a, kt.rubber_b), hi = std::max(kt.rubber_a, kt.rubber_b);
-            if (kt.rubber_ctrl)
-            {
-                kt.marked = kt.drag_base;
-                for (auto i = lo; i <= hi; ++i) if (i >= 0 && i < n) { if (kt.rubber_add) kt.marked.insert(i); else kt.marked.erase(i); }
-            }
-            else { kt.marked.clear(); for (auto i = lo; i <= hi; ++i) if (i >= 0 && i < n) kt.marked.insert(i); }
-            return true;
-        }
-        return faux;
-    }
-    inline auto kt_drag_end(settings_state& st) -> bool
-    {
-        auto& kt = st.kt;
-        auto active = kt.drag_mode != 0;
-        kt.vsb_drag = kt.hsb_drag = faux; kt.col_drag = -1; kt.rubber = faux; kt.drag_mode = 0;
-        return active;
     }
 
     // Close the settings overlay and clear the window's "dialog active" guard.
@@ -773,6 +422,7 @@ namespace netxs::app::parvion
     inline void settings_render(settings_state& st, auto& canvas, twod sz)
     {
         auto W = sz.x, H = sz.y;
+        st.key_table_area = {};
         if (W <= 4 || H <= 6) return;
         canvas.fill(rect{{ 0, 0 }, { W, H }}, [&](cell& c){ c.bgc(theme::bg).fgc(theme::text_fg); });
         // Title strip.
@@ -847,8 +497,7 @@ namespace netxs::app::parvion
             auto btn_y = pk_y + pk_h - 2;
             auto tbl_top = py + 1;
             auto tbl_h = std::max(2, btn_y - 1 - tbl_top);
-            st.kt.area = rect{{ ix + 2, tbl_top }, { inner, tbl_h }};
-            kt_render(canvas, st, st.focused);
+            st.key_table_area = rect{{ ix + 2, tbl_top }, { inner, tbl_h }};
             st.hit.addkey    = rect{{ ix + 2, btn_y }, { (si32)cell_width(sd::btn_addkey), 1 }};
             st.hit.removekey = rect{{ st.hit.addkey.coor.x + st.hit.addkey.size.x + 1, btn_y }, { (si32)cell_width(sd::btn_removekey), 1 }};
             paint_button(canvas, st.hit.addkey,    sd::btn_addkey,    st.hover_add,    st.press_add);
@@ -936,8 +585,8 @@ namespace netxs::app::parvion
         st.draft.keyfiles.push_back(path);
         st.key_comment.push_back(comment);
         st.key_data.push_back(data);
-        st.kt.sel = (si32)st.draft.keyfiles.size() - 1;
-        st.kt.marked = { st.kt.sel };
+        st.key_marked = { (si32)st.draft.keyfiles.size() - 1 };
+        if (auto table = st.key_table_wp.lock()) table->base::deface();
     }
 
     // Forward declaration so the conversion can re-trigger the passphrase prompt on a failed attempt.
@@ -1027,8 +676,7 @@ namespace netxs::app::parvion
     // Remove the selected key rows from the draft table.
     inline void sd_remove_keys(settings_state& st)
     {
-        auto sel = st.kt.marked;
-        if (sel.empty() && st.kt.sel >= 0) sel.insert(st.kt.sel);
+        auto sel = st.key_marked;
         if (sel.empty()) return;
         auto nk = std::vector<text>{}, nc = std::vector<text>{}, nd = std::vector<text>{};
         for (auto i = si32{}; i < (si32)st.draft.keyfiles.size(); ++i) if (!sel.count(i))
@@ -1038,7 +686,128 @@ namespace netxs::app::parvion
             nd.push_back(i < (si32)st.key_data.size()    ? st.key_data[i]    : text{});
         }
         st.draft.keyfiles = nk; st.key_comment = nc; st.key_data = nd;
-        st.kt.sel = -1; st.kt.marked.clear(); st.kt.scroll = 0;
+        st.key_marked.clear();
+        ++st.key_table_revision;
+        if (auto table = st.key_table_wp.lock()) table->base::deface();
+    }
+
+    // Adapt the draft key list to the reusable table. The dialog owns only data/preferences;
+    // make_table owns painting, selection gestures, scrolling, column menus and keyboard motion.
+    inline auto sd_key_table_cfg(settings_state& st) -> table_cfg
+    {
+        auto stp = &st;
+        auto cfg = table_cfg{};
+        cfg.ctrl = st.ctrl;
+        cfg.window_wp = st.window_wp;
+        cfg.palette = table_palette{
+            .bg         = theme::bg,
+            .header     = theme::surface,
+            .text_fg    = theme::text_fg,
+            .subtext    = theme::subtext,
+            .sel_bg     = theme::sel_bg,
+            .sel_bg_act = theme::sel_bg_act,
+            .sort_fg    = theme::sort_fg,
+            .sb_track   = theme::sb_track,
+            .sb_thumb   = theme::sb_thumb,
+            .sb_hover   = theme::sb_hover,
+            .sb_drag    = theme::sb_drag,
+        };
+        cfg.columns = [stp]
+        {
+            auto table = qtable{};
+            table.left = 0;
+            for (auto i = si32{}; i < sd::kt_ncol; ++i)
+            {
+                if (stp->key_col_shown[(size_t)i])
+                {
+                    table.cols.push_back(qtable::column{
+                        .title = text{ sd::kt_headers[(size_t)i] },
+                        .width = stp->key_col_w[(size_t)i],
+                        .right = faux,
+                        .resizable = true,
+                        .key = i,
+                    });
+                }
+                table.roster.push_back(qtable::col_toggle{
+                    .title = text{ sd::kt_headers[(size_t)i] },
+                    .key = i,
+                    .shown = stp->key_col_shown[(size_t)i],
+                });
+            }
+            table.set_shown = [stp](si32 key, bool shown)
+            {
+                if (key >= 0 && key < sd::kt_ncol) stp->key_col_shown[(size_t)key] = shown;
+            };
+            table.resize = [stp](si32 key, si32 width)
+            {
+                if (key >= 0 && key < sd::kt_ncol)
+                    stp->key_col_w[(size_t)key] = std::clamp(width, g_col_min, g_col_max);
+            };
+            table.autofit = [stp](si32 key)
+            {
+                return key >= 0 && key < sd::kt_ncol ? kt_col_content_w(*stp, key) : si32{};
+            };
+            return table;
+        };
+        cfg.rows = [stp]{ return (si32)stp->draft.keyfiles.size(); };
+        cfg.revision = [stp]{ return stp->key_table_revision; };
+        cfg.cell = [stp](si32 row, si32 key)
+        {
+            return cellval{ kt_cell(*stp, key, row), theme::text_fg };
+        };
+        cfg.compare = [stp](si32 a, si32 b, si32 key)
+        {
+            if (key < 0 || key >= sd::kt_ncol) return si32{};
+            auto lhs = kt_cell(*stp, key, a); utf::to_lower(lhs);
+            auto rhs = kt_cell(*stp, key, b); utf::to_lower(rhs);
+            return lhs < rhs ? -1 : lhs > rhs ? 1 : 0;
+        };
+        cfg.selection = [stp]
+        {
+            auto sel = qsel_cfg{};
+            sel.key_count = [stp]{ return (si32)stp->draft.keyfiles.size(); };
+            sel.is_sel = [stp](si32 key){ return stp->key_marked.contains(key); };
+            sel.set_sel = [stp](si32 key, bool on)
+            {
+                if (key < 0 || key >= (si32)stp->draft.keyfiles.size()) return;
+                if (on) stp->key_marked.insert(key);
+                else    stp->key_marked.erase(key);
+            };
+            sel.clear = [stp]{ stp->key_marked.clear(); };
+            sel.any = [stp]{ return !stp->key_marked.empty(); };
+            sel.in_scope = [stp](si32 key){ return key >= 0 && key < (si32)stp->draft.keyfiles.size(); };
+            sel.disp = [stp]{ return (si32)stp->draft.keyfiles.size(); };
+            sel.key_of_row = [stp](si32 row)
+            {
+                return row >= 0 && row < (si32)stp->draft.keyfiles.size() ? row : -1;
+            };
+            return sel;
+        };
+        cfg.on_key = [stp](hids& gear, netxs::wptr<ui::base> table_wp)
+        {
+            auto key = gear.keybd::generic();
+            if (key == input::key::Esc)
+            {
+                gear.set_handled();
+                sd_close(*stp);
+                return true;
+            }
+            if (key == input::key::KeyEnter)
+            {
+                gear.set_handled();
+                sd_accept(*stp);
+                return true;
+            }
+            if (key != input::key::KeyDelete || stp->key_marked.empty()) return faux;
+            sd_remove_keys(*stp);
+            if (auto table = table_wp.lock()) table->base::deface();
+            if (auto card = stp->card_wp.lock()) card->base::deface();
+            gear.set_handled();
+            return true;
+        };
+        cfg.wide_hit = true;
+        cfg.arrow_nav = true;
+        return cfg;
     }
 
     // Build the threshold-unit dropdown menu (item 3): one radio row per unit (Byte..TiB). The
@@ -1134,14 +903,18 @@ namespace netxs::app::parvion
         // The card's minimum width is negotiated from the form's internal components (see
         // sd_min_width): wide enough that no group-box content ever overflows its border.
         auto minw = sd_min_width();
-        auto card = overlay->attach(ui::mock::ctor())
-            ->active()
+        auto card_layer = overlay->attach(ui::cake::ctor())
             ->alignment({ snap::center, snap::center })
-            ->limits({ minw, 24 }, { std::max(minw, 104), 42 })
+            ->limits({ minw, 24 }, { std::max(minw, 104), 42 });
+        // The manually painted form is the back layer; the shared key table is attached as a
+        // separately focusable front layer once the form state has been initialized below.
+        auto card = card_layer->attach(ui::mock::ctor())
+            ->active()
             ->plugin<pro::mouse>()
             ->plugin<pro::focus>(pro::focus::mode::focused)
             ->plugin<pro::keybd>();
-        card->invoke([ctrl, window_wp, overlay_wp](auto& boss)
+        auto card_layer_wp = ptr::shadow(card_layer);
+        card->invoke([ctrl, window_wp, overlay_wp, card_layer_wp](auto& boss)
         {
             auto& st = boss.base::field(settings_state{});
             st.ctrl = ctrl;
@@ -1160,10 +933,21 @@ namespace netxs::app::parvion
                 if (i < st.key_data.size())    st.key_data[i]    = data;
             }
 
+            auto key_table = make_table(sd_key_table_cfg(st));
+            st.key_table_wp = ptr::shadow(key_table);
+            key_table->base::hidden = true; // Only the SFTP tab exposes this card layer.
+            if (auto layer = card_layer_wp.lock()) layer->base::attach(key_table);
+
             boss.base::signal(tier::release, e2::form::draggable::_<hids::buttons::left>, true);
             boss.LISTEN(tier::release, e2::render::any, parent_canvas)
             {
                 settings_render(st, parent_canvas, boss.base::size());
+                if (auto table = st.key_table_wp.lock())
+                {
+                    auto show = st.tab == sd::tab_sftp && st.key_table_area.size.x > 0 && st.key_table_area.size.y > 0;
+                    table->base::hidden = !show;
+                    if (show) table->base::extend(st.key_table_area);
+                }
             };
             boss.LISTEN(tier::release, e2::form::state::focus::count, count)
             {
@@ -1194,13 +978,6 @@ namespace netxs::app::parvion
                     if (sd_hit(st.hit.addkey, mx, my))    st.press_add = true;
                     if (sd_hit(st.hit.removekey, mx, my)) st.press_remove = true;
                     if (sd_hit(st.hit.compression, mx, my)) { st.compression = !st.compression; }
-                    // Key-table row selection (the press; scrollbar/border presses go to drag/click).
-                    if (kt_in_area(st, mx, my))
-                    {
-                        auto ctl  = !!(gear.ctlstat & hids::anyCtrl);
-                        auto shft = !!(gear.ctlstat & hids::anyShift);
-                        kt_on_down(st, mx - st.kt.area.coor.x, my - st.kt.area.coor.y, ctl, shft);
-                    }
                 }
                 else if (st.tab == sd::tab_debug)
                 {
@@ -1238,10 +1015,6 @@ namespace netxs::app::parvion
                         app::shared::menu::open_dropdown_popup(boss, sd_build_hash_menu(st, st.card_wp), true, sel, at);
                         fired = true;
                     }
-                    else if (kt_in_area(st, mx, my)) // Scrollbar rail paging.
-                    {
-                        if (kt_on_click(st, mx - st.kt.area.coor.x, my - st.kt.area.coor.y)) fired = true;
-                    }
                 }
                 else if (st.tab == sd::tab_debug)
                 {
@@ -1256,25 +1029,9 @@ namespace netxs::app::parvion
                 if (!fired) boss.base::deface();
                 else boss.base::deface();
             });
-            boss.on(tier::mouserelease, input::key::LeftDoubleClick, [&](hids& gear)
-            {
-                auto mx = (si32)gear.coord.x, my = (si32)gear.coord.y;
-                if (st.tab == sd::tab_sftp && kt_in_area(st, mx, my)
-                    && kt_on_dclick(st, mx - st.kt.area.coor.x, my - st.kt.area.coor.y)) { boss.base::deface(); gear.dismiss(); }
-            });
-            boss.on(tier::mouserelease, input::key::MouseWheel, [&](hids& gear)
-            {
-                auto mx = (si32)gear.coord.x, my = (si32)gear.coord.y;
-                if (st.tab == sd::tab_sftp && kt_in_area(st, mx, my))
-                {
-                    kt_on_wheel(st, gear.whlsi, gear.hzwhl);
-                    boss.base::deface();
-                    gear.dismiss();
-                }
-            });
             boss.on(tier::mouserelease, input::key::MouseLeave, [&](hids&)
             {
-                auto dirty = kt_clear_hover(st);
+                auto dirty = faux;
                 if (st.hover_loglevel) { st.hover_loglevel = faux; dirty = true; }
                 if (dirty) boss.base::deface();
             });
@@ -1291,8 +1048,6 @@ namespace netxs::app::parvion
                     upd(st.hover_remove, st.hit.removekey);
                     upd(st.hover_unit, st.hit.unit);
                     upd(st.hover_hashalgo, st.hit.hash_algo);
-                    if (kt_in_area(st, mx, my)) { if (kt_on_move(st, mx - st.kt.area.coor.x, my - st.kt.area.coor.y)) dirty = true; }
-                    else if (kt_clear_hover(st)) dirty = true;
                 }
                 else if (st.tab == sd::tab_debug)
                 {
@@ -1300,34 +1055,22 @@ namespace netxs::app::parvion
                 }
                 if (dirty) boss.base::deface();
             });
-            // Left-drag: a press within the key table drives its column resize / scrollbar / rubber-band
-            // selection; otherwise it scrubs the active field's caret (mutually exclusive by press loc).
+            // Left-drag scrubs the active numeric field's caret. The shared table owns its own drags.
             boss.LISTEN(tier::release, e2::form::drag::start::_<hids::buttons::left>, gear)
             {
                 auto px = (si32)gear.click.x, py = (si32)gear.click.y;
                 st.drag_field = -1;
-                st.kt.drag_mode = 0;
-                if (st.tab == sd::tab_sftp && kt_in_area(st, px, py))
-                {
-                    auto ctl = !!(gear.ctlstat & hids::anyCtrl);
-                    if (kt_drag_start(st, px - st.kt.area.coor.x, py - st.kt.area.coor.y, ctl)) { boss.base::deface(); return; }
-                }
                 for (auto i = si32{}; i < sd::f_count; ++i) if (st.fields[i].tab == st.tab && sd_hit(st.fields[i].box, px, py)) { st.drag_field = i; break; }
             };
             boss.LISTEN(tier::release, e2::form::drag::pull::_<hids::buttons::left>, gear)
             {
-                if (st.kt.drag_mode != 0)
-                {
-                    if (kt_drag_pull(st, (si32)gear.coord.x - st.kt.area.coor.x, (si32)gear.coord.y - st.kt.area.coor.y)) boss.base::deface();
-                    return;
-                }
                 if (st.drag_field < 0) return;
                 auto& f = st.fields[st.drag_field];
                 f.caret = std::min(cell_to_cluster(f.val, f.off + ((si32)gear.coord.x - f.box.coor.x)), cluster_count(f.val));
                 boss.base::deface();
             };
-            boss.LISTEN(tier::release, e2::form::drag::stop::_<hids::buttons::left>,   gear) { st.drag_field = -1; if (kt_drag_end(st)) boss.base::deface(); };
-            boss.LISTEN(tier::release, e2::form::drag::cancel::_<hids::buttons::left>, gear) { st.drag_field = -1; if (kt_drag_end(st)) boss.base::deface(); };
+            boss.LISTEN(tier::release, e2::form::drag::stop::_<hids::buttons::left>,   gear) { st.drag_field = -1; };
+            boss.LISTEN(tier::release, e2::form::drag::cancel::_<hids::buttons::left>, gear) { st.drag_field = -1; };
             boss.LISTEN(tier::preview, input::events::keybd::any, gear)
             {
                 if (!st.focused) return;

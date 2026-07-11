@@ -246,6 +246,48 @@ def grid_contains(chars, needle):
     return any(needle in row_text(chars, r) for r in range(ROWS))
 
 
+SORT_GLYPHS = ("↕", "↑", "↓")
+
+
+def table_header_field(chars, title, row=None):
+    """Return a table header's bounds and sort marker without fixed coordinates."""
+    if row is None:
+        pos = find_text(chars, title)
+        if pos is None:
+            return None
+        row, col = pos
+    else:
+        col = row_text(chars, row).find(title)
+        if col < 0:
+            return None
+    dividers = [c for c in range(COLS) if chars[row][c] == "│"]
+    left = max((c + 1 for c in dividers if c < col), default=0)
+    right = min((c for c in dividers if c >= col + len(title)), default=COLS)
+    markers = [(c, chars[row][c]) for c in range(left, right)
+               if chars[row][c] in SORT_GLYPHS]
+    marker_col, marker = markers[0] if markers else (-1, "")
+    return row, col, left, right, marker_col, marker
+
+
+def click_table_header(session, title, row=None):
+    field = table_header_field(session.screen()[0], title, row)
+    if field is None:
+        return False
+    hr, col, *_ = field
+    session.click(col + 1, hr + 1)
+    return True
+
+
+def named_row_order(chars, names):
+    found = []
+    for name in names:
+        pos = find_text(chars, name)
+        if pos is None:
+            return None
+        found.append((pos[0], name))
+    return [name for _, name in sorted(found)]
+
+
 def make_tree():
     d = tempfile.mkdtemp(prefix="parvionpane_")
     open(os.path.join(d, "alpha.txt"), "w").close()
@@ -255,6 +297,65 @@ def make_tree():
 
 
 # ----------------------------------- tests -----------------------------------
+
+
+def test_shared_table_file_sort_configuration():
+    """File headers sort by name/bytes/mtime while keeping parent and directories first."""
+    print("TEST: parvion pane - shared table file sort configuration ... ", end="", flush=True)
+    d = tempfile.mkdtemp(prefix="parvionsort_")
+    try:
+        os.mkdir(os.path.join(d, "adir"))
+        os.mkdir(os.path.join(d, "zdir"))
+        with open(os.path.join(d, "alpha.bin"), "wb") as f:
+            f.write(b"a" * 9)
+        with open(os.path.join(d, "zeta.bin"), "wb") as f:
+            f.write(b"z")
+        os.utime(os.path.join(d, "alpha.bin"), (1_000_000_000, 1_000_000_000))
+        os.utime(os.path.join(d, "zeta.bin"),  (1_100_000_000, 1_100_000_000))
+        names = ("adir", "zdir", "alpha.bin", "zeta.bin")
+        with ParvionSession(d) as s:
+            chars = s.screen()[0]
+            modified = table_header_field(chars, "Modified")
+            if modified is None:
+                print("FAIL - file headers not found"); return False
+            hr = modified[0]
+            bad = [(title, table_header_field(chars, title, hr))
+                   for title in ("Name", "Size", "Modified")
+                   if not table_header_field(chars, title, hr)
+                   or table_header_field(chars, title, hr)[5] != "↕"]
+            if bad:
+                print(f"FAIL - headers are not sortable: {bad}"); return False
+
+            # Name descending reverses values within the directory/file groups, never the groups.
+            click_table_header(s, "Name", hr)  # ascending
+            click_table_header(s, "Name", hr)  # descending
+            chars = s.screen()[0]
+            if table_header_field(chars, "Name", hr)[5] != "↓":
+                print("FAIL - Name did not enter descending mode"); return False
+            if named_row_order(chars, names) != ["zdir", "adir", "zeta.bin", "alpha.bin"]:
+                print(f"FAIL - descending grouped Name order: {named_row_order(chars, names)}"); return False
+            parent = find_text(chars, "/..")
+            first = find_text(chars, "zdir")
+            if not parent or not first or parent[0] >= first[0]:
+                print("FAIL - parent row was not pinned above descending sort"); return False
+            click_table_header(s, "Name", hr)  # source order
+            if named_row_order(s.screen()[0], names) != ["adir", "zdir", "alpha.bin", "zeta.bin"]:
+                print("FAIL - third Name click did not restore source order"); return False
+
+            # Size is numeric: the one-byte zeta file precedes the nine-byte alpha file.
+            click_table_header(s, "Size", hr)
+            if named_row_order(s.screen()[0], names) != ["adir", "zdir", "zeta.bin", "alpha.bin"]:
+                print(f"FAIL - ascending numeric Size order: {named_row_order(s.screen()[0], names)}"); return False
+
+            # Modified descending puts the newer zeta file first, still below directories.
+            click_table_header(s, "Modified", hr)
+            click_table_header(s, "Modified", hr)
+            if named_row_order(s.screen()[0], names) != ["adir", "zdir", "zeta.bin", "alpha.bin"]:
+                print(f"FAIL - descending Modified order: {named_row_order(s.screen()[0], names)}"); return False
+        print("PASS")
+        return True
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
 
 def test_blank_click_does_not_select():
     """Clicking the blank area to the right of the columns does not select a file."""
@@ -628,9 +729,74 @@ def test_ctrl_drag_deselects():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_shared_table_keyboard_activation_and_parent():
+    """The table owns focus after a row click, but pane-level Enter/Backspace actions still fire."""
+    print("TEST: parvion pane - shared table routes Enter/Backspace activation ... ", end="", flush=True)
+    d = make_tree()
+    nested = os.path.join(d, "gamma", "inside_gamma.txt")
+    open(nested, "w").close()
+    try:
+        with ParvionSession(d) as s:
+            folder = find_text(s.screen()[0], "/gamma")
+            if folder is None:
+                print("FAIL - gamma directory not listed")
+                return False
+            s.click(folder[1] + 1, folder[0] + 1)
+            s.write("\r", settle=0.8)
+            if not grid_contains(s.screen()[0], "inside_gamma.txt"):
+                print("FAIL - Enter did not activate the selected directory")
+                return False
+            if grid_contains(s.screen()[0], "alpha.txt"):
+                print("FAIL - listing did not change after entering gamma")
+                return False
+            s.write("\x7f", settle=0.8)  # Backspace returns to the parent directory.
+            if not grid_contains(s.screen()[0], "alpha.txt"):
+                print("FAIL - Backspace did not return to the parent directory")
+                return False
+            print("PASS")
+            return True
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_shared_table_keyboard_navigation_scrolls_to_last_row():
+    """Repeated Down keeps the keyboard cursor selected and scrolls a long pane to its last row."""
+    print("TEST: parvion pane - shared table keyboard navigation scrolls selection ... ", end="", flush=True)
+    d = tempfile.mkdtemp(prefix="parvionpane_many_")
+    try:
+        for i in range(48):
+            open(os.path.join(d, f"row_{i:02d}.txt"), "w").close()
+        with ParvionSession(d) as s:
+            first = find_text(s.screen()[0], "/..")
+            if first is None:
+                print("FAIL - '..' row not found")
+                return False
+            s.click(first[1] + 1, first[0] + 1)
+            selected_bg = s.screen()[1][first[0]][first[1]]
+            if selected_bg is None:
+                print("FAIL - first row did not become selected")
+                return False
+            s.write("\x1b[B" * 60, settle=1.0)  # Down Arrow; clamping should stop on the last row.
+            chars, bg = s.screen()
+            last = find_text(chars, "row_47.txt")
+            if last is None:
+                print("FAIL - keyboard navigation did not reveal the final row")
+                return False
+            if bg[last[0]][last[1]] != selected_bg:
+                print(f"FAIL - final row is visible but not selected (bg {bg[last[0]][last[1]]})")
+                return False
+            print("PASS")
+            return True
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 TESTS = [
+    test_shared_table_file_sort_configuration,
     test_ctrl_click_keeps_focus,
     test_right_click_activates_pane,
+    test_shared_table_keyboard_activation_and_parent,
+    test_shared_table_keyboard_navigation_scrolls_to_last_row,
     test_blank_click_does_not_select,
     test_right_click_blank_clears_selection,
     test_ctrl_drag_adds_to_selection,
