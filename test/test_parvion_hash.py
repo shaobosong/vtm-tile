@@ -297,6 +297,39 @@ def test_checksums_row_selection():
         return True
 
 
+def test_checksums_arrow_key_selection():
+    """Checksums inherits shared-table keyboard navigation: Up/Down moves the single selected row."""
+    with ParvionSession(DEMO_ENV) as s:
+        chars = _open_checksums_tab(s)
+        report = find_text(chars, "report.pdf")
+        notes = find_text(chars, "notes.txt")
+        if not report or not notes:
+            print("FAIL test_checksums_arrow_key_selection: rows not found"); return False
+        bg0 = s.screen()[1]
+        report_before, notes_before = bg0[report[0]][report[1]], bg0[notes[0]][notes[1]]
+        s.click(report[1] + 1, report[0] + 1)
+        bg1 = s.screen()[1]
+        selected_bg = bg1[report[0]][report[1]]
+        if selected_bg is None or selected_bg == report_before:
+            print("FAIL test_checksums_arrow_key_selection: initial row not selected"); return False
+
+        s.write("\x1b[B")  # Down Arrow -> notes.txt
+        bg2 = s.screen()[1]
+        if bg2[notes[0]][notes[1]] != selected_bg:
+            print("FAIL test_checksums_arrow_key_selection: Down Arrow did not select next row"); return False
+        if bg2[report[0]][report[1]] == selected_bg:
+            print("FAIL test_checksums_arrow_key_selection: Down Arrow left previous row selected"); return False
+
+        s.write("\x1b[A")  # Up Arrow -> report.pdf
+        bg3 = s.screen()[1]
+        if bg3[report[0]][report[1]] != selected_bg:
+            print("FAIL test_checksums_arrow_key_selection: Up Arrow did not select previous row"); return False
+        if bg3[notes[0]][notes[1]] != notes_before:
+            print("FAIL test_checksums_arrow_key_selection: Up Arrow left next row selected"); return False
+        print("OK test_checksums_arrow_key_selection")
+        return True
+
+
 def test_checksums_sort_cycle_is_typed_and_stable():
     """Checksum headers expose the shared sort UI; Size uses raw bytes, default restores source
     order, and equal Algorithm values retain their original relative order."""
@@ -429,6 +462,7 @@ TESTS = [
     test_no_checksum_on_folder,
     test_checksums_column_resize,
     test_checksums_row_selection,
+    test_checksums_arrow_key_selection,
     test_checksums_sort_cycle_is_typed_and_stable,
     test_hash_settings_single_dropdown,
 ]

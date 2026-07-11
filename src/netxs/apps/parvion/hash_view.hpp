@@ -206,6 +206,7 @@ namespace netxs::app::parvion
         cfg.follow     = []{ return -1; }; // Tail-follow: pin to the bottom.
         cfg.empty_text = []{ return text{ "(no checksums)" }; };
         cfg.on_key     = [ctrl, window_wp](hids& gear, netxs::wptr<ui::base> self){ return clear_finished_on_key(gear, ctrl, window_wp, self); };
+        cfg.arrow_nav = true;
         cfg.wide_hit   = true; // A click anywhere on a row selects it (flat list).
         return make_tab_page(make_table(std::move(cfg)), std::move(title));
     }

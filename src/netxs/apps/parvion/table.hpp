@@ -269,7 +269,7 @@ namespace netxs::app::parvion
         std::function<text()>                            empty_text;  // Message shown when rows()==0 (null => none).
         std::function<bool(hids&, netxs::wptr<ui::base>)> on_key;     // App keys (Delete clear-finished); null => none.
         bool                                             wide_hit = faux;  // Row hit-box spans full body width (else content width).
-        bool                                             arrow_nav = faux; // Single-select arrow-key navigation.
+        bool                                             arrow_nav = true; // Single-select arrow-key navigation for selectable tables.
         bool                                             focus_on_start = faux; // Construct with initial focus (modal picker lists).
         table_palette                                    palette{};         // Complete table paint palette.
     };
