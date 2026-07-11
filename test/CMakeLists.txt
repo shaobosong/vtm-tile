@@ -41,6 +41,13 @@ add_executable(parvion_pin_top_test "parvion_pin_top_test.cpp")
 target_include_directories(parvion_pin_top_test PRIVATE "${CMAKE_SOURCE_DIR}/src")
 add_test(NAME parvion_pin_top_test COMMAND parvion_pin_top_test)
 
+# Unit test for Parvion table horizontal clipping.
+add_executable(parvion_table_clip_test "parvion_table_clip_test.cpp")
+target_include_directories(parvion_table_clip_test PRIVATE "${CMAKE_SOURCE_DIR}/src"
+                                                           ${LUA_INCLUDE_DIR})
+target_link_libraries(parvion_table_clip_test PRIVATE Lua::Lua)
+add_test(NAME parvion_table_clip_test COMMAND parvion_table_clip_test)
+
 # Unit test for the Parvion message logger (FileZilla-style detailed queueing).
 add_executable(parvion_logging_test "parvion_logging_test.cpp")
 target_include_directories(parvion_logging_test PRIVATE "${CMAKE_SOURCE_DIR}/src")

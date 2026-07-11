@@ -137,14 +137,34 @@ namespace netxs::app::parvion
                 canvas.fill(rect{{ bx, top }, { 1, bottom - top }}, [&](cell& c){ c.fgc(fg).txt("\xE2\x94\x82"); }); // │
             }
         }
-        // Paint text into the cell [x, x+w) at row y, shifted left by `hscroll`, right-clipped to
-        // `disp_w`; wider content is tail-ellipsized (fit_ellipsis). The shared cell primitive.
+        // Paint text into the cell [x, x+w) at row y, shifted left by `hscroll`, clipped to
+        // [0, disp_w); wider content is tail-ellipsized (fit_ellipsis). The shared cell primitive.
         static void paint_at(auto& canvas, si32 x, si32 w, si32 y, view s, ui32 fg, ui32 bg, si32 hscroll, si32 disp_w)
         {
-            auto sx   = x - hscroll;
-            auto room = std::min(w, disp_w - sx);
-            if (room <= 0 || sx >= disp_w) return;
-            put_str(canvas, sx, y, fit_ellipsis(s, w), fg, bg, room);
+            auto sx = x - hscroll;
+            if (w <= 0 || disp_w <= 0 || sx >= disp_w || sx + w <= 0) return;
+
+            auto text = fit_ellipsis(s, w);
+            auto cut  = std::max(0, -sx);
+            auto used = si32{};
+            auto from = size_t{};
+            if (cut)
+            {
+                utf::decode_clusters(text, [&](view cl)
+                {
+                    auto cw = gc_cells(utf::cluster(cl));
+                    if (used >= cut) return faux;
+                    used += cw;
+                    from += cl.size();
+                    return true;
+                });
+                if (used < cut) return;
+            }
+
+            auto dx   = sx + used;
+            auto room = std::min(w - used, disp_w - dx);
+            if (room <= 0 || dx >= disp_w) return;
+            put_str(canvas, dx, y, view{ text }.substr(from), fg, bg, room);
         }
     };
 
