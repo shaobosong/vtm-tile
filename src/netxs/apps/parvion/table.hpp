@@ -181,7 +181,7 @@ namespace netxs::app::parvion
         bool                  focused = faux;
 
         si32 scroll = 0, hscroll = 0;
-        bool follow = true;
+        bool live_follow = faux;
         bool sb_hover = faux,  sb_drag = faux;  si32 sb_grab = 0;
         bool hsb_hover = faux, hsb_drag = faux; si32 hsb_grab = 0;
         si32 hover_border = -1, col_drag = -1;
@@ -212,6 +212,23 @@ namespace netxs::app::parvion
     struct gutterval { text arrow; ui32 arrow_fg = 0; si32 expand_id = -1; expand_kind expand = xp_none; };
     // One cell's rendered content.
     struct cellval { text s; ui32 fg = 0; };
+
+    // Persistent live-update target. Unlike a one-shot reveal, this target is reapplied on every
+    // render while live following is enabled.
+    struct table_follow_target
+    {
+        enum kind { tail, source_row } mode = tail;
+        si32 row = -1;
+    };
+
+    // Result of a caller-owned key handler. A row reveal is a one-shot viewport operation and can
+    // independently request that the horizontal viewport return to its origin.
+    struct table_viewport_action
+    {
+        enum kind { unhandled, handled, reveal_row } mode = unhandled;
+        si32 row = -1;
+        bool reset_horizontal = faux;
+    };
 
     // Standard gutter geometry (arrow then expand button), used when a table has a tree gutter.
     static constexpr auto g_arrow_x  = si32{ 1 };
@@ -271,7 +288,7 @@ namespace netxs::app::parvion
         std::function<void(si32 expand_id)>              toggle;      // Toggle a row's expansion.
         std::function<qsel_cfg()>                        selection;   // null => not selectable.
         std::function<qmenu_cfg(netxs::wptr<ui::base>)>  menu;        // Item/blank menus (null => none; header menu still shows).
-        std::function<si32()>                            follow;      // -1 => pin to bottom; >=0 => keep that display row visible.
+        std::function<table_follow_target()>             follow;      // Persistent live-update target (null => no live following).
         std::function<ui64()>                            revision;    // Change token: reset vertical/horizontal viewport when it changes.
         std::function<si32(si32 source_row)>             sort_group;  // Fixed ascending group rank; direction only reverses within a group.
         std::function<si32(si32, si32, si32)>            compare;     // Source rows a/b + column key -> negative/equal/positive.
@@ -279,7 +296,7 @@ namespace netxs::app::parvion
         table_delete_cfg                                 deletion;    // Opt-in Delete-key selected-row removal.
         std::function<void(si32 key)>                    on_col_grab; // A column-border drag begins (null => none).
         std::function<text()>                            empty_text;  // Message shown when rows()==0 (null => none).
-        std::function<bool(hids&, netxs::wptr<ui::base>)> on_key;     // App keys; null => none.
+        std::function<table_viewport_action(hids&, netxs::wptr<ui::base>)> on_key; // App key + optional one-shot viewport action.
         bool                                             wide_hit = faux;  // Row hit-box spans full body width (else content width).
         bool                                             arrow_nav = true; // Single-select arrow-key navigation for selectable tables.
         bool                                             focus_on_start = faux; // Construct with initial focus (modal picker lists).
@@ -511,7 +528,7 @@ namespace netxs::app::parvion
         next = std::clamp(next, 0, maxv);
         if (next == st.scroll) return faux;
         st.scroll = next;
-        st.follow = faux;
+        st.live_follow = faux;
         q_rubber_pull(st, s, q_rubber_row_at_drag(st));
         return true;
     }
@@ -582,7 +599,7 @@ namespace netxs::app::parvion
             {
                 st.revision = revision;
                 st.scroll = st.hscroll = 0;
-                st.follow = true;
+                st.live_follow = faux;
             }
         }
 
@@ -592,11 +609,15 @@ namespace netxs::app::parvion
         tbl_layout(st, w, h, nrows, t.content_w(), /*body_top=*/1);
 
         auto maxscroll = std::max(0, st.total - st.body_rows);
-        if (st.follow && cfg.follow)
+        if (st.live_follow && cfg.follow)
         {
-            auto source = cfg.follow();
-            auto f = source >= 0 ? q_visual_row(st, source) : -1;
-            st.scroll = f >= 0 ? std::clamp(f - st.body_rows + 1, 0, maxscroll) : maxscroll;
+            auto target = cfg.follow();
+            if (target.mode == table_follow_target::tail) st.scroll = maxscroll;
+            else
+            {
+                auto f = q_visual_row(st, target.row);
+                if (f >= 0) st.scroll = std::clamp(f - st.body_rows + 1, 0, maxscroll);
+            }
         }
         tbl_clamp(st);
 
@@ -675,6 +696,7 @@ namespace netxs::app::parvion
             auto& cfg = boss.base::field(table_cfg{ cfgv });
             st.ctrl      = cfgv.ctrl;      // Threaded from the view; drives the widget's readiness guards.
             st.window_wp = cfgv.window_wp;
+            st.live_follow = !!cfgv.follow;
             boss.LISTEN(tier::release, e2::render::any, parent_canvas)
             {
                 table_render(st, cfg, parent_canvas, boss.base::size());
@@ -755,7 +777,7 @@ namespace netxs::app::parvion
                             else if (st.sort_dir == table_state::sort_descending) { st.sort_dir = table_state::sort_default; st.sort_key = -1; }
                             else                                                 st.sort_dir = table_state::sort_ascending;
                             st.scroll = 0;
-                            st.follow = faux;
+                            st.live_follow = faux;
                             st.press_header = -1;
                             boss.base::deface();
                             gear.dismiss();
@@ -768,7 +790,7 @@ namespace netxs::app::parvion
                     auto page = std::max(1, st.body_rows);
                     if (my < sb.thumb_y)                    st.scroll = std::clamp(st.scroll - page, 0, sb.maxscroll);
                     else if (my >= sb.thumb_y + sb.thumb_h) st.scroll = std::clamp(st.scroll + page, 0, sb.maxscroll);
-                    st.follow = st.scroll == sb.maxscroll; boss.base::deface(); gear.dismiss(); return;
+                    st.live_follow = !!cfg.follow && st.scroll == sb.maxscroll; boss.base::deface(); gear.dismiss(); return;
                 }
                 if (auto sb = tbl_hsb(st); sb.ok && my == sb.top && mx >= sb.x && mx < sb.x + sb.track_h)
                 {
@@ -833,7 +855,7 @@ namespace netxs::app::parvion
             boss.on(tier::mouserelease, input::key::MouseWheel, [&](hids& gear)
             {
                 if (gear.hzwhl || st.hsb_hover) { auto maxh = std::max(0, st.content_w - st.disp_w); st.hscroll = std::clamp(st.hscroll - gear.whlsi * 4, 0, maxh); }
-                else { auto maxv = std::max(0, st.total - st.body_rows); st.scroll = std::clamp(st.scroll - gear.whlsi, 0, maxv); st.follow = st.scroll == maxv; }
+                else { auto maxv = std::max(0, st.total - st.body_rows); st.scroll = std::clamp(st.scroll - gear.whlsi, 0, maxv); st.live_follow = !!cfg.follow && st.scroll == maxv; }
                 boss.base::deface();
             });
             boss.base::signal(tier::release, e2::form::draggable::_<hids::buttons::left>, true);
@@ -846,7 +868,7 @@ namespace netxs::app::parvion
                     if (py >= sb.thumb_y && py < sb.thumb_y + sb.thumb_h) st.sb_grab = py - sb.thumb_y;
                     else { st.sb_grab = sb.thumb_h / 2; tbl_vsb_to(st, py, sb); }
                     st.sb_drag = st.sb_hover = true; st.drag = table_state::d_vsb;
-                    st.follow = st.scroll == std::max(0, st.total - st.body_rows); boss.base::deface(); return;
+                    st.live_follow = !!cfg.follow && st.scroll == std::max(0, st.total - st.body_rows); boss.base::deface(); return;
                 }
                 if (auto sb = tbl_hsb(st); sb.ok && py == sb.top && px >= sb.x && px < sb.x + sb.track_h)
                 {
@@ -872,7 +894,7 @@ namespace netxs::app::parvion
                 {
                     pro::focus::set(boss.This(), gear.id, solo::on);
                     st.drag_y = py;
-                    st.follow = faux;
+                    st.live_follow = faux;
                     q_rubber_begin(st, q_ordered_sel(st, cfg.selection()), st.scroll + (py - st.body_top), !!(gear.ctlstat & hids::anyCtrl));
                     boss.base::deface(); return;
                 }
@@ -882,7 +904,7 @@ namespace netxs::app::parvion
                 auto mx = (si32)gear.coord.x, my = (si32)gear.coord.y;
                 switch (st.drag)
                 {
-                    case table_state::d_vsb: tbl_vsb_to(st, my, tbl_vsb(st)); st.follow = st.scroll == std::max(0, st.total - st.body_rows); boss.base::deface(); break;
+                    case table_state::d_vsb: tbl_vsb_to(st, my, tbl_vsb(st)); st.live_follow = !!cfg.follow && st.scroll == std::max(0, st.total - st.body_rows); boss.base::deface(); break;
                     case table_state::d_hsb: tbl_hsb_to(st, mx, tbl_hsb(st)); boss.base::deface(); break;
                     case table_state::d_col:
                     {
@@ -978,7 +1000,31 @@ namespace netxs::app::parvion
                         return;
                     }
                 }
-                if (cfg.on_key && cfg.on_key(gear, ptr::shadow(boss.This()))) return;
+                if (cfg.on_key)
+                {
+                    auto action = cfg.on_key(gear, ptr::shadow(boss.This()));
+                    if (action.mode != table_viewport_action::unhandled)
+                    {
+                        gear.set_handled();
+                        if (action.mode == table_viewport_action::reveal_row)
+                        {
+                            auto row = q_visual_row(st, action.row);
+                            auto maxv = std::max(0, st.total - st.body_rows);
+                            if      (row >= 0 && row < st.scroll)                 st.scroll = row;
+                            else if (row >= 0 && row >= st.scroll + st.body_rows) st.scroll = row - st.body_rows + 1;
+                            st.scroll = std::clamp(st.scroll, 0, maxv);
+                            if (action.reset_horizontal) st.hscroll = 0;
+                            if (cfg.selection)
+                            {
+                                auto key = cfg.selection().key_of_row(action.row);
+                                if (key >= 0) st.sel_anchor = key;
+                            }
+                            st.live_follow = faux;
+                            boss.base::deface();
+                        }
+                        return;
+                    }
+                }
                 if (k == input::key::KeyEnter && cfg.activate && cfg.selection)
                 {
                     auto s = cfg.selection();
@@ -1004,7 +1050,7 @@ namespace netxs::app::parvion
                 auto s = q_ordered_sel(st, cfg.selection());
                 auto n = cfg.rows ? cfg.rows() : 0;
                 auto maxv = std::max(0, st.total - st.body_rows);
-                auto page = std::max(1, st.body_rows - 1);
+                auto page = std::max(1, st.body_rows);
                 auto sels = std::vector<si32>{}; // Ordered selectable display rows.
                 for (auto i = si32{}; i < n; ++i) if (s.key_of_row(i) >= 0) sels.push_back(i);
                 auto select_at = [&](si32 p)
@@ -1015,18 +1061,46 @@ namespace netxs::app::parvion
                     s.clear(); s.set_sel(key, true); st.sel_anchor = key;
                     if      (dr < st.scroll)                 st.scroll = dr;
                     else if (dr >= st.scroll + st.body_rows) st.scroll = dr - st.body_rows + 1;
-                    st.scroll = std::clamp(st.scroll, 0, maxv); st.follow = st.scroll == maxv;
+                    st.scroll = std::clamp(st.scroll, 0, maxv); st.live_follow = !!cfg.follow && st.scroll == maxv;
                 };
                 auto cur = si32{ -1 };
                 for (auto p = si32{}; p < (si32)sels.size(); ++p) if (s.key_of_row(sels[(size_t)p]) == st.sel_anchor) { cur = p; break; }
                 if (cur < 0) for (auto p = si32{}; p < (si32)sels.size(); ++p) if (s.is_sel(s.key_of_row(sels[(size_t)p]))) { cur = p; break; }
+                auto select_visual = [&](si32 visual, si32 dir)
+                {
+                    if (sels.empty()) return;
+                    auto upper = std::lower_bound(sels.begin(), sels.end(), visual);
+                    if (upper == sels.begin()) { select_at(0); return; }
+                    if (upper == sels.end())   { select_at((si32)sels.size() - 1); return; }
+                    auto hi = (si32)(upper - sels.begin()), lo = hi - 1;
+                    auto dlo = visual - sels[(size_t)lo], dhi = sels[(size_t)hi] - visual;
+                    select_at(dlo < dhi || (dlo == dhi && dir < 0) ? lo : hi);
+                };
+                auto page_selection = [&](si32 dir)
+                {
+                    if (sels.empty()) return;
+                    auto maxoff = std::max(0, st.total - st.body_rows);
+                    auto currow = cur >= 0 ? sels[(size_t)cur] : dir < 0 ? sels.back() : sels.front();
+                    auto rel = std::clamp(currow - st.scroll, 0, std::max(0, st.body_rows - 1));
+                    if (dir < 0)
+                    {
+                        if (st.scroll == 0) { select_at(0); return; }
+                        st.scroll = std::max(0, st.scroll - page);
+                    }
+                    else
+                    {
+                        if (st.scroll >= maxoff) { select_at((si32)sels.size() - 1); return; }
+                        st.scroll = std::min(maxoff, st.scroll + page);
+                    }
+                    select_visual(st.scroll + rel, dir);
+                };
                 auto act = true;
-                     if (k == input::key::KeyUpArrow)    select_at(cur < 0 ? (si32)sels.size() - 1 : cur - 1);
-                else if (k == input::key::KeyDownArrow)  select_at(cur < 0 ? 0 : cur + 1);
-                else if (k == input::key::KeyHome)     { st.scroll = 0;    st.follow = maxv == 0; }
-                else if (k == input::key::KeyEnd)      { st.scroll = maxv; st.follow = true; }
-                else if (k == input::key::KeyPageUp)   { st.scroll = std::clamp(st.scroll - page, 0, maxv); st.follow = st.scroll == maxv; }
-                else if (k == input::key::KeyPageDown) { st.scroll = std::clamp(st.scroll + page, 0, maxv); st.follow = st.scroll == maxv; }
+                     if (k == input::key::KeyUpArrow   || k == input::key::NumpadUpArrow)   select_at(cur < 0 ? (si32)sels.size() - 1 : cur - 1);
+                else if (k == input::key::KeyDownArrow || k == input::key::NumpadDownArrow) select_at(cur < 0 ? 0 : cur + 1);
+                else if (k == input::key::KeyHome      || k == input::key::NumpadHome)     { st.scroll = 0;    select_at(0); }
+                else if (k == input::key::KeyEnd       || k == input::key::NumpadEnd)      { st.scroll = maxv; select_at((si32)sels.size() - 1); }
+                else if (k == input::key::KeyPageUp    || k == input::key::NumpadPageUp)     page_selection(-1);
+                else if (k == input::key::KeyPageDown  || k == input::key::NumpadPageDown)   page_selection(+1);
                 else if (k == input::key::Esc)         { s.clear(); st.sel_anchor = -1; }
                 else act = false;
                 if (act) { gear.set_handled(); boss.base::deface(); }

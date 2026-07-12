@@ -82,9 +82,12 @@ namespace netxs::app::parvion
         sftp_remote*          ctrl = nullptr;   // SFTP controller (both panes) for enqueueing transfers.
         netxs::wptr<ui::base> window_wp;        // App top-level window cake: anchor for confirm dialogs.
         netxs::wptr<ui::base> table_wp;         // Shared table widget (picker focus hand-off after overlay attach).
-        ui64                  seen_gen = ~0ull; // Last remote listing generation seen (selection reset).
+        ui64                  seen_gen = ~0ull; // Last remote listing generation reconciled into selection state.
         ui64                  seen_local_gen = 0; // Last local refresh generation seen (post-download re-list); matches ctrl->local_gen's initial 0.
         ui64                  revision = 0;    // Navigation generation consumed by table_cfg::revision.
+        text                  seen_path;       // Remote path associated with seen_gen (same-path refresh preserves viewport).
+        bool                  delete_pending = faux; // Next same-directory refresh settles selection beside deleted rows.
+        si32                  delete_anchor = 0;     // First deleted logical row; replacement selection keeps this position.
         // File-picker mode (Settings dialog's "Add key file..."): when set, activating a FILE
         // (double-click / Enter / Open button) invokes this with the file's full path instead of
         // enqueueing a transfer; directory navigation is unchanged. Lets the picker reuse the whole
@@ -331,6 +334,12 @@ namespace netxs::app::parvion
         auto items = std::vector<direntry>{};
         if (st.lister(st.path, items, st.error)) st.items = std::move(items);
         pane_clamp(st); // Keep sel/scroll valid against the (possibly larger) listing.
+        if (st.delete_pending)
+        {
+            st.sel = std::clamp(st.delete_anchor, 0, std::max(0, st.total() - 1));
+            st.marked = { st.sel };
+            st.delete_pending = faux;
+        }
     }
     inline void pane_goparent(pane_state& st)
     {
@@ -546,6 +555,10 @@ namespace netxs::app::parvion
             if (row > 0 && row - 1 < (si32)its.size())
                 victims.emplace_back(its[(size_t)(row - 1)].name, its[(size_t)(row - 1)].is_dir);
         if (victims.empty()) return;
+        st.delete_anchor = st.total();
+        for (auto row : st.marked) if (row > 0) st.delete_anchor = std::min(st.delete_anchor, row);
+        if (st.delete_anchor >= st.total()) st.delete_anchor = st.sel;
+        st.delete_pending = true;
         if (st.remote)
         {
             // Remote: folders recurse (plain rmdir can't), files go through the same recop engine so a
@@ -555,7 +568,6 @@ namespace netxs::app::parvion
                 else     st.remote->delete_remote_file(nm);
             return;
         }
-        st.marked = { 0 }; st.sel = 0;
         if (st.ctrl)
         {
             // Local: hand the paths to the controller's detached worker (a big subtree must not
@@ -724,8 +736,21 @@ namespace netxs::app::parvion
         if (st.remote && st.remote->gen != st.seen_gen)
         {
             st.seen_gen = st.remote->gen;
-            st.sel = 0;
-            st.marked = { 0 };
+            auto path_changed = st.seen_path != st.remote->path;
+            st.seen_path = st.remote->path;
+            if (path_changed)
+            {
+                st.sel = 0;
+                st.marked = { 0 };
+                st.delete_pending = faux;
+                ++st.revision;
+            }
+            else if (st.delete_pending)
+            {
+                st.sel = std::clamp(st.delete_anchor, 0, std::max(0, st.total() - 1));
+                st.marked = { st.sel };
+                st.delete_pending = faux;
+            }
         }
         pane_clamp(st);
     }
@@ -845,12 +870,12 @@ namespace netxs::app::parvion
         return menu;
     }
 
-    inline auto pane_table_key(std::shared_ptr<pane_state> const& state, hids& gear, netxs::wptr<ui::base> self) -> bool
+    inline auto pane_table_key(std::shared_ptr<pane_state> const& state, hids& gear, netxs::wptr<ui::base> self) -> table_viewport_action
     {
         auto& st = *state;
         if (gear.payload != input::keybd::type::keypress
          || gear.keystat == input::key::released
-         || gear.keystat == input::key::interrupted) return faux;
+         || gear.keystat == input::key::interrupted) return {};
         auto k = gear.keybd::generic();
         if (st.input_mode)
         {
@@ -876,20 +901,20 @@ namespace netxs::app::parvion
             }
             gear.set_handled();
             if (auto p = self.lock()) p->base::deface();
-            return true;
+            return { table_viewport_action::handled };
         }
         if (k == input::key::Esc && st.on_cancel)
         {
             auto cb = st.on_cancel;
             gear.set_handled();
             cb(); // Deferred by the picker: do not touch st/self afterwards.
-            return true;
+            return { table_viewport_action::handled };
         }
-        auto act = faux;
+        auto action = table_viewport_action{};
         if (k == input::key::Backspace)
         {
             pane_goparent(st);
-            act = true;
+            action.mode = table_viewport_action::handled;
         }
         else
         {
@@ -900,14 +925,13 @@ namespace netxs::app::parvion
                 pane_clamp(st);
                 st.marked = { st.sel };
                 pane_fire_select(st);
-                ++st.revision; // Bring a type-ahead jump back into view via table_cfg::revision.
-                act = true;
+                action = { table_viewport_action::reveal_row, st.sel, true };
             }
         }
-        if (!act) return faux; // Shared-table navigation / Enter activation handles the rest.
+        if (action.mode == table_viewport_action::unhandled) return {}; // Shared-table navigation / Enter activation handles the rest.
         gear.set_handled();
         if (auto p = self.lock()) p->base::deface();
-        return true;
+        return action;
     }
 
     inline void pane_title_render(pane_state& st, auto& canvas, twod size)
@@ -1052,6 +1076,7 @@ namespace netxs::app::parvion
         state->ctrl = ctrl;
         state->window_wp = window_wp;
         state->path = initial_path;
+        state->seen_path = remote ? remote->path : initial_path;
         if (!remote) pane_relist(*state, initial_path);
         if (out_state) *out_state = state.get();
 
@@ -1085,7 +1110,7 @@ namespace netxs::app::parvion
             state->marked = { row };
             pane_activate(*state);
         };
-        cfg.revision = [state]{ return state->remote ? state->remote->gen : state->revision; };
+        cfg.revision = [state]{ pane_sync(*state); return state->revision; };
         cfg.sort_group = [state](si32 row){ return pane_sort_group(*state, row); };
         cfg.compare = [state](si32 a, si32 b, si32 key){ return pane_compare(*state, a, b, key); };
         cfg.arrow_nav = true;

@@ -317,7 +317,14 @@ namespace netxs::app::parvion
             mc.on_blank_rclick = [ctrl, deface]{ auto any = faux; for (auto& it : ctrl->queue) { any |= it.selected; it.selected = faux; } if (any) deface(); };
             return mc;
         };
-        cfg.follow      = [ctrl, status]{ auto rows = xfer_rows(ctrl, status); for (auto i = si32{}; i < (si32)rows.size(); ++i) if (rows[(size_t)i].child == -1 && rows[(size_t)i].qi == ctrl->active) return i; return -1; };
+        cfg.follow      = [ctrl, status]
+        {
+            auto rows = xfer_rows(ctrl, status);
+            for (auto i = si32{}; i < (si32)rows.size(); ++i)
+                if (rows[(size_t)i].child == -1 && rows[(size_t)i].qi == ctrl->active)
+                    return table_follow_target{ table_follow_target::source_row, i };
+            return table_follow_target{ table_follow_target::tail };
+        };
         cfg.on_col_grab = [status, cols](si32 key){ if (key == q_ncol && cols->reason_w_override == 0) cols->reason_w_override = xfer_reason_w(*cols, status); };
         cfg.empty_text  = []{ return text{ "(no transfers — press Enter on a file to queue one)" }; };
         cfg.deletion.enabled = true;

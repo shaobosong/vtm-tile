@@ -621,6 +621,52 @@ def test_delete_key_item():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_delete_preserves_viewport_and_navigation_selection():
+    """A deletion refresh keeps the viewport and selects the adjacent surviving row coherently."""
+    print("TEST: parvion pane - Delete preserves viewport/navigation selection ... ", end="", flush=True)
+    d = tempfile.mkdtemp(prefix="parvionpane_delete_view_")
+    try:
+        for i in range(48):
+            open(os.path.join(d, f"row_{i:02d}.txt"), "w").close()
+        with ParvionSession(d) as s:
+            parent = find_text(s.screen()[0], "/..")
+            if parent is None:
+                print("FAIL - parent row not found")
+                return False
+            s.click(parent[1] + 1, parent[0] + 1)
+            s.write("\x1b[B" * 41, settle=1.0)  # Select row_40 and scroll it into view.
+            victim = find_text(s.screen()[0], "row_40.txt")
+            if victim is None:
+                print("FAIL - deletion target not visible")
+                return False
+            selected_bg = s.screen()[1][victim[0]][victim[1]]
+            s.write("\x1b[3~", settle=0.4)
+            if not grid_contains(s.screen()[0], "Delete 'row_40.txt'?"):
+                print("FAIL - delete confirmation not shown")
+                return False
+            s.write("\r", settle=1.2)
+            chars, bg = s.screen()
+            if find_text(chars, "row_40.txt") is not None:
+                print("FAIL - deleted item remains visible")
+                return False
+            adjacent = find_text(chars, "row_41.txt")
+            if adjacent is None or bg[adjacent[0]][adjacent[1]] != selected_bg:
+                print("FAIL - refresh did not select the adjacent surviving row")
+                return False
+            if find_text(chars, "/..") is not None:
+                print("FAIL - deletion refresh reset the viewport to the top")
+                return False
+            s.write("\x1b[B")
+            following = find_text(s.screen()[0], "row_42.txt")
+            if following is None or s.screen()[1][following[0]][following[1]] != selected_bg:
+                print("FAIL - arrow navigation did not continue from the visible selection")
+                return False
+            print("PASS")
+            return True
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_rename_item():
     """Item menu -> Rename -> edit -> Enter renames the file on disk."""
     print("TEST: parvion pane - Rename ... ", end="", flush=True)
@@ -827,6 +873,172 @@ def test_shared_table_keyboard_navigation_scrolls_to_last_row():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_typeahead_and_navigation_share_selection_cursor():
+    """Arrow navigation continues from the item selected by ASCII type-ahead."""
+    print("TEST: parvion pane - type-ahead and arrows share selection cursor ... ", end="", flush=True)
+    d = tempfile.mkdtemp(prefix="parvionpane_keycursor_")
+    try:
+        for name in ("alpha.txt", "beta.txt", "charlie.txt", "delta.txt"):
+            open(os.path.join(d, name), "w").close()
+        with ParvionSession(d) as s:
+            alpha = find_text(s.screen()[0], "alpha.txt")
+            if alpha is None:
+                print("FAIL - alpha row not found")
+                return False
+            s.click(alpha[1] + 1, alpha[0] + 1)
+            selected_bg = s.screen()[1][alpha[0]][alpha[1]]
+            s.write("c")
+            charlie = find_text(s.screen()[0], "charlie.txt")
+            if charlie is None or s.screen()[1][charlie[0]][charlie[1]] != selected_bg:
+                print("FAIL - type-ahead did not select charlie")
+                return False
+            s.write("\x1b[B")
+            delta = find_text(s.screen()[0], "delta.txt")
+            if delta is None or s.screen()[1][delta[0]][delta[1]] != selected_bg:
+                print("FAIL - Down continued from the pre-type-ahead cursor")
+                return False
+            print("PASS")
+            return True
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_page_home_end_keys_navigate_and_select():
+    """Paging preserves the selection's viewport row; Home/End select the boundaries."""
+    print("TEST: parvion pane - Page/Home/End navigate and select ... ", end="", flush=True)
+    d = tempfile.mkdtemp(prefix="parvionpane_pagekeys_")
+    try:
+        for i in range(48):
+            open(os.path.join(d, f"row_{i:02d}.txt"), "w").close()
+        with ParvionSession(d) as s:
+            start = find_text(s.screen()[0], "row_02.txt")
+            if start is None:
+                print("FAIL - starting row not found")
+                return False
+            s.click(start[1] + 1, start[0] + 1)
+            selected_bg = s.screen()[1][start[0]][start[1]]
+            s.write("\x1b[6~")  # PageDown: move viewport and selection together.
+            if find_text(s.screen()[0], "row_02.txt") is not None:
+                print("FAIL - PageDown did not advance the viewport")
+                return False
+            s.write("\x1b[5~")  # PageUp: preserve the relative row and return to row_02.
+            start = find_text(s.screen()[0], "row_02.txt")
+            if start is None or s.screen()[1][start[0]][start[1]] != selected_bg:
+                print("FAIL - PageUp did not restore the relative selected row")
+                return False
+            s.write("\x1b[5~")  # Already at top: snap selection to the first item.
+            parent = find_text(s.screen()[0], "/..")
+            if parent is None or s.screen()[1][parent[0]][parent[1]] != selected_bg:
+                print("FAIL - PageUp at the top did not select the first item")
+                return False
+            s.write("\x1b[F")   # End selects and reveals the final item.
+            last = find_text(s.screen()[0], "row_47.txt")
+            if last is None or s.screen()[1][last[0]][last[1]] != selected_bg:
+                print("FAIL - End did not select the final item")
+                return False
+            s.write("\x1b[H")   # Home selects and reveals the first item.
+            parent = find_text(s.screen()[0], "/..")
+            if parent is None or s.screen()[1][parent[0]][parent[1]] != selected_bg:
+                print("FAIL - Home did not select the first item")
+                return False
+            print("PASS")
+            return True
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_typeahead_scrolls_selection_into_view_and_resets_horizontal_scroll():
+    """An ASCII name jump reveals its row and returns the table to the Name column."""
+    print("TEST: parvion pane - type-ahead follows selection and resets horizontal scroll ... ", end="", flush=True)
+    d = tempfile.mkdtemp(prefix="parvionpane_typeahead_")
+    try:
+        long_stem = "a" * 90
+        for i in range(48):
+            open(os.path.join(d, f"{long_stem}_{i:02d}.txt"), "w").close()
+        target = "z_typeahead_target.txt"
+        open(os.path.join(d, target), "w").close()
+        with ParvionSession(d) as s:
+            chars = s.screen()[0]
+            name = table_header_field(chars, "Name")
+            if name is None:
+                print("FAIL - Name header not found")
+                return False
+            header_row, _, _, name_right, _, _ = name
+            if chars[header_row][name_right] != "│":
+                print("FAIL - Name divider not found")
+                return False
+
+            # Auto-fit the long Name column, then page its horizontal rail to the right.
+            s.double_click(name_right + 1, header_row + 1)
+            chars = s.screen()[0]
+            hbars = []
+            for r in range(header_row + 1, ROWS):
+                cols = [c for c, ch in enumerate(chars[r]) if ch in ("▂", "▄")]
+                if cols and min(cols) < COLS // 2:
+                    hbars.append((len(cols), r, min(cols), max(cols)))
+            if not hbars:
+                print("FAIL - auto-fit did not create the local pane horizontal scrollbar")
+                return False
+            _, hrow, _, hright = max(hbars)
+            s.click(hright + 1, hrow + 1)
+            if "Name" in row_text(s.screen()[0], header_row)[:COLS // 2]:
+                print("FAIL - horizontal scrollbar did not move away from the Name column")
+                return False
+
+            s.write("z", settle=0.8)
+            chars, bg = s.screen()
+            pos = find_text(chars, target)
+            if pos is None:
+                print("FAIL - type-ahead did not scroll the target row into view")
+                return False
+            if "Name" not in row_text(chars, header_row)[:COLS // 2]:
+                print("FAIL - type-ahead did not reset horizontal scrolling")
+                return False
+            if bg[pos[0]][pos[1]] is None:
+                print("FAIL - visible type-ahead target is not selected")
+                return False
+            print("PASS")
+            return True
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_vertical_scrollbar_stays_at_last_item():
+    """Dragging the file-list scrollbar to its end must not snap back to the selection."""
+    print("TEST: parvion pane - vertical scrollbar stays at last item ... ", end="", flush=True)
+    d = tempfile.mkdtemp(prefix="parvionpane_vscroll_")
+    try:
+        for i in range(48):
+            open(os.path.join(d, f"row_{i:02d}.txt"), "w").close()
+        with ParvionSession(d) as s:
+            chars = s.screen()[0]
+            tracks = {}
+            for r, row in enumerate(chars):
+                for c, ch in enumerate(row[:COLS // 2]):
+                    if ch in ("▐", "█"):
+                        tracks.setdefault(c, []).append(r)
+            if not tracks:
+                print("FAIL - local pane vertical scrollbar not found")
+                return False
+            col, rows = max(tracks.items(), key=lambda item: len(item[1]))
+            top, bottom = min(rows), max(rows)
+            if bottom <= top:
+                print("FAIL - local pane vertical scrollbar track is too short")
+                return False
+            s.drag_path([(col + 1, top + 1), (col + 1, bottom + 1)], settle=0.8)
+            if not grid_contains(s.screen()[0], "row_47.txt"):
+                print("FAIL - scrollbar snapped away from the last list item")
+                return False
+            s.feed(0.8)
+            if not grid_contains(s.screen()[0], "row_47.txt"):
+                print("FAIL - scrollbar reset to the top after reaching the last list item")
+                return False
+            print("PASS")
+            return True
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_file_activation_preserves_scrolled_viewport():
     """Enter / double-click file activation must not reset the file pane's vertical scroll."""
     print("TEST: parvion pane - file activation preserves scrolled viewport ... ", end="", flush=True)
@@ -878,6 +1090,10 @@ TESTS = [
     test_right_click_activates_pane,
     test_shared_table_keyboard_activation_and_parent,
     test_shared_table_keyboard_navigation_scrolls_to_last_row,
+    test_typeahead_and_navigation_share_selection_cursor,
+    test_page_home_end_keys_navigate_and_select,
+    test_typeahead_scrolls_selection_into_view_and_resets_horizontal_scroll,
+    test_vertical_scrollbar_stays_at_last_item,
     test_file_activation_preserves_scrolled_viewport,
     test_blank_click_does_not_select,
     test_right_click_blank_clears_selection,
@@ -890,6 +1106,7 @@ TESTS = [
     test_delete_item,
     test_delete_cancel,
     test_delete_key_item,
+    test_delete_preserves_viewport_and_navigation_selection,
     test_rename_item,
 ]
 

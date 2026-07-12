@@ -790,15 +790,15 @@ namespace netxs::app::parvion
             {
                 gear.set_handled();
                 sd_close(*stp);
-                return true;
+                return table_viewport_action{ table_viewport_action::handled };
             }
             if (key == input::key::KeyEnter)
             {
                 gear.set_handled();
                 sd_accept(*stp);
-                return true;
+                return table_viewport_action{ table_viewport_action::handled };
             }
-            return faux;
+            return table_viewport_action{};
         };
         cfg.deletion.enabled = true;
         cfg.deletion.remove_selected = [stp](netxs::wptr<ui::base>)

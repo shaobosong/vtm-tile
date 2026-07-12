@@ -232,7 +232,7 @@ namespace netxs::app::parvion
         cfg.compare    = [ctrl](si32 row_a, si32 row_b, si32 key){ return hash_compare(ctrl, row_a, row_b, key); };
         cfg.selection  = [ctrl]{ return hash_sel(ctrl); };
         cfg.menu       = [ctrl, window_wp](netxs::wptr<ui::base> panel_wp){ return hash_menu(ctrl, panel_wp, window_wp); };
-        cfg.follow     = []{ return -1; }; // Tail-follow: pin to the bottom.
+        cfg.follow     = []{ return table_follow_target{ table_follow_target::tail }; };
         cfg.empty_text = []{ return text{ "(no checksums)" }; };
         cfg.deletion.enabled = true;
         cfg.deletion.remove_selected = [ctrl](netxs::wptr<ui::base>)
