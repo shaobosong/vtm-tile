@@ -485,6 +485,34 @@ namespace netxs::app::parvion
         return s;
     }
 
+    // Resolve the one selected row that keyboard actions should operate on.  The table keeps a
+    // navigation cursor so a multi-selection has a movable endpoint, but caller-owned selection can
+    // be replaced independently (directory navigation, refresh, delete settlement, etc.).  A stale
+    // cursor must therefore never outrank what is actually painted as selected.
+    inline auto q_selected_row(qsel_cfg const& s, si32 preferred_key) -> si32
+    {
+        auto fallback = si32{ -1 };
+        for (auto row = si32{}; row < s.disp(); ++row)
+        {
+            auto key = s.key_of_row(row);
+            if (key < 0 || !s.is_sel(key)) continue;
+            if (key == preferred_key) return row;
+            if (fallback < 0) fallback = row;
+        }
+        return fallback;
+    }
+
+    inline void q_reset_selection_state(table_state& st)
+    {
+        st.sel_anchor = st.nav_cursor = -1;
+        st.rubber_a = st.rubber_b = -1;
+        st.drag_y = 0;
+        st.drag_base.clear();
+        st.rubber_ctrl = faux;
+        st.rubber_add = true;
+        st.drag = table_state::d_none;
+    }
+
     // ---- Selection layer ---------------------------------------------------------------------------
     inline auto q_sel_press(table_state& st, qsel_cfg const& s, si32 hit, bool ctl, bool shft) -> bool
     {
@@ -643,6 +671,7 @@ namespace netxs::app::parvion
                 st.revision = revision;
                 st.scroll = st.hscroll = 0;
                 st.live_follow = faux;
+                q_reset_selection_state(st);
             }
         }
 
@@ -1070,19 +1099,12 @@ namespace netxs::app::parvion
                 }
                 if (k == input::key::KeyEnter && cfg.activate && cfg.selection)
                 {
-                    auto s = cfg.selection();
-                    auto n = cfg.rows ? cfg.rows() : 0;
-                    auto source = si32{ -1 };
-                    for (auto row = si32{}; row < n; ++row)
-                        if (s.key_of_row(row) == st.nav_cursor) { source = row; break; }
-                    if (source < 0)
-                        for (auto row = si32{}; row < n; ++row)
-                        {
-                            auto key = s.key_of_row(row);
-                            if (key >= 0 && s.is_sel(key)) { source = row; break; }
-                        }
+                    auto s = q_ordered_sel(st, cfg.selection());
+                    auto visual = q_selected_row(s, st.nav_cursor);
+                    auto source = q_source_row(st, visual);
                     if (source >= 0)
                     {
+                        st.nav_cursor = s.key_of_row(visual);
                         gear.set_handled();
                         boss.base::deface();
                         cfg.activate(source);

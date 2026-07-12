@@ -110,6 +110,46 @@ namespace
         return below.offset == 30 && below.cursor == 39
             && above.offset == 0 && above.cursor == 0;
     }
+
+    auto test_selected_row_rejects_stale_cursor() -> bool
+    {
+        auto selected = std::set<si32>{ 0 };
+        auto order = std::vector<si32>{ 2, 0, 1 };
+        auto s = qsel_cfg{};
+        s.disp = [&]{ return (si32)order.size(); };
+        s.key_of_row = [&](si32 row){ return order[(size_t)row]; };
+        s.is_sel = [&](si32 key){ return selected.count(key) != 0; };
+        // Key 2 was the cursor in the previous listing, but only key 0 is visibly selected now.
+        return q_selected_row(s, 2) == 1;
+    }
+
+    auto test_selected_row_keeps_selected_cursor() -> bool
+    {
+        auto selected = std::set<si32>{ 0, 2 };
+        auto order = std::vector<si32>{ 2, 0, 1 };
+        auto s = qsel_cfg{};
+        s.disp = [&]{ return (si32)order.size(); };
+        s.key_of_row = [&](si32 row){ return order[(size_t)row]; };
+        s.is_sel = [&](si32 key){ return selected.count(key) != 0; };
+        return q_selected_row(s, 0) == 1;
+    }
+
+    auto test_revision_resets_selection_state() -> bool
+    {
+        auto st = table_state{};
+        st.sel_anchor = 4;
+        st.nav_cursor = 5;
+        st.rubber_a = 2;
+        st.rubber_b = 6;
+        st.drag_base = { 2, 3 };
+        st.rubber_ctrl = true;
+        st.drag = table_state::d_rubber;
+        q_reset_selection_state(st);
+        return st.sel_anchor == -1 && st.nav_cursor == -1
+            && st.rubber_a == -1 && st.rubber_b == -1
+            && st.drag_base.empty() && !st.rubber_ctrl
+            && st.drag == table_state::d_none;
+    }
 }
 
 int main()
@@ -124,6 +164,9 @@ int main()
         { "page_navigation_scroll_from_edges", test_page_navigation_scrolls_from_edges },
         { "page_navigation_partial_last_page", test_page_navigation_partial_last_page },
         { "page_navigation_visible_page", test_page_navigation_uses_visible_page },
+        { "selected_row_rejects_stale_cursor", test_selected_row_rejects_stale_cursor },
+        { "selected_row_keeps_selected_cursor", test_selected_row_keeps_selected_cursor },
+        { "revision_resets_selection_state", test_revision_resets_selection_state },
     };
 
     auto failed = 0;

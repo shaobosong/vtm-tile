@@ -841,6 +841,43 @@ def test_shared_table_keyboard_activation_and_parent():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_enter_after_directory_change_activates_visible_parent():
+    """Entering a directory replaces the selection with '..'; immediate Enter must activate that
+    visible row, not the stale table cursor at the directory's former numeric offset."""
+    print("TEST: parvion pane - Enter after directory change activates visible '..' ... ", end="", flush=True)
+    d = make_tree()
+    nested = os.path.join(d, "gamma", "inside_gamma.txt")
+    open(nested, "w").close()
+    try:
+        with ParvionSession(d) as s:
+            folder = find_text(s.screen()[0], "/gamma")
+            if folder is None:
+                print("FAIL - gamma directory not listed")
+                return False
+            s.click(folder[1] + 1, folder[0] + 1)
+            s.write("\r", settle=0.8)
+            parent = find_text(s.screen()[0], "/..")
+            if parent is None or not grid_contains(s.screen()[0], "inside_gamma.txt"):
+                print("FAIL - did not enter gamma")
+                return False
+            selected_bg = s.screen()[1][parent[0]][parent[1]]
+            inside = find_text(s.screen()[0], "inside_gamma.txt")
+            if inside is None or s.screen()[1][inside[0]][inside[1]] == selected_bg:
+                print("FAIL - '..' is not the sole visible selection after navigation")
+                return False
+            s.write("\r", settle=0.8)
+            if not grid_contains(s.screen()[0], "alpha.txt"):
+                print("FAIL - immediate Enter did not return through '..'")
+                return False
+            if grid_contains(s.screen()[0], "inside_gamma.txt"):
+                print("FAIL - remained in gamma after activating visible '..'")
+                return False
+            print("PASS")
+            return True
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_shared_table_keyboard_navigation_scrolls_to_last_row():
     """Repeated Down keeps the keyboard cursor selected and scrolls a long pane to its last row."""
     print("TEST: parvion pane - shared table keyboard navigation scrolls selection ... ", end="", flush=True)
@@ -1218,6 +1255,7 @@ TESTS = [
     test_ctrl_click_keeps_focus,
     test_right_click_activates_pane,
     test_shared_table_keyboard_activation_and_parent,
+    test_enter_after_directory_change_activates_visible_parent,
     test_shared_table_keyboard_navigation_scrolls_to_last_row,
     test_typeahead_and_navigation_share_selection_cursor,
     test_page_home_end_keys_navigate_and_select,
