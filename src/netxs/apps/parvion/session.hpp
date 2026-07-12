@@ -2293,11 +2293,7 @@ namespace netxs::app::parvion
         void hash_remove(ui64 id) { std::erase_if(hash_queue, [&](auto& it){ return it.id == id; }); dirty = true; }
         void hash_remove_selected() { std::erase_if(hash_queue, [](auto& it){ return it.selected; }); dirty = true; }
         auto hash_selected_count() const { auto n = si32{}; for (auto& it : hash_queue) if (it.selected) ++n; return n; }
-        void hash_clear_finished()
-        {
-            std::erase_if(hash_queue, [](auto& it){ return it.status == hash_item::succeeded || it.status == hash_item::failed; });
-            dirty = true;
-        }
+        void hash_remove_all() { hash_queue.clear(); dirty = true; }
     private:
         // Drive the checksum workers: fold each active worker's progress/result into its item, reap
         // finished workers, then start queued items up to max_hash_jobs. Independent of pump_queue.

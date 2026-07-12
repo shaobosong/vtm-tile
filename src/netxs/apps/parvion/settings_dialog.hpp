@@ -783,7 +783,7 @@ namespace netxs::app::parvion
             };
             return sel;
         };
-        cfg.on_key = [stp](hids& gear, netxs::wptr<ui::base> table_wp)
+        cfg.on_key = [stp](hids& gear, netxs::wptr<ui::base>)
         {
             auto key = gear.keybd::generic();
             if (key == input::key::Esc)
@@ -798,12 +798,13 @@ namespace netxs::app::parvion
                 sd_accept(*stp);
                 return true;
             }
-            if (key != input::key::KeyDelete || stp->key_marked.empty()) return faux;
+            return faux;
+        };
+        cfg.deletion.enabled = true;
+        cfg.deletion.remove_selected = [stp](netxs::wptr<ui::base>)
+        {
             sd_remove_keys(*stp);
-            if (auto table = table_wp.lock()) table->base::deface();
             if (auto card = stp->card_wp.lock()) card->base::deface();
-            gear.set_handled();
-            return true;
         };
         cfg.wide_hit = true;
         cfg.arrow_nav = true;

@@ -216,6 +216,13 @@ namespace netxs::app::parvion
         });
         return items;
     }
+    inline auto xfer_remove_confirmation(sftp_remote* ctrl) -> app::shared::confirm_dialog_text
+    {
+        auto count = si32{}; for (auto& it : ctrl->queue) if (it.selected) ++count;
+        return { count == 1 ? text{ "Remove this transfer from the queue?" }
+                            : "Remove " + std::to_string(count) + " transfers from the queue?",
+                 "Remove", "Cancel" };
+    }
     // One transfer cell's rendered text + colour.
     inline auto xfer_cell(sftp_remote* ctrl, si32 status, si32 row, si32 key) -> cellval
     {
@@ -313,7 +320,12 @@ namespace netxs::app::parvion
         cfg.follow      = [ctrl, status]{ auto rows = xfer_rows(ctrl, status); for (auto i = si32{}; i < (si32)rows.size(); ++i) if (rows[(size_t)i].child == -1 && rows[(size_t)i].qi == ctrl->active) return i; return -1; };
         cfg.on_col_grab = [status, cols](si32 key){ if (key == q_ncol && cols->reason_w_override == 0) cols->reason_w_override = xfer_reason_w(*cols, status); };
         cfg.empty_text  = []{ return text{ "(no transfers — press Enter on a file to queue one)" }; };
-        cfg.on_key      = [ctrl, window_wp](hids& gear, netxs::wptr<ui::base> self){ return clear_finished_on_key(gear, ctrl, window_wp, self); };
+        cfg.deletion.enabled = true;
+        cfg.deletion.remove_selected = [ctrl](netxs::wptr<ui::base>)
+        {
+            if (ctrl) ctrl->queue_remove([](queue_item const& it){ return it.selected; });
+        };
+        cfg.deletion.confirm = [ctrl]{ return xfer_remove_confirmation(ctrl); };
         cfg.arrow_nav   = true;
         return make_tab_page(make_table(std::move(cfg)), std::move(title));
     }

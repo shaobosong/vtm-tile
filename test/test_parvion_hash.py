@@ -13,7 +13,7 @@ no_autostart so no real parvionhash backend is spawned. We verify:
 
   1. The bottom tab strip shows "Checksums (5)"; clicking it lists every seeded task,
      its algorithm, a final digest, and a failure reason.
-  2. Right-clicking a finished task opens the Copy digest / Remove / Clear finished menu.
+  2. Right-clicking a task opens Copy digest / Remove; blank space exposes Remove all.
   3. Copy digest on a multi-selection writes newline-separated successful digests.
 """
 
@@ -102,10 +102,34 @@ def test_checksums_context_menu():
             return False
         s.click(rp[1] + 1, rp[0] + 1, button=2)  # right-click the finished row
         chars, _ = s.screen()
-        wanted = ["Copy digest", "Remove", "Clear finished"]
+        wanted = ["Copy digest", "Remove"]
         missing = [w for w in wanted if not grid_contains(chars, w)]
         if missing:
             print(f"FAIL test_checksums_context_menu: missing menu items {missing}")
+            return False
+        if grid_contains(chars, "Clear finished") or grid_contains(chars, "Remove all"):
+            print("FAIL test_checksums_context_menu: bulk action shown for selected items")
+            return False
+        rm = find_text(chars, "Remove")
+        s.click(rm[1] + 1, rm[0] + 1)
+        if not grid_contains(s.screen()[0], "Remove this checksum?"):
+            print("FAIL test_checksums_context_menu: Remove confirmation not shown")
+            return False
+        s.write("\x1b")
+        if not grid_contains(s.screen()[0], "report.pdf"):
+            print("FAIL test_checksums_context_menu: cancelled Remove deleted the row")
+            return False
+
+        missing_row = find_text(s.screen()[0], "missing.bin")
+        s.click(missing_row[1] + 1, missing_row[0] + 3, button=2)
+        chars = s.screen()[0]
+        remove_all = find_text(chars, "Remove all")
+        if not remove_all or grid_contains(chars, "Clear finished") or grid_contains(chars, "Copy digest"):
+            print("FAIL test_checksums_context_menu: blank menu is not Remove all only")
+            return False
+        s.click(remove_all[1] + 1, remove_all[0] + 1)
+        if not grid_contains(s.screen()[0], "Checksums (0)"):
+            print("FAIL test_checksums_context_menu: Remove all did not clear the checksum queue")
             return False
         print("OK test_checksums_context_menu")
         return True
@@ -330,6 +354,48 @@ def test_checksums_arrow_key_selection():
         return True
 
 
+def test_checksums_keyboard_remove_selected_and_noop():
+    """Delete removes selected checksum rows and does nothing when no rows are selected."""
+    with ParvionSession(DEMO_ENV) as s:
+        chars = _open_checksums_tab(s)
+        report = find_text(chars, "report.pdf")
+        notes = find_text(chars, "notes.txt")
+        backup = find_text(chars, "backup.tar.gz")
+        if not report or not notes or not backup:
+            print("FAIL test_checksums_keyboard_remove_selected_and_noop: rows not found"); return False
+        s.click(report[1] + 1, report[0] + 1)
+        s.write("\x7f")  # Backspace is not table row deletion.
+        if not grid_contains(s.screen()[0], "report.pdf"):
+            print("FAIL test_checksums_keyboard_remove_selected_and_noop: Backspace removed a selected row"); return False
+        s.click(notes[1] + 1, notes[0] + 1, button=16)
+        s.write("\x1b[3~")  # Delete -> selected-row confirmation.
+        if not grid_contains(s.screen()[0], "Remove 2 selected checksums?"):
+            print("FAIL test_checksums_keyboard_remove_selected_and_noop: confirmation not shown"); return False
+        s.write("\x1b")  # Cancel preserves both rows.
+        if not grid_contains(s.screen()[0], "report.pdf") or not grid_contains(s.screen()[0], "notes.txt"):
+            print("FAIL test_checksums_keyboard_remove_selected_and_noop: cancellation removed rows"); return False
+        s.write("\x1b[3~")
+        s.write("\r")  # Confirm removal.
+        chars = s.screen()[0]
+        if grid_contains(chars, "report.pdf") or grid_contains(chars, "notes.txt"):
+            print("FAIL test_checksums_keyboard_remove_selected_and_noop: selected rows survived Delete"); return False
+        if not grid_contains(chars, "backup.tar.gz") or not grid_contains(chars, "Checksums (3)"):
+            print("FAIL test_checksums_keyboard_remove_selected_and_noop: wrong rows removed after Delete"); return False
+
+        backup = find_text(chars, "backup.tar.gz")
+        if not backup:
+            print("FAIL test_checksums_keyboard_remove_selected_and_noop: backup row disappeared"); return False
+        s.click(backup[1] + 1, backup[0] + 1)  # Focus/select a remaining row.
+        s.write("\x1b")                       # Clear selection.
+        s.write("\x1b[3~")                    # Delete with no selection: no-op.
+        chars = s.screen()[0]
+        for name in ("backup.tar.gz", "image.iso", "missing.bin", "Checksums (3)"):
+            if not grid_contains(chars, name):
+                print(f"FAIL test_checksums_keyboard_remove_selected_and_noop: no-selection Delete removed {name}"); return False
+        print("OK test_checksums_keyboard_remove_selected_and_noop")
+        return True
+
+
 def test_checksums_sort_cycle_is_typed_and_stable():
     """Checksum headers expose the shared sort UI; Size uses raw bytes, default restores source
     order, and equal Algorithm values retain their original relative order."""
@@ -463,6 +529,7 @@ TESTS = [
     test_checksums_column_resize,
     test_checksums_row_selection,
     test_checksums_arrow_key_selection,
+    test_checksums_keyboard_remove_selected_and_noop,
     test_checksums_sort_cycle_is_typed_and_stable,
     test_hash_settings_single_dropdown,
 ]

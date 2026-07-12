@@ -1018,29 +1018,46 @@ def test_multiselect_remove_all_selected():
         return True
 
 
-def test_keyboard_clear_finished_confirm():
-    """The Delete key asks before clearing finished items; Esc preserves them, Enter clears."""
-    print("TEST: parvion - keyboard clear-finished asks for confirmation ... ", end="", flush=True)
+def test_keyboard_delete_removes_selected_only():
+    """Delete removes selected transfers; no-selection Delete/Backspace does not clear finished."""
+    print("TEST: parvion - keyboard Delete removes selected transfers only ... ", end="", flush=True)
     with ParvionSession(DEMO_ENV) as s:
         pos = find_text(s.screen()[0], "notes.txt")
         if pos is None:
             print("FAIL - queue row not found")
             return False
         s.click(pos[1] + 1, pos[0] + 1, button=0)  # Focus the queue panel.
-        s.write("\x1b[3~")                         # Delete -> confirmation dialog.
-        if not grid_contains(s.screen()[0], "Clear all finished transfers?"):
-            print("FAIL - confirmation dialog not shown")
+        before = tab_count(s.screen()[0], "Transferring")
+        s.write("\x1b[3~")                         # Delete -> selected transfer confirmation.
+        if not grid_contains(s.screen()[0], "Remove this transfer from the queue?"):
+            print("FAIL - selected-transfer confirmation dialog not shown")
             return False
-        s.write("\x1b")                            # Esc -> Cancel: nothing cleared.
+        s.write("\x1b")                            # Cancel table-owned confirmation.
+        if not grid_contains(s.screen()[0], "notes.txt"):
+            print("FAIL - selected transfer removed despite cancellation")
+            return False
+        s.write("\x1b[3~")                         # Delete again.
+        s.write("\r")                              # Confirm removal.
+        if grid_contains(s.screen()[0], "notes.txt"):
+            print("FAIL - selected transfer survived Delete")
+            return False
+        if tab_count(s.screen()[0], "Transferring") != before - 1:
+            print("FAIL - Transferring tab count did not decrease after Delete")
+            return False
+
+        # Focus the table, clear selection, then press Delete and Backspace. Neither key should
+        # run the old clear-finished action when no table rows are selected.
+        pos = find_text(s.screen()[0], "bigfile.iso")
+        if pos is None:
+            print("FAIL - remaining queue row not found")
+            return False
+        s.click(pos[1] + 1, pos[0] + 1, button=0)
+        s.write("\x1b")                            # Esc clears table selection.
+        s.write("\x1b[3~")                         # Delete with no selection: no-op.
+        s.write("\x7f")                            # Backspace with no selection: no-op.
         chars = s.screen()[0]
         if tab_count(chars, "Failed") != 1 or tab_count(chars, "Succeeded") != 1:
-            print("FAIL - finished items cleared despite cancelling")
-            return False
-        s.write("\x1b[3~")                         # Delete again ...
-        s.write("\r")                              # ... Enter -> Confirm: finished items cleared.
-        chars = s.screen()[0]
-        if tab_count(chars, "Failed") != 0 or tab_count(chars, "Succeeded") != 0:
-            print("FAIL - finished items not cleared after confirm")
+            print("FAIL - no-selection Delete/Backspace cleared finished transfers")
             return False
         print("PASS")
         return True
@@ -1577,7 +1594,7 @@ TESTS = [
     test_header_menu_toggles_column_visibility,
     test_remove_item_via_menu,
     test_multiselect_remove_all_selected,
-    test_keyboard_clear_finished_confirm,
+    test_keyboard_delete_removes_selected_only,
     test_pin_to_top_reorders_pending,
     test_pause_then_start_progress_label,
     test_local_and_remote_name_columns,

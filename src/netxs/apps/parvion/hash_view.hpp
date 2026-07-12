@@ -140,13 +140,45 @@ namespace netxs::app::parvion
         }
         return out;
     }
-    inline auto hash_menu(sftp_remote* ctrl, netxs::wptr<ui::base> panel_wp) -> qmenu_cfg
+    inline auto hash_remove_confirmation(sftp_remote* ctrl) -> app::shared::confirm_dialog_text
+    {
+        auto count = ctrl ? ctrl->hash_selected_count() : 0;
+        return {
+            count == 1 ? text{ "Remove this checksum?" }
+                       : "Remove " + std::to_string(count) + " selected checksums?",
+            "Remove", "Cancel" };
+    }
+    inline void hash_confirm_remove_selected(sftp_remote* ctrl,
+                                             netxs::wptr<ui::base> panel_wp,
+                                             netxs::wptr<ui::base> window_wp)
+    {
+        if (!ctrl || !ctrl->hash_selected_count()) return;
+        auto run = [ctrl, panel_wp]
+        {
+            if (auto panel = panel_wp.lock())
+            {
+                ctrl->hash_remove_selected();
+                panel->base::deface();
+            }
+        };
+        if (auto window = window_wp.lock())
+            app::shared::show_close_confirmation(*window, run, {}, hash_remove_confirmation(ctrl));
+        else run();
+    }
+    inline auto hash_menu(sftp_remote* ctrl,
+                          netxs::wptr<ui::base> panel_wp,
+                          netxs::wptr<ui::base> window_wp) -> qmenu_cfg
     {
         namespace m = app::shared::menu;
         auto deface = [panel_wp]{ if (auto p = panel_wp.lock()) p->base::deface(); };
-        auto clear_item = [ctrl, deface]{ auto clr = m::item{ .alive = true, .label = "Clear finished" }; clr.action = [ctrl, deface](hids&){ ctrl->hash_clear_finished(); deface(); }; return clr; };
+        auto remove_all_item = [ctrl, deface]
+        {
+            auto item = m::item{ .alive = true, .label = "Remove all" };
+            item.action = [ctrl, deface](hids&){ ctrl->hash_remove_all(); deface(); };
+            return item;
+        };
         auto cfg = qmenu_cfg{};
-        cfg.item = [ctrl, deface, clear_item](si32 hit) -> std::vector<m::item>
+        cfg.item = [ctrl, panel_wp, window_wp](si32 hit) -> std::vector<m::item>
         {
             auto items = std::vector<m::item>{};
             if (hit >= 0 && hit < (si32)ctrl->hash_queue.size())
@@ -155,16 +187,13 @@ namespace netxs::app::parvion
                 auto copy = m::item{ .alive = true, .label = "Copy digest", .disabled = payload.empty() };
                 copy.action = [payload](hids& g){ if (!payload.empty()) g.set_clipboard(dot_00, payload, mime::textonly); };
                 items.push_back(std::move(copy));
-                auto n = ctrl->hash_selected_count();
-                auto rm = m::item{ .alive = true, .label = n > 1 ? "Remove " + std::to_string(n) + " checksums" : text{ "Remove" } };
-                rm.action = [ctrl, deface](hids&){ ctrl->hash_remove_selected(); deface(); };
+                auto rm = m::item{ .alive = true, .label = "Remove" };
+                rm.action = [ctrl, panel_wp, window_wp](hids&){ hash_confirm_remove_selected(ctrl, panel_wp, window_wp); };
                 items.push_back(std::move(rm));
-                items.push_back(m::item{ .alive = true, .type = m::kind::separator });
             }
-            items.push_back(clear_item());
             return items;
         };
-        cfg.blank = [clear_item]{ return std::vector<m::item>{ clear_item() }; };
+        cfg.blank = [remove_all_item]{ return std::vector<m::item>{ remove_all_item() }; };
         cfg.on_item_rclick = [ctrl, deface](si32 hit){ if (hit >= 0 && hit < (si32)ctrl->hash_queue.size() && !ctrl->hash_queue[(size_t)hit].selected) { for (auto& it : ctrl->hash_queue) it.selected = faux; ctrl->hash_queue[(size_t)hit].selected = true; deface(); } };
         cfg.on_blank_rclick = [ctrl, deface]{ auto any = faux; for (auto& it : ctrl->hash_queue) { any |= it.selected; it.selected = faux; } if (any) deface(); };
         return cfg;
@@ -202,10 +231,16 @@ namespace netxs::app::parvion
         cfg.cell       = [ctrl](si32 row, si32 key){ return hash_cell(ctrl, row, key); };
         cfg.compare    = [ctrl](si32 row_a, si32 row_b, si32 key){ return hash_compare(ctrl, row_a, row_b, key); };
         cfg.selection  = [ctrl]{ return hash_sel(ctrl); };
-        cfg.menu       = [ctrl](netxs::wptr<ui::base> panel_wp){ return hash_menu(ctrl, panel_wp); };
+        cfg.menu       = [ctrl, window_wp](netxs::wptr<ui::base> panel_wp){ return hash_menu(ctrl, panel_wp, window_wp); };
         cfg.follow     = []{ return -1; }; // Tail-follow: pin to the bottom.
         cfg.empty_text = []{ return text{ "(no checksums)" }; };
-        cfg.on_key     = [ctrl, window_wp](hids& gear, netxs::wptr<ui::base> self){ return clear_finished_on_key(gear, ctrl, window_wp, self); };
+        cfg.deletion.enabled = true;
+        cfg.deletion.remove_selected = [ctrl](netxs::wptr<ui::base>)
+        {
+            if (!ctrl) return;
+            ctrl->hash_remove_selected();
+        };
+        cfg.deletion.confirm = [ctrl]{ return hash_remove_confirmation(ctrl); };
         cfg.arrow_nav = true;
         cfg.wide_hit   = true; // A click anywhere on a row selects it (flat list).
         return make_tab_page(make_table(std::move(cfg)), std::move(title));

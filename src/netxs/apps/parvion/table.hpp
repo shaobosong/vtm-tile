@@ -246,6 +246,17 @@ namespace netxs::app::parvion
         std::function<void()>                                     on_blank_rclick; // Selection reset on blank (null = none).
     };
 
+    // Opt-in Delete-key behavior. `on_delete` is the upstream override: returning true consumes
+    // the key and suppresses the table's default selected-row removal. A null `confirm` removes
+    // immediately; otherwise the table owns the confirmation flow and dialog lifetime.
+    struct table_delete_cfg
+    {
+        bool                                             enabled = faux;
+        std::function<void(netxs::wptr<ui::base>)>       remove_selected;
+        std::function<app::shared::confirm_dialog_text()> confirm;
+        std::function<bool(hids&, netxs::wptr<ui::base>)> on_delete;
+    };
+
     // The complete table configuration a caller supplies. Everything here is DATA / adapters; there
     // is no event-handling code. `columns` / `rows` / `cell` / `gutter` / `follow` are re-queried from
     // live state each render or hit-test.
@@ -265,9 +276,10 @@ namespace netxs::app::parvion
         std::function<si32(si32 source_row)>             sort_group;  // Fixed ascending group rank; direction only reverses within a group.
         std::function<si32(si32, si32, si32)>            compare;     // Source rows a/b + column key -> negative/equal/positive.
         std::function<void(si32 source_row)>             activate;    // Double-click/Enter activation (null => none).
+        table_delete_cfg                                 deletion;    // Opt-in Delete-key selected-row removal.
         std::function<void(si32 key)>                    on_col_grab; // A column-border drag begins (null => none).
         std::function<text()>                            empty_text;  // Message shown when rows()==0 (null => none).
-        std::function<bool(hids&, netxs::wptr<ui::base>)> on_key;     // App keys (Delete clear-finished); null => none.
+        std::function<bool(hids&, netxs::wptr<ui::base>)> on_key;     // App keys; null => none.
         bool                                             wide_hit = faux;  // Row hit-box spans full body width (else content width).
         bool                                             arrow_nav = true; // Single-select arrow-key navigation for selectable tables.
         bool                                             focus_on_start = faux; // Construct with initial focus (modal picker lists).
@@ -931,8 +943,42 @@ namespace netxs::app::parvion
                 if (gear.payload != input::keybd::type::keypress) return;
                 if (gear.keystat == input::key::released || gear.keystat == input::key::interrupted) return;
                 if (gear.keybd::handled) return;
-                if (cfg.on_key && cfg.on_key(gear, ptr::shadow(boss.This()))) return;
                 auto k = gear.keybd::generic();
+                if (k == input::key::KeyDelete
+                 && cfg.deletion.enabled
+                 && cfg.selection)
+                {
+                    auto s = cfg.selection();
+                    if (s.any())
+                    {
+                        auto self = ptr::shadow(boss.This());
+                        if (cfg.deletion.on_delete && cfg.deletion.on_delete(gear, self))
+                        {
+                            gear.set_handled();
+                            return;
+                        }
+                        if (!cfg.deletion.remove_selected) return;
+                        gear.set_handled();
+                        auto remove = cfg.deletion.remove_selected;
+                        auto run = [self, remove]
+                        {
+                            if (auto table = self.lock())
+                            {
+                                remove(self);
+                                table->base::deface();
+                            }
+                        };
+                        if (cfg.deletion.confirm)
+                        {
+                            if (auto window = cfg.window_wp.lock())
+                                app::shared::show_close_confirmation(*window, run, {}, cfg.deletion.confirm());
+                            else run();
+                        }
+                        else run();
+                        return;
+                    }
+                }
+                if (cfg.on_key && cfg.on_key(gear, ptr::shadow(boss.This()))) return;
                 if (k == input::key::KeyEnter && cfg.activate && cfg.selection)
                 {
                     auto s = cfg.selection();

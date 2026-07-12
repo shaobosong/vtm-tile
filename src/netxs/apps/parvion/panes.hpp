@@ -601,10 +601,8 @@ namespace netxs::app::parvion
         return out;
     }
 
-    inline void pane_confirm_delete_selection(pane_state& st, netxs::wptr<ui::base> panel_wp)
+    inline auto pane_delete_confirmation(pane_state& st) -> app::shared::confirm_dialog_text
     {
-        // Count the victims exactly like pane_delete_selection (skip row 0 = "..") so the
-        // dialog reflects what would actually be deleted; bail silently when there's nothing.
         auto& its = st.cur_items();
         auto count = si32{};
         auto first = text{};
@@ -614,6 +612,19 @@ namespace netxs::app::parvion
                 if (!count) first = its[(size_t)(row - 1)].name;
                 ++count;
             }
+        return {
+            count == 1 ? "Delete '" + fit_ellipsis(first, 26) + "'?" // Keep the message on one dialog row.
+                       : "Delete " + std::to_string(count) + " selected items?",
+            "Delete", "Cancel" };
+    }
+
+    inline void pane_confirm_delete_selection(pane_state& st, netxs::wptr<ui::base> panel_wp)
+    {
+        // Count the victims exactly like pane_delete_selection (skip row 0 = "..").
+        auto& its = st.cur_items();
+        auto count = si32{};
+        for (auto row : st.marked)
+            if (row > 0 && row - 1 < (si32)its.size()) ++count;
         if (!count) return;
         auto run = [&st, panel_wp] // Deferred to confirm time: lock the panel before touching its st field storage.
         {
@@ -621,11 +632,7 @@ namespace netxs::app::parvion
         };
         auto window = st.window_wp.lock();
         if (!window) { run(); return; } // No dialog anchor wired: behave as before.
-        auto texts = app::shared::confirm_dialog_text{
-            count == 1 ? "Delete '" + fit_ellipsis(first, 26) + "'?" // 26-cell name keeps the message on one dialog row.
-                       : "Delete " + std::to_string(count) + " selected items?",
-            "Delete", "Cancel" };
-        app::shared::show_close_confirmation(*window, run, {}, texts);
+        app::shared::show_close_confirmation(*window, run, {}, pane_delete_confirmation(st));
     }
 
     inline void pane_hash_selection(pane_state& st, si32 algo) // Enqueue a checksum task per marked file (skips dirs).
@@ -884,11 +891,6 @@ namespace netxs::app::parvion
             pane_goparent(st);
             act = true;
         }
-        else if (k == input::key::KeyDelete)
-        {
-            pane_confirm_delete_selection(st, self);
-            act = true;
-        }
         else
         {
             auto cl = gear.cluster;
@@ -1072,6 +1074,9 @@ namespace netxs::app::parvion
         cfg.menu = [state](netxs::wptr<ui::base> panel_wp){ return pane_menu(state, panel_wp); };
         cfg.empty_text = [state]{ return state->cur_msg(); };
         cfg.on_key = [state](hids& gear, netxs::wptr<ui::base> self){ return pane_table_key(state, gear, self); };
+        cfg.deletion.enabled = true;
+        cfg.deletion.remove_selected = [state](netxs::wptr<ui::base>){ pane_delete_selection(*state); };
+        cfg.deletion.confirm = [state]{ return pane_delete_confirmation(*state); };
         cfg.activate = [state](si32 row)
         {
             pane_sync(*state);

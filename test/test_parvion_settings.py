@@ -441,6 +441,46 @@ def test_key_table_ctrl_multiselect_remove_and_reindex():
     print("PASS"); return True
 
 
+def test_key_table_keyboard_remove_selected_and_noop():
+    """Delete removes selected key rows and does nothing when no rows are selected."""
+    print("TEST: key table keyboard remove selected/no-selection noop ... ", end="", flush=True)
+    cfg = tempfile.mkdtemp(prefix="pvset_")
+    paths = ["/keys/remove_alpha.pem", "/keys/keep_beta.pem", "/keys/remove_gamma.pem"]
+    _write_settings_with_keys(cfg, paths)
+    with _session(cfg) as s:
+        _open_dialog(s)
+        _goto_sftp(s)
+        chars = s.screen()[0]
+        alpha = T.find_text(chars, "remove_alpha.pem")
+        gamma = T.find_text(chars, "remove_gamma.pem")
+        if not alpha or not gamma:
+            print("FAIL - key rows not found"); return False
+        s.click(alpha[1] + 1, alpha[0] + 1)
+        s.click(gamma[1] + 1, gamma[0] + 1, button=16)
+        s.write("\x1b[3~")  # Delete -> remove selected key rows.
+        chars = s.screen()[0]
+        if T.grid_contains(chars, "remove_alpha.pem") or T.grid_contains(chars, "remove_gamma.pem"):
+            print("FAIL - selected key rows survived Delete"); return False
+        if not T.grid_contains(chars, "keep_beta.pem"):
+            print("FAIL - unselected key row was removed by Delete"); return False
+
+        beta = T.find_text(chars, "keep_beta.pem")
+        if not beta:
+            print("FAIL - surviving key row not found"); return False
+        s.click(beta[1] + 1, beta[0] + 1)
+        s.click(beta[1] + 1, beta[0] + 3)  # Blank table space clears selection without closing Settings.
+        s.write("\x1b[3~")  # Delete with no selection: no-op.
+        chars = s.screen()[0]
+        if not T.grid_contains(chars, "keep_beta.pem"):
+            print("FAIL - no-selection Delete removed the surviving key"); return False
+        ok = T.find_text(chars, " OK ")
+        s.click(ok[1] + 2, ok[0] + 1); s.feed(0.8)
+    saved = _settings_file(cfg).get("SFTP keyfile", [])
+    if saved != [paths[1]]:
+        print(f"FAIL - wrong key rows persisted after keyboard removal: {saved}"); return False
+    print("PASS"); return True
+
+
 def test_key_table_column_resize():
     # Item 6: dragging a column border (resize handle) widens that column — the next
     # column's header shifts right, exactly like the Local Site browser.
@@ -799,6 +839,7 @@ TESTS = [
     test_key_table_autofit_creates_and_pages_horizontal_scrollbar,
     test_key_table_column_menu_hides_comment,
     test_key_table_ctrl_multiselect_remove_and_reindex,
+    test_key_table_keyboard_remove_selected_and_noop,
     test_picker_buttons_right_aligned,
     test_esc_closes_dialog_on_open,
     test_esc_closes_key_picker,
