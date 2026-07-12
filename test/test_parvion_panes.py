@@ -841,6 +841,45 @@ def test_shared_table_keyboard_activation_and_parent():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_multiselect_enter_keeps_batch_selection():
+    """Enter on multiple file rows takes the batch-transfer path instead of activating one row."""
+    print("TEST: parvion pane - multi-select Enter uses batch transfer ... ", end="", flush=True)
+    d = make_tree()
+    try:
+        with ParvionSession(d) as s:
+            alpha = find_text(s.screen()[0], "alpha.txt")
+            beta = find_text(s.screen()[0], "beta.txt")
+            if alpha is None or beta is None:
+                print("FAIL - test files not listed")
+                return False
+            s.click(alpha[1] + 1, alpha[0] + 1)
+            s.click(beta[1] + 1, beta[0] + 1, button=16)
+            chars, bg = s.screen()
+            alpha = find_text(chars, "alpha.txt")
+            beta = find_text(chars, "beta.txt")
+            selected_bg = bg[beta[0]][beta[1]]
+            if bg[alpha[0]][alpha[1]] != selected_bg:
+                print("FAIL - Ctrl-click did not create a two-file selection")
+                return False
+
+            # This harness is intentionally disconnected, so uploads are not queued; retaining both
+            # highlights proves Enter did not fall through to single-row activation, which collapses
+            # the selection before transferring the cursor row.
+            s.write("\r", settle=0.8)
+            chars, bg = s.screen()
+            alpha = find_text(chars, "alpha.txt")
+            beta = find_text(chars, "beta.txt")
+            if (alpha is None or beta is None
+             or bg[alpha[0]][alpha[1]] != selected_bg
+             or bg[beta[0]][beta[1]] != selected_bg):
+                print("FAIL - Enter collapsed the batch selection to one row")
+                return False
+            print("PASS")
+            return True
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_enter_after_directory_change_activates_visible_parent():
     """Entering a directory replaces the selection with '..'; immediate Enter must activate that
     visible row, not the stale table cursor at the directory's former numeric offset."""
@@ -1255,6 +1294,7 @@ TESTS = [
     test_ctrl_click_keeps_focus,
     test_right_click_activates_pane,
     test_shared_table_keyboard_activation_and_parent,
+    test_multiselect_enter_keeps_batch_selection,
     test_enter_after_directory_change_activates_visible_parent,
     test_shared_table_keyboard_navigation_scrolls_to_last_row,
     test_typeahead_and_navigation_share_selection_cursor,

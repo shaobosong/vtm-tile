@@ -601,6 +601,15 @@ namespace netxs::app::parvion
         }
     }
 
+    inline auto pane_selected_item_count(pane_state const& st) -> si32 // Excludes the synthetic ".." row.
+    {
+        auto count = si32{};
+        auto size = (si32)st.cur_items().size();
+        for (auto row : st.marked)
+            if (row > 0 && row - 1 < size) ++count;
+        return count;
+    }
+
     inline auto pane_selection_paths(pane_state const& st) -> text // Full paths for marked real rows, newline-separated.
     {
         auto out = text{};
@@ -911,7 +920,14 @@ namespace netxs::app::parvion
             return { table_viewport_action::handled };
         }
         auto action = table_viewport_action{};
-        if (k == input::key::Backspace)
+        if (k == input::key::KeyEnter && st.ctrl && pane_selected_item_count(st) > 1)
+        {
+            // A multi-selection is one batch action.  Leave single-row Enter to the shared table so
+            // directories still open and files retain their normal one-file transfer behaviour.
+            pane_transfer_selection(st);
+            action.mode = table_viewport_action::handled;
+        }
+        else if (k == input::key::Backspace)
         {
             pane_goparent(st);
             action.mode = table_viewport_action::handled;
