@@ -187,7 +187,8 @@ namespace netxs::app::parvion
         si32 hover_border = -1, col_drag = -1;
         si32 sort_key = -1, sort_dir = sort_default;
         si32 hover_header = -1, press_header = -1;
-        si32 sel_anchor = -1;
+        si32 sel_anchor = -1; // Fixed endpoint for Shift ranges.
+        si32 nav_cursor = -1; // Movable keyboard/range endpoint.
         si32 rubber_a = -1, rubber_b = -1;
         si32 drag_y = 0;
         std::set<si32> drag_base;
@@ -382,6 +383,41 @@ namespace netxs::app::parvion
         st.scroll  = std::clamp(st.scroll,  0, std::max(0, st.total - st.body_rows));
         st.hscroll = std::clamp(st.hscroll, 0, std::max(0, st.content_w - st.disp_w));
     }
+    struct page_nav_state { si32 offset = 0, cursor = 0; };
+    // Explorer-style paging: visit the current edge before scrolling a page.
+    inline auto q_page_nav(si32 total, si32 page, si32 offset, si32 cursor, si32 dir) -> page_nav_state
+    {
+        if (total <= 0) return {};
+        page = std::max(1, page);
+        auto maxoff = std::max(0, total - page);
+        cursor = std::clamp(cursor, 0, total - 1);
+        offset = std::clamp(offset, 0, maxoff);
+        auto top = offset;
+        auto bottom = std::min(total - 1, offset + page - 1);
+        if (dir < 0)
+        {
+            if (cursor != top) cursor = top;
+            else if (offset > 0)
+            {
+                offset = std::max(0, offset - page);
+                cursor = offset;
+            }
+            else
+                cursor = 0;
+        }
+        else
+        {
+            if (cursor != bottom) cursor = bottom;
+            else if (offset < maxoff)
+            {
+                offset = std::min(maxoff, offset + page);
+                cursor = std::min(total - 1, offset + page - 1);
+            }
+            else
+                cursor = total - 1;
+        }
+        return { offset, cursor };
+    }
     inline auto q_row_w(table_state const& st) -> si32 { return std::clamp(st.content_w - st.hscroll, 0, st.disp_w); }
     inline auto q_border_hit(qtable const& t, si32 mx, si32 hscroll) -> si32
     {
@@ -471,6 +507,7 @@ namespace netxs::app::parvion
                     auto key = s.key_of_row(i);
                     if (key >= 0 && s.in_scope(key)) s.set_sel(key, true);
                 }
+                s.set_sel(hit, true); // Keep the caller's navigation cursor on the movable endpoint.
             }
             else
             {
@@ -481,9 +518,14 @@ namespace netxs::app::parvion
         }
         else if (ctl) { s.set_sel(hit, !s.is_sel(hit)); st.sel_anchor = hit; }
         else          { s.clear(); s.set_sel(hit, true); st.sel_anchor = hit; }
+        st.nav_cursor = hit;
         return true;
     }
-    inline auto q_sel_clear_blank(table_state& st, qsel_cfg const& s) -> bool { if (!s.any()) return faux; s.clear(); st.sel_anchor = -1; return true; }
+    inline auto q_sel_clear_blank(table_state& st, qsel_cfg const& s) -> bool
+    {
+        if (!s.any()) { st.sel_anchor = st.nav_cursor = -1; return faux; }
+        s.clear(); st.sel_anchor = st.nav_cursor = -1; return true;
+    }
     inline void q_sel_snapshot(table_state& st, qsel_cfg const& s) { st.drag_base.clear(); for (auto k = si32{}; k < s.key_count(); ++k) if (s.is_sel(k)) st.drag_base.insert(k); }
     inline void q_rubber_begin(table_state& st, qsel_cfg const& s, si32 press_row, bool ctl)
     {
@@ -493,11 +535,12 @@ namespace netxs::app::parvion
         st.rubber_ctrl = ctl;
         if (st.rubber_ctrl) st.rubber_add = !st.drag_base.count(anchor_key);
         else                s.clear();
-        if (anchor_key >= 0) st.sel_anchor = anchor_key;
+        if (anchor_key >= 0) st.sel_anchor = st.nav_cursor = anchor_key;
     }
     inline void q_rubber_pull(table_state& st, qsel_cfg const& s, si32 cur_row)
     {
         st.rubber_b = cur_row;
+        if (auto key = cur_row >= 0 && cur_row < s.disp() ? s.key_of_row(cur_row) : -1; key >= 0) st.nav_cursor = key;
         auto lo = std::min(st.rubber_a, st.rubber_b), hi = std::max(st.rubber_a, st.rubber_b);
         if (st.rubber_ctrl)
         {
@@ -572,12 +615,12 @@ namespace netxs::app::parvion
         if (hit >= 0)
         {
             if (cfg.on_item_rclick) cfg.on_item_rclick(hit);
-            st.sel_anchor = hit; // The right-clicked row becomes the shift-range anchor.
+            st.sel_anchor = st.nav_cursor = hit; // The right-clicked row becomes the keyboard/range cursor.
             if (cfg.item)   m::open_dropdown_popup(boss, cfg.item(hit), faux, -1, at);
         }
         else
         {
-            if (cfg.on_blank_rclick) { cfg.on_blank_rclick(); st.sel_anchor = -1; }
+            if (cfg.on_blank_rclick) { cfg.on_blank_rclick(); st.sel_anchor = st.nav_cursor = -1; }
             if (cfg.blank)           m::open_dropdown_popup(boss, cfg.blank(), faux, -1, at);
         }
     }
@@ -1017,7 +1060,7 @@ namespace netxs::app::parvion
                             if (cfg.selection)
                             {
                                 auto key = cfg.selection().key_of_row(action.row);
-                                if (key >= 0) st.sel_anchor = key;
+                                if (key >= 0) st.sel_anchor = st.nav_cursor = key;
                             }
                             st.live_follow = faux;
                             boss.base::deface();
@@ -1031,7 +1074,7 @@ namespace netxs::app::parvion
                     auto n = cfg.rows ? cfg.rows() : 0;
                     auto source = si32{ -1 };
                     for (auto row = si32{}; row < n; ++row)
-                        if (s.key_of_row(row) == st.sel_anchor) { source = row; break; }
+                        if (s.key_of_row(row) == st.nav_cursor) { source = row; break; }
                     if (source < 0)
                         for (auto row = si32{}; row < n; ++row)
                         {
@@ -1053,55 +1096,74 @@ namespace netxs::app::parvion
                 auto page = std::max(1, st.body_rows);
                 auto sels = std::vector<si32>{}; // Ordered selectable display rows.
                 for (auto i = si32{}; i < n; ++i) if (s.key_of_row(i) >= 0) sels.push_back(i);
-                auto select_at = [&](si32 p)
+                auto select_at = [&](si32 p, bool extend = faux)
                 {
                     if (sels.empty()) return;
                     p = std::clamp(p, 0, (si32)sels.size() - 1);
                     auto dr = sels[(size_t)p]; auto key = s.key_of_row(dr);
-                    s.clear(); s.set_sel(key, true); st.sel_anchor = key;
+                    if (extend)
+                    {
+                        auto anchor = si32{ -1 };
+                        for (auto i = si32{}; i < (si32)sels.size(); ++i)
+                        {
+                            auto candidate = s.key_of_row(sels[(size_t)i]);
+                            if (candidate == st.sel_anchor && s.is_sel(candidate)) { anchor = i; break; }
+                        }
+                        if (anchor < 0)
+                            for (auto i = si32{}; i < (si32)sels.size(); ++i)
+                            {
+                                auto candidate = s.key_of_row(sels[(size_t)i]);
+                                if (s.is_sel(candidate)) { anchor = i; st.sel_anchor = candidate; break; }
+                            }
+                        if (anchor < 0) { anchor = p; st.sel_anchor = key; }
+                        auto lo = std::min(anchor, p), hi = std::max(anchor, p);
+                        s.clear();
+                        for (auto i = lo; i <= hi; ++i) s.set_sel(s.key_of_row(sels[(size_t)i]), true);
+                        s.set_sel(key, true); // Finish on the movable endpoint for caller-owned cursors.
+                    }
+                    else
+                    {
+                        s.clear(); s.set_sel(key, true); st.sel_anchor = key;
+                    }
+                    st.nav_cursor = key;
                     if      (dr < st.scroll)                 st.scroll = dr;
                     else if (dr >= st.scroll + st.body_rows) st.scroll = dr - st.body_rows + 1;
                     st.scroll = std::clamp(st.scroll, 0, maxv); st.live_follow = !!cfg.follow && st.scroll == maxv;
                 };
                 auto cur = si32{ -1 };
-                for (auto p = si32{}; p < (si32)sels.size(); ++p) if (s.key_of_row(sels[(size_t)p]) == st.sel_anchor) { cur = p; break; }
+                for (auto p = si32{}; p < (si32)sels.size(); ++p)
+                {
+                    auto key = s.key_of_row(sels[(size_t)p]);
+                    if (key == st.nav_cursor && s.is_sel(key)) { cur = p; break; }
+                }
                 if (cur < 0) for (auto p = si32{}; p < (si32)sels.size(); ++p) if (s.is_sel(s.key_of_row(sels[(size_t)p]))) { cur = p; break; }
-                auto select_visual = [&](si32 visual, si32 dir)
+                auto select_visual = [&](si32 visual, si32 dir, bool extend)
                 {
                     if (sels.empty()) return;
                     auto upper = std::lower_bound(sels.begin(), sels.end(), visual);
-                    if (upper == sels.begin()) { select_at(0); return; }
-                    if (upper == sels.end())   { select_at((si32)sels.size() - 1); return; }
+                    if (upper == sels.begin()) { select_at(0, extend); return; }
+                    if (upper == sels.end())   { select_at((si32)sels.size() - 1, extend); return; }
                     auto hi = (si32)(upper - sels.begin()), lo = hi - 1;
                     auto dlo = visual - sels[(size_t)lo], dhi = sels[(size_t)hi] - visual;
-                    select_at(dlo < dhi || (dlo == dhi && dir < 0) ? lo : hi);
+                    select_at(dlo < dhi || (dlo == dhi && dir < 0) ? lo : hi, extend);
                 };
-                auto page_selection = [&](si32 dir)
+                auto page_selection = [&](si32 dir, bool extend)
                 {
                     if (sels.empty()) return;
-                    auto maxoff = std::max(0, st.total - st.body_rows);
                     auto currow = cur >= 0 ? sels[(size_t)cur] : dir < 0 ? sels.back() : sels.front();
-                    auto rel = std::clamp(currow - st.scroll, 0, std::max(0, st.body_rows - 1));
-                    if (dir < 0)
-                    {
-                        if (st.scroll == 0) { select_at(0); return; }
-                        st.scroll = std::max(0, st.scroll - page);
-                    }
-                    else
-                    {
-                        if (st.scroll >= maxoff) { select_at((si32)sels.size() - 1); return; }
-                        st.scroll = std::min(maxoff, st.scroll + page);
-                    }
-                    select_visual(st.scroll + rel, dir);
+                    auto next = q_page_nav(st.total, page, st.scroll, currow, dir);
+                    st.scroll = next.offset;
+                    select_visual(next.cursor, dir, extend);
                 };
+                auto extend = !!(gear.ctlstat & hids::anyShift);
                 auto act = true;
-                     if (k == input::key::KeyUpArrow   || k == input::key::NumpadUpArrow)   select_at(cur < 0 ? (si32)sels.size() - 1 : cur - 1);
-                else if (k == input::key::KeyDownArrow || k == input::key::NumpadDownArrow) select_at(cur < 0 ? 0 : cur + 1);
-                else if (k == input::key::KeyHome      || k == input::key::NumpadHome)     { st.scroll = 0;    select_at(0); }
-                else if (k == input::key::KeyEnd       || k == input::key::NumpadEnd)      { st.scroll = maxv; select_at((si32)sels.size() - 1); }
-                else if (k == input::key::KeyPageUp    || k == input::key::NumpadPageUp)     page_selection(-1);
-                else if (k == input::key::KeyPageDown  || k == input::key::NumpadPageDown)   page_selection(+1);
-                else if (k == input::key::Esc)         { s.clear(); st.sel_anchor = -1; }
+                     if (k == input::key::KeyUpArrow   || k == input::key::NumpadUpArrow)   select_at(cur < 0 ? (si32)sels.size() - 1 : cur - 1, extend);
+                else if (k == input::key::KeyDownArrow || k == input::key::NumpadDownArrow) select_at(cur < 0 ? 0 : cur + 1, extend);
+                else if (k == input::key::KeyHome      || k == input::key::NumpadHome)     { st.scroll = 0;    select_at(0, extend); }
+                else if (k == input::key::KeyEnd       || k == input::key::NumpadEnd)      { st.scroll = maxv; select_at((si32)sels.size() - 1, extend); }
+                else if (k == input::key::KeyPageUp    || k == input::key::NumpadPageUp)     page_selection(-1, extend);
+                else if (k == input::key::KeyPageDown  || k == input::key::NumpadPageDown)   page_selection(+1, extend);
+                else if (k == input::key::Esc)         { s.clear(); st.sel_anchor = st.nav_cursor = -1; }
                 else act = false;
                 if (act) { gear.set_handled(); boss.base::deface(); }
             };

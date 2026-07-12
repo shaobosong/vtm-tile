@@ -904,7 +904,7 @@ def test_typeahead_and_navigation_share_selection_cursor():
 
 
 def test_page_home_end_keys_navigate_and_select():
-    """Paging preserves the selection's viewport row; Home/End select the boundaries."""
+    """Paging visits visible edges before scrolling; Home/End select boundaries."""
     print("TEST: parvion pane - Page/Home/End navigate and select ... ", end="", flush=True)
     d = tempfile.mkdtemp(prefix="parvionpane_pagekeys_")
     try:
@@ -917,19 +917,27 @@ def test_page_home_end_keys_navigate_and_select():
                 return False
             s.click(start[1] + 1, start[0] + 1)
             selected_bg = s.screen()[1][start[0]][start[1]]
-            s.write("\x1b[6~")  # PageDown: move viewport and selection together.
-            if find_text(s.screen()[0], "row_02.txt") is not None:
-                print("FAIL - PageDown did not advance the viewport")
+            visible = [(find_text(s.screen()[0], f"row_{i:02d}.txt"), i) for i in range(48)]
+            bottom = max((item for item in visible if item[0] is not None), key=lambda item: item[0][0])
+            s.write("\x1b[6~")  # First PageDown selects the current visible bottom.
+            pos = find_text(s.screen()[0], f"row_{bottom[1]:02d}.txt")
+            if (find_text(s.screen()[0], "row_02.txt") is None or pos is None
+             or s.screen()[1][pos[0]][pos[1]] != selected_bg):
+                print("FAIL - PageDown did not select the current visible bottom")
                 return False
-            s.write("\x1b[5~")  # PageUp: preserve the relative row and return to row_02.
-            start = find_text(s.screen()[0], "row_02.txt")
-            if start is None or s.screen()[1][start[0]][start[1]] != selected_bg:
-                print("FAIL - PageUp did not restore the relative selected row")
-                return False
-            s.write("\x1b[5~")  # Already at top: snap selection to the first item.
+            s.write("\x1b[5~")  # First PageUp selects the current visible top.
             parent = find_text(s.screen()[0], "/..")
             if parent is None or s.screen()[1][parent[0]][parent[1]] != selected_bg:
-                print("FAIL - PageUp at the top did not select the first item")
+                print("FAIL - PageUp did not select the current visible top")
+                return False
+            s.write("\x1b[6~" * 2)  # Edge first, then advance one page.
+            if find_text(s.screen()[0], "row_02.txt") is not None:
+                print("FAIL - second PageDown did not advance the viewport")
+                return False
+            s.write("\x1b[5~" * 2)  # Edge first, then return to the previous page.
+            parent = find_text(s.screen()[0], "/..")
+            if parent is None or s.screen()[1][parent[0]][parent[1]] != selected_bg:
+                print("FAIL - second PageUp did not return to the previous page")
                 return False
             s.write("\x1b[F")   # End selects and reveals the final item.
             last = find_text(s.screen()[0], "row_47.txt")
@@ -940,6 +948,127 @@ def test_page_home_end_keys_navigate_and_select():
             parent = find_text(s.screen()[0], "/..")
             if parent is None or s.screen()[1][parent[0]][parent[1]] != selected_bg:
                 print("FAIL - Home did not select the first item")
+                return False
+            print("PASS")
+            return True
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_paging_prioritizes_visible_page_after_scroll():
+    """Paging uses visible edges after independent scrollbar movement."""
+    print("TEST: parvion pane - paging prioritizes visible page ... ", end="", flush=True)
+    d = tempfile.mkdtemp(prefix="parvionpane_page_offscreen_")
+    try:
+        for i in range(48):
+            open(os.path.join(d, f"row_{i:02d}.txt"), "w").close()
+        with ParvionSession(d) as s:
+            start = find_text(s.screen()[0], "row_02.txt")
+            if start is None:
+                print("FAIL - starting row not found")
+                return False
+            s.click(start[1] + 1, start[0] + 1)
+            selected_bg = s.screen()[1][start[0]][start[1]]
+            chars = s.screen()[0]
+            tracks = {}
+            for r, row in enumerate(chars):
+                for c, ch in enumerate(row[:COLS // 2]):
+                    if ch in ("▐", "█"):
+                        tracks.setdefault(c, []).append(r)
+            if not tracks:
+                print("FAIL - local pane vertical scrollbar not found")
+                return False
+            col, rows = max(tracks.items(), key=lambda item: len(item[1]))
+            s.drag_path([(col + 1, min(rows) + 1), (col + 1, max(rows) + 1)])
+            chars = s.screen()[0]
+            visible = [(find_text(chars, f"row_{i:02d}.txt"), i) for i in range(48)]
+            top = min((item for item in visible if item[0] is not None), key=lambda item: item[0][0])
+            if find_text(chars, "row_47.txt") is None:
+                print("FAIL - scrollbar did not move selection off-screen")
+                return False
+            s.write("\x1b[6~")
+            chars, bg = s.screen()
+            last = find_text(chars, "row_47.txt")
+            if last is None or bg[last[0]][last[1]] != selected_bg:
+                print("FAIL - PageDown did not prioritize the visible bottom")
+                return False
+            s.write("\x1b[5~")
+            pos = find_text(s.screen()[0], f"row_{top[1]:02d}.txt")
+            if pos is None or s.screen()[1][pos[0]][pos[1]] != selected_bg:
+                print("FAIL - PageUp did not prioritize the visible top")
+                return False
+            print("PASS")
+            return True
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_shift_navigation_extends_and_shrinks_selection():
+    """Shift+arrows/pages/Home/End extend from one fixed keyboard anchor."""
+    print("TEST: parvion pane - Shift navigation multi-select ... ", end="", flush=True)
+    d = tempfile.mkdtemp(prefix="parvionpane_shiftkeys_")
+    try:
+        for i in range(48):
+            open(os.path.join(d, f"row_{i:02d}.txt"), "w").close()
+        with ParvionSession(d) as s:
+            start = find_text(s.screen()[0], "row_02.txt")
+            plain = find_text(s.screen()[0], "row_01.txt")
+            if start is None or plain is None:
+                print("FAIL - starting rows not found")
+                return False
+            unselected_bg = s.screen()[1][plain[0]][plain[1]]
+            s.click(start[1] + 1, start[0] + 1)
+            selected_bg = s.screen()[1][start[0]][start[1]]
+
+            s.write("\x1b[1;2B" * 2)  # Shift+Down twice: row_02 through row_04.
+            chars, bg = s.screen()
+            selected = [find_text(chars, f"row_{i:02d}.txt") for i in (2, 3, 4)]
+            if any(pos is None or bg[pos[0]][pos[1]] != selected_bg for pos in selected):
+                print("FAIL - Shift+Down did not extend the selection")
+                return False
+            s.write("\x1b[1;2A")  # Shift+Up shrinks the movable endpoint to row_03.
+            chars, bg = s.screen()
+            row04 = find_text(chars, "row_04.txt")
+            if row04 is None or bg[row04[0]][row04[1]] != unselected_bg:
+                print("FAIL - Shift+Up did not shrink the selection")
+                return False
+
+            visible = [(find_text(s.screen()[0], f"row_{i:02d}.txt"), i) for i in range(48)]
+            bottom = max((item for item in visible if item[0] is not None), key=lambda item: item[0][0])
+            s.write("\x1b[6;2~")  # First Shift+PageDown extends to the visible bottom.
+            pos = find_text(s.screen()[0], f"row_{bottom[1]:02d}.txt")
+            if (find_text(s.screen()[0], "row_02.txt") is None or pos is None
+             or s.screen()[1][pos[0]][pos[1]] != selected_bg):
+                print("FAIL - Shift+PageDown did not extend to the visible bottom")
+                return False
+            s.write("\x1b[6;2~")  # From the edge, advance to the next page.
+            if find_text(s.screen()[0], "row_02.txt") is not None:
+                print("FAIL - second Shift+PageDown did not advance the viewport")
+                return False
+            s.write("\x1b[5;2~" * 2)  # Visit the visible top, then the previous page.
+            chars, bg = s.screen()
+            parent = find_text(chars, "/..")
+            row02 = find_text(chars, "row_02.txt")
+            row03 = find_text(chars, "row_03.txt")
+            row04 = find_text(chars, "row_04.txt")
+            if (parent is None or row02 is None or row03 is None or row04 is None
+             or bg[parent[0]][parent[1]] != selected_bg
+             or bg[row02[0]][row02[1]] != selected_bg
+             or bg[row03[0]][row03[1]] != unselected_bg
+             or bg[row04[0]][row04[1]] != unselected_bg):
+                print("FAIL - Shift+PageUp did not shrink through visible page tops")
+                return False
+
+            s.write("\x1b[1;2H")  # Shift+Home: parent through the row_02 anchor.
+            parent = find_text(s.screen()[0], "/..")
+            if parent is None or s.screen()[1][parent[0]][parent[1]] != selected_bg:
+                print("FAIL - Shift+Home did not extend to the first item")
+                return False
+            s.click(row02[1] + 1, row02[0] + 1)  # Reset the anchor for Shift+End.
+            s.write("\x1b[1;2F")
+            last = find_text(s.screen()[0], "row_47.txt")
+            if last is None or s.screen()[1][last[0]][last[1]] != selected_bg:
+                print("FAIL - Shift+End did not extend to the final item")
                 return False
             print("PASS")
             return True
@@ -1092,6 +1221,8 @@ TESTS = [
     test_shared_table_keyboard_navigation_scrolls_to_last_row,
     test_typeahead_and_navigation_share_selection_cursor,
     test_page_home_end_keys_navigate_and_select,
+    test_paging_prioritizes_visible_page_after_scroll,
+    test_shift_navigation_extends_and_shrinks_selection,
     test_typeahead_scrolls_selection_into_view_and_resets_horizontal_scroll,
     test_vertical_scrollbar_stays_at_last_item,
     test_file_activation_preserves_scrolled_viewport,
