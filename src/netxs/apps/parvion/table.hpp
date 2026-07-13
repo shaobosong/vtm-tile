@@ -456,6 +456,20 @@ namespace netxs::app::parvion
             if (st.row_order[(size_t)i] == source_row) return i;
         return -1;
     }
+    inline auto q_follow_scroll(table_state const& st, table_cfg const& cfg) -> si32
+    {
+        if (!cfg.follow) return -1;
+        auto maxscroll = std::max(0, st.total - st.body_rows);
+        auto target = cfg.follow();
+        if (target.mode == table_follow_target::tail) return maxscroll;
+        auto row = q_visual_row(st, target.row);
+        return row >= 0 ? std::clamp(row - st.body_rows + 1, 0, maxscroll) : -1;
+    }
+    inline auto q_at_follow_target(table_state const& st, table_cfg const& cfg) -> bool
+    {
+        auto scroll = q_follow_scroll(st, cfg);
+        return scroll >= 0 && st.scroll == scroll;
+    }
     inline void q_build_order(table_state& st, table_cfg const& cfg, si32 nrows)
     {
         st.row_order.resize((size_t)std::max(0, nrows));
@@ -683,7 +697,6 @@ namespace netxs::app::parvion
         q_build_order(st, cfg, nrows);
         tbl_layout(st, w, h, nrows, t.content_w(), /*body_top=*/1);
 
-        auto maxscroll = std::max(0, st.total - st.body_rows);
         if (revision_row >= 0)
         {
             auto row = q_visual_row(st, revision_row);
@@ -691,13 +704,8 @@ namespace netxs::app::parvion
         }
         if (st.live_follow && cfg.follow)
         {
-            auto target = cfg.follow();
-            if (target.mode == table_follow_target::tail) st.scroll = maxscroll;
-            else
-            {
-                auto f = q_visual_row(st, target.row);
-                if (f >= 0) st.scroll = std::clamp(f - st.body_rows + 1, 0, maxscroll);
-            }
+            auto follow_scroll = q_follow_scroll(st, cfg);
+            if (follow_scroll >= 0) st.scroll = follow_scroll;
         }
         tbl_clamp(st);
 
@@ -870,7 +878,7 @@ namespace netxs::app::parvion
                     auto page = std::max(1, st.body_rows);
                     if (my < sb.thumb_y)                    st.scroll = std::clamp(st.scroll - page, 0, sb.maxscroll);
                     else if (my >= sb.thumb_y + sb.thumb_h) st.scroll = std::clamp(st.scroll + page, 0, sb.maxscroll);
-                    st.live_follow = !!cfg.follow && st.scroll == sb.maxscroll; boss.base::deface(); gear.dismiss(); return;
+                    st.live_follow = q_at_follow_target(st, cfg); boss.base::deface(); gear.dismiss(); return;
                 }
                 if (auto sb = tbl_hsb(st); sb.ok && my == sb.top && mx >= sb.x && mx < sb.x + sb.track_h)
                 {
@@ -935,7 +943,7 @@ namespace netxs::app::parvion
             boss.on(tier::mouserelease, input::key::MouseWheel, [&](hids& gear)
             {
                 if (gear.hzwhl || st.hsb_hover) { auto maxh = std::max(0, st.content_w - st.disp_w); st.hscroll = std::clamp(st.hscroll - gear.whlsi * 4, 0, maxh); }
-                else { auto maxv = std::max(0, st.total - st.body_rows); st.scroll = std::clamp(st.scroll - gear.whlsi, 0, maxv); st.live_follow = !!cfg.follow && st.scroll == maxv; }
+                else { auto maxv = std::max(0, st.total - st.body_rows); st.scroll = std::clamp(st.scroll - gear.whlsi, 0, maxv); st.live_follow = q_at_follow_target(st, cfg); }
                 boss.base::deface();
             });
             boss.base::signal(tier::release, e2::form::draggable::_<hids::buttons::left>, true);
@@ -948,7 +956,7 @@ namespace netxs::app::parvion
                     if (py >= sb.thumb_y && py < sb.thumb_y + sb.thumb_h) st.sb_grab = py - sb.thumb_y;
                     else { st.sb_grab = sb.thumb_h / 2; tbl_vsb_to(st, py, sb); }
                     st.sb_drag = st.sb_hover = true; st.drag = table_state::d_vsb;
-                    st.live_follow = !!cfg.follow && st.scroll == std::max(0, st.total - st.body_rows); boss.base::deface(); return;
+                    st.live_follow = q_at_follow_target(st, cfg); boss.base::deface(); return;
                 }
                 if (auto sb = tbl_hsb(st); sb.ok && py == sb.top && px >= sb.x && px < sb.x + sb.track_h)
                 {
@@ -984,7 +992,7 @@ namespace netxs::app::parvion
                 auto mx = (si32)gear.coord.x, my = (si32)gear.coord.y;
                 switch (st.drag)
                 {
-                    case table_state::d_vsb: tbl_vsb_to(st, my, tbl_vsb(st)); st.live_follow = !!cfg.follow && st.scroll == std::max(0, st.total - st.body_rows); boss.base::deface(); break;
+                    case table_state::d_vsb: tbl_vsb_to(st, my, tbl_vsb(st)); st.live_follow = q_at_follow_target(st, cfg); boss.base::deface(); break;
                     case table_state::d_hsb: tbl_hsb_to(st, mx, tbl_hsb(st)); boss.base::deface(); break;
                     case table_state::d_col:
                     {
@@ -1158,7 +1166,7 @@ namespace netxs::app::parvion
                     st.nav_cursor = key;
                     if      (dr < st.scroll)                 st.scroll = dr;
                     else if (dr >= st.scroll + st.body_rows) st.scroll = dr - st.body_rows + 1;
-                    st.scroll = std::clamp(st.scroll, 0, maxv); st.live_follow = !!cfg.follow && st.scroll == maxv;
+                    st.scroll = std::clamp(st.scroll, 0, maxv); st.live_follow = q_at_follow_target(st, cfg);
                 };
                 auto cur = si32{ -1 };
                 for (auto p = si32{}; p < (si32)sels.size(); ++p)

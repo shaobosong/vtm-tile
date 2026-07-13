@@ -150,6 +150,32 @@ namespace
             && st.drag_base.empty() && !st.rubber_ctrl
             && st.drag == table_state::d_none;
     }
+
+    auto test_tail_follow_rearms_at_bottom() -> bool
+    {
+        auto st = table_state{};
+        st.total = 50;
+        st.body_rows = 10;
+        st.scroll = 40;
+        auto cfg = table_cfg{};
+        cfg.follow = []{ return table_follow_target{ table_follow_target::tail }; };
+        return q_follow_scroll(st, cfg) == 40
+            && q_at_follow_target(st, cfg);
+    }
+
+    auto test_source_follow_does_not_rearm_at_unrelated_bottom() -> bool
+    {
+        auto st = table_state{};
+        st.total = 50;
+        st.body_rows = 10;
+        st.scroll = 40;
+        st.row_order.resize(50);
+        for (auto i = si32{}; i < 50; ++i) st.row_order[(size_t)i] = i;
+        auto cfg = table_cfg{};
+        cfg.follow = []{ return table_follow_target{ table_follow_target::source_row, 0 }; };
+        return q_follow_scroll(st, cfg) == 0
+            && !q_at_follow_target(st, cfg);
+    }
 }
 
 int main()
@@ -167,6 +193,8 @@ int main()
         { "selected_row_rejects_stale_cursor", test_selected_row_rejects_stale_cursor },
         { "selected_row_keeps_selected_cursor", test_selected_row_keeps_selected_cursor },
         { "revision_resets_selection_state", test_revision_resets_selection_state },
+        { "tail_follow_rearms_at_bottom", test_tail_follow_rearms_at_bottom },
+        { "source_follow_does_not_rearm_at_unrelated_bottom", test_source_follow_does_not_rearm_at_unrelated_bottom },
     };
 
     auto failed = 0;
