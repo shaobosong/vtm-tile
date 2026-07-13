@@ -7,7 +7,7 @@ End-to-end TUI tests for the Parvion address bar (the editable path field in eac
 title strip, panes.hpp): clicking the path starts an inline edit (connect-bar field style,
 with a block caret), a left-drag scrubs the caret, Enter navigates to the typed path
 (absolute or resolved relative to the current dir), Esc reverts, and a nonexistent or
-inaccessible path falls back to the previous directory.
+inaccessible path leaves the previous listing visible and logs the error to the Message log.
 
 Local pane only (no network): the app is launched as `vtm-tile -r parvion` with the child's
 cwd set to a fresh temp directory, so the address shown in the Local site header is known.
@@ -46,6 +46,14 @@ def _click_path_end(s, hdr):
     """Click one cell past the shown path's end: starts the edit with the caret at the end."""
     r, path, col = hdr
     s.click(col + len(path) + 1, r + 1)  # 1-based SGR coords; +1 past the last path cell.
+
+
+def _local_table_header_row(s, hdr):
+    """The file table is directly below the Local site title strip."""
+    chars = s.screen()[0]
+    row = hdr[0] + 1
+    txt = T.row_text(chars, row)
+    return row if "Name" in txt and "Size" in txt and "Modified" in txt else None
 
 
 def _caret_in_header(s, hdr_row):
@@ -232,15 +240,19 @@ def test_address_esc_reverts():
         shutil.rmtree(d, ignore_errors=True)
 
 
-def test_address_bad_path_falls_back():
-    """Enter on a nonexistent path falls back to the previous directory."""
-    print("TEST: parvion address bar - bad path falls back ... ", end="", flush=True)
+def test_address_bad_path_keeps_listing():
+    """Enter on a nonexistent path leaves the previous directory visible without in-pane error text."""
+    print("TEST: parvion address bar - bad path keeps listing ... ", end="", flush=True)
     d = T.make_tree()
     try:
         with T.ParvionSession(d) as s:
             hdr = _local_header(s)
             if hdr is None:
                 print("FAIL - Local site header not found")
+                return False
+            table_header = _local_table_header_row(s, hdr)
+            if table_header is None:
+                print("FAIL - Local file table header not found")
                 return False
             _click_path_end(s, hdr)
             s.write("\x7f" * (len(d) + 8))
@@ -251,10 +263,19 @@ def test_address_bad_path_falls_back():
                 print(f"FAIL - header shows {hdr2 and hdr2[1]!r}, want the previous dir {d!r}")
                 return False
             if not T.grid_contains(s.screen()[0], "alpha.txt"):
-                print("FAIL - previous dir listing not restored")
+                print("FAIL - previous dir listing not retained")
                 return False
-            if T.grid_contains(s.screen()[0], "Not a directory:"):
+            chars = s.screen()[0]
+            header = T.row_text(chars, table_header)
+            if "Name" not in header or "Size" not in header or "Modified" not in header:
+                print(f"FAIL - file table header changed after bad path; row is {header!r}")
+                return False
+            body = T.row_text(chars, table_header + 1)
+            if "Not a directory:" in body:
                 print("FAIL - error body shown instead of the previous listing")
+                return False
+            if T.grid_contains(chars, "Not a directory: /nonexistent_parvion_xyz"):
+                print("FAIL - bad-path error shown in the file pane instead of only the Message log")
                 return False
             print("PASS")
             return True
@@ -285,7 +306,7 @@ def test_address_bad_path_logs_error():
                 return False
             s.click(pos[1] + 1, pos[0] + 1)  # 1-based SGR coords.
             s.feed(0.6)
-            if not T.grid_contains(s.screen()[0], "Not a directory"):
+            if not T.grid_contains(s.screen()[0], "Error: Not a directory"):
                 print("FAIL - bad-path error not shown in the message log")
                 return False
             print("PASS")
@@ -328,7 +349,7 @@ TESTS = [
     test_address_relative_dotdot,
     test_address_absolute_dotdot,
     test_address_esc_reverts,
-    test_address_bad_path_falls_back,
+    test_address_bad_path_keeps_listing,
     test_address_bad_path_logs_error,
     test_address_drag_scrubs_caret,
 ]

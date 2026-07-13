@@ -309,20 +309,58 @@ namespace netxs::app::parvion
     }
 
     // --- pane logic (free functions; safe to call from deferred handlers) --------
-    inline void pane_relist(pane_state& st, text const& newpath)
+    inline void pane_reset_listing_cursor(pane_state& st)
     {
-        st.error.clear();
-        st.items.clear();
         st.sel = 0;
         st.marked = { 0 };
         st.revision_row = -1;
         st.create_pending.clear();
         st.rename_pending.clear();
         ++st.revision;
-        if (st.lister) { if (!st.lister(newpath, st.items, st.error)) st.items.clear(); }
-        else st.error = "Not connected.";
+    }
+
+    inline void pane_commit_listing(pane_state& st, text const& newpath, std::vector<direntry>&& items)
+    {
+        st.error.clear();
+        st.items = std::move(items);
+        pane_reset_listing_cursor(st);
         st.path = newpath;
         if (st.is_local && st.ctrl && !newpath.empty()) st.ctrl->local_dir = newpath; // Download target follows the local pane (skip the drive-list sentinel).
+    }
+
+    inline void pane_log_nav_error(pane_state& st, text err)
+    {
+        if (st.ctrl) st.ctrl->log_line(logtype::error, err);
+    }
+
+    inline void pane_relist(pane_state& st, text const& newpath)
+    {
+        auto items = std::vector<direntry>{};
+        auto error = text{};
+        if (st.lister && st.lister(newpath, items, error))
+        {
+            pane_commit_listing(st, newpath, std::move(items));
+            return;
+        }
+        st.error = st.lister ? std::move(error) : text{ "Not connected." };
+        st.items.clear();
+        pane_reset_listing_cursor(st);
+        st.path = newpath;
+        if (st.is_local && st.ctrl && !newpath.empty()) st.ctrl->local_dir = newpath; // Download target follows the local pane (skip the drive-list sentinel).
+    }
+    inline auto pane_try_relist(pane_state& st, text const& newpath) -> bool
+    {
+        if (!st.lister) { pane_log_nav_error(st, "Not connected."); return faux; }
+        auto items = std::vector<direntry>{};
+        auto error = text{};
+        if (!st.lister(newpath, items, error))
+        {
+            if (error.empty()) error = "Cannot access: " + newpath;
+            pane_log_nav_error(st, std::move(error));
+            return faux;
+        }
+        pane_commit_listing(st, newpath, std::move(items));
+        return true;
     }
     inline void pane_clamp(pane_state& st)
     {
@@ -336,9 +374,14 @@ namespace netxs::app::parvion
     inline void pane_refresh(pane_state& st)
     {
         if (!st.lister) return;
-        st.error.clear();
         auto items = std::vector<direntry>{};
-        if (st.lister(st.path, items, st.error)) st.items = std::move(items);
+        auto error = text{};
+        if (st.lister(st.path, items, error))
+        {
+            st.error.clear();
+            st.items = std::move(items);
+        }
+        else st.error = std::move(error);
         pane_clamp(st); // Keep sel/scroll valid against the (possibly larger) listing.
         if (st.delete_pending)
         {
@@ -350,7 +393,7 @@ namespace netxs::app::parvion
     inline void pane_goparent(pane_state& st)
     {
         if (st.remote) { st.remote->cdup(); return; }
-        pane_relist(st, parent_path(st.path, st.is_local));
+        pane_try_relist(st, parent_path(st.path, st.is_local));
     }
     inline void pane_activate(pane_state& st)
     {
@@ -366,16 +409,16 @@ namespace netxs::app::parvion
             return;
         }
         // Local pane: dir -> descend; file -> enqueue upload.
-        if (st.sel == 0) { pane_relist(st, parent_path(st.path, st.is_local)); return; }
+        if (st.sel == 0) { pane_try_relist(st, parent_path(st.path, st.is_local)); return; }
         auto idx = st.sel - 1;
         if (idx < 0 || idx >= (si32)st.items.size()) return;
         auto& e = st.items[idx];
         if (e.is_dir)
         {
         #if defined(_WIN32)
-            if (st.path.empty()) { pane_relist(st, e.name + "\\"); return; } // drive list -> enter drive root
+            if (st.path.empty()) { pane_try_relist(st, e.name + "\\"); return; } // drive list -> enter drive root
         #endif
-            pane_relist(st, child_path(st.path, e.name, st.is_local));
+            pane_try_relist(st, child_path(st.path, e.name, st.is_local));
         }
         else if (st.on_pick) st.on_pick(child_path(st.path, e.name, st.is_local));
         else if (st.ctrl)    st.ctrl->enqueue_upload(child_path(st.path, e.name, true), e.name, e.size);
@@ -463,16 +506,13 @@ namespace netxs::app::parvion
         // Windows: only follow unambiguous targets. A bare "/" or "\" (and empty input) opens the
         // drive list; a bare drive letter ("C:"), a drive-relative path ("C:dir") or a drive-less
         // rooted path ("\dir") is ambiguous — we don't guess a drive. Such inputs are reported the
-        // same way an unreadable directory is (log the error, then re-list the current directory).
+        // same way an unreadable directory is (log the error, then keep the current listing visible).
         switch (classify_win_addr(dest))
         {
-            case win_addr::drive_list: pane_relist(st, {}); return; // "" / "/" / "\" -> "Computer".
+            case win_addr::drive_list: pane_try_relist(st, {}); return; // "" / "/" / "\" -> "Computer".
             case win_addr::invalid:
-                // Match the not-a-directory fallback: log the error, then re-list the current
-                // directory (the reverted address bar is the on-pane feedback). The input is a
-                // pure-string reject, so there is nothing to attempt — refresh in place.
-                if (st.ctrl) st.ctrl->log_line(logtype::error, "Invalid path: " + dest);
-                pane_relist(st, st.path);
+                // Pure-string reject: leave the current listing in place and log the error.
+                pane_log_nav_error(st, "Invalid path: " + dest);
                 return;
             case win_addr::navigate: break; // Absolute-with-drive, UNC, or relative: navigate below.
         }
@@ -487,17 +527,7 @@ namespace netxs::app::parvion
         // drop it so the title matches the cwd-seeded form, but keep a bare root ("/", "C:\").
         auto root = fp.root_path().string();
         if (dest.size() > root.size() && (dest.back() == '/' || dest.back() == '\\')) dest.pop_back();
-        auto oldpath = st.path;
-        pane_relist(st, dest);
-        // Nonexistent / inaccessible target: report it in the message log (the remote pane's
-        // failed cd surfaces an Error line the same way), then fall back to the previous
-        // directory (the reverted address is the on-pane feedback). The fallback relist clears
-        // st.error, so log it first.
-        if (!st.error.empty() && dest != oldpath)
-        {
-            if (st.ctrl) st.ctrl->log_line(logtype::error, st.error);
-            pane_relist(st, oldpath);
-        }
+        pane_try_relist(st, dest);
     }
 
     // --- transfer-table-style columns (Name / Size / Modified), mirroring parvion/queue.hpp ----------
