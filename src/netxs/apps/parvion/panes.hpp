@@ -88,6 +88,7 @@ namespace netxs::app::parvion
         si32                  revision_row = -1; // One-shot source row revealed after a revision change.
         text                  seen_path;       // Remote path associated with seen_gen (same-path refresh preserves viewport).
         text                  create_pending; // Remote mkdir target, selected after its successful refreshed listing.
+        text                  rename_pending; // Remote renamed directory target, selected after its successful refreshed listing.
         bool                  delete_pending = faux; // Next same-directory refresh settles selection beside deleted rows.
         si32                  delete_anchor = 0;     // First deleted logical row; replacement selection keeps this position.
         // File-picker mode (Settings dialog's "Add key file..."): when set, activating a FILE
@@ -316,6 +317,7 @@ namespace netxs::app::parvion
         st.marked = { 0 };
         st.revision_row = -1;
         st.create_pending.clear();
+        st.rename_pending.clear();
         ++st.revision;
         if (st.lister) { if (!st.lister(newpath, st.items, st.error)) st.items.clear(); }
         else st.error = "Not connected.";
@@ -539,7 +541,7 @@ namespace netxs::app::parvion
         ++st.revision;
         pane_reload(st);
     }
-    inline auto pane_select_created_dir(pane_state& st, view name) -> bool
+    inline auto pane_select_named_dir(pane_state& st, view name) -> bool
     {
         auto& items = st.cur_items();
         for (auto i = si32{}; i < (si32)items.size(); ++i)
@@ -567,7 +569,7 @@ namespace netxs::app::parvion
         auto ec = std::error_code{};
         auto created = fs::create_directory(fs::path{ child_path(st.path, name, true) }, ec);
         pane_refresh(st);
-        if (created && !ec) pane_select_created_dir(st, name);
+        if (created && !ec) pane_select_named_dir(st, name);
     }
     inline void pane_rename_sel(pane_state& st) // Renames the cursor item to st.input_buf.
     {
@@ -576,11 +578,17 @@ namespace netxs::app::parvion
         auto idx = st.sel - 1;
         if (newname.empty() || st.sel <= 0 || idx < 0 || idx >= (si32)its.size()) return;
         auto oldname = text{ its[(size_t)idx].name };
+        auto old_is_dir = its[(size_t)idx].is_dir;
         if (oldname == newname) return;
-        if (st.remote) { st.remote->remote_rename(oldname, newname); return; }
+        if (st.remote)
+        {
+            if (st.remote->remote_rename(oldname, newname) && old_is_dir) st.rename_pending = newname;
+            return;
+        }
         auto ec = std::error_code{};
         fs::rename(fs::path{ child_path(st.path, oldname, true) }, fs::path{ child_path(st.path, newname, true) }, ec);
         pane_refresh(st);
+        if (!ec && old_is_dir) pane_select_named_dir(st, newname);
     }
     inline void pane_delete_selection(pane_state& st) // Deletes every marked real item (skips ".."), folders included.
     {
@@ -787,13 +795,19 @@ namespace netxs::app::parvion
                 st.sel = 0;
                 st.marked = { 0 };
                 st.create_pending.clear();
+                st.rename_pending.clear();
                 st.delete_pending = faux;
                 ++st.revision;
             }
             else if (!st.create_pending.empty())
             {
-                pane_select_created_dir(st, st.create_pending);
+                pane_select_named_dir(st, st.create_pending);
                 st.create_pending.clear();
+            }
+            else if (!st.rename_pending.empty())
+            {
+                pane_select_named_dir(st, st.rename_pending);
+                st.rename_pending.clear();
             }
             else if (st.delete_pending)
             {
@@ -802,9 +816,10 @@ namespace netxs::app::parvion
                 st.delete_pending = faux;
             }
         }
-        else if (st.remote && !st.create_pending.empty() && st.remote->await == sftp_remote::c_none)
+        else if (st.remote && st.remote->await == sftp_remote::c_none)
         {
-            st.create_pending.clear(); // mkdir failed: no refreshed listing was produced.
+            st.create_pending.clear(); // mkdir/rename failed: no refreshed listing was produced.
+            st.rename_pending.clear();
         }
         pane_clamp(st);
     }

@@ -743,6 +743,48 @@ def test_rename_item():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_rename_directory_reveals_new_row():
+    """A successful directory rename scrolls to and selects the newly named directory."""
+    print("TEST: parvion pane - Rename directory reveals new row ... ", end="", flush=True)
+    d = tempfile.mkdtemp(prefix="parvionpane_rename_view_")
+    try:
+        for i in range(48):
+            os.mkdir(os.path.join(d, f"dir_{i:02d}"))
+        with ParvionSession(d) as s:
+            victim = find_text(s.screen()[0], "dir_00")
+            if victim is None:
+                print("FAIL - directory to rename not visible")
+                return False
+            s.click(20, victim[0] + 1, button=2)  # Right-click blank space within the item row.
+            rn = find_text(s.screen()[0], "Rename")
+            if rn is None:
+                print("FAIL - Rename menu item not found")
+                return False
+            s.click(rn[1] + 1, rn[0] + 1, button=0)
+            s.write("\x7f" * len("dir_00"))
+            s.write("zz_renamed_directory")
+            s.write("\r", settle=0.8)
+            if os.path.exists(os.path.join(d, "dir_00")) or not os.path.isdir(os.path.join(d, "zz_renamed_directory")):
+                print("FAIL - directory not renamed on disk")
+                return False
+            chars, bg = s.screen()
+            renamed = find_text(chars, "zz_renamed_directory")
+            if renamed is None:
+                print("FAIL - renamed directory was not revealed")
+                return False
+            ordinary = find_text(chars, "dir_47")
+            if ordinary is None or bg[renamed[0]][renamed[1]] == bg[ordinary[0]][ordinary[1]]:
+                print("FAIL - revealed directory is not selected")
+                return False
+            if find_text(chars, "/..") is not None:
+                print("FAIL - viewport remained at the top")
+                return False
+            print("PASS")
+            return True
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 SEL_ACCENT = (137, 180, 250)  # theme::sel_bg_act — the focused-selection left accent (x=0).
 
 
@@ -1362,6 +1404,7 @@ TESTS = [
     test_delete_key_item,
     test_delete_preserves_viewport_and_navigation_selection,
     test_rename_item,
+    test_rename_directory_reveals_new_row,
 ]
 
 

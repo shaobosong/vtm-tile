@@ -1916,12 +1916,13 @@ namespace netxs::app::parvion
             send_cmd((is_dir ? text{ "rmdir " } : text{ "rm " }) + quote_name(child_path(path, name, faux)));
             mark("Deleting " + name + "...");
         }
-        void remote_rename(text const& oldname, text const& newname)
+        auto remote_rename(text const& oldname, text const& newname) -> bool
         {
-            if (!connected() || recop != rec_none || await != c_none || oldname.empty() || newname.empty()) return;
+            if (!connected() || recop != rec_none || await != c_none || oldname.empty() || newname.empty()) return faux;
             await = c_op;
             send_cmd("mv " + quote_name(child_path(path, oldname, faux)) + " " + quote_name(child_path(path, newname, faux)));
             mark("Renaming " + oldname + " to " + newname + "...");
+            return true;
         }
         // Re-list the current remote directory when the control link is next idle (poll() drains it).
         void request_refresh() { remote_refresh_pending = true; }
