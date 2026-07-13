@@ -242,7 +242,6 @@ namespace netxs::app::parvion
         };
         cfg.deletion.confirm = [ctrl]{ return hash_remove_confirmation(ctrl); };
         cfg.arrow_nav = true;
-        cfg.wide_hit   = true; // A click anywhere on a row selects it (flat list).
         return make_tab_page(make_table(std::move(cfg)), std::move(title));
     }
 }

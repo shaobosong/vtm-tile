@@ -29,7 +29,7 @@ import subprocess
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from test_parvion_queue import (  # noqa: E402
     ParvionSession, kill_all_vtm, find_text, grid_contains, row_text,
-    header_field, click_header, named_row_order,
+    find_menu_item, header_field, click_header, named_row_order,
     ROWS, COLS, VTM_TILE_BINARY,
 )
 import test_parvion_panes as P  # noqa: E402  (ParvionSession that sets the launch cwd)
@@ -66,6 +66,19 @@ def _open_checksums_tab(s):
     r, c = pos
     s.click(c + 1, r + 1)  # mouse coords are 1-based; grid indices are 0-based.
     return s.screen()[0]
+
+
+def _hide_checksums_column(s, name):
+    chars = s.screen()[0]
+    hdr = find_text(chars, "Source")
+    if not hdr:
+        return False
+    s.click(hdr[1] + 1, hdr[0] + 1, button=2)
+    item = find_menu_item(s.screen()[0], name)
+    if not item:
+        return False
+    s.click(item[1] + 1, item[0] + 1)
+    return True
 
 
 def test_checksums_tab_lists_tasks():
@@ -321,6 +334,52 @@ def test_checksums_row_selection():
         return True
 
 
+def test_checksums_blank_area_matches_transfer_table():
+    """The row-right blank area is not part of a checksum row, matching transfer tables."""
+    with ParvionSession(DEMO_ENV) as s:
+        _open_checksums_tab(s)
+        if not _hide_checksums_column(s, "Result"):
+            print("FAIL test_checksums_blank_area_matches_transfer_table: Result column toggle missing")
+            return False
+        chars, bg0 = s.screen()
+        pos = find_text(chars, "notes.txt")
+        if not pos:
+            print("FAIL test_checksums_blank_area_matches_transfer_table: notes.txt row not found")
+            return False
+        r, c = pos
+        blank_c = 100
+        if row_text(chars, r)[blank_c] != " ":
+            print("FAIL test_checksums_blank_area_matches_transfer_table: test point is not blank")
+            return False
+
+        name_before = bg0[r][c]
+        s.click(c + 1, r + 1)
+        bg1 = s.screen()[1]
+        selected = bg1[r][c]
+        if selected is None or selected == name_before:
+            print("FAIL test_checksums_blank_area_matches_transfer_table: row was not selected")
+            return False
+
+        s.click(blank_c + 1, r + 1)
+        if s.screen()[1][r][c] == selected:
+            print("FAIL test_checksums_blank_area_matches_transfer_table: left-click blank kept row selected")
+            return False
+
+        s.click(c + 1, r + 1)
+        selected = s.screen()[1][r][c]
+        s.click(blank_c + 1, r + 1, button=2)
+        chars = s.screen()[0]
+        if not grid_contains(chars, "Remove all") or grid_contains(chars, "Copy digest"):
+            print("FAIL test_checksums_blank_area_matches_transfer_table: row-right blank opened item menu")
+            return False
+        s.write("\x1b")
+        if s.screen()[1][r][c] == selected:
+            print("FAIL test_checksums_blank_area_matches_transfer_table: right-click blank kept row selected")
+            return False
+        print("OK test_checksums_blank_area_matches_transfer_table")
+        return True
+
+
 def test_checksums_arrow_key_selection():
     """Checksums inherits shared-table keyboard navigation: Up/Down moves the single selected row."""
     with ParvionSession(DEMO_ENV) as s:
@@ -528,6 +587,7 @@ TESTS = [
     test_no_checksum_on_folder,
     test_checksums_column_resize,
     test_checksums_row_selection,
+    test_checksums_blank_area_matches_transfer_table,
     test_checksums_arrow_key_selection,
     test_checksums_keyboard_remove_selected_and_noop,
     test_checksums_sort_cycle_is_typed_and_stable,
