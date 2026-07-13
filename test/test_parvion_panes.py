@@ -520,6 +520,50 @@ def test_create_directory():
             if not grid_contains(s.screen()[0], "newfolder"):
                 print("FAIL - new directory not shown in the listing")
                 return False
+            chars, bg = s.screen()
+            created = find_text(chars, "newfolder")
+            other = find_text(chars, "alpha.txt")
+            if created is None or other is None or bg[created[0]][created[1]] == bg[other[0]][other[1]]:
+                print("FAIL - new directory is not selected")
+                return False
+            print("PASS")
+            return True
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_create_directory_reveals_new_row():
+    """A successful create scrolls a long listing to the selected new directory."""
+    print("TEST: parvion pane - Create Directory reveals new row ... ", end="", flush=True)
+    d = tempfile.mkdtemp(prefix="parvionpane_create_view_")
+    try:
+        for i in range(48):
+            os.mkdir(os.path.join(d, f"dir_{i:02d}"))
+        with ParvionSession(d) as s:
+            parent = find_text(s.screen()[0], "/..")
+            if parent is None:
+                print("FAIL - parent row not found")
+                return False
+            s.click(54, parent[0] + 2, button=2)
+            cd = find_text(s.screen()[0], "Create Directory")
+            if cd is None:
+                print("FAIL - Create Directory menu item not found")
+                return False
+            s.click(cd[1] + 1, cd[0] + 1)
+            s.write("zz_new_directory")
+            s.write("\r", settle=0.8)
+            chars, bg = s.screen()
+            created = find_text(chars, "zz_new_directory")
+            if created is None:
+                print("FAIL - new directory was not revealed")
+                return False
+            ordinary = find_text(chars, "dir_47")
+            if ordinary is None or bg[created[0]][created[1]] == bg[ordinary[0]][ordinary[1]]:
+                print("FAIL - revealed directory is not selected")
+                return False
+            if find_text(chars, "/..") is not None:
+                print("FAIL - viewport remained at the top")
+                return False
             print("PASS")
             return True
     finally:
@@ -1312,6 +1356,7 @@ TESTS = [
     test_item_context_menu,
     test_copy_full_path,
     test_create_directory,
+    test_create_directory_reveals_new_row,
     test_delete_item,
     test_delete_cancel,
     test_delete_key_item,

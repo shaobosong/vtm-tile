@@ -1901,12 +1901,13 @@ namespace netxs::app::parvion
         }
         // Remote file operations (psftp/parvionsftp verbs): each fires the command and then re-lists the
         // current directory once the backend reports done (handled as c_op in command_done).
-        void remote_mkdir(text const& name)
+        auto remote_mkdir(text const& name) -> bool
         {
-            if (!connected() || recop != rec_none || await != c_none || name.empty()) return;
+            if (!connected() || recop != rec_none || await != c_none || name.empty()) return faux;
             await = c_op;
             send_cmd("mkdir " + quote_name(child_path(path, name, faux)));
             mark("Creating directory " + name + "...");
+            return true;
         }
         void remote_remove(text const& name, bool is_dir)
         {

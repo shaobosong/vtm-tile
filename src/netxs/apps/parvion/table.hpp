@@ -291,6 +291,7 @@ namespace netxs::app::parvion
         std::function<qmenu_cfg(netxs::wptr<ui::base>)>  menu;        // Item/blank menus (null => none; header menu still shows).
         std::function<table_follow_target()>             follow;      // Persistent live-update target (null => no live following).
         std::function<ui64()>                            revision;    // Change token: reset vertical/horizontal viewport when it changes.
+        std::function<si32()>                            revision_row;// One-shot source row to reveal after a revision change (-1 => top).
         std::function<si32(si32 source_row)>             sort_group;  // Fixed ascending group rank; direction only reverses within a group.
         std::function<si32(si32, si32, si32)>            compare;     // Source rows a/b + column key -> negative/equal/positive.
         std::function<void(si32 source_row)>             activate;    // Double-click/Enter activation (null => none).
@@ -663,6 +664,7 @@ namespace netxs::app::parvion
         st.row_hit.clear();
         st.expand_hit.clear();
 
+        auto revision_row = si32{ -1 };
         if (cfg.revision)
         {
             auto revision = cfg.revision();
@@ -672,6 +674,7 @@ namespace netxs::app::parvion
                 st.scroll = st.hscroll = 0;
                 st.live_follow = faux;
                 q_reset_selection_state(st);
+                if (cfg.revision_row) revision_row = cfg.revision_row();
             }
         }
 
@@ -681,6 +684,11 @@ namespace netxs::app::parvion
         tbl_layout(st, w, h, nrows, t.content_w(), /*body_top=*/1);
 
         auto maxscroll = std::max(0, st.total - st.body_rows);
+        if (revision_row >= 0)
+        {
+            auto row = q_visual_row(st, revision_row);
+            if (row >= st.body_rows) st.scroll = row - st.body_rows + 1;
+        }
         if (st.live_follow && cfg.follow)
         {
             auto target = cfg.follow();

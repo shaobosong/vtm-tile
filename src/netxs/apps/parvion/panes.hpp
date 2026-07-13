@@ -85,7 +85,9 @@ namespace netxs::app::parvion
         ui64                  seen_gen = ~0ull; // Last remote listing generation reconciled into selection state.
         ui64                  seen_local_gen = 0; // Last local refresh generation seen (post-download re-list); matches ctrl->local_gen's initial 0.
         ui64                  revision = 0;    // Navigation generation consumed by table_cfg::revision.
+        si32                  revision_row = -1; // One-shot source row revealed after a revision change.
         text                  seen_path;       // Remote path associated with seen_gen (same-path refresh preserves viewport).
+        text                  create_pending; // Remote mkdir target, selected after its successful refreshed listing.
         bool                  delete_pending = faux; // Next same-directory refresh settles selection beside deleted rows.
         si32                  delete_anchor = 0;     // First deleted logical row; replacement selection keeps this position.
         // File-picker mode (Settings dialog's "Add key file..."): when set, activating a FILE
@@ -312,6 +314,8 @@ namespace netxs::app::parvion
         st.items.clear();
         st.sel = 0;
         st.marked = { 0 };
+        st.revision_row = -1;
+        st.create_pending.clear();
         ++st.revision;
         if (st.lister) { if (!st.lister(newpath, st.items, st.error)) st.items.clear(); }
         else st.error = "Not connected.";
@@ -525,14 +529,45 @@ namespace netxs::app::parvion
         if (st.remote) st.remote->request_refresh();
         else           pane_refresh(st);
     }
+    // An explicit Refresh from the blank-area context menu starts the view over. Automatic
+    // destination/delete refreshes deliberately use pane_refresh/pane_reload directly so they
+    // retain the current viewport and selection.
+    inline void pane_reload_reset_view(pane_state& st)
+    {
+        st.sel = 0;
+        st.marked.clear();
+        ++st.revision;
+        pane_reload(st);
+    }
+    inline auto pane_select_created_dir(pane_state& st, view name) -> bool
+    {
+        auto& items = st.cur_items();
+        for (auto i = si32{}; i < (si32)items.size(); ++i)
+        {
+            if (items[(size_t)i].is_dir && items[(size_t)i].name == name)
+            {
+                st.sel = i + 1;
+                st.marked = { st.sel };
+                st.revision_row = st.sel;
+                ++st.revision;
+                return true;
+            }
+        }
+        return faux;
+    }
     inline void pane_create_dir(pane_state& st) // Uses st.input_buf as the new directory name.
     {
         auto name = st.input_buf;
         if (name.empty()) return;
-        if (st.remote) { st.remote->remote_mkdir(name); return; }
+        if (st.remote)
+        {
+            if (st.remote->remote_mkdir(name)) st.create_pending = name;
+            return;
+        }
         auto ec = std::error_code{};
-        fs::create_directory(fs::path{ child_path(st.path, name, true) }, ec);
+        auto created = fs::create_directory(fs::path{ child_path(st.path, name, true) }, ec);
         pane_refresh(st);
+        if (created && !ec) pane_select_created_dir(st, name);
     }
     inline void pane_rename_sel(pane_state& st) // Renames the cursor item to st.input_buf.
     {
@@ -680,7 +715,7 @@ namespace netxs::app::parvion
             row.action = [panel_wp, fn](hids&){ if (auto p = panel_wp.lock()) { fn(); p->base::deface(); } };
             items.push_back(std::move(row));
         };
-        add("Refresh", [&st]{ pane_reload(st); });
+        add("Refresh", [&st]{ pane_reload_reset_view(st); });
         add("Create Directory", [&st, panel_wp]
         {
             st.input_mode = 1; st.input_buf.clear();
@@ -751,8 +786,14 @@ namespace netxs::app::parvion
             {
                 st.sel = 0;
                 st.marked = { 0 };
+                st.create_pending.clear();
                 st.delete_pending = faux;
                 ++st.revision;
+            }
+            else if (!st.create_pending.empty())
+            {
+                pane_select_created_dir(st, st.create_pending);
+                st.create_pending.clear();
             }
             else if (st.delete_pending)
             {
@@ -760,6 +801,10 @@ namespace netxs::app::parvion
                 st.marked = { st.sel };
                 st.delete_pending = faux;
             }
+        }
+        else if (st.remote && !st.create_pending.empty() && st.remote->await == sftp_remote::c_none)
+        {
+            st.create_pending.clear(); // mkdir failed: no refreshed listing was produced.
         }
         pane_clamp(st);
     }
@@ -1127,6 +1172,7 @@ namespace netxs::app::parvion
             pane_activate(*state);
         };
         cfg.revision = [state]{ pane_sync(*state); return state->revision; };
+        cfg.revision_row = [state]{ return std::exchange(state->revision_row, -1); };
         cfg.sort_group = [state](si32 row){ return pane_sort_group(*state, row); };
         cfg.compare = [state](si32 a, si32 b, si32 key){ return pane_compare(*state, a, b, key); };
         cfg.arrow_nav = true;
