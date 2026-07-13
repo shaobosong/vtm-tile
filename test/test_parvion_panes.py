@@ -296,6 +296,21 @@ def named_row_order(chars, names):
     return [name for _, name in sorted(found)]
 
 
+def visible_dir_numbers(chars, count=48):
+    return [i for i in range(count) if find_text(chars, f"dir_{i:02d}") is not None]
+
+
+def mid_visible_dir_with_lower_marker(chars, count=48):
+    visible = visible_dir_numbers(chars, count)
+    if len(visible) < 6:
+        return None
+    target = visible[len(visible) // 2]
+    lower_candidates = [i for i in visible[len(visible) // 2 + 1:-1] if i > target]
+    if not lower_candidates:
+        return None
+    return target, lower_candidates[len(lower_candidates) // 2]
+
+
 def make_tree():
     d = tempfile.mkdtemp(prefix="parvionpane_")
     open(os.path.join(d, "alpha.txt"), "w").close()
@@ -570,6 +585,63 @@ def test_create_directory_reveals_new_row():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_create_directory_preserves_visible_viewport():
+    """Creating a directory that sorts into the current page selects it without moving the viewport."""
+    print("TEST: parvion pane - Create Directory preserves visible viewport ... ", end="", flush=True)
+    d = tempfile.mkdtemp(prefix="parvionpane_create_keep_view_")
+    try:
+        for i in range(48):
+            os.mkdir(os.path.join(d, f"dir_{i:02d}"))
+        with ParvionSession(d) as s:
+            parent = find_text(s.screen()[0], "/..")
+            if parent is None:
+                print("FAIL - parent row not found")
+                return False
+            s.click(parent[1] + 1, parent[0] + 1)
+            s.write("\x1b[B" * 32, settle=1.0)
+            chars = s.screen()[0]
+            pick = mid_visible_dir_with_lower_marker(chars)
+            if pick is None or find_text(chars, "/..") is not None:
+                print("FAIL - could not establish a scrolled visible range")
+                return False
+            target, lower = pick
+            anchor = find_text(chars, f"dir_{target:02d}")
+            if anchor is None:
+                print("FAIL - create anchor not visible")
+                return False
+            newname = f"dir_{target:02d}a"
+            s.click(54, anchor[0] + 1, button=2)
+            cd = find_text(s.screen()[0], "Create Directory")
+            if cd is None:
+                print("FAIL - Create Directory menu item not found")
+                return False
+            s.click(cd[1] + 1, cd[0] + 1)
+            s.write(newname)
+            s.write("\r", settle=0.8)
+            if not os.path.isdir(os.path.join(d, newname)):
+                print("FAIL - directory not created on disk")
+                return False
+            chars, bg = s.screen()
+            created = find_text(chars, newname)
+            marker = find_text(chars, f"dir_{lower:02d}")
+            if created is None:
+                print("FAIL - new directory is not visible")
+                return False
+            if marker is None:
+                print("FAIL - viewport jumped away from a previously visible lower row")
+                return False
+            if find_text(chars, "/..") is not None:
+                print("FAIL - viewport reset to the top")
+                return False
+            if bg[created[0]][created[1]] == bg[marker[0]][marker[1]]:
+                print("FAIL - new directory is not selected")
+                return False
+            print("PASS")
+            return True
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_delete_item():
     """Item menu -> Delete removes the file from disk and the listing."""
     print("TEST: parvion pane - Delete ... ", end="", flush=True)
@@ -778,6 +850,65 @@ def test_rename_directory_reveals_new_row():
                 return False
             if find_text(chars, "/..") is not None:
                 print("FAIL - viewport remained at the top")
+                return False
+            print("PASS")
+            return True
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_rename_directory_preserves_visible_viewport():
+    """Renaming a directory to a nearby sorted name selects it without moving the viewport."""
+    print("TEST: parvion pane - Rename directory preserves visible viewport ... ", end="", flush=True)
+    d = tempfile.mkdtemp(prefix="parvionpane_rename_keep_view_")
+    try:
+        for i in range(48):
+            os.mkdir(os.path.join(d, f"dir_{i:02d}"))
+        with ParvionSession(d) as s:
+            parent = find_text(s.screen()[0], "/..")
+            if parent is None:
+                print("FAIL - parent row not found")
+                return False
+            s.click(parent[1] + 1, parent[0] + 1)
+            s.write("\x1b[B" * 32, settle=1.0)
+            chars = s.screen()[0]
+            pick = mid_visible_dir_with_lower_marker(chars)
+            if pick is None or find_text(chars, "/..") is not None:
+                print("FAIL - could not establish a scrolled visible range")
+                return False
+            target, lower = pick
+            oldname = f"dir_{target:02d}"
+            newname = f"dir_{target:02d}a"
+            victim = find_text(chars, oldname)
+            if victim is None:
+                print("FAIL - directory to rename not visible")
+                return False
+            s.click(victim[1] + 1, victim[0] + 1, button=2)
+            rn = find_text(s.screen()[0], "Rename")
+            if rn is None:
+                print("FAIL - Rename menu item not found")
+                return False
+            s.click(rn[1] + 1, rn[0] + 1, button=0)
+            s.write("\x7f" * len(oldname))
+            s.write(newname)
+            s.write("\r", settle=0.8)
+            if os.path.exists(os.path.join(d, oldname)) or not os.path.isdir(os.path.join(d, newname)):
+                print("FAIL - directory not renamed on disk")
+                return False
+            chars, bg = s.screen()
+            renamed = find_text(chars, newname)
+            marker = find_text(chars, f"dir_{lower:02d}")
+            if renamed is None:
+                print("FAIL - renamed directory is not visible")
+                return False
+            if marker is None:
+                print("FAIL - viewport jumped away from a previously visible lower row")
+                return False
+            if find_text(chars, "/..") is not None:
+                print("FAIL - viewport reset to the top")
+                return False
+            if bg[renamed[0]][renamed[1]] == bg[marker[0]][marker[1]]:
+                print("FAIL - renamed directory is not selected")
                 return False
             print("PASS")
             return True
@@ -1399,12 +1530,14 @@ TESTS = [
     test_copy_full_path,
     test_create_directory,
     test_create_directory_reveals_new_row,
+    test_create_directory_preserves_visible_viewport,
     test_delete_item,
     test_delete_cancel,
     test_delete_key_item,
     test_delete_preserves_viewport_and_navigation_selection,
     test_rename_item,
     test_rename_directory_reveals_new_row,
+    test_rename_directory_preserves_visible_viewport,
 ]
 
 

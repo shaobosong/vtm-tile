@@ -419,6 +419,17 @@ namespace netxs::app::parvion
         }
         return { offset, cursor };
     }
+    inline auto q_reveal_scroll(si32 total, si32 page, si32 offset, si32 row) -> si32
+    {
+        page = std::max(0, page);
+        auto maxoff = std::max(0, total - page);
+        offset = std::clamp(offset, 0, maxoff);
+        if (total <= 0 || page <= 0 || row < 0) return offset;
+        row = std::clamp(row, 0, total - 1);
+        if (row < offset)        return row;
+        if (row >= offset + page) return std::clamp(row - page + 1, 0, maxoff);
+        return offset;
+    }
     inline auto q_row_w(table_state const& st) -> si32 { return std::clamp(st.content_w - st.hscroll, 0, st.disp_w); }
     inline auto q_border_hit(qtable const& t, si32 mx, si32 hscroll) -> si32
     {
@@ -684,11 +695,13 @@ namespace netxs::app::parvion
             auto revision = cfg.revision();
             if (revision != st.revision)
             {
+                auto old_scroll = st.scroll;
                 st.revision = revision;
-                st.scroll = st.hscroll = 0;
+                if (cfg.revision_row) revision_row = cfg.revision_row();
+                st.scroll = revision_row >= 0 ? old_scroll : 0;
+                st.hscroll = 0;
                 st.live_follow = faux;
                 q_reset_selection_state(st);
-                if (cfg.revision_row) revision_row = cfg.revision_row();
             }
         }
 
@@ -700,7 +713,7 @@ namespace netxs::app::parvion
         if (revision_row >= 0)
         {
             auto row = q_visual_row(st, revision_row);
-            if (row >= st.body_rows) st.scroll = row - st.body_rows + 1;
+            st.scroll = q_reveal_scroll(st.total, st.body_rows, st.scroll, row);
         }
         if (st.live_follow && cfg.follow)
         {

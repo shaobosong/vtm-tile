@@ -111,6 +111,26 @@ namespace
             && above.offset == 0 && above.cursor == 0;
     }
 
+    auto test_reveal_scroll_keeps_visible_row() -> bool
+    {
+        return q_reveal_scroll(50, 10, 20, 20) == 20
+            && q_reveal_scroll(50, 10, 20, 25) == 20
+            && q_reveal_scroll(50, 10, 20, 29) == 20;
+    }
+
+    auto test_reveal_scroll_moves_minimally() -> bool
+    {
+        return q_reveal_scroll(50, 10, 20, 12) == 12
+            && q_reveal_scroll(50, 10, 20, 35) == 26;
+    }
+
+    auto test_reveal_scroll_clamps_bounds() -> bool
+    {
+        return q_reveal_scroll(8, 10, 4, 7) == 0
+            && q_reveal_scroll(50, 10, 90, 45) == 40
+            && q_reveal_scroll(50, 0, 10, 20) == 10;
+    }
+
     auto test_selected_row_rejects_stale_cursor() -> bool
     {
         auto selected = std::set<si32>{ 0 };
@@ -190,6 +210,9 @@ int main()
         { "page_navigation_scroll_from_edges", test_page_navigation_scrolls_from_edges },
         { "page_navigation_partial_last_page", test_page_navigation_partial_last_page },
         { "page_navigation_visible_page", test_page_navigation_uses_visible_page },
+        { "reveal_scroll_keeps_visible_row", test_reveal_scroll_keeps_visible_row },
+        { "reveal_scroll_moves_minimally", test_reveal_scroll_moves_minimally },
+        { "reveal_scroll_clamps_bounds", test_reveal_scroll_clamps_bounds },
         { "selected_row_rejects_stale_cursor", test_selected_row_rejects_stale_cursor },
         { "selected_row_keeps_selected_cursor", test_selected_row_keeps_selected_cursor },
         { "revision_resets_selection_state", test_revision_resets_selection_state },
