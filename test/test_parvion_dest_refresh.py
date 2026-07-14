@@ -644,6 +644,65 @@ def test_upload_success_clears_state_row():
         shutil.rmtree(sroot, ignore_errors=True)
 
 
+def test_remote_create_and_inline_rename():
+    """The writable SFTP pane creates a unique default, enters inline Rename after refresh,
+    commits the new name, and refuses a duplicate without letting server rename overwrite it."""
+    print("TEST: parvion remote pane - Create Directory / inline Rename ... ", end="", flush=True)
+    sroot = tempfile.mkdtemp(prefix="parvionsrv_remote_name_")
+    d = tempfile.mkdtemp(prefix="parvionremote_name_")
+    os.mkdir(os.path.join(sroot, "New folder"))
+    os.mkdir(os.path.join(sroot, "taken"))
+    srv = LocalSftpServer(sroot)
+    try:
+        with T.ParvionSession(d, env=ENV) as s:
+            if not connect(s, srv.port):
+                print("FAIL - could not connect to the local SFTP server")
+                return False
+            parent = find_in_pane(s.screen()[0], "/..", remote=True)
+            if parent is None:
+                print("FAIL - remote parent row not found")
+                return False
+            s.click(T.COLS - 5, parent[0] + 2, button=2)
+            create = T.find_text(s.screen()[0], "Create Directory")
+            if create is None:
+                print("FAIL - remote Create Directory menu item not found")
+                return False
+            s.click(create[1] + 1, create[0] + 1)
+            if not wait_in_pane(s, "New folder (2)", remote=True, timeout=10.0):
+                print("FAIL - remote default was not created/refreshed")
+                return False
+            if not os.path.isdir(os.path.join(sroot, "New folder (2)")):
+                print("FAIL - generated remote directory is missing on the server")
+                return False
+            s.write("\x7f" * len("New folder (2)"))
+            s.write("remote_named")
+            s.write("\r")
+            if not wait_in_pane(s, "remote_named", remote=True, timeout=10.0):
+                print("FAIL - committed remote rename was not refreshed")
+                return False
+            if not os.path.isdir(os.path.join(sroot, "remote_named")):
+                print("FAIL - remote directory was not renamed on the server")
+                return False
+
+            renamed = find_in_pane(s.screen()[0], "remote_named", remote=True)
+            s.click(renamed[1] + 1, renamed[0] + 1, button=2)
+            rename = T.find_text(s.screen()[0], "Rename")
+            s.click(rename[1] + 1, rename[0] + 1)
+            s.write("\x7f" * len("remote_named"))
+            s.write("taken")
+            s.write("\r")
+            if not os.path.isdir(os.path.join(sroot, "remote_named")) \
+                    or not os.path.isdir(os.path.join(sroot, "taken")):
+                print("FAIL - duplicate remote rename overwrote or removed an entry")
+                return False
+            print("PASS")
+            return True
+    finally:
+        srv.close()
+        shutil.rmtree(d, ignore_errors=True)
+        shutil.rmtree(sroot, ignore_errors=True)
+
+
 TESTS = [
     test_success_refreshes_local_pane,
     test_pause_refreshes_local_pane,
@@ -653,6 +712,7 @@ TESTS = [
     test_remove_upload_refreshes_both_panes,
     test_failed_upload_refreshes_both_panes,
     test_upload_success_clears_state_row,
+    test_remote_create_and_inline_rename,
 ]
 
 

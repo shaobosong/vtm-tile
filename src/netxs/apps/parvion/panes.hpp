@@ -63,9 +63,13 @@ namespace netxs::app::parvion
         // Multi-selection (mirrors the queue table): `marked` is the highlighted set of logical rows.
         // The shared table owns the transient anchor / rubber-band state.
         std::set<si32>        marked{ 0 };
-        // Inline name entry for the right-click "Create Directory" / "Rename" actions.
-        si32                  input_mode = 0;   // 0 = none, 1 = create-directory, 2 = rename.
-        text                  input_buf;        // The name being typed.
+        // Explorer-style name editor painted in the selected row's Name cell.
+        bool                  name_edit = faux;
+        text                  name_buf;
+        si32                  name_caret = 0;  // Grapheme-cluster index.
+        text                  name_original;   // Stable operation identity; selection may move on an outside click.
+        si32                  name_row = -1;    // Source row whose Name cell owns the editor.
+        bool                  name_is_dir = faux;
         // Address-bar path entry (the row-0 path field, connect-bar style).
         bool                  addr_edit  = faux; // Editing the path in place.
         text                  addr_buf;          // The path being typed.
@@ -87,8 +91,8 @@ namespace netxs::app::parvion
         ui64                  revision = 0;    // Navigation generation consumed by table_cfg::revision.
         si32                  revision_row = -1; // One-shot source row revealed after a revision change.
         text                  seen_path;       // Remote path associated with seen_gen (same-path refresh preserves viewport).
-        text                  create_pending; // Remote mkdir target, selected after its successful refreshed listing.
-        text                  rename_pending; // Remote renamed directory target, selected after its successful refreshed listing.
+        text                  create_pending; // Remote mkdir target; successful refresh selects it and starts Rename.
+        text                  rename_pending; // Remote rename target, selected after its successful refreshed listing.
         bool                  delete_pending = faux; // Next same-directory refresh settles selection beside deleted rows.
         si32                  delete_anchor = 0;     // First deleted logical row; replacement selection keeps this position.
         // File-picker mode (Settings dialog's "Add key file..."): when set, activating a FILE
@@ -309,8 +313,19 @@ namespace netxs::app::parvion
     }
 
     // --- pane logic (free functions; safe to call from deferred handlers) --------
+    inline void pane_name_cancel(pane_state& st)
+    {
+        st.name_edit = faux;
+        st.name_buf.clear();
+        st.name_caret = 0;
+        st.name_original.clear();
+        st.name_row = -1;
+        st.name_is_dir = faux;
+    }
+
     inline void pane_reset_listing_cursor(pane_state& st)
     {
+        pane_name_cancel(st);
         st.sel = 0;
         st.marked = { 0 };
         st.revision_row = -1;
@@ -471,8 +486,7 @@ namespace netxs::app::parvion
     // --- address-bar editing (the row-0 path field, connect-bar style) -----------
     inline void pane_addr_begin(pane_state& st)
     {
-        st.input_mode = 0; // The two inline editors are mutually exclusive.
-        st.input_buf.clear();
+        pane_name_cancel(st); // The two inline editors are mutually exclusive.
         st.addr_buf   = st.cur_path();
         st.addr_caret = cluster_count(st.addr_buf);
         // Open scrolled to the tail (where the resting view is anchored), caret at the end.
@@ -571,12 +585,12 @@ namespace netxs::app::parvion
         ++st.revision;
         pane_reload(st);
     }
-    inline auto pane_select_named_dir(pane_state& st, view name) -> bool
+    inline auto pane_select_named_item(pane_state& st, view name) -> bool
     {
         auto& items = st.cur_items();
         for (auto i = si32{}; i < (si32)items.size(); ++i)
         {
-            if (items[(size_t)i].is_dir && items[(size_t)i].name == name)
+            if (items[(size_t)i].name == name)
             {
                 st.sel = i + 1;
                 st.marked = { st.sel };
@@ -587,38 +601,183 @@ namespace netxs::app::parvion
         }
         return faux;
     }
-    inline void pane_create_dir(pane_state& st) // Uses st.input_buf as the new directory name.
+
+    inline auto pane_windows_name_rules(pane_state const& st) -> bool
     {
-        auto name = st.input_buf;
-        if (name.empty()) return;
-        if (st.remote)
-        {
-            if (st.remote->remote_mkdir(name)) st.create_pending = name;
-            return;
-        }
-        auto ec = std::error_code{};
-        auto created = fs::create_directory(fs::path{ child_path(st.path, name, true) }, ec);
-        pane_refresh(st);
-        if (created && !ec) pane_select_named_dir(st, name);
+        if (st.remote) return faux; // The remote pane and its path math are POSIX-style.
+    #if defined(_WIN32)
+        return true;
+    #else
+        return faux;
+    #endif
     }
-    inline void pane_rename_sel(pane_state& st) // Renames the cursor item to st.input_buf.
+    inline auto pane_names_equal(view a, view b, bool windows) -> bool
     {
-        auto newname = st.input_buf;
-        auto& its = st.cur_items();
-        auto idx = st.sel - 1;
-        if (newname.empty() || st.sel <= 0 || idx < 0 || idx >= (si32)its.size()) return;
-        auto oldname = text{ its[(size_t)idx].name };
-        auto old_is_dir = its[(size_t)idx].is_dir;
-        if (oldname == newname) return;
+        if (!windows) return a == b;
+        auto lhs = text{ a };
+        auto rhs = text{ b };
+        utf::to_lower(lhs);
+        utf::to_lower(rhs);
+        return lhs == rhs;
+    }
+    inline auto pane_validate_name(view name, bool windows, text& reason) -> bool
+    {
+        if (name.empty()) { reason = "the name is empty"; return faux; }
+        if (name == "." || name == "..") { reason = "'.' and '..' are reserved"; return faux; }
+        for (auto c : name)
+        {
+            auto u = (unsigned char)c;
+            if (!u) { reason = "the name contains NUL"; return faux; }
+            if (c == '/') { reason = "the name contains '/'"; return faux; }
+            if (windows && (u < 0x20 || c == '<' || c == '>' || c == ':' || c == '"'
+                                     || c == '|' || c == '?' || c == '*' || c == '\\'))
+            {
+                reason = "the name contains a character reserved by Windows";
+                return faux;
+            }
+        }
+        if (!windows) return true;
+        if (name.back() == ' ' || name.back() == '.')
+        {
+            reason = "Windows names cannot end in a space or dot";
+            return faux;
+        }
+        auto base = text{ name.substr(0, name.find('.')) };
+        utf::to_lower(base);
+        auto reserved = base == "con" || base == "prn" || base == "aux" || base == "nul"
+                     || (base.size() == 4 && (base.starts_with("com") || base.starts_with("lpt"))
+                                          && base[3] >= '1' && base[3] <= '9');
+        if (reserved)
+        {
+            reason = "the name is reserved by Windows";
+            return faux;
+        }
+        return true;
+    }
+    inline auto pane_name_duplicate(pane_state const& st, view name, view original = {}) -> bool
+    {
+        auto windows = pane_windows_name_rules(st);
+        if (!original.empty() && pane_names_equal(name, original, windows)) return faux;
+        for (auto& item : st.cur_items())
+        {
+            if (!original.empty() && item.name == original) continue;
+            if (pane_names_equal(item.name, name, windows)) return true;
+        }
+        if (!st.remote)
+        {
+            auto ec = std::error_code{};
+            auto status = fs::symlink_status(fs::path{ child_path(st.path, text{ name }, true) }, ec);
+            if (!ec && status.type() != fs::file_type::not_found && status.type() != fs::file_type::none) return true;
+        }
+        return faux;
+    }
+    inline void pane_name_error(pane_state& st, text message)
+    {
+        pane_log_nav_error(st, "Rename failed: " + std::move(message));
+    }
+    inline auto pane_name_begin(pane_state& st, si32 row) -> bool
+    {
+        auto& items = st.cur_items();
+        auto idx = row - 1;
+        if (row <= 0 || idx < 0 || idx >= (si32)items.size()) return faux;
+        pane_addr_cancel(st);
+        st.col_shown[0] = true;
+        st.col_w[0] = std::max(st.col_w[0], si32{ 4 });
+        st.sel = row;
+        st.marked = { row };
+        st.name_edit = true;
+        st.name_buf = items[(size_t)idx].name;
+        st.name_caret = cluster_count(st.name_buf);
+        st.name_original = items[(size_t)idx].name;
+        st.name_row = row;
+        st.name_is_dir = items[(size_t)idx].is_dir;
+        st.revision_row = row;
+        ++st.revision; // Reveal the row and return the horizontal viewport to the Name field.
+        return true;
+    }
+    inline auto pane_name_commit(pane_state& st) -> bool
+    {
+        if (!st.name_edit) return true;
+        auto newname = st.name_buf;
+        auto oldname = st.name_original;
+        pane_name_cancel(st); // Every submission leaves edit mode; failures reveal the unchanged row.
+
+        auto reason = text{};
+        if (!pane_validate_name(newname, pane_windows_name_rules(st), reason))
+        {
+            pane_name_error(st, std::move(reason));
+            pane_select_named_item(st, oldname);
+            return faux;
+        }
+        if (newname == oldname) { pane_select_named_item(st, oldname); return true; }
+        if (pane_name_duplicate(st, newname, oldname))
+        {
+            pane_name_error(st, "'" + newname + "' already exists");
+            pane_select_named_item(st, oldname);
+            return faux;
+        }
         if (st.remote)
         {
-            if (st.remote->remote_rename(oldname, newname) && old_is_dir) st.rename_pending = newname;
-            return;
+            if (st.remote->remote_rename(oldname, newname))
+            {
+                st.rename_pending = newname;
+                return true;
+            }
+            pane_name_error(st, "the remote filesystem is busy or unavailable");
+            pane_select_named_item(st, oldname);
+            return faux;
         }
         auto ec = std::error_code{};
         fs::rename(fs::path{ child_path(st.path, oldname, true) }, fs::path{ child_path(st.path, newname, true) }, ec);
+        if (ec)
+        {
+            pane_name_error(st, ec.message());
+            pane_select_named_item(st, oldname);
+            return faux;
+        }
         pane_refresh(st);
-        if (!ec && old_is_dir) pane_select_named_dir(st, newname);
+        pane_select_named_item(st, newname);
+        return true;
+    }
+    inline auto pane_default_dir_name(pane_state const& st) -> text
+    {
+        auto name = text{ "New folder" };
+        if (!pane_name_duplicate(st, name)) return name;
+        for (auto n = si32{ 2 };; ++n)
+        {
+            name = "New folder (" + std::to_string(n) + ")";
+            if (!pane_name_duplicate(st, name)) return name;
+        }
+    }
+    inline void pane_create_dir(pane_state& st)
+    {
+        auto name = pane_default_dir_name(st);
+        if (st.remote)
+        {
+            if (st.remote->remote_mkdir(name)) st.create_pending = name;
+            else pane_log_nav_error(st, "Create directory failed: the remote filesystem is busy or unavailable");
+            return;
+        }
+        for (auto attempt = si32{}; attempt < 64; ++attempt)
+        {
+            auto ec = std::error_code{};
+            auto created = fs::create_directory(fs::path{ child_path(st.path, name, true) }, ec);
+            if (created && !ec)
+            {
+                pane_refresh(st);
+                if (pane_select_named_item(st, name)) pane_name_begin(st, st.sel);
+                return;
+            }
+            if (!ec || ec == std::errc::file_exists)
+            {
+                pane_refresh(st); // A racing creator took the candidate; choose the next free name.
+                name = pane_default_dir_name(st);
+                continue;
+            }
+            pane_log_nav_error(st, "Create directory failed: " + ec.message());
+            return;
+        }
+        pane_log_nav_error(st, "Create directory failed: could not choose an unused name");
     }
     inline void pane_delete_selection(pane_state& st) // Deletes every marked real item (skips ".."), folders included.
     {
@@ -756,7 +915,7 @@ namespace netxs::app::parvion
         add("Refresh", [&st]{ pane_reload_reset_view(st); });
         add("Create Directory", [&st, panel_wp]
         {
-            st.input_mode = 1; st.input_buf.clear();
+            pane_create_dir(st);
             if (auto p = panel_wp.lock()) pro::focus::set(p, id_t{}, solo::on);
         });
         return items;
@@ -785,8 +944,7 @@ namespace netxs::app::parvion
             auto& its = st.cur_items();
             auto idx = st.sel - 1;
             if (st.sel <= 0 || idx < 0 || idx >= (si32)its.size()) return; // ".." / no item: can't rename.
-            st.input_mode = 2;
-            st.input_buf = text{ its[(size_t)idx].name };
+            pane_name_begin(st, st.sel);
             if (auto p = panel_wp.lock()) pro::focus::set(p, id_t{}, solo::on);
         });
         // "Calculate Checksum" — a nested submenu of algorithms (the secondary menu). Each leaf
@@ -831,12 +989,12 @@ namespace netxs::app::parvion
             }
             else if (!st.create_pending.empty())
             {
-                pane_select_named_dir(st, st.create_pending);
+                if (pane_select_named_item(st, st.create_pending)) pane_name_begin(st, st.sel);
                 st.create_pending.clear();
             }
             else if (!st.rename_pending.empty())
             {
-                pane_select_named_dir(st, st.rename_pending);
+                pane_select_named_item(st, st.rename_pending);
                 st.rename_pending.clear();
             }
             else if (st.delete_pending)
@@ -895,6 +1053,8 @@ namespace netxs::app::parvion
                                : e.is_dir ? ui32{ theme::dir_fg }
                                           : ui32{ theme::text_fg };
             }
+            if (st.name_edit && row == st.name_row)
+                return { row > 0 && st.cur_items()[(size_t)(row - 1)].is_dir ? text{ "/" } : text{ " " }, fg };
         }
         return { pane_cell_text(st, key, row), fg };
     }
@@ -972,33 +1132,39 @@ namespace netxs::app::parvion
     inline auto pane_table_key(std::shared_ptr<pane_state> const& state, hids& gear, netxs::wptr<ui::base> self) -> table_viewport_action
     {
         auto& st = *state;
+        if (st.name_edit && gear.payload == input::keybd::type::keypaste)
+        {
+            edit_insert(st.name_buf, st.name_caret, edit_filter(gear.cluster));
+            if (auto p = self.lock()) p->base::deface();
+            return { table_viewport_action::handled };
+        }
         if (gear.payload != input::keybd::type::keypress
          || gear.keystat == input::key::released
          || gear.keystat == input::key::interrupted) return {};
         auto k = gear.keybd::generic();
-        if (st.input_mode)
+        if (st.name_edit)
         {
-            if (k == input::key::Esc) { st.input_mode = 0; st.input_buf.clear(); }
+            if (k == input::key::Esc)
+            {
+                auto original = st.name_original;
+                pane_name_cancel(st);
+                pane_select_named_item(st, original);
+            }
             else if (k == input::key::KeyEnter)
             {
-                auto mode = st.input_mode;
-                st.input_mode = 0;
-                if      (mode == 1) pane_create_dir(st);
-                else if (mode == 2) pane_rename_sel(st);
-                st.input_buf.clear();
+                pane_name_commit(st);
             }
-            else if (k == input::key::Backspace)
-            {
-                auto n = cluster_count(st.input_buf);
-                if (n > 0) st.input_buf = st.input_buf.substr(0, cluster_to_byte(st.input_buf, n - 1));
-            }
+            else if (k == input::key::Backspace)     edit_backspace(st.name_buf, st.name_caret);
+            else if (k == input::key::KeyDelete)     edit_delete(st.name_buf, st.name_caret);
+            else if (k == input::key::KeyLeftArrow)  st.name_caret = std::max(0, st.name_caret - 1);
+            else if (k == input::key::KeyRightArrow) st.name_caret = std::min(cluster_count(st.name_buf), st.name_caret + 1);
+            else if (k == input::key::KeyHome)       st.name_caret = 0;
+            else if (k == input::key::KeyEnd)        st.name_caret = cluster_count(st.name_buf);
             else
             {
-                auto cl = gear.cluster;
-                if (!cl.empty() && (unsigned char)cl[0] >= 0x20 && cl != "\x7f" && cl != "/" && cl != "\\")
-                    st.input_buf += text{ cl };
+                auto ins = edit_filter(gear.cluster);
+                if (!ins.empty()) edit_insert(st.name_buf, st.name_caret, ins);
             }
-            gear.set_handled();
             if (auto p = self.lock()) p->base::deface();
             return { table_viewport_action::handled };
         }
@@ -1201,6 +1367,19 @@ namespace netxs::app::parvion
             return state->cur_msg().empty() ? state->total() : 0;
         };
         cfg.cell = [state](si32 row, si32 key){ return pane_cell(state, row, key); };
+        cfg.edit_cell = [state](si32 row, si32 key) -> std::optional<table_edit_cell>
+        {
+            if (!state->name_edit || row != state->name_row || key != 0) return std::nullopt;
+            return table_edit_cell{ state->name_buf, state->name_caret, 1 };
+        };
+        cfg.edit_active = [state]{ return state->name_edit; };
+        cfg.edit_caret = [state](si32 row, si32 key, si32 cell)
+        {
+            if (!state->name_edit || row != state->name_row || key != 0) return;
+            state->name_caret = std::min(cell_to_cluster(state->name_buf, std::max(0, cell)),
+                                         cluster_count(state->name_buf));
+        };
+        cfg.edit_commit = [state]{ pane_name_commit(*state); };
         cfg.selection = [state]{ return pane_selection(state); };
         cfg.menu = [state](netxs::wptr<ui::base> panel_wp){ return pane_menu(state, panel_wp); };
         cfg.empty_text = [state]{ return state->cur_msg(); };
@@ -1228,20 +1407,6 @@ namespace netxs::app::parvion
         state->table_wp = table_wp;
         auto table_layer = ui::cake::ctor()->alignment({ snap::both, snap::both });
         table_layer->attach(table);
-        table_layer->attach(ui::mock::ctor())->invoke([state](auto& boss)
-        {
-            auto& st = *state;
-            boss.LISTEN(tier::release, e2::render::any, canvas)
-            {
-                if (!st.input_mode || boss.base::size().y <= 0) return;
-                auto w = boss.base::size().x;
-                auto prompt = (st.input_mode == 1 ? text{ "New folder: " } : text{ "Rename: " }) + st.input_buf;
-                canvas.fill(rect{{ 0, 0 }, { w, 1 }}, [&](cell& c){ c.bgc(theme::sel_bg_act); });
-                put_str(canvas, 0, 0, prompt, theme::sel_fg_act, theme::sel_bg_act, w);
-                auto curx = std::min(std::max(0, w - 1), cell_width(prompt));
-                if (w > 0) canvas.fill(rect{{ curx, 0 }, { 1, 1 }}, [&](cell& c){ c.bgc(theme::sel_fg_act); });
-            };
-        });
 
         auto pane = ui::fork::ctor(axis::Y);
         pane->attach(slot::_1, make_pane_title(state, table_wp))->limits({ -1, 1 }, { -1, 1 });

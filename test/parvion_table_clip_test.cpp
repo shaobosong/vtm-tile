@@ -196,6 +196,42 @@ namespace
         return q_follow_scroll(st, cfg) == 0
             && !q_at_follow_target(st, cfg);
     }
+
+    auto test_posix_name_validation() -> bool
+    {
+        auto reason = text{};
+        return pane_validate_name("notes\\draft:*?", faux, reason)
+            && !pane_validate_name("", faux, reason)
+            && !pane_validate_name(".", faux, reason)
+            && !pane_validate_name("..", faux, reason)
+            && !pane_validate_name("a/b", faux, reason);
+    }
+
+    auto test_windows_name_validation() -> bool
+    {
+        auto reason = text{};
+        return pane_validate_name("notes.txt", true, reason)
+            && !pane_validate_name("a:b", true, reason)
+            && !pane_validate_name("a\\b", true, reason)
+            && !pane_validate_name("trail. ", true, reason)
+            && !pane_validate_name("CON", true, reason)
+            && !pane_validate_name("nul.txt", true, reason)
+            && !pane_validate_name("Com9.log", true, reason)
+            && !pane_validate_name("lpt1", true, reason);
+    }
+
+    auto test_default_directory_numbering() -> bool
+    {
+        auto st = pane_state{};
+        st.items = {
+            direntry{ .name = "New folder",     .is_dir = true },
+            direntry{ .name = "New folder (2)", .is_dir = false },
+            direntry{ .name = "New folder (4)", .is_dir = true },
+        };
+        return pane_default_dir_name(st) == "New folder (3)"
+            && pane_names_equal("Readme", "README", true)
+            && !pane_names_equal("Readme", "README", faux);
+    }
 }
 
 int main()
@@ -218,6 +254,9 @@ int main()
         { "revision_resets_selection_state", test_revision_resets_selection_state },
         { "tail_follow_rearms_at_bottom", test_tail_follow_rearms_at_bottom },
         { "source_follow_does_not_rearm_at_unrelated_bottom", test_source_follow_does_not_rearm_at_unrelated_bottom },
+        { "posix_name_validation", test_posix_name_validation },
+        { "windows_name_validation", test_windows_name_validation },
+        { "default_directory_numbering", test_default_directory_numbering },
     };
 
     auto failed = 0;

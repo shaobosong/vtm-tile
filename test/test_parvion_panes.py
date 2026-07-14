@@ -527,6 +527,10 @@ def test_create_directory():
                 print("FAIL - 'Create Directory' not in menu")
                 return False
             s.click(cd[1] + 1, cd[0] + 1, button=0)  # Click it -> input mode.
+            if not os.path.isdir(os.path.join(d, "New folder")):
+                print("FAIL - default directory was not created before rename")
+                return False
+            s.write("\x7f" * len("New folder"))
             s.write("newfolder")
             s.write("\r")
             if not os.path.isdir(os.path.join(d, "newfolder")):
@@ -565,6 +569,7 @@ def test_create_directory_reveals_new_row():
                 print("FAIL - Create Directory menu item not found")
                 return False
             s.click(cd[1] + 1, cd[0] + 1)
+            s.write("\x7f" * len("New folder"))
             s.write("zz_new_directory")
             s.write("\r", settle=0.8)
             chars, bg = s.screen()
@@ -616,6 +621,7 @@ def test_create_directory_preserves_visible_viewport():
                 print("FAIL - Create Directory menu item not found")
                 return False
             s.click(cd[1] + 1, cd[0] + 1)
+            s.write("\x7f" * len("New folder"))
             s.write(newname)
             s.write("\r", settle=0.8)
             if not os.path.isdir(os.path.join(d, newname)):
@@ -635,6 +641,77 @@ def test_create_directory_preserves_visible_viewport():
                 return False
             if bg[created[0]][created[1]] == bg[marker[0]][marker[1]]:
                 print("FAIL - new directory is not selected")
+                return False
+            print("PASS")
+            return True
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_create_directory_unique_default_and_cancel():
+    """Create happens immediately, skips occupied defaults, and Esc keeps the generated directory."""
+    print("TEST: parvion pane - Create Directory unique default / cancel ... ", end="", flush=True)
+    d = make_tree()
+    try:
+        os.mkdir(os.path.join(d, "New folder"))
+        os.mkdir(os.path.join(d, "New folder (2)"))
+        with ParvionSession(d) as s:
+            parent = find_text(s.screen()[0], "/..")
+            s.click(54, parent[0] + 2, button=2)
+            cd = find_text(s.screen()[0], "Create Directory")
+            if cd is None:
+                print("FAIL - Create Directory menu item not found")
+                return False
+            s.click(cd[1] + 1, cd[0] + 1)
+            default = os.path.join(d, "New folder (3)")
+            if not os.path.isdir(default):
+                print("FAIL - numbered default was not created immediately")
+                return False
+            chars = s.screen()[0]
+            created = find_text(chars, "New folder (3)")
+            header = find_text(chars, "Name")
+            if created is None or header is None or created[0] == header[0]:
+                print("FAIL - default name is not rendered in its file-list row")
+                return False
+            if grid_contains(chars, "New folder:"):
+                print("FAIL - legacy header prompt is still visible")
+                return False
+            s.write("\x1b")
+            if not os.path.isdir(default) or not grid_contains(s.screen()[0], "New folder (3)"):
+                print("FAIL - Esc removed or hid the generated directory")
+                return False
+            print("PASS")
+            return True
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_create_directory_invalid_rename_keeps_default():
+    """An invalid follow-up rename closes the editor and leaves the already-created default intact."""
+    print("TEST: parvion pane - Create Directory invalid rename reverts ... ", end="", flush=True)
+    d = make_tree()
+    try:
+        with ParvionSession(d) as s:
+            parent = find_text(s.screen()[0], "/..")
+            s.click(54, parent[0] + 2, button=2)
+            cd = find_text(s.screen()[0], "Create Directory")
+            s.click(cd[1] + 1, cd[0] + 1)
+            s.write("\x7f" * len("New folder"))
+            s.write("bad/name")
+            s.write("\r")
+            if not os.path.isdir(os.path.join(d, "New folder")):
+                print("FAIL - invalid rename did not retain the default directory")
+                return False
+            if os.path.exists(os.path.join(d, "bad")):
+                print("FAIL - invalid name was interpreted as a path")
+                return False
+            log = find_text(s.screen()[0], "Message log")
+            if log is None:
+                print("FAIL - Message log tab not found")
+                return False
+            s.click(log[1] + 1, log[0] + 1)
+            if not grid_contains(s.screen()[0], "Error: Rename failed"):
+                print("FAIL - invalid rename was not logged")
                 return False
             print("PASS")
             return True
@@ -808,6 +885,87 @@ def test_rename_item():
                 return False
             if not grid_contains(s.screen()[0], "renamed.txt"):
                 print("FAIL - renamed file not shown")
+                return False
+            print("PASS")
+            return True
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_rename_click_elsewhere_commits():
+    """Clicking another row commits the active Name-cell editor."""
+    print("TEST: parvion pane - Rename commits on outside click ... ", end="", flush=True)
+    d = make_tree()
+    try:
+        with ParvionSession(d) as s:
+            pos = find_text(s.screen()[0], "alpha.txt")
+            s.click(pos[1] + 1, pos[0] + 1, button=2)
+            rn = find_text(s.screen()[0], "Rename")
+            s.click(rn[1] + 1, rn[0] + 1)
+            s.write("\x7f" * len("alpha.txt"))
+            s.write("clicked.txt")
+            other = find_text(s.screen()[0], "beta.txt")
+            s.click(other[1] + 1, other[0] + 1)
+            if os.path.exists(os.path.join(d, "alpha.txt")) or not os.path.exists(os.path.join(d, "clicked.txt")):
+                print("FAIL - outside click did not commit the rename")
+                return False
+            print("PASS")
+            return True
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_rename_rejects_duplicate_and_empty():
+    """Duplicate and empty submissions restore the original item and log an error."""
+    print("TEST: parvion pane - Rename rejects duplicate / empty ... ", end="", flush=True)
+    d = make_tree()
+    try:
+        with ParvionSession(d) as s:
+            for replacement in ("beta.txt", ""):
+                pos = find_text(s.screen()[0], "alpha.txt")
+                s.click(pos[1] + 1, pos[0] + 1, button=2)
+                rn = find_text(s.screen()[0], "Rename")
+                s.click(rn[1] + 1, rn[0] + 1)
+                s.write("\x7f" * len("alpha.txt"))
+                if replacement:
+                    s.write(replacement)
+                s.write("\r")
+                if not os.path.exists(os.path.join(d, "alpha.txt")):
+                    print(f"FAIL - original disappeared after rejected name {replacement!r}")
+                    return False
+            if not os.path.exists(os.path.join(d, "beta.txt")):
+                print("FAIL - duplicate target was overwritten")
+                return False
+            log = find_text(s.screen()[0], "Message log")
+            s.click(log[1] + 1, log[0] + 1)
+            if not grid_contains(s.screen()[0], "Error: Rename failed"):
+                print("FAIL - rejected rename was not logged")
+                return False
+            print("PASS")
+            return True
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_rename_accepts_posix_characters():
+    """The Linux/POSIX local pane accepts characters that Windows reserves, including backslash."""
+    if os.name == "nt":
+        print("TEST: parvion pane - Rename POSIX characters ... SKIP (Windows)")
+        return True
+    print("TEST: parvion pane - Rename accepts POSIX characters ... ", end="", flush=True)
+    d = make_tree()
+    try:
+        newname = "linux\\name:*.txt"
+        with ParvionSession(d) as s:
+            pos = find_text(s.screen()[0], "alpha.txt")
+            s.click(pos[1] + 1, pos[0] + 1, button=2)
+            rn = find_text(s.screen()[0], "Rename")
+            s.click(rn[1] + 1, rn[0] + 1)
+            s.write("\x7f" * len("alpha.txt"))
+            s.write(newname)
+            s.write("\r")
+            if not os.path.exists(os.path.join(d, newname)):
+                print("FAIL - valid POSIX punctuation was rejected")
                 return False
             print("PASS")
             return True
@@ -1531,11 +1689,16 @@ TESTS = [
     test_create_directory,
     test_create_directory_reveals_new_row,
     test_create_directory_preserves_visible_viewport,
+    test_create_directory_unique_default_and_cancel,
+    test_create_directory_invalid_rename_keeps_default,
     test_delete_item,
     test_delete_cancel,
     test_delete_key_item,
     test_delete_preserves_viewport_and_navigation_selection,
     test_rename_item,
+    test_rename_click_elsewhere_commits,
+    test_rename_rejects_duplicate_and_empty,
+    test_rename_accepts_posix_characters,
     test_rename_directory_reveals_new_row,
     test_rename_directory_preserves_visible_viewport,
 ]
