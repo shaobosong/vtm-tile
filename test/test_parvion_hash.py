@@ -13,7 +13,7 @@ no_autostart so no real parvionhash backend is spawned. We verify:
 
   1. The bottom tab strip shows "Checksums (5)"; clicking it lists every seeded task,
      its algorithm, a final digest, and a failure reason.
-  2. Right-clicking a task opens Copy digest / Remove; blank space exposes Remove all.
+  2. Every context menu exposes Copy digest / Remove plus Select All.
   3. Copy digest on a multi-selection writes newline-separated successful digests.
 """
 
@@ -29,7 +29,7 @@ import subprocess
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from test_parvion_queue import (  # noqa: E402
     ParvionSession, kill_all_vtm, find_text, grid_contains, row_text,
-    find_menu_item, header_field, click_header, named_row_order,
+    find_menu_item, menu_has_separator_between, header_field, click_header, named_row_order,
     ROWS, COLS, VTM_TILE_BINARY,
 )
 import test_parvion_panes as P  # noqa: E402  (ParvionSession that sets the launch cwd)
@@ -115,13 +115,16 @@ def test_checksums_context_menu():
             return False
         s.click(rp[1] + 1, rp[0] + 1, button=2)  # right-click the finished row
         chars, _ = s.screen()
-        wanted = ["Copy digest", "Remove"]
+        wanted = ["Copy digest", "Remove", "Select All"]
         missing = [w for w in wanted if not grid_contains(chars, w)]
         if missing:
             print(f"FAIL test_checksums_context_menu: missing menu items {missing}")
             return False
         if grid_contains(chars, "Clear finished") or grid_contains(chars, "Remove all"):
-            print("FAIL test_checksums_context_menu: bulk action shown for selected items")
+            print("FAIL test_checksums_context_menu: obsolete bulk action shown")
+            return False
+        if not menu_has_separator_between(chars, "Remove", "Select All"):
+            print("FAIL test_checksums_context_menu: action groups are not separated")
             return False
         rm = find_text(chars, "Remove")
         s.click(rm[1] + 1, rm[0] + 1)
@@ -136,14 +139,26 @@ def test_checksums_context_menu():
         missing_row = find_text(s.screen()[0], "missing.bin")
         s.click(missing_row[1] + 1, missing_row[0] + 3, button=2)
         chars = s.screen()[0]
-        remove_all = find_text(chars, "Remove all")
-        if not remove_all or grid_contains(chars, "Clear finished") or grid_contains(chars, "Copy digest"):
-            print("FAIL test_checksums_context_menu: blank menu is not Remove all only")
+        select_all = find_text(chars, "Select All")
+        if not select_all or grid_contains(chars, "Remove all") or not grid_contains(chars, "Copy digest"):
+            print("FAIL test_checksums_context_menu: blank menu is not unified")
             return False
-        s.click(remove_all[1] + 1, remove_all[0] + 1)
-        if not grid_contains(s.screen()[0], "Checksums (0)"):
-            print("FAIL test_checksums_context_menu: Remove all did not clear the checksum queue")
+        copy = find_text(chars, "Copy digest")
+        s.click(copy[1] + 1, copy[0] + 1)
+        if not grid_contains(s.screen()[0], "Select All"):
+            print("FAIL test_checksums_context_menu: disabled Copy digest was interactive")
             return False
+        chars = s.screen()[0]
+        select_all = find_text(chars, "Select All")
+        s.click(select_all[1] + 1, select_all[0] + 1)
+        report = find_text(s.screen()[0], "report.pdf")
+        s.click(report[1] + 1, report[0] + 1, button=2)
+        rm = find_text(s.screen()[0], "Remove")
+        s.click(rm[1] + 1, rm[0] + 1)
+        if not grid_contains(s.screen()[0], "Remove 5 selected checksums?"):
+            print("FAIL test_checksums_context_menu: Select All did not select every checksum")
+            return False
+        s.write("\x1b")
         print("OK test_checksums_context_menu")
         return True
 
@@ -256,14 +271,13 @@ def test_backend_hash_all_algorithms():
 
 
 def test_no_checksum_on_folder():
-    """Right-clicking a folder must NOT offer 'Calculate Checksum' (checksums are for files);
-    a regular file in the same dir still offers it."""
+    """A folder keeps Calculate Checksum visible but disabled; a file enables it."""
     d = tempfile.mkdtemp(prefix="pvhashdir_")
     os.mkdir(os.path.join(d, "subdir"))
     with open(os.path.join(d, "plain.txt"), "w") as f:
         f.write("hi")
     with P.ParvionSession(d, env={"PARVION_DEMO_QUEUE": "0"}) as s:
-        # Right-click the folder row: the item menu opens (Rename present) but no checksum entry.
+        # Right-click the folder row: the checksum submenu is visible but inert.
         fd = find_text(s.screen()[0], "subdir")
         if not fd:
             print("FAIL test_no_checksum_on_folder: subdir not listed"); return False
@@ -271,8 +285,12 @@ def test_no_checksum_on_folder():
         chars = s.screen()[0]
         if not grid_contains(chars, "Rename"):
             print("FAIL test_no_checksum_on_folder: folder context menu did not open"); return False
-        if grid_contains(chars, "Calculate Checksum"):
-            print("FAIL test_no_checksum_on_folder: 'Calculate Checksum' shown for a folder"); return False
+        checksum = find_text(chars, "Calculate Checksum")
+        if not checksum:
+            print("FAIL test_no_checksum_on_folder: 'Calculate Checksum' omitted for a folder"); return False
+        s.click(checksum[1] + 1, checksum[0] + 1); s.feed(0.4)
+        if not grid_contains(s.screen()[0], "Calculate Checksum") or grid_contains(s.screen()[0], "SHA-256"):
+            print("FAIL test_no_checksum_on_folder: folder checksum action was interactive"); return False
         # Dismiss, then right-click the file: checksum entry must be present.
         s.click(1, 1); s.feed(0.3)
         ff = find_text(s.screen()[0], "plain.txt")
@@ -369,8 +387,8 @@ def test_checksums_blank_area_matches_transfer_table():
         selected = s.screen()[1][r][c]
         s.click(blank_c + 1, r + 1, button=2)
         chars = s.screen()[0]
-        if not grid_contains(chars, "Remove all") or grid_contains(chars, "Copy digest"):
-            print("FAIL test_checksums_blank_area_matches_transfer_table: row-right blank opened item menu")
+        if not grid_contains(chars, "Select All") or grid_contains(chars, "Remove all") or not grid_contains(chars, "Copy digest"):
+            print("FAIL test_checksums_blank_area_matches_transfer_table: row-right blank did not open unified menu")
             return False
         s.write("\x1b")
         if s.screen()[1][r][c] == selected:

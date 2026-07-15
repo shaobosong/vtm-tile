@@ -5,7 +5,7 @@
 """
 End-to-end TUI tests for the Parvion local file-preview pane operations:
   - clicking the blank area (right of / below the columns) never selects an item;
-  - right-click context menus (blank: Refresh / Create Directory; item: Upload / Copy full path / Delete / Rename);
+  - unified right-click context menus with disabled item actions on blank space;
   - Create Directory, Delete and Rename act on the real local filesystem.
 
 The app is launched as `vtm-tile -r parvion` with the child's cwd set to a fresh temp directory, so the
@@ -254,6 +254,12 @@ def grid_contains(chars, needle):
     return any(needle in row_text(chars, r) for r in range(ROWS))
 
 
+def menu_has_separator_between(chars, upper, lower):
+    a, b = find_text(chars, upper), find_text(chars, lower)
+    return bool(a and b and a[0] < b[0]
+                and any("─" in row_text(chars, r) for r in range(a[0] + 1, b[0])))
+
+
 SORT_GLYPHS = ("↕", "↑", "↓")
 
 
@@ -438,8 +444,8 @@ def test_right_click_blank_clears_selection():
 
 
 def test_blank_context_menu():
-    """Right-click on the blank area opens Refresh / Create Directory."""
-    print("TEST: parvion pane - blank context menu ... ", end="", flush=True)
+    """Blank space shows the unified menu with inert selected-item actions."""
+    print("TEST: parvion pane - unified blank context menu ... ", end="", flush=True)
     d = make_tree()
     try:
         with ParvionSession(d) as s:
@@ -449,9 +455,19 @@ def test_blank_context_menu():
                 return False
             s.click(5, dd[0] + 7, button=2)  # Right-click a blank row below the list.
             chars = s.screen()[0]
-            missing = [w for w in ("Refresh", "Create Directory") if not grid_contains(chars, w)]
+            missing = [w for w in ("Upload", "Copy full path", "Delete", "Rename",
+                                   "Calculate Checksum", "Refresh", "Create Directory")
+                       if not grid_contains(chars, w)]
             if missing:
                 print(f"FAIL - blank menu missing {missing}")
+                return False
+            if not menu_has_separator_between(chars, "Calculate Checksum", "Refresh"):
+                print("FAIL - item and pane-wide actions are not separated")
+                return False
+            upload = find_text(chars, "Upload")
+            s.click(upload[1] + 1, upload[0] + 1)
+            if not grid_contains(s.screen()[0], "Refresh"):
+                print("FAIL - disabled Upload action dismissed the blank menu")
                 return False
             print("PASS")
             return True
@@ -460,8 +476,8 @@ def test_blank_context_menu():
 
 
 def test_item_context_menu():
-    """Right-click on a file opens Upload / Copy full path / Delete / Rename (local pane)."""
-    print("TEST: parvion pane - item context menu ... ", end="", flush=True)
+    """Right-click on a file opens the same selected-item and pane-wide groups."""
+    print("TEST: parvion pane - unified item context menu ... ", end="", flush=True)
     d = make_tree()
     try:
         with ParvionSession(d) as s:
@@ -471,9 +487,14 @@ def test_item_context_menu():
                 return False
             s.click(pos[1] + 1, pos[0] + 1, button=2)
             chars = s.screen()[0]
-            missing = [w for w in ("Upload", "Copy full path", "Delete", "Rename") if not grid_contains(chars, w)]
+            missing = [w for w in ("Upload", "Copy full path", "Delete", "Rename",
+                                   "Calculate Checksum", "Refresh", "Create Directory")
+                       if not grid_contains(chars, w)]
             if missing:
                 print(f"FAIL - item menu missing {missing}")
+                return False
+            if not menu_has_separator_between(chars, "Calculate Checksum", "Refresh"):
+                print("FAIL - item and pane-wide actions are not separated")
                 return False
             print("PASS")
             return True

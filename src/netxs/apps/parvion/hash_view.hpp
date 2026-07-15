@@ -171,29 +171,29 @@ namespace netxs::app::parvion
     {
         namespace m = app::shared::menu;
         auto deface = [panel_wp]{ if (auto p = panel_wp.lock()) p->base::deface(); };
-        auto remove_all_item = [ctrl, deface]
-        {
-            auto item = m::item{ .alive = true, .label = "Remove all" };
-            item.action = [ctrl, deface](hids&){ ctrl->hash_remove_all(); deface(); };
-            return item;
-        };
         auto cfg = qmenu_cfg{};
-        cfg.item = [ctrl, panel_wp, window_wp](si32 hit) -> std::vector<m::item>
+        cfg.items = [ctrl, deface, panel_wp, window_wp]() -> std::vector<m::item>
         {
             auto items = std::vector<m::item>{};
-            if (hit >= 0 && hit < (si32)ctrl->hash_queue.size())
+            auto payload = hash_copy_digest_payload(ctrl);
+            auto copy = m::item{ .alive = true, .label = "Copy digest", .disabled = payload.empty() };
+            copy.action = [payload](hids& g){ if (!payload.empty()) g.set_clipboard(dot_00, payload, mime::textonly); };
+            items.push_back(std::move(copy));
+
+            auto rm = m::item{ .alive = true, .label = "Remove", .disabled = !ctrl->hash_selected_count() };
+            rm.action = [ctrl, panel_wp, window_wp](hids&){ hash_confirm_remove_selected(ctrl, panel_wp, window_wp); };
+            items.push_back(std::move(rm));
+
+            items.push_back(m::item{ .alive = true, .type = m::kind::separator });
+            auto select_all = m::item{ .alive = true, .label = "Select All", .disabled = ctrl->hash_queue.empty() };
+            select_all.action = [ctrl, deface](hids&)
             {
-                auto payload = hash_copy_digest_payload(ctrl);
-                auto copy = m::item{ .alive = true, .label = "Copy digest", .disabled = payload.empty() };
-                copy.action = [payload](hids& g){ if (!payload.empty()) g.set_clipboard(dot_00, payload, mime::textonly); };
-                items.push_back(std::move(copy));
-                auto rm = m::item{ .alive = true, .label = "Remove" };
-                rm.action = [ctrl, panel_wp, window_wp](hids&){ hash_confirm_remove_selected(ctrl, panel_wp, window_wp); };
-                items.push_back(std::move(rm));
-            }
+                for (auto& it : ctrl->hash_queue) it.selected = true;
+                deface();
+            };
+            items.push_back(std::move(select_all));
             return items;
         };
-        cfg.blank = [remove_all_item]{ return std::vector<m::item>{ remove_all_item() }; };
         cfg.on_item_rclick = [ctrl, deface](si32 hit){ if (hit >= 0 && hit < (si32)ctrl->hash_queue.size() && !ctrl->hash_queue[(size_t)hit].selected) { for (auto& it : ctrl->hash_queue) it.selected = faux; ctrl->hash_queue[(size_t)hit].selected = true; deface(); } };
         cfg.on_blank_rclick = [ctrl, deface]{ auto any = faux; for (auto& it : ctrl->hash_queue) { any |= it.selected; it.selected = faux; } if (any) deface(); };
         return cfg;

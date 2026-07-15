@@ -11,7 +11,7 @@ double-click selects the word under the cursor, and a triple-click selects the
 whole line. Selected cells paint with theme::sel_bg. The right-click log menu
 always carries a "Copy" item: enabled (and copying the selection via OSC 52) when
 text is selected, disabled (greyed, inert) otherwise. A plain left-click cancels
-the selection, the app menu matches FileZilla's detailed/copy/clear items, and a
+the selection, the app menu orders Copy, Select all, and clear actions, and a
 live log update (new lines appended) does NOT clear it.
 
 Driven via a pty using the SGR mouse protocol. The app is launched as
@@ -97,7 +97,7 @@ def _drag_hold(s, points, hold=0.9, button=0, settle=0.6):
 
 
 def _find_copy_cell(chars):
-    """(row, col) of the dedicated 'Copy' menu row (not 'Copy to clipboard' / 'Clear'), or None."""
+    """(row, col) of the dedicated 'Copy' menu row, or None."""
     for r in range(T.ROWS):
         line = T.row_text(chars, r)
         if "Copy" in line and "clipboard" not in line and "Clear" not in line:
@@ -293,8 +293,26 @@ def test_log_copy_present_disabled_no_selection():
     print("PASS"); return True
 
 
-def test_log_context_menu_omits_log_level():
-    print("TEST: parvion message log - context menu omits Log level ... ", end="", flush=True)
+def test_log_select_all_covers_full_log():
+    print("TEST: parvion message log - Select all covers the full log ... ", end="", flush=True)
+    with _session() as s:
+        info = _enter_log(s)
+        if info is None:
+            print("FAIL: message log / seeded lines not found"); return False
+        lr, lc, _ = info
+        s.click(lc + 2, lr + 1, button=2)
+        select_all = T.find_text(s.screen()[0], "Select all")
+        if select_all is None:
+            print("FAIL: Select all menu item missing"); return False
+        s.click(select_all[1] + 1, select_all[0] + 1)
+        clip = _copy_via_menu(s, lr, lc + 2)
+        if clip is None or "log line 00" not in clip or "log line 19" not in clip:
+            print(f"FAIL: Select all copied incomplete log text: {clip!r}"); return False
+    print("PASS"); return True
+
+
+def test_log_context_menu_grouping():
+    print("TEST: parvion message log - context menu grouping ... ", end="", flush=True)
     with _session() as s:
         info = _enter_log(s)
         if info is None:
@@ -303,33 +321,21 @@ def test_log_context_menu_omits_log_level():
         s.click(lc + 2, lr + 1, button=2)
         chars, _ = s.screen()
         blob = "\n".join(T.row_text(chars, r) for r in range(len(chars)))
-        for needle in ("Show detailed log", "Copy to clipboard", "Clear all"):
+        for needle in ("Copy", "Select all", "Clear all"):
             if needle not in blob:
                 print(f"FAIL: '{needle}' missing from menu"); return False
-        if "Log level" in blob:
-            print("FAIL: old Log level item is still in the message-log menu"); return False
-    print("PASS"); return True
-
-
-def test_show_detailed_flushes_queued_detail():
-    print("TEST: parvion message log - Show detailed log flushes queued detail ... ", end="", flush=True)
-    with _session({"PARVION_DEMO_LOG_DETAIL": "1"}) as s:
-        info = _enter_log(s)
-        if info is None:
-            print("FAIL: message log / seeded lines not found"); return False
-        chars, _ = s.screen()
-        if T.grid_contains(chars, "demo hidden command") or T.grid_contains(chars, "demo hidden response"):
-            print("FAIL: queued detail was visible before Show detailed log"); return False
-        lr, lc, _ = info
-        s.click(lc + 2, lr + 1, button=2)
-        chars, _ = s.screen()
-        detail = T.find_text(chars, "Show detailed log")
-        if not detail:
-            print("FAIL: Show detailed log menu item missing"); return False
-        s.click(detail[1] + 1, detail[0] + 1); s.feed(0.8)
-        chars, _ = s.screen()
-        if not T.grid_contains(chars, "demo hidden command") or not T.grid_contains(chars, "demo hidden response"):
-            print("FAIL: queued detail did not appear after Show detailed log"); return False
+        if "Copy to clipboard" in blob or "Show detailed log" in blob or "Log level" in blob:
+            print("FAIL: obsolete message-log menu item is still present"); return False
+        copy = _find_copy_cell(chars)
+        select_all = T.find_text(chars, "Select all")
+        clear = T.find_text(chars, "Clear all")
+        if not (copy and select_all and clear
+                and copy[0] < select_all[0] < clear[0]):
+            print("FAIL: message-log menu groups are out of order"); return False
+        if not T.menu_has_separator_between(chars, "Copy", "Select all"):
+            print("FAIL: Copy is not separated from the remaining log actions"); return False
+        if T.menu_has_separator_between(chars, "Select all", "Clear all"):
+            print("FAIL: unexpected separator within the log-action group"); return False
     print("PASS"); return True
 
 
@@ -373,8 +379,8 @@ TESTS = [
     test_log_double_click_word,
     test_log_triple_click_line,
     test_log_copy_present_disabled_no_selection,
-    test_log_context_menu_omits_log_level,
-    test_show_detailed_flushes_queued_detail,
+    test_log_select_all_covers_full_log,
+    test_log_context_menu_grouping,
     test_log_live_appends_arrive,
     test_log_selection_survives_log_update,
 ]

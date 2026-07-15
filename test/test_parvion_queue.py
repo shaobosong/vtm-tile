@@ -10,10 +10,11 @@ tables — the behaviors added on top of parvion/queue.hpp:
      right edge (one more column border than the other transfer tabs).
   2. A selected row's highlight ends at the last column; the area to its
      right stays blank (and no longer hit-tests as part of the row).
-  3. Right-click on the blank area opens a context menu with
-     "Start All" / "Pause All" / "Remove All" (scoped to the active tab).
-  4. Right-click on an item opens "Start" / "Pause" / "Remove" / "Pin to Top".
-     Pin to Top moves a pending item to the front of the pending group.
+  3. Right-clicking an item or blank area opens the same categorized context
+     menu, with selected-item actions disabled when the selection is empty and
+     Select All targeting every transfer on the active tab.
+  4. Pin to Top moves a pending item to the front of the pending group and is
+     visible but disabled when the current selection cannot be pinned.
   5. Right-click with several rows selected applies the action to all of them.
 
 Driven via a pty using the SGR mouse protocol, mirroring the harness used by
@@ -347,6 +348,13 @@ def find_text(chars, needle):
 
 def grid_contains(chars, needle):
     return any(needle in row_text(chars, r) for r in range(ROWS))
+
+
+def menu_has_separator_between(chars, upper, lower):
+    """True when a horizontal menu separator is rendered between two labels."""
+    a, b = find_text(chars, upper), find_text(chars, lower)
+    return bool(a and b and a[0] < b[0]
+                and any("─" in row_text(chars, r) for r in range(a[0] + 1, b[0])))
 
 
 def find_menu_item(chars, name):
@@ -756,20 +764,45 @@ def test_expand_button_press_and_hold_feedback():
         return True
 
 
-def test_blank_area_menu_lists_all_actions():
-    """Right-click on the blank area shows Start All / Pause All / Remove All."""
-    print("TEST: parvion - blank-area menu lists *All actions ... ", end="", flush=True)
+def test_blank_area_menu_is_unified():
+    """Blank clicks show the unified menu with inert selected-transfer actions."""
+    print("TEST: parvion - blank-area menu is unified + disables selection actions ... ", end="", flush=True)
     with ParvionSession(DEMO_ENV) as s:
-        pos = find_text(s.screen()[0], "notes.txt")
+        chars, bg_before = s.screen()
+        pos = find_text(chars, "notes.txt")
+        queued = find_text(chars, "queued_00")
         if pos is None:
             print("FAIL - item row not found")
+            return False
+        if queued is None:
+            print("FAIL - queued row not found")
             return False
         r, _ = pos
         s.click(100, r + 1, button=2)  # Right-click blank area to the right of the columns.
         chars = s.screen()[0]
-        missing = [w for w in ("Start All", "Pause All", "Remove All") if not grid_contains(chars, w)]
+        missing = [w for w in ("Start", "Pause", "Remove", "Pin to Top", "Select All")
+                   if not grid_contains(chars, w)]
         if missing:
             print(f"FAIL - menu missing {missing}")
+            return False
+        old = [w for w in ("Start All", "Pause All", "Remove All") if grid_contains(chars, w)]
+        if old:
+            print(f"FAIL - old bulk actions still present: {old}")
+            return False
+        if not menu_has_separator_between(chars, "Pin to Top", "Select All"):
+            print("FAIL - item actions and Select All are not separated")
+            return False
+        start = find_text(chars, "Start")
+        s.click(start[1] + 1, start[0] + 1)
+        if not grid_contains(s.screen()[0], "Select All"):
+            print("FAIL - disabled Start action dismissed the blank-area menu")
+            return False
+        select_all = find_text(s.screen()[0], "Select All")
+        s.click(select_all[1] + 1, select_all[0] + 1)
+        bg_after = s.screen()[1]
+        if (bg_after[pos[0]][pos[1]] == bg_before[pos[0]][pos[1]]
+            or bg_after[queued[0]][queued[1]] == bg_before[queued[0]][queued[1]]):
+            print("FAIL - Select All did not select every transfer on the active tab")
             return False
         print("PASS")
         return True
@@ -801,9 +834,9 @@ def test_right_click_blank_clears_selection():
         return True
 
 
-def test_item_menu_lists_item_actions():
-    """Right-click a queued item shows Start / Pause / Remove / Pin to Top."""
-    print("TEST: parvion - item menu lists item actions ... ", end="", flush=True)
+def test_item_menu_is_unified():
+    """Right-click a queued item shows both selected and tab-wide action groups."""
+    print("TEST: parvion - item menu is unified and categorized ... ", end="", flush=True)
     with ParvionSession(DEMO_ENV) as s:
         pos = find_text(s.screen()[0], "queued_00")  # A pending item: full menu incl. Pin to Top.
         if pos is None:
@@ -812,17 +845,24 @@ def test_item_menu_lists_item_actions():
         r, c = pos
         s.click(c + 1, r + 1, button=2)  # Right-click the item.
         chars = s.screen()[0]
-        missing = [w for w in ("Start", "Pause", "Remove", "Pin to Top") if not grid_contains(chars, w)]
+        missing = [w for w in ("Start", "Pause", "Remove", "Pin to Top", "Select All")
+                   if not grid_contains(chars, w)]
         if missing:
             print(f"FAIL - menu missing {missing}")
+            return False
+        if any(grid_contains(chars, w) for w in ("Start All", "Pause All", "Remove All")):
+            print("FAIL - old bulk actions are still present")
+            return False
+        if not menu_has_separator_between(chars, "Pin to Top", "Select All"):
+            print("FAIL - item actions and Select All are not separated")
             return False
         print("PASS")
         return True
 
 
-def test_transferring_item_menu_omits_pin():
-    """Right-clicking an in-flight (transferring) item drops 'Pin to Top' (nothing to pin)."""
-    print("TEST: parvion - transferring item menu omits Pin to Top ... ", end="", flush=True)
+def test_transferring_item_menu_disables_pin():
+    """Pin to Top stays visible but is disabled for an in-flight transfer."""
+    print("TEST: parvion - transferring item menu disables Pin to Top ... ", end="", flush=True)
     with ParvionSession(DEMO_ENV) as s:
         pos = find_text(s.screen()[0], "notes.txt")  # A demo transferring item.
         if pos is None:
@@ -835,8 +875,13 @@ def test_transferring_item_menu_omits_pin():
         if missing:
             print(f"FAIL - menu missing {missing}")
             return False
-        if grid_contains(chars, "Pin to Top"):
-            print("FAIL - transferring item menu still shows 'Pin to Top'")
+        pin = find_text(chars, "Pin to Top")
+        if pin is None:
+            print("FAIL - transferring item menu omitted 'Pin to Top'")
+            return False
+        s.click(pin[1] + 1, pin[0] + 1)
+        if not grid_contains(s.screen()[0], "Select All"):
+            print("FAIL - inapplicable Pin to Top was interactive")
             return False
         print("PASS")
         return True
@@ -857,7 +902,7 @@ def test_failed_succeeded_item_menu_omits_pause_and_pin():
             r, c = pos
             s.click(c + 1, r + 1, button=2)  # Right-click the item.
             chars = s.screen()[0]
-            missing = [w for w in ("Start", "Remove") if not grid_contains(chars, w)]
+            missing = [w for w in ("Start", "Remove", "Select All") if not grid_contains(chars, w)]
             if missing:
                 print(f"FAIL - {item_name} menu missing {missing}")
                 return False
@@ -865,15 +910,21 @@ def test_failed_succeeded_item_menu_omits_pause_and_pin():
             if present:
                 print(f"FAIL - {item_name} menu still shows {present}")
                 return False
+            if any(grid_contains(chars, w) for w in ("Start All", "Pause All", "Remove All")):
+                print(f"FAIL - {item_name} menu still shows old bulk actions")
+                return False
+            if not menu_has_separator_between(chars, "Remove", "Select All"):
+                print(f"FAIL - {item_name} menu action groups are not separated")
+                return False
             s._write(b"\x1b")  # Dismiss the menu before the next tab.
             s.feed(0.3)
         print("PASS")
         return True
 
 
-def test_failed_succeeded_all_menu_omits_pause_all():
-    """On the Failed and Succeeded tabs the blank-area menu drops 'Pause All' (Start All/Remove All stay)."""
-    print("TEST: parvion - Failed/Succeeded blank-area menu omits Pause All ... ", end="", flush=True)
+def test_failed_succeeded_blank_menu_uses_select_all():
+    """Failed/Succeeded blank menus offer Select All without the old bulk actions."""
+    print("TEST: parvion - Failed/Succeeded blank menus use Select All ... ", end="", flush=True)
     with ParvionSession(DEMO_ENV) as s:
         for tab_label, item_name in (("Failed (", "upload.bin"), ("Succeeded (", "archive.tar")):
             if not click_label(s, tab_label):
@@ -886,12 +937,13 @@ def test_failed_succeeded_all_menu_omits_pause_all():
             # Right-click well right of the columns (Failed content ends at col 107) -> blank-area menu.
             s.click(115, pos[0] + 1, button=2)
             chars = s.screen()[0]
-            missing = [w for w in ("Start All", "Remove All") if not grid_contains(chars, w)]
+            missing = [w for w in ("Start", "Remove", "Select All") if not grid_contains(chars, w)]
             if missing:
                 print(f"FAIL - {tab_label} blank-area menu missing {missing}")
                 return False
-            if grid_contains(chars, "Pause All"):
-                print(f"FAIL - {tab_label} blank-area menu still shows 'Pause All'")
+            old = [w for w in ("Start All", "Pause All", "Remove All") if grid_contains(chars, w)]
+            if old:
+                print(f"FAIL - {tab_label} blank-area menu still shows {old}")
                 return False
             s._write(b"\x1b")  # Dismiss the menu before the next tab.
             s.feed(0.3)
@@ -1584,12 +1636,12 @@ TESTS = [
     test_right_click_activates_queue,
     test_selection_highlight_ends_at_last_column,
     test_expand_button_press_and_hold_feedback,
-    test_blank_area_menu_lists_all_actions,
+    test_blank_area_menu_is_unified,
     test_right_click_blank_clears_selection,
-    test_item_menu_lists_item_actions,
-    test_transferring_item_menu_omits_pin,
+    test_item_menu_is_unified,
+    test_transferring_item_menu_disables_pin,
     test_failed_succeeded_item_menu_omits_pause_and_pin,
-    test_failed_succeeded_all_menu_omits_pause_all,
+    test_failed_succeeded_blank_menu_uses_select_all,
     test_header_menu_lists_column_toggles,
     test_header_menu_toggles_column_visibility,
     test_remove_item_via_menu,

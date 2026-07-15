@@ -275,11 +275,10 @@ namespace netxs::app::parvion
     };
 
     // Right-click menus for a table. The column-header show/hide menu is intrinsic (built from the
-    // column roster); item/blank menus are supplied here. Any builder may be null.
+    // column roster); the body uses one menu after synchronizing selection with the click target.
     struct qmenu_cfg
     {
-        std::function<std::vector<app::shared::menu::item>(si32)> item;            // Per-row menu (null = none).
-        std::function<std::vector<app::shared::menu::item>()>     blank;           // Blank-area menu (null = none).
+        std::function<std::vector<app::shared::menu::item>()>     items;           // Unified body menu (null = none).
         std::function<void(si32)>                                 on_item_rclick;  // Selection sync for a row (null = none).
         std::function<void()>                                     on_blank_rclick; // Selection reset on blank (null = none).
     };
@@ -312,7 +311,7 @@ namespace netxs::app::parvion
         std::function<gutterval(si32 row)>               gutter;      // Left-gutter arrow/expand (null => no gutter).
         std::function<void(si32 expand_id)>              toggle;      // Toggle a row's expansion.
         std::function<qsel_cfg()>                        selection;   // null => not selectable.
-        std::function<qmenu_cfg(netxs::wptr<ui::base>)>  menu;        // Item/blank menus (null => none; header menu still shows).
+        std::function<qmenu_cfg(netxs::wptr<ui::base>)>  menu;        // Unified body menu (null => none; header menu still shows).
         std::function<table_follow_target()>             follow;      // Persistent live-update target (null => no live following).
         std::function<ui64()>                            revision;    // Change token: reset vertical/horizontal viewport when it changes.
         std::function<si32()>                            revision_row;// One-shot source row to reveal after a revision change (-1 => top).
@@ -703,13 +702,12 @@ namespace netxs::app::parvion
         {
             if (cfg.on_item_rclick) cfg.on_item_rclick(hit);
             st.sel_anchor = st.nav_cursor = hit; // The right-clicked row becomes the keyboard/range cursor.
-            if (cfg.item)   m::open_dropdown_popup(boss, cfg.item(hit), faux, -1, at);
         }
         else
         {
             if (cfg.on_blank_rclick) { cfg.on_blank_rclick(); st.sel_anchor = st.nav_cursor = -1; }
-            if (cfg.blank)           m::open_dropdown_popup(boss, cfg.blank(), faux, -1, at);
         }
+        if (cfg.items) m::open_dropdown_popup(boss, cfg.items(), faux, -1, at);
     }
 
     // Paint a caller-owned single-line editor inside one visible table cell. The editor scrolls its

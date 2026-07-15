@@ -32,7 +32,9 @@ namespace netxs::app::parvion
         std::function<const void*(si32)>                  line_id;    // stable identity of line i (null => index).
         std::function<ui64()>                             epoch;      // layout epoch; a change drops the selection.
         std::function<text()>                             empty_text; // shown when line_count()==0 (null => none).
-        std::function<std::vector<app::shared::menu::item>(netxs::wptr<ui::base>)> menu; // app right-click items ("Copy" is prepended).
+        std::function<std::vector<app::shared::menu::item>(netxs::wptr<ui::base>,
+                                                           app::shared::menu::item,
+                                                           app::shared::menu::item)> menu; // App arranges core-supplied Copy/Select all rows.
         std::function<bool(hids&, netxs::wptr<ui::base>)> on_key;     // app keys (Delete clear-finished); null => none.
     };
 
@@ -152,6 +154,20 @@ namespace netxs::app::parvion
         st.sel = faux; st.dragging = faux; st.selm = textbox_state::sel_none;
         st.anchor_ln = st.anchor_cl = st.head_ln = st.head_cl = 0;
         st.anchor_id = st.head_id = nullptr;
+    }
+    inline auto tb_select_all(textbox_state& st, textbox_cfg const& cfg) -> bool
+    {
+        auto n = cfg.line_count ? cfg.line_count() : 0;
+        if (n <= 0) return faux;
+        auto last = n - 1;
+        st.anchor_ln = 0;    st.anchor_cl = 0;
+        st.head_ln   = last; st.head_cl   = cluster_count(tb_line_text(cfg, last));
+        st.anchor_id = cfg.line_id ? cfg.line_id(0)    : nullptr;
+        st.head_id   = cfg.line_id ? cfg.line_id(last) : nullptr;
+        st.selm = textbox_state::sel_char; st.sel = true; st.dragging = faux;
+        st.follow = faux; st.drag = textbox_state::d_none;
+        st.seen_epoch = cfg.epoch ? cfg.epoch() : 0;
+        return tb_has_selection(st);
     }
     inline auto tb_index_of(textbox_cfg const& cfg, si32 n, const void* id) -> si32
     {
@@ -415,14 +431,28 @@ namespace netxs::app::parvion
             {
                 pro::focus::set(boss.This(), gear.id, solo::on);
                 namespace m = app::shared::menu;
-                auto at    = twod{ (si32)gear.coord.x, (si32)gear.coord.y };
-                auto items = cfg.menu ? cfg.menu(ptr::shadow(boss.This())) : std::vector<m::item>{};
+                auto at   = twod{ (si32)gear.coord.x, (si32)gear.coord.y };
                 auto has  = tb_has_selection(st);
                 auto out  = has ? tb_selection_text(st, cfg) : text{};
                 auto copy = m::item{ .alive = true, .label = "Copy", .disabled = !has };
                 copy.action = [out](hids& g){ if (!out.empty()) g.set_clipboard(dot_00, out, mime::textonly); };
-                items.insert(items.begin(), m::item{ .alive = true, .type = m::kind::separator });
-                items.insert(items.begin(), std::move(copy));
+
+                auto n = cfg.line_count ? cfg.line_count() : 0;
+                auto select_all = m::item{ .alive = true, .label = "Select all", .disabled = n == 0 };
+                auto panel_wp = ptr::shadow(boss.This());
+                select_all.action = [stp = &st, cfgp = &cfg, panel_wp](hids&)
+                {
+                    if (tb_select_all(*stp, *cfgp))
+                        if (auto panel = panel_wp.lock()) panel->base::deface();
+                };
+                auto items = std::vector<m::item>{};
+                if (cfg.menu) items = cfg.menu(panel_wp, std::move(copy), std::move(select_all));
+                else
+                {
+                    items.push_back(std::move(copy));
+                    items.push_back(m::item{ .alive = true, .type = m::kind::separator });
+                    items.push_back(std::move(select_all));
+                }
                 m::open_dropdown_popup(boss, items, faux, -1, at);
                 gear.dismiss();
             });

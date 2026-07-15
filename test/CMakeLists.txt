@@ -234,7 +234,7 @@ if(Python3_FOUND)
 
     # Regression test for the Parvion transfer-queue tables: Reason-column
     # resize handle, selection highlight ending at the last column, and the
-    # right-click context menus (Start/Pause/Remove/Pin to Top and the *All variants).
+    # unified right-click context menus (selected actions plus Select All).
     add_test(NAME parvion_queue_test
              COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test_parvion_queue.py")
     set_tests_properties(parvion_queue_test PROPERTIES

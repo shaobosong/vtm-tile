@@ -58,31 +58,20 @@ namespace netxs::app::parvion
         }
     };
 
-    // The Message-log right-click menu (Show detailed log / Copy to clipboard / Clear all).
-    // The text-view core prepends the selection "Copy" item.
-    inline auto build_log_menu(sftp_remote* ctrl, netxs::wptr<ui::base> panel_wp) -> std::vector<app::shared::menu::item>
+    // The Message-log right-click menu: Copy / separator / Select all / Clear all.
+    inline auto build_log_menu(sftp_remote* ctrl,
+                               netxs::wptr<ui::base> panel_wp,
+                               app::shared::menu::item copy,
+                               app::shared::menu::item select_all) -> std::vector<app::shared::menu::item>
     {
         namespace m = app::shared::menu;
         auto deface = [panel_wp]{ if (auto p = panel_wp.lock()) p->base::deface(); };
         auto items = std::vector<m::item>{};
 
-        auto detail = m::item{ .alive = true, .label = "Show detailed log", .type = m::kind::check, .checked = ctrl->logger.show_detailed };
-        detail.action = [ctrl, deface](hids&){ ctrl->logger.set_show_detailed(!ctrl->logger.show_detailed); ctrl->dirty = true; deface(); };
-        items.push_back(std::move(detail));
+        items.push_back(std::move(copy));
         items.push_back(m::item{ .alive = true, .type = m::kind::separator });
 
-        auto copy = m::item{ .alive = true, .label = "Copy to clipboard" };
-        copy.action = [ctrl](hids& gear)
-        {
-            auto out = text{};
-            for (auto& ln : ctrl->logger.lines)
-            {
-                if (ctrl->show_stamps) out += ln.stamp + " ";
-                out += text{ log_prefix(ln.type) } + ln.body + "\n";
-            }
-            gear.set_clipboard(dot_00, out, mime::textonly);
-        };
-        items.push_back(std::move(copy));
+        items.push_back(std::move(select_all));
 
         auto clear = m::item{ .alive = true, .label = "Clear all" };
         clear.action = [ctrl, deface](hids&){ ctrl->logger.clear(); ctrl->dirty = true; deface(); };
@@ -110,7 +99,10 @@ namespace netxs::app::parvion
         cfg.line_id    = [ctrl, cache](si32 i) -> const void* { auto& vis = cache->get(ctrl); return i >= 0 && i < (si32)vis.size() ? (const void*)vis[(size_t)i] : nullptr; };
         cfg.epoch      = [ctrl]{ return ctrl->show_stamps ? ui64{ 1 } : ui64{ 0 }; };
         cfg.empty_text = []{ return text{ "(no messages)" }; };
-        cfg.menu       = [ctrl](netxs::wptr<ui::base> panel_wp){ return build_log_menu(ctrl, panel_wp); };
+        cfg.menu       = [ctrl](netxs::wptr<ui::base> panel_wp, auto copy, auto select_all)
+        {
+            return build_log_menu(ctrl, panel_wp, std::move(copy), std::move(select_all));
+        };
         cfg.on_key     = [ctrl, window_wp](hids& gear, netxs::wptr<ui::base> self){ return clear_finished_on_key(gear, ctrl, window_wp, self); };
         auto box = make_textbox(std::move(cfg));
         return make_tab_page(std::move(box.widget), std::move(title), {}, std::move(box.clear_selection));

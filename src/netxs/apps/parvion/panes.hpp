@@ -575,7 +575,7 @@ namespace netxs::app::parvion
         if (st.remote) st.remote->request_refresh();
         else           pane_refresh(st);
     }
-    // An explicit Refresh from the blank-area context menu starts the view over. Automatic
+    // An explicit Refresh from the unified context menu starts the view over. Automatic
     // destination/delete refreshes deliberately use pane_refresh/pane_reload directly so they
     // retain the current viewport and selection.
     inline void pane_reload_reset_view(pane_state& st)
@@ -901,45 +901,27 @@ namespace netxs::app::parvion
         }
     }
 
-    // Right-click menu for the blank area: Refresh + Create Directory (mirrors the queue's menus).
-    inline auto build_pane_blank_menu(pane_state& st, netxs::wptr<ui::base> panel_wp) -> std::vector<app::shared::menu::item>
+    // Unified right-click menu: selected-item actions, then pane-wide actions.
+    inline auto build_pane_menu(pane_state& st, netxs::wptr<ui::base> panel_wp) -> std::vector<app::shared::menu::item>
     {
         namespace m = app::shared::menu;
         auto items = std::vector<m::item>{};
-        auto add = [&](text label, auto fn)
+        auto selected = pane_selected_item_count(st) > 0;
+        auto add = [&](text label, bool disabled, auto fn)
         {
-            auto row = m::item{ .alive = true, .label = std::move(label) };
+            auto row = m::item{ .alive = true, .label = std::move(label), .disabled = disabled };
             row.action = [panel_wp, fn](hids&){ if (auto p = panel_wp.lock()) { fn(); p->base::deface(); } };
             items.push_back(std::move(row));
         };
-        add("Refresh", [&st]{ pane_reload_reset_view(st); });
-        add("Create Directory", [&st, panel_wp]
-        {
-            pane_create_dir(st);
-            if (auto p = panel_wp.lock()) pro::focus::set(p, id_t{}, solo::on);
-        });
-        return items;
-    }
-    // Right-click menu for a selected item: Upload/Download + Delete + Rename.
-    inline auto build_pane_item_menu(pane_state& st, netxs::wptr<ui::base> panel_wp) -> std::vector<app::shared::menu::item>
-    {
-        namespace m = app::shared::menu;
-        auto items = std::vector<m::item>{};
-        auto add = [&](text label, auto fn)
-        {
-            auto row = m::item{ .alive = true, .label = std::move(label) };
-            row.action = [panel_wp, fn](hids&){ if (auto p = panel_wp.lock()) { fn(); p->base::deface(); } };
-            items.push_back(std::move(row));
-        };
-        add(st.remote ? text{ "Download" } : text{ "Upload" }, [&st]{ pane_transfer_selection(st); });
+        add(st.remote ? text{ "Download" } : text{ "Upload" }, !selected, [&st]{ pane_transfer_selection(st); });
         {
             auto paths = pane_selection_paths(st);
             auto row = m::item{ .alive = true, .label = "Copy full path", .disabled = paths.empty() };
             row.action = [paths](hids& gear){ if (!paths.empty()) gear.set_clipboard(dot_00, paths, mime::textonly); };
             items.push_back(std::move(row));
         }
-        add("Delete", [&st, panel_wp]{ pane_confirm_delete_selection(st, panel_wp); });
-        add("Rename", [&st, panel_wp]
+        add("Delete", !selected, [&st, panel_wp]{ pane_confirm_delete_selection(st, panel_wp); });
+        add("Rename", !selected, [&st, panel_wp]
         {
             auto& its = st.cur_items();
             auto idx = st.sel - 1;
@@ -949,25 +931,30 @@ namespace netxs::app::parvion
         });
         // "Calculate Checksum" — a nested submenu of algorithms (the secondary menu). Each leaf
         // enqueues a hash task for every selected file; remote files stream-and-hash while
-        // downloading (no local copy), local files are read directly. Shown only when the selection
-        // contains at least one regular file — checksums don't apply to folders.
+        // downloading (no local copy), local files are read directly. The row remains visible but is
+        // disabled unless the selection contains a regular file.
         {
             auto& its = st.cur_items();
             auto has_file = faux;
             for (auto row : st.marked)
                 if (row > 0 && row - 1 < (si32)its.size() && !its[(size_t)(row - 1)].is_dir) { has_file = true; break; }
-            if (has_file)
+            auto sub = m::item{ .alive = true, .label = "Calculate Checksum", .type = m::kind::dropdown, .disabled = !has_file };
+            for (auto a = si32{}; a < hash_algo_count; ++a)
             {
-                auto sub = m::item{ .alive = true, .label = "Calculate Checksum", .type = m::kind::dropdown };
-                for (auto a = si32{}; a < hash_algo_count; ++a)
-                {
-                    auto row = m::item{ .alive = true, .label = text{ hash_algo_label(a) } };
-                    row.action = [panel_wp, &st, a](hids&){ if (auto p = panel_wp.lock()) { pane_hash_selection(st, a); p->base::deface(); } };
-                    sub.children.push_back(std::move(row));
-                }
-                items.push_back(std::move(sub));
+                auto row = m::item{ .alive = true, .label = text{ hash_algo_label(a) } };
+                row.action = [panel_wp, &st, a](hids&){ if (auto p = panel_wp.lock()) { pane_hash_selection(st, a); p->base::deface(); } };
+                sub.children.push_back(std::move(row));
             }
+            items.push_back(std::move(sub));
         }
+
+        items.push_back(m::item{ .alive = true, .type = m::kind::separator });
+        add("Refresh", faux, [&st]{ pane_reload_reset_view(st); });
+        add("Create Directory", faux, [&st, panel_wp]
+        {
+            pane_create_dir(st);
+            if (auto p = panel_wp.lock()) pro::focus::set(p, id_t{}, solo::on);
+        });
         return items;
     }
 
@@ -1109,12 +1096,7 @@ namespace netxs::app::parvion
     inline auto pane_menu(std::shared_ptr<pane_state> const& state, netxs::wptr<ui::base> panel_wp) -> qmenu_cfg
     {
         auto menu = qmenu_cfg{};
-        menu.item = [state, panel_wp](si32 hit)
-        {
-            return hit > 0 ? build_pane_item_menu(*state, panel_wp)
-                           : build_pane_blank_menu(*state, panel_wp);
-        };
-        menu.blank = [state, panel_wp]{ return build_pane_blank_menu(*state, panel_wp); };
+        menu.items = [state, panel_wp]{ return build_pane_menu(*state, panel_wp); };
         menu.on_item_rclick = [state](si32 hit)
         {
             if (hit > 0)
@@ -1123,7 +1105,7 @@ namespace netxs::app::parvion
                 state->sel = hit;
                 pane_fire_select(*state);
             }
-            else state->marked.clear(); // The synthetic ".." row uses the blank-area menu.
+            else state->marked.clear(); // The synthetic ".." row has no item selection.
         };
         menu.on_blank_rclick = [state]{ state->marked.clear(); };
         return menu;

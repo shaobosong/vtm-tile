@@ -1794,8 +1794,8 @@ namespace netxs::app::parvion
             holding_followers = faux;
             active_state_path.clear(); active_md_size = 0; active_resume = faux;
         }
-        // Queue context-menu actions (driven from parvion/queue.hpp). Each acts on the items matching
-        // `pred` — the panel's selection for the per-item menu, or the active tab for the "All" menu.
+        // Queue context-menu actions (driven from parvion/queue.hpp). Each acts on the selected items
+        // matching `pred`.
         // Pause: stop+hold matched items; a live transfer reverts to a paused-queued state.
         template<class P> void queue_pause(P pred)
         {
