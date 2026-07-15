@@ -38,6 +38,19 @@ namespace netxs::app::parvion
             || (status == 1 && it.status == queue_item::failed)
             || (status == 2 && it.status == queue_item::succeeded);
     }
+    inline auto xfer_copy_payload(sftp_remote* ctrl, si32 status, text queue_item::* field) -> text
+    {
+        auto out = text{};
+        if (!ctrl) return out;
+        for (auto& it : ctrl->queue)
+        {
+            auto& value = it.*field;
+            if (!it.selected || !tab_status_match(status, it) || value.empty()) continue;
+            if (!out.empty()) out += '\n';
+            out += value;
+        }
+        return out;
+    }
     // Reconstruct a file's parallel-chunk byte ranges (mirrors start_item's csz math in session.hpp).
     inline auto chunk_ranges(si64 size, ui32 count) -> std::vector<std::pair<si64, si64>>
     {
@@ -204,6 +217,26 @@ namespace netxs::app::parvion
                 count == 1 ? text{ "Remove this transfer from the queue?" } : "Remove " + std::to_string(count) + " transfers from the queue?", "Remove", "Cancel" });
         });
         if (status == 0) add("Pin to Top", !pinnable, [ctrl, sel]{ ctrl->queue_pin_top(sel); });
+
+        {
+            auto local = xfer_copy_payload(ctrl, status, &queue_item::local_path);
+            auto remote = xfer_copy_payload(ctrl, status, &queue_item::remote_path);
+            auto reason = status == 1 ? xfer_copy_payload(ctrl, status, &queue_item::error) : text{};
+            auto copy = m::item{ .alive = true, .label = "Copy", .type = m::kind::dropdown, .disabled = local.empty() && remote.empty() && reason.empty() };
+            auto local_name = m::item{ .alive = true, .label = "Local Name", .disabled = local.empty() };
+            local_name.action = [local](hids& g){ if (!local.empty()) g.set_clipboard(dot_00, local, mime::textonly); };
+            copy.children.push_back(std::move(local_name));
+            auto remote_name = m::item{ .alive = true, .label = "Remote Name", .disabled = remote.empty() };
+            remote_name.action = [remote](hids& g){ if (!remote.empty()) g.set_clipboard(dot_00, remote, mime::textonly); };
+            copy.children.push_back(std::move(remote_name));
+            if (status == 1)
+            {
+                auto failed_reason = m::item{ .alive = true, .label = "Failed Reason", .disabled = reason.empty() };
+                failed_reason.action = [reason](hids& g){ if (!reason.empty()) g.set_clipboard(dot_00, reason, mime::textonly); };
+                copy.children.push_back(std::move(failed_reason));
+            }
+            items.push_back(std::move(copy));
+        }
 
         items.push_back(m::item{ .alive = true, .type = m::kind::separator });
         add("Select All", !any_in_scope, [ctrl, scope]

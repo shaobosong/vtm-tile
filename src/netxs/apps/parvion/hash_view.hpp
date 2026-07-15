@@ -140,6 +140,18 @@ namespace netxs::app::parvion
         }
         return out;
     }
+    inline auto hash_copy_path_payload(sftp_remote* ctrl) -> text
+    {
+        auto out = text{};
+        if (!ctrl) return out;
+        for (auto& it : ctrl->hash_queue)
+        {
+            if (!it.selected || it.path.empty()) continue;
+            if (!out.empty()) out += '\n';
+            out += it.path;
+        }
+        return out;
+    }
     inline auto hash_remove_confirmation(sftp_remote* ctrl) -> app::shared::confirm_dialog_text
     {
         auto count = ctrl ? ctrl->hash_selected_count() : 0;
@@ -175,9 +187,15 @@ namespace netxs::app::parvion
         cfg.items = [ctrl, deface, panel_wp, window_wp]() -> std::vector<m::item>
         {
             auto items = std::vector<m::item>{};
-            auto payload = hash_copy_digest_payload(ctrl);
-            auto copy = m::item{ .alive = true, .label = "Copy digest", .disabled = payload.empty() };
-            copy.action = [payload](hids& g){ if (!payload.empty()) g.set_clipboard(dot_00, payload, mime::textonly); };
+            auto paths = hash_copy_path_payload(ctrl);
+            auto digests = hash_copy_digest_payload(ctrl);
+            auto copy = m::item{ .alive = true, .label = "Copy", .type = m::kind::dropdown, .disabled = paths.empty() };
+            auto path = m::item{ .alive = true, .label = "Path", .disabled = paths.empty() };
+            path.action = [paths](hids& g){ if (!paths.empty()) g.set_clipboard(dot_00, paths, mime::textonly); };
+            copy.children.push_back(std::move(path));
+            auto digest = m::item{ .alive = true, .label = "Digest", .disabled = digests.empty() };
+            digest.action = [digests](hids& g){ if (!digests.empty()) g.set_clipboard(dot_00, digests, mime::textonly); };
+            copy.children.push_back(std::move(digest));
             items.push_back(std::move(copy));
 
             auto rm = m::item{ .alive = true, .label = "Remove", .disabled = !ctrl->hash_selected_count() };

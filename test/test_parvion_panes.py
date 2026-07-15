@@ -260,6 +260,16 @@ def menu_has_separator_between(chars, upper, lower):
                 and any("─" in row_text(chars, r) for r in range(a[0] + 1, b[0])))
 
 
+def menu_items_are_ordered(chars, labels):
+    positions = [find_text(chars, label) for label in labels]
+    return all(positions) and all(a[0] < b[0] for a, b in zip(positions, positions[1:]))
+
+
+def find_text_on_row(chars, needle, row):
+    c = row_text(chars, row).find(needle)
+    return (row, c) if c >= 0 else None
+
+
 SORT_GLYPHS = ("↕", "↑", "↓")
 
 
@@ -455,19 +465,23 @@ def test_blank_context_menu():
                 return False
             s.click(5, dd[0] + 7, button=2)  # Right-click a blank row below the list.
             chars = s.screen()[0]
-            missing = [w for w in ("Upload", "Copy full path", "Delete", "Rename",
-                                   "Calculate Checksum", "Refresh", "Create Directory")
+            labels = ("Upload", "Delete", "Rename", "Copy",
+                      "Calculate Checksum", "Refresh", "Create Directory")
+            missing = [w for w in labels
                        if not grid_contains(chars, w)]
             if missing:
                 print(f"FAIL - blank menu missing {missing}")
                 return False
+            if not menu_items_are_ordered(chars, labels):
+                print("FAIL - blank menu items are out of order")
+                return False
             if not menu_has_separator_between(chars, "Calculate Checksum", "Refresh"):
                 print("FAIL - item and pane-wide actions are not separated")
                 return False
-            upload = find_text(chars, "Upload")
-            s.click(upload[1] + 1, upload[0] + 1)
+            copy = find_text(chars, "Copy")
+            s.click(copy[1] + 1, copy[0] + 1)
             if not grid_contains(s.screen()[0], "Refresh"):
-                print("FAIL - disabled Upload action dismissed the blank menu")
+                print("FAIL - disabled Copy submenu dismissed the blank menu")
                 return False
             print("PASS")
             return True
@@ -487,11 +501,15 @@ def test_item_context_menu():
                 return False
             s.click(pos[1] + 1, pos[0] + 1, button=2)
             chars = s.screen()[0]
-            missing = [w for w in ("Upload", "Copy full path", "Delete", "Rename",
-                                   "Calculate Checksum", "Refresh", "Create Directory")
+            labels = ("Upload", "Delete", "Rename", "Copy",
+                      "Calculate Checksum", "Refresh", "Create Directory")
+            missing = [w for w in labels
                        if not grid_contains(chars, w)]
             if missing:
                 print(f"FAIL - item menu missing {missing}")
+                return False
+            if not menu_items_are_ordered(chars, labels):
+                print("FAIL - item menu items are out of order")
                 return False
             if not menu_has_separator_between(chars, "Calculate Checksum", "Refresh"):
                 print("FAIL - item and pane-wide actions are not separated")
@@ -502,9 +520,9 @@ def test_item_context_menu():
         shutil.rmtree(d, ignore_errors=True)
 
 
-def test_copy_full_path():
-    """Item menu -> Copy full path writes the selected item's absolute path to the clipboard."""
-    print("TEST: parvion pane - Copy full path ... ", end="", flush=True)
+def test_copy_name_and_full_path():
+    """Item menu -> Copy writes either the selected item's name or its absolute path."""
+    print("TEST: parvion pane - Copy name / full path ... ", end="", flush=True)
     d = make_tree()
     try:
         with ParvionSession(d) as s:
@@ -512,23 +530,30 @@ def test_copy_full_path():
             if pos is None:
                 print("FAIL - alpha.txt not listed")
                 return False
-            s.click(pos[1] + 1, pos[0] + 1, button=2)
-            cp = find_text(s.screen()[0], "Copy full path")
-            if cp is None:
-                print("FAIL - 'Copy full path' not in menu")
-                return False
-            before = len(s._buf)
-            s.click(cp[1] + 1, cp[0] + 1, button=0)
-            s.feed(0.6)
-            hits = _OSC52.findall(s._buf[before:])
-            if not hits:
-                print("FAIL - no clipboard sequence emitted")
-                return False
-            got = base64.b64decode(hits[-1]).decode("utf-8", "replace")
-            want = os.path.join(d, "alpha.txt")
-            if got != want:
-                print(f"FAIL - clipboard {got!r} != {want!r}")
-                return False
+            for leaf, row_offset, want in (("Name", 0, "alpha.txt"),
+                                           ("Full Path", 1, os.path.join(d, "alpha.txt"))):
+                s.click(pos[1] + 1, pos[0] + 1, button=2)
+                cp = find_text(s.screen()[0], "Copy")
+                if cp is None:
+                    print("FAIL - 'Copy' submenu not in menu")
+                    return False
+                s.click(cp[1] + 1, cp[0] + 1, button=0)
+                s.feed(0.4)
+                item = find_text_on_row(s.screen()[0], leaf, cp[0] + row_offset)
+                if item is None:
+                    print(f"FAIL - '{leaf}' not in Copy submenu")
+                    return False
+                before = len(s._buf)
+                s.click(item[1] + 1, item[0] + 1, button=0)
+                s.feed(0.6)
+                hits = _OSC52.findall(s._buf[before:])
+                if not hits:
+                    print(f"FAIL - {leaf} emitted no clipboard sequence")
+                    return False
+                got = base64.b64decode(hits[-1]).decode("utf-8", "replace")
+                if got != want:
+                    print(f"FAIL - {leaf} clipboard {got!r} != {want!r}")
+                    return False
             print("PASS")
             return True
     finally:
@@ -1706,7 +1731,7 @@ TESTS = [
     test_ctrl_drag_deselects,
     test_blank_context_menu,
     test_item_context_menu,
-    test_copy_full_path,
+    test_copy_name_and_full_path,
     test_create_directory,
     test_create_directory_reveals_new_row,
     test_create_directory_preserves_visible_viewport,

@@ -854,6 +854,18 @@ namespace netxs::app::parvion
         return out;
     }
 
+    inline auto pane_selection_names(pane_state const& st) -> text // Names for marked real rows, newline-separated.
+    {
+        auto out = text{};
+        auto& its = st.cur_items();
+        for (auto row : st.marked) if (row > 0 && row - 1 < (si32)its.size())
+        {
+            if (!out.empty()) out += '\n';
+            out += its[(size_t)(row - 1)].name;
+        }
+        return out;
+    }
+
     inline auto pane_delete_confirmation(pane_state& st) -> app::shared::confirm_dialog_text
     {
         auto& its = st.cur_items();
@@ -914,12 +926,6 @@ namespace netxs::app::parvion
             items.push_back(std::move(row));
         };
         add(st.remote ? text{ "Download" } : text{ "Upload" }, !selected, [&st]{ pane_transfer_selection(st); });
-        {
-            auto paths = pane_selection_paths(st);
-            auto row = m::item{ .alive = true, .label = "Copy full path", .disabled = paths.empty() };
-            row.action = [paths](hids& gear){ if (!paths.empty()) gear.set_clipboard(dot_00, paths, mime::textonly); };
-            items.push_back(std::move(row));
-        }
         add("Delete", !selected, [&st, panel_wp]{ pane_confirm_delete_selection(st, panel_wp); });
         add("Rename", !selected, [&st, panel_wp]
         {
@@ -929,6 +935,18 @@ namespace netxs::app::parvion
             pane_name_begin(st, st.sel);
             if (auto p = panel_wp.lock()) pro::focus::set(p, id_t{}, solo::on);
         });
+        {
+            auto names = pane_selection_names(st);
+            auto paths = pane_selection_paths(st);
+            auto sub = m::item{ .alive = true, .label = "Copy", .type = m::kind::dropdown, .disabled = names.empty() };
+            auto name = m::item{ .alive = true, .label = "Name", .disabled = names.empty() };
+            name.action = [names](hids& gear){ if (!names.empty()) gear.set_clipboard(dot_00, names, mime::textonly); };
+            sub.children.push_back(std::move(name));
+            auto path = m::item{ .alive = true, .label = "Full Path", .disabled = paths.empty() };
+            path.action = [paths](hids& gear){ if (!paths.empty()) gear.set_clipboard(dot_00, paths, mime::textonly); };
+            sub.children.push_back(std::move(path));
+            items.push_back(std::move(sub));
+        }
         // "Calculate Checksum" — a nested submenu of algorithms (the secondary menu). Each leaf
         // enqueues a hash task for every selected file; remote files stream-and-hash while
         // downloading (no local copy), local files are read directly. The row remains visible but is

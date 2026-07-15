@@ -16,6 +16,7 @@ tables — the behaviors added on top of parvion/queue.hpp:
   4. Pin to Top moves a pending item to the front of the pending group and is
      visible but disabled when the current selection cannot be pinned.
   5. Right-click with several rows selected applies the action to all of them.
+  6. Transfer context menus copy the selected local/remote names and failed reasons.
 
 Driven via a pty using the SGR mouse protocol, mirroring the harness used by
 the existing test_dropdown_menu / test_tile_ctrl_click_focus suites. The app
@@ -27,6 +28,7 @@ backend, so the queued items stay put for the queue-action assertions.
 import os
 import re
 import sys
+import base64
 import pty
 import time
 import fcntl
@@ -46,6 +48,7 @@ ROWS = 44
 SETTLE = 1.5
 
 _CSI_RE = re.compile(rb"\x1b\[([\x30-\x3f]*)([\x20-\x2f]*)([\x40-\x7e])")
+_OSC52 = re.compile(rb"\x1b\]52;[^;]*;([A-Za-z0-9+/=]+)(?:\x07|\x1b\\)")
 
 
 def kill_all_vtm():
@@ -348,6 +351,11 @@ def find_text(chars, needle):
 
 def grid_contains(chars, needle):
     return any(needle in row_text(chars, r) for r in range(ROWS))
+
+
+def find_text_on_row(chars, needle, row):
+    col = row_text(chars, row).find(needle)
+    return (row, col) if col >= 0 else None
 
 
 def menu_has_separator_between(chars, upper, lower):
@@ -780,7 +788,7 @@ def test_blank_area_menu_is_unified():
         r, _ = pos
         s.click(100, r + 1, button=2)  # Right-click blank area to the right of the columns.
         chars = s.screen()[0]
-        missing = [w for w in ("Start", "Pause", "Remove", "Pin to Top", "Select All")
+        missing = [w for w in ("Start", "Pause", "Remove", "Pin to Top", "Copy", "Select All")
                    if not grid_contains(chars, w)]
         if missing:
             print(f"FAIL - menu missing {missing}")
@@ -845,7 +853,7 @@ def test_item_menu_is_unified():
         r, c = pos
         s.click(c + 1, r + 1, button=2)  # Right-click the item.
         chars = s.screen()[0]
-        missing = [w for w in ("Start", "Pause", "Remove", "Pin to Top", "Select All")
+        missing = [w for w in ("Start", "Pause", "Remove", "Pin to Top", "Copy", "Select All")
                    if not grid_contains(chars, w)]
         if missing:
             print(f"FAIL - menu missing {missing}")
@@ -871,7 +879,7 @@ def test_transferring_item_menu_disables_pin():
         r, c = pos
         s.click(c + 1, r + 1, button=2)  # Right-click the item.
         chars = s.screen()[0]
-        missing = [w for w in ("Start", "Pause", "Remove") if not grid_contains(chars, w)]
+        missing = [w for w in ("Start", "Pause", "Remove", "Copy") if not grid_contains(chars, w)]
         if missing:
             print(f"FAIL - menu missing {missing}")
             return False
@@ -902,7 +910,7 @@ def test_failed_succeeded_item_menu_omits_pause_and_pin():
             r, c = pos
             s.click(c + 1, r + 1, button=2)  # Right-click the item.
             chars = s.screen()[0]
-            missing = [w for w in ("Start", "Remove", "Select All") if not grid_contains(chars, w)]
+            missing = [w for w in ("Start", "Remove", "Copy", "Select All") if not grid_contains(chars, w)]
             if missing:
                 print(f"FAIL - {item_name} menu missing {missing}")
                 return False
@@ -937,7 +945,7 @@ def test_failed_succeeded_blank_menu_uses_select_all():
             # Right-click well right of the columns (Failed content ends at col 107) -> blank-area menu.
             s.click(115, pos[0] + 1, button=2)
             chars = s.screen()[0]
-            missing = [w for w in ("Start", "Remove", "Select All") if not grid_contains(chars, w)]
+            missing = [w for w in ("Start", "Remove", "Copy", "Select All") if not grid_contains(chars, w)]
             if missing:
                 print(f"FAIL - {tab_label} blank-area menu missing {missing}")
                 return False
@@ -947,6 +955,57 @@ def test_failed_succeeded_blank_menu_uses_select_all():
                 return False
             s._write(b"\x1b")  # Dismiss the menu before the next tab.
             s.feed(0.3)
+        print("PASS")
+        return True
+
+
+def test_copy_fields_by_transfer_tab():
+    """Every transfer tab copies its displayed name fields; Failed also copies its reason."""
+    print("TEST: parvion - transfer Copy submenu fields ... ", end="", flush=True)
+    with ParvionSession(DEMO_ENV) as s:
+        tabs = (
+            (None, "notes.txt", (("Local Name", 0, "notes.txt"),
+                                  ("Remote Name", 1, "/remote/notes.txt"))),
+            ("Failed (", "upload.bin", (("Local Name", 0, "upload.bin"),
+                                         ("Remote Name", 1, "/remote/upload.bin"),
+                                         ("Failed Reason", 2, "Permission denied"))),
+            ("Succeeded (", "archive.tar", (("Local Name", 0, "/local/archive.tar"),
+                                              ("Remote Name", 1, "archive.tar"))),
+        )
+        for tab_label, item_name, fields in tabs:
+            if tab_label and not click_label(s, tab_label):
+                print(f"FAIL - {tab_label} tab not found")
+                return False
+            pos = find_text(s.screen()[0], item_name)
+            if not pos:
+                print(f"FAIL - {item_name} row not found")
+                return False
+            for leaf, row_offset, want in fields:
+                s.click(pos[1] + 1, pos[0] + 1, button=2)
+                copy = find_text(s.screen()[0], "Copy")
+                if not copy:
+                    print(f"FAIL - {item_name} menu missing Copy")
+                    return False
+                s.click(copy[1] + 1, copy[0] + 1)
+                chars = s.screen()[0]
+                item = find_text_on_row(chars, leaf, copy[0] + row_offset)
+                if not item:
+                    print(f"FAIL - {item_name} Copy submenu missing {leaf}")
+                    return False
+                if tab_label != "Failed (" and grid_contains(chars, "Failed Reason"):
+                    print(f"FAIL - {item_name} Copy submenu unexpectedly shows Failed Reason")
+                    return False
+                before = len(s._buf)
+                s.click(item[1] + 1, item[0] + 1)
+                s.feed(0.6)
+                hits = _OSC52.findall(s._buf[before:])
+                if not hits:
+                    print(f"FAIL - {leaf} emitted no clipboard sequence")
+                    return False
+                got = base64.b64decode(hits[-1]).decode("utf-8", "replace")
+                if got != want:
+                    print(f"FAIL - {leaf} clipboard {got!r} != {want!r}")
+                    return False
         print("PASS")
         return True
 
@@ -1642,6 +1701,7 @@ TESTS = [
     test_transferring_item_menu_disables_pin,
     test_failed_succeeded_item_menu_omits_pause_and_pin,
     test_failed_succeeded_blank_menu_uses_select_all,
+    test_copy_fields_by_transfer_tab,
     test_header_menu_lists_column_toggles,
     test_header_menu_toggles_column_visibility,
     test_remove_item_via_menu,

@@ -13,8 +13,8 @@ no_autostart so no real parvionhash backend is spawned. We verify:
 
   1. The bottom tab strip shows "Checksums (5)"; clicking it lists every seeded task,
      its algorithm, a final digest, and a failure reason.
-  2. Every context menu exposes Copy digest / Remove plus Select All.
-  3. Copy digest on a multi-selection writes newline-separated successful digests.
+  2. Every context menu exposes Copy -> Path / Digest, Remove, and Select All.
+  3. Copy on a multi-selection writes newline-separated paths or successful digests.
 """
 
 import os
@@ -38,6 +38,11 @@ DEMO_ENV = {"PARVION_DEMO_HASH": "1"}
 DEMO_REPORT_DIGEST = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 DEMO_NOTES_DIGEST = "d41d8cd98f00b204e9800998ecf8427e"
 _OSC52 = re.compile(rb"\x1b\]52;[^;]*;([A-Za-z0-9+/=]+)(?:\x07|\x1b\\)")
+
+
+def _find_text_on_row(chars, needle, row):
+    col = row_text(chars, row).find(needle)
+    return (row, col) if col >= 0 else None
 
 
 def _digest_file(path, algo):
@@ -115,7 +120,7 @@ def test_checksums_context_menu():
             return False
         s.click(rp[1] + 1, rp[0] + 1, button=2)  # right-click the finished row
         chars, _ = s.screen()
-        wanted = ["Copy digest", "Remove", "Select All"]
+        wanted = ["Copy", "Remove", "Select All"]
         missing = [w for w in wanted if not grid_contains(chars, w)]
         if missing:
             print(f"FAIL test_checksums_context_menu: missing menu items {missing}")
@@ -140,13 +145,13 @@ def test_checksums_context_menu():
         s.click(missing_row[1] + 1, missing_row[0] + 3, button=2)
         chars = s.screen()[0]
         select_all = find_text(chars, "Select All")
-        if not select_all or grid_contains(chars, "Remove all") or not grid_contains(chars, "Copy digest"):
+        if not select_all or grid_contains(chars, "Remove all") or not grid_contains(chars, "Copy"):
             print("FAIL test_checksums_context_menu: blank menu is not unified")
             return False
-        copy = find_text(chars, "Copy digest")
+        copy = find_text(chars, "Copy")
         s.click(copy[1] + 1, copy[0] + 1)
         if not grid_contains(s.screen()[0], "Select All"):
-            print("FAIL test_checksums_context_menu: disabled Copy digest was interactive")
+            print("FAIL test_checksums_context_menu: disabled Copy submenu was interactive")
             return False
         chars = s.screen()[0]
         select_all = find_text(chars, "Select All")
@@ -163,36 +168,45 @@ def test_checksums_context_menu():
         return True
 
 
-def test_checksums_multiselect_copy_digest():
+def test_checksums_multiselect_copy_fields():
     with ParvionSession(DEMO_ENV) as s:
         chars = _open_checksums_tab(s)
         report = find_text(chars, "report.pdf")
         notes = find_text(chars, "notes.txt")
         backup = find_text(chars, "backup.tar.gz")
         if not report or not notes or not backup:
-            print("FAIL test_checksums_multiselect_copy_digest: rows not found")
+            print("FAIL test_checksums_multiselect_copy_fields: rows not found")
             return False
         s.click(report[1] + 1, report[0] + 1)
         s.click(backup[1] + 1, backup[0] + 1, button=16)  # Include a non-finished row; it has no digest.
         s.click(notes[1] + 1, notes[0] + 1, button=16)
-        s.click(report[1] + 1, report[0] + 1, button=2)   # Right-click a row already in the selection.
-        cp = find_text(s.screen()[0], "Copy digest")
-        if not cp:
-            print("FAIL test_checksums_multiselect_copy_digest: Copy digest menu item missing")
-            return False
-        before = len(s._buf)
-        s.click(cp[1] + 1, cp[0] + 1)
-        s.feed(0.6)
-        hits = _OSC52.findall(s._buf[before:])
-        if not hits:
-            print("FAIL test_checksums_multiselect_copy_digest: no clipboard sequence emitted")
-            return False
-        got = base64.b64decode(hits[-1]).decode("utf-8", "replace")
-        want = DEMO_REPORT_DIGEST + "\n" + DEMO_NOTES_DIGEST
-        if got != want:
-            print(f"FAIL test_checksums_multiselect_copy_digest: clipboard {got!r} != {want!r}")
-            return False
-        print("OK test_checksums_multiselect_copy_digest")
+        cases = (
+            ("Path", 0, "/home/user/report.pdf\n/home/user/notes.txt\n/srv/backup/backup.tar.gz"),
+            ("Digest", 1, DEMO_REPORT_DIGEST + "\n" + DEMO_NOTES_DIGEST),
+        )
+        for leaf, row_offset, want in cases:
+            s.click(report[1] + 1, report[0] + 1, button=2)  # Keep the existing multi-selection.
+            cp = find_text(s.screen()[0], "Copy")
+            if not cp:
+                print("FAIL test_checksums_multiselect_copy_fields: Copy submenu missing")
+                return False
+            s.click(cp[1] + 1, cp[0] + 1)
+            item = _find_text_on_row(s.screen()[0], leaf, cp[0] + row_offset)
+            if not item:
+                print(f"FAIL test_checksums_multiselect_copy_fields: {leaf} item missing")
+                return False
+            before = len(s._buf)
+            s.click(item[1] + 1, item[0] + 1)
+            s.feed(0.6)
+            hits = _OSC52.findall(s._buf[before:])
+            if not hits:
+                print(f"FAIL test_checksums_multiselect_copy_fields: {leaf} emitted no clipboard sequence")
+                return False
+            got = base64.b64decode(hits[-1]).decode("utf-8", "replace")
+            if got != want:
+                print(f"FAIL test_checksums_multiselect_copy_fields: {leaf} clipboard {got!r} != {want!r}")
+                return False
+        print("OK test_checksums_multiselect_copy_fields")
         return True
 
 
@@ -387,7 +401,7 @@ def test_checksums_blank_area_matches_transfer_table():
         selected = s.screen()[1][r][c]
         s.click(blank_c + 1, r + 1, button=2)
         chars = s.screen()[0]
-        if not grid_contains(chars, "Select All") or grid_contains(chars, "Remove all") or not grid_contains(chars, "Copy digest"):
+        if not grid_contains(chars, "Select All") or grid_contains(chars, "Remove all") or not grid_contains(chars, "Copy"):
             print("FAIL test_checksums_blank_area_matches_transfer_table: row-right blank did not open unified menu")
             return False
         s.write("\x1b")
@@ -598,7 +612,7 @@ def test_hash_settings_single_dropdown():
 TESTS = [
     test_checksums_tab_lists_tasks,
     test_checksums_context_menu,
-    test_checksums_multiselect_copy_digest,
+    test_checksums_multiselect_copy_fields,
     test_local_file_hash_end_to_end,
     test_backend_hash_non_ascii_path,
     test_backend_hash_all_algorithms,
