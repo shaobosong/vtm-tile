@@ -82,7 +82,7 @@ namespace
     auto autofit_table(view title, si32 body_w) -> qtable
     {
         auto table = qtable{};
-        table.cols.push_back(qtable::column{ .title = text{ title }, .key = 7 });
+        table.add_column(qtable::column{ .title = text{ title }, .key = 7 }, true);
         table.autofit = [body_w](si32){ return body_w; };
         return table;
     }
@@ -109,6 +109,31 @@ namespace
     {
         auto table = autofit_table("Name", 0);
         return q_col_autofit(table, 0, true) == 7; // 4 title + separator + glyph + divider.
+    }
+
+    auto test_add_column_keeps_roster_in_sync() -> bool
+    {
+        auto table = qtable{};
+        table.add_column(qtable::column{ .title = text{ "Shown" }, .key = 4 }, true);
+        table.add_column(qtable::column{ .title = text{ "Hidden" }, .key = 7 }, faux);
+        return table.cols.size() == 1
+            && table.cols.front().key == 4
+            && table.roster.size() == 2
+            && table.roster[0].shown
+            && !table.roster[1].shown
+            && table.roster[1].key == 7;
+    }
+
+    auto test_column_width_write_is_clamped() -> bool
+    {
+        auto table = qtable{};
+        auto width = si32{};
+        table.add_column(qtable::column{ .title = text{ "Name" }, .key = 3 }, true);
+        table.resize = [&](si32 key, si32 w){ if (key == 3) width = w; };
+        q_set_col_w(table, 0, g_col_max + 10);
+        if (width != g_col_max) return faux;
+        q_set_col_w(table, 0, g_col_min - 10);
+        return width == g_col_min;
     }
 
     auto test_page_navigation_visits_edges_first() -> bool
@@ -278,6 +303,8 @@ int main()
         { "body_content_controls_autofit", test_body_content_controls_autofit },
         { "plain_header_has_no_sort_suffix", test_plain_header_has_no_sort_suffix },
         { "empty_sortable_table_fits_header", test_empty_sortable_table_fits_header },
+        { "add_column_keeps_roster_in_sync", test_add_column_keeps_roster_in_sync },
+        { "column_width_write_is_clamped", test_column_width_write_is_clamped },
         { "page_navigation_edges_first", test_page_navigation_visits_edges_first },
         { "page_navigation_scroll_from_edges", test_page_navigation_scrolls_from_edges },
         { "page_navigation_partial_last_page", test_page_navigation_partial_last_page },

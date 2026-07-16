@@ -697,7 +697,6 @@ namespace netxs::app::parvion
     {
         auto stp = &st;
         auto cfg = table_cfg{};
-        cfg.ctrl = st.ctrl;
         cfg.window_wp = st.window_wp;
         cfg.palette = table_palette{
             .bg         = theme::bg,
@@ -715,24 +714,15 @@ namespace netxs::app::parvion
         cfg.columns = [stp]
         {
             auto table = qtable{};
-            table.left = 0;
             for (auto i = si32{}; i < sd::kt_ncol; ++i)
             {
-                if (stp->key_col_shown[(size_t)i])
-                {
-                    table.cols.push_back(qtable::column{
-                        .title = text{ sd::kt_headers[(size_t)i] },
-                        .width = stp->key_col_w[(size_t)i],
-                        .right = faux,
-                        .resizable = true,
-                        .key = i,
-                    });
-                }
-                table.roster.push_back(qtable::col_toggle{
+                table.add_column(qtable::column{
                     .title = text{ sd::kt_headers[(size_t)i] },
+                    .width = stp->key_col_w[(size_t)i],
+                    .right = faux,
+                    .resizable = true,
                     .key = i,
-                    .shown = stp->key_col_shown[(size_t)i],
-                });
+                }, stp->key_col_shown[(size_t)i]);
             }
             table.set_shown = [stp](si32 key, bool shown)
             {
@@ -741,7 +731,7 @@ namespace netxs::app::parvion
             table.resize = [stp](si32 key, si32 width)
             {
                 if (key >= 0 && key < sd::kt_ncol)
-                    stp->key_col_w[(size_t)key] = std::clamp(width, g_col_min, g_col_max);
+                    stp->key_col_w[(size_t)key] = width;
             };
             table.autofit = [stp](si32 key)
             {
@@ -807,7 +797,6 @@ namespace netxs::app::parvion
             if (auto card = stp->card_wp.lock()) card->base::deface();
         };
         cfg.wide_hit = true;
-        cfg.arrow_nav = true;
         return cfg;
     }
 

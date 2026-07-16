@@ -157,15 +157,15 @@ namespace netxs::app::parvion
         auto t = qtable{};
         t.left = q_name_x;
         if (!ctrl) return t;
-        for (auto i = si32{}; i < q_ncol; ++i)
-            if (ctrl->col_shown[(size_t)i])
-                t.cols.push_back(qtable::column{ text{ q_headers[(size_t)i] }, cols->col_w[(size_t)i], /*right*/ i >= 2 && i <= 4, true, i });
-        if (status == 1 && ctrl->col_shown[(size_t)q_ncol])
-            t.cols.push_back(qtable::column{ text{ q_headers[(size_t)q_ncol] }, xfer_reason_w(*cols, status), faux, true, q_ncol });
         auto n = status == 1 ? q_ncol + 1 : q_ncol;
-        for (auto i = si32{}; i < n; ++i) t.roster.push_back({ text{ q_headers[(size_t)i] }, i, ctrl->col_shown[(size_t)i] });
+        for (auto i = si32{}; i < n; ++i)
+        {
+            auto width = i < q_ncol ? cols->col_w[(size_t)i] : xfer_reason_w(*cols, status);
+            t.add_column({ text{ q_headers[(size_t)i] }, width, i >= 2 && i <= 4, true, i },
+                         ctrl->col_shown[(size_t)i]);
+        }
         t.set_shown = [ctrl](si32 key, bool on){ if (key >= 0 && key < (si32)ctrl->col_shown.size()) ctrl->col_shown[(size_t)key] = on; };
-        t.resize    = [cols](si32 key, si32 w){ if (key < q_ncol) cols->col_w[(size_t)key] = w; else cols->reason_w_override = w; };
+        t.resize    = [cols](si32 key, si32 w){ if (key >= 0 && key < q_ncol) cols->col_w[(size_t)key] = w; else if (key == q_ncol) cols->reason_w_override = w; };
         t.autofit   = [ctrl, status](si32 key){ return xfer_content_w(ctrl, status, key); };
         return t;
     }
@@ -320,7 +320,6 @@ namespace netxs::app::parvion
             return text{ base } + " (" + std::to_string(n) + ")";
         };
         auto cfg = table_cfg{};
-        cfg.ctrl = ctrl;
         cfg.window_wp = window_wp;
         cfg.columns   = [ctrl, status, cols]{ return xfer_columns(ctrl, status, cols); };
         cfg.rows      = [ctrl, status, row_snapshot]
@@ -361,7 +360,6 @@ namespace netxs::app::parvion
             if (ctrl) ctrl->queue_remove([](queue_item const& it){ return it.selected; });
         };
         cfg.deletion.confirm = [ctrl]{ return xfer_remove_confirmation(ctrl); };
-        cfg.arrow_nav   = true;
         return make_tab_page(make_table(std::move(cfg)), std::move(title));
     }
 }

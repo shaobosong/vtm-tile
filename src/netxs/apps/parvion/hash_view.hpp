@@ -90,9 +90,8 @@ namespace netxs::app::parvion
     {
         static constexpr auto right = std::array<bool, 6>{ faux, faux, faux, true, true, faux };
         auto t = qtable{};
-        t.left = 1;
         if (!ctrl) return t;
-        auto src = (si32)cell_width("Source"), path = (si32)cell_width("Path"), res = (si32)cell_width("Result");
+        auto src = si32{}, path = si32{}, res = si32{};
         for (auto& it : ctrl->hash_queue)
         {
             src  = std::max(src,  (si32)cell_width(it.source()));
@@ -100,16 +99,16 @@ namespace netxs::app::parvion
             res  = std::max(res,  (si32)cell_width(it.status == hash_item::failed ? it.error : it.digest));
         }
         path = std::min(path, 48); // Cap the Path column; longer paths scroll horizontally.
-        auto autow = std::array<si32, 6>{ src + 1, path + 1, std::max(9, (si32)cell_width("Algorithm")) + 1, 12, 11, res + 1 };
+        auto bodyw = std::array<si32, 6>{ src, path, 9, 11, 10, res };
+        auto autow = std::array<si32, 6>{};
         for (auto i = si32{}; i < 6; ++i)
-            autow[(size_t)i] = std::max(autow[(size_t)i], (si32)cell_width(hash_headers[(size_t)i]) + 3); // Suffix + divider.
+            autow[(size_t)i] = q_col_fit_w(hash_headers[(size_t)i], bodyw[(size_t)i], true);
         for (auto i = si32{}; i < 6; ++i)
         {
-            if (!ctrl->hash_col_shown[(size_t)i]) continue;
             auto w = cols->w[(size_t)i] > 0 ? cols->w[(size_t)i] : autow[(size_t)i];
-            t.cols.push_back(qtable::column{ text{ hash_headers[(size_t)i] }, w, right[(size_t)i], true, i });
+            t.add_column({ text{ hash_headers[(size_t)i] }, w, right[(size_t)i], true, i },
+                         ctrl->hash_col_shown[(size_t)i]);
         }
-        for (auto i = si32{}; i < 6; ++i) t.roster.push_back({ text{ hash_headers[(size_t)i] }, i, ctrl->hash_col_shown[(size_t)i] });
         t.set_shown = [ctrl](si32 key, bool on){ if (key >= 0 && key < (si32)ctrl->hash_col_shown.size()) ctrl->hash_col_shown[(size_t)key] = on; };
         t.resize    = [cols](si32 key, si32 w){ if (key >= 0 && key < (si32)cols->w.size()) cols->w[(size_t)key] = w; };
         t.autofit   = [ctrl](si32 key){ return hash_content_w(ctrl, key); };
@@ -242,7 +241,6 @@ namespace netxs::app::parvion
         auto cols = std::make_shared<hash_cols>();
         auto title = [ctrl]{ return "Checksums (" + std::to_string(ctrl ? ctrl->hash_queue.size() : 0) + ")"; };
         auto cfg = table_cfg{};
-        cfg.ctrl = ctrl;
         cfg.window_wp = window_wp;
         cfg.columns    = [ctrl, cols]{ return hash_columns(ctrl, cols); };
         cfg.rows       = [ctrl]{ return (si32)ctrl->hash_queue.size(); };
@@ -259,7 +257,6 @@ namespace netxs::app::parvion
             ctrl->hash_remove_selected();
         };
         cfg.deletion.confirm = [ctrl]{ return hash_remove_confirmation(ctrl); };
-        cfg.arrow_nav = true;
         return make_tab_page(make_table(std::move(cfg)), std::move(title));
     }
 }

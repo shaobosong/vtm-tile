@@ -26,8 +26,6 @@
 
 namespace netxs::app::parvion
 {
-    struct sftp_remote;
-
     // All colors painted by the reusable table. Callers may override individual
     // fields to make the component fit a surrounding surface; defaults preserve
     // the transfer/checksum tables' established appearance.
@@ -59,15 +57,20 @@ namespace netxs::app::parvion
             bool resizable = true;
             si32 key = -1;       // Caller tag (a logical column id, stable across show/hide + reorder).
         };
-        std::vector<column> cols; // Visible columns, left to right.
-        si32 left = 1;            // Requested first-column x; cell 0 is reserved for the header menu.
-
         struct col_toggle { text title; si32 key = -1; bool shown = true; };
-        std::vector<col_toggle>                roster;    // All columns (shown + hidden) for the header menu.
+        std::vector<column>                    cols;      // Visible columns, left to right.
+        std::vector<col_toggle>                roster;    // All columns for the header show/hide menu.
+        si32                                   left = 1;  // First-column x (cell 0 is reserved for the table menu).
         std::function<void(si32 key, bool on)> set_shown; // Flip a column's visibility (backing write).
         std::function<void(si32 key, si32 w)>  resize;    // Persist a dragged column width.
         // Return the widest body-cell width. The core adds any header decoration and the divider.
         std::function<si32(si32 key)>          autofit;
+
+        void add_column(column col, bool shown)
+        {
+            roster.push_back({ col.title, col.key, shown });
+            if (shown) cols.push_back(std::move(col));
+        }
 
         auto col_x(si32 i) const -> si32
         {
@@ -195,9 +198,7 @@ namespace netxs::app::parvion
         enum dmode { d_none, d_vsb, d_hsb, d_col, d_rubber };
         enum sort_mode { sort_default, sort_ascending, sort_descending };
 
-        sftp_remote*          ctrl = nullptr;
-        netxs::wptr<ui::base> window_wp;
-        bool                  focused = faux;
+        bool focused = faux;
 
         si32 scroll = 0, hscroll = 0;
         bool live_follow = faux;
@@ -310,7 +311,6 @@ namespace netxs::app::parvion
     // live state each render or hit-test.
     struct table_cfg
     {
-        sftp_remote*          ctrl = nullptr; // Optional caller context retained for source compatibility.
         netxs::wptr<ui::base> window_wp;      // App window: anchor for confirm dialogs.
         std::function<qtable()>                          columns;     // Column model (rebuilt each render/hit).
         std::function<si32()>                            rows;        // Number of display rows.
@@ -481,14 +481,22 @@ namespace netxs::app::parvion
         }
         return -1;
     }
-    inline void q_set_col_w(qtable const& t, si32 v, si32 w) { if (v >= 0 && v < (si32)t.cols.size() && t.resize) t.resize(t.cols[(size_t)v].key, w); }
+    inline auto q_col_fit_w(view title, si32 body_w, bool sortable) -> si32
+    {
+        auto header_w = (si32)cell_width(title) + (sortable ? 2 : 0); // Separator + sort glyph.
+        return std::clamp(std::max(body_w, header_w) + 1, g_col_min, g_col_max); // Trailing divider.
+    }
+    inline void q_set_col_w(qtable const& t, si32 v, si32 w)
+    {
+        if (v >= 0 && v < (si32)t.cols.size() && t.resize)
+            t.resize(t.cols[(size_t)v].key, std::clamp(w, g_col_min, g_col_max));
+    }
     inline auto q_col_autofit(qtable const& t, si32 v, bool sortable) -> si32
     {
         if (v < 0 || v >= (si32)t.cols.size()) return g_col_min;
         auto& col = t.cols[(size_t)v];
         auto body_w = t.autofit ? t.autofit(col.key) : si32{};
-        auto header_w = (si32)cell_width(col.title) + (sortable ? 2 : 0); // Separator + sort glyph.
-        return std::clamp(std::max(body_w, header_w) + 1, g_col_min, g_col_max); // Trailing divider.
+        return q_col_fit_w(col.title, body_w, sortable);
     }
     inline auto q_row_at(table_state const& st, si32 mx, si32 my) -> si32
     {
@@ -916,8 +924,6 @@ namespace netxs::app::parvion
         {
             auto& st  = boss.base::field(table_state{});
             auto& cfg = boss.base::field(table_cfg{ cfgv });
-            st.ctrl      = cfgv.ctrl;      // Threaded from the view; drives the widget's readiness guards.
-            st.window_wp = cfgv.window_wp;
             st.live_follow = !!cfgv.follow;
             boss.LISTEN(tier::release, e2::render::any, parent_canvas)
             {
@@ -1186,7 +1192,7 @@ namespace netxs::app::parvion
                         if (st.col_drag >= 0 && st.col_drag < (si32)tbl.cols.size())
                         {
                             auto left = tbl.col_x(st.col_drag);
-                            auto ww = std::clamp(mx + st.hscroll - left + 1, g_col_min, g_col_max);
+                            auto ww = mx + st.hscroll - left + 1;
                             q_set_col_w(tbl, st.col_drag, ww); boss.base::deface();
                         }
                         break;

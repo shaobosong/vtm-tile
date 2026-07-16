@@ -1021,13 +1021,9 @@ namespace netxs::app::parvion
     {
         auto& st = *state;
         auto t = qtable{};
-        t.left = 1;
         for (auto i = si32{}; i < p_ncol; ++i)
-        {
-            if (st.col_shown[(size_t)i])
-                t.cols.push_back({ text{ p_headers[(size_t)i] }, st.col_w[(size_t)i], i == 1, true, i });
-            t.roster.push_back({ text{ p_headers[(size_t)i] }, i, st.col_shown[(size_t)i] });
-        }
+            t.add_column({ text{ p_headers[(size_t)i] }, st.col_w[(size_t)i], i == 1, true, i },
+                         st.col_shown[(size_t)i]);
         t.set_shown = [state](si32 key, bool on)
         {
             if (key >= 0 && key < p_ncol) state->col_shown[(size_t)key] = on;
@@ -1353,7 +1349,6 @@ namespace netxs::app::parvion
         if (out_state) *out_state = state.get();
 
         auto cfg = table_cfg{};
-        cfg.ctrl = ctrl;
         cfg.window_wp = window_wp;
         cfg.palette = table_palette{
             .bg = theme::bg, .header = theme::surface, .text_fg = theme::text_fg,
@@ -1399,7 +1394,6 @@ namespace netxs::app::parvion
         cfg.revision_row = [state]{ return std::exchange(state->revision_row, -1); };
         cfg.sort_group = [state](si32 row){ return pane_sort_group(*state, row); };
         cfg.compare = [state](si32 a, si32 b, si32 key){ return pane_compare(*state, a, b, key); };
-        cfg.arrow_nav = true;
         cfg.focus_on_start = grab_focus;
 
         auto table = make_table(std::move(cfg));
