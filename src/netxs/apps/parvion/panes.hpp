@@ -547,6 +547,7 @@ namespace netxs::app::parvion
     // --- transfer-table-style columns (Name / Size / Modified), mirroring parvion/queue.hpp ----------
     static constexpr auto p_ncol    = si32{ 3 };
     static constexpr auto p_headers = std::array<view, p_ncol>{ "Name", "Size", "Modified" };
+    static constexpr auto p_menu_headers = std::array<view, p_ncol>{ "&Name", "&Size", "&Modified" };
 
     inline auto p_col_visible(pane_state const& st, si32 i) -> bool { return i >= 0 && i < p_ncol && st.col_shown[(size_t)i]; }
     // The text column `col` shows for logical `row` (row 0 == "..", else items[row-1]); mirrors render.
@@ -925,9 +926,9 @@ namespace netxs::app::parvion
             row.action = [panel_wp, fn](hids&){ if (auto p = panel_wp.lock()) { fn(); p->base::deface(); } };
             items.push_back(std::move(row));
         };
-        add(st.remote ? text{ "Download" } : text{ "Upload" }, !selected, [&st]{ pane_transfer_selection(st); });
-        add("Delete", !selected, [&st, panel_wp]{ pane_confirm_delete_selection(st, panel_wp); });
-        add("Rename", !selected, [&st, panel_wp]
+        add(st.remote ? text{ "Down&load" } : text{ "Up&load" }, !selected, [&st]{ pane_transfer_selection(st); });
+        add("&Delete", !selected, [&st, panel_wp]{ pane_confirm_delete_selection(st, panel_wp); });
+        add("&Rename", !selected, [&st, panel_wp]
         {
             auto& its = st.cur_items();
             auto idx = st.sel - 1;
@@ -938,11 +939,11 @@ namespace netxs::app::parvion
         {
             auto names = pane_selection_names(st);
             auto paths = pane_selection_paths(st);
-            auto sub = m::item{ .alive = true, .label = "Copy", .type = m::kind::dropdown, .disabled = names.empty() };
-            auto name = m::item{ .alive = true, .label = "Name", .disabled = names.empty() };
+            auto sub = m::item{ .alive = true, .label = "&Copy", .type = m::kind::dropdown, .disabled = names.empty() };
+            auto name = m::item{ .alive = true, .label = "&Name", .disabled = names.empty() };
             name.action = [names](hids& gear){ if (!names.empty()) gear.set_clipboard(dot_00, names, mime::textonly); };
             sub.children.push_back(std::move(name));
-            auto path = m::item{ .alive = true, .label = "Full Path", .disabled = paths.empty() };
+            auto path = m::item{ .alive = true, .label = "&Full Path", .disabled = paths.empty() };
             path.action = [paths](hids& gear){ if (!paths.empty()) gear.set_clipboard(dot_00, paths, mime::textonly); };
             sub.children.push_back(std::move(path));
             items.push_back(std::move(sub));
@@ -956,10 +957,13 @@ namespace netxs::app::parvion
             auto has_file = faux;
             for (auto row : st.marked)
                 if (row > 0 && row - 1 < (si32)its.size() && !its[(size_t)(row - 1)].is_dir) { has_file = true; break; }
-            auto sub = m::item{ .alive = true, .label = "Calculate Checksum", .type = m::kind::dropdown, .disabled = !has_file };
+            auto sub = m::item{ .alive = true, .label = "Calculate C&hecksum", .type = m::kind::dropdown, .disabled = !has_file };
+            static constexpr auto labels = std::array<view, hash_algo_count>{
+                "&MD5", "SHA-&1", "SHA-&256", "SHA-&384", "SHA-&512"
+            };
             for (auto a = si32{}; a < hash_algo_count; ++a)
             {
-                auto row = m::item{ .alive = true, .label = text{ hash_algo_label(a) } };
+                auto row = m::item{ .alive = true, .label = text{ labels[(size_t)a] } };
                 row.action = [panel_wp, &st, a](hids&){ if (auto p = panel_wp.lock()) { pane_hash_selection(st, a); p->base::deface(); } };
                 sub.children.push_back(std::move(row));
             }
@@ -967,8 +971,8 @@ namespace netxs::app::parvion
         }
 
         items.push_back(m::item{ .alive = true, .type = m::kind::separator });
-        add("Refresh", faux, [&st]{ pane_reload_reset_view(st); });
-        add("Create Directory", faux, [&st, panel_wp]
+        add("R&efresh", faux, [&st]{ pane_reload_reset_view(st); });
+        add("Create &Folder", faux, [&st, panel_wp]
         {
             pane_create_dir(st);
             if (auto p = panel_wp.lock()) pro::focus::set(p, id_t{}, solo::on);
@@ -1023,7 +1027,7 @@ namespace netxs::app::parvion
         auto t = qtable{};
         for (auto i = si32{}; i < p_ncol; ++i)
             t.add_column({ text{ p_headers[(size_t)i] }, st.col_w[(size_t)i], i == 1, true, i },
-                         st.col_shown[(size_t)i]);
+                         st.col_shown[(size_t)i], text{ p_menu_headers[(size_t)i] });
         t.set_shown = [state](si32 key, bool on)
         {
             if (key >= 0 && key < p_ncol) state->col_shown[(size_t)key] = on;

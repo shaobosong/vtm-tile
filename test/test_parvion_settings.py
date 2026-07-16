@@ -417,10 +417,9 @@ def test_key_table_column_menu_hides_comment():
         header_row = filename[0]
         data_before = data[1]
         s.click(filename[1] + 1, header_row + 1, button=2)
-        item = _find_column_menu_item(s.screen()[0], "Comment")
-        if item is None:
+        if _find_column_menu_item(s.screen()[0], "Comment") is None:
             print("FAIL - Comment toggle missing from the header menu"); return False
-        s.click(item[1] + 1, item[0] + 1)
+        s.write("c")  # Auto-assigned &Comment shortcut from the shared table.
         line = T.row_text(s.screen()[0], header_row)
         if "Comment" in line:
             print("FAIL - Comment header remained visible after toggling it off"); return False

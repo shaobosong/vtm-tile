@@ -906,7 +906,7 @@ namespace netxs::app::shared
         // Per-popup keyboard-navigation state. One entry per attached
         // overlay, aligned 1:1 with popup_chain::overlays. The deepest
         // entry (navs.back()) is the popup that receives keyboard
-        // navigation (Up/Down/Left/Right/Enter and shortcut letters)
+        // navigation (Up/Down/Left/Right/Enter and shortcut keys)
         // — typing a key dispatches through the back() entry's
         // callbacks. Captured by value to keep the popup's items
         // and operations reachable from the host-level kbd_hook
@@ -1011,9 +1011,9 @@ namespace netxs::app::shared
                                           bool radio = faux, si32 radio_checked = -1) -> netxs::wptr<ui::base>;
 
         // Byte position of the shortcut '&' marker in `s` (the '&'
-        // character followed by an ASCII alphabetic key letter), or
+        // character followed by an ASCII alphanumeric key), or
         // text::npos if no shortcut is encoded. Only the FIRST '&'
-        // followed by [A-Za-z] is treated as a marker; other '&'
+        // followed by [A-Za-z0-9] is treated as a marker; other '&'
         // characters render literally.
         static auto label_shortcut_pos(text const& s) -> size_t
         {
@@ -1021,13 +1021,15 @@ namespace netxs::app::shared
             while (pos != text::npos && pos + 1 < s.size())
             {
                 auto next = s[pos + 1];
-                if ((next >= 'A' && next <= 'Z') || (next >= 'a' && next <= 'z')) return pos;
+                if ((next >= 'A' && next <= 'Z')
+                 || (next >= 'a' && next <= 'z')
+                 || (next >= '0' && next <= '9')) return pos;
                 pos = s.find('&', pos + 1);
             }
             return text::npos;
         }
 
-        // Lowercase shortcut letter encoded in `s`, or 0 if none.
+        // Lowercase shortcut key encoded in `s`, or 0 if none.
         static auto label_shortcut_char(text const& s) -> char
         {
             auto pos = label_shortcut_pos(s);
@@ -1046,9 +1048,9 @@ namespace netxs::app::shared
 
         // Render `s` for paint surfaces that consume ANSI/SGR
         // (ui::item / para). The shortcut '&' marker is removed
-        // and the following letter is wrapped in SGR 4 / 24
+        // and the following key is wrapped in SGR 4 / 24
         // (underline on/off), so menu-bar buttons display the
-        // shortcut letter underlined exactly like popup rows. If
+        // shortcut key underlined exactly like popup rows. If
         // `s` has no '&' shortcut marker it is returned unchanged.
         static auto label_styled_ansi(text const& s) -> text
         {
@@ -1058,7 +1060,7 @@ namespace netxs::app::shared
             out.reserve(s.size() + 8);
             out.append(s, 0, pos);              // bytes before '&'
             out.append("\x1b[4m");              // underline ON
-            out.push_back(s[pos + 1]);          // shortcut letter
+            out.push_back(s[pos + 1]);          // shortcut key
             out.append("\x1b[24m");             // underline OFF
             out.append(s, pos + 2, text::npos); // remainder
             return out;
@@ -1394,9 +1396,9 @@ namespace netxs::app::shared
             //                          the root popup.
             //   Enter               -> activate a leaf row's script, or
             //                          open+focus a submenu trigger.
-            //   Letter (a-z, A-Z)   -> '&Label' shortcut. Find the
+            //   Letter/digit        -> '&Label' shortcut. Find the
             //                          current popup's row whose label
-            //                          encodes that letter; submenus
+            //                          encodes that key; submenus
             //                          open+focus, leaves activate.
             host_ptr->bell::submit(tier::preview, input::events::keybd::any, *chain->kbd_hook)
                 = [chain](hids& gear)
@@ -1550,15 +1552,17 @@ namespace netxs::app::shared
                         gear.set_handled(faux);
                         return;
                     }
-                    // '&'-shortcut letter matching against the current
+                    // '&'-shortcut key matching against the current
                     // popup's items. Scan for the first row whose
-                    // shortcut letter matches the typed character
+                    // shortcut key matches the typed character
                     // (case-insensitive); submenu triggers open and
                     // focus, leaves dispatch their script.
                     if (!gear.keybd::cluster.empty())
                     {
                         auto first = (unsigned char)gear.keybd::cluster.front();
-                        if ((first >= 'A' && first <= 'Z') || (first >= 'a' && first <= 'z'))
+                        if ((first >= 'A' && first <= 'Z')
+                         || (first >= 'a' && first <= 'z')
+                         || (first >= '0' && first <= '9'))
                         {
                             auto target = (char)std::tolower(first);
                             for (auto i = si32{ 0 }; i < count; ++i)
@@ -2160,7 +2164,7 @@ namespace netxs::app::shared
                 auto& hover = props.hover;
                 // '&Label' shortcut decoration: pass an ANSI-styled
                 // string so the underlying ui::item / para renderer
-                // displays the shortcut letter underlined and elides
+                // displays the shortcut key underlined and elides
                 // the '&' marker byte (matching the popup-row paint
                 // path).
                 auto button = ui::item::ctor(label_styled_ansi(label))->drawdots();

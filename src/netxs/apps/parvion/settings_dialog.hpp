@@ -62,6 +62,7 @@ namespace netxs::app::parvion
         // --- Private-key shared-table model ----------------------------------------------------
         inline constexpr auto kt_ncol    = si32{ 3 };
         inline const     auto kt_headers = std::array<view, kt_ncol>{ "Filename", "Comment", "Data" };
+        inline const     auto kt_menu_headers = std::array<view, kt_ncol>{ "&Filename", "&Comment", "&Data" };
     }
 
     struct settings_state
@@ -722,7 +723,7 @@ namespace netxs::app::parvion
                     .right = faux,
                     .resizable = true,
                     .key = i,
-                }, stp->key_col_shown[(size_t)i]);
+                }, stp->key_col_shown[(size_t)i], text{ sd::kt_menu_headers[(size_t)i] });
             }
             table.set_shown = [stp](si32 key, bool shown)
             {

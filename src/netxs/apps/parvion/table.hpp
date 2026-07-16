@@ -66,9 +66,11 @@ namespace netxs::app::parvion
         // Return the widest body-cell width. The core adds any header decoration and the divider.
         std::function<si32(si32 key)>          autofit;
 
-        void add_column(column col, bool shown)
+        // `menu_label` is caller-owned and may contain an '&' shortcut marker. The table never adds
+        // or changes one; an empty value uses the plain header title.
+        void add_column(column col, bool shown, text menu_label = {})
         {
-            roster.push_back({ col.title, col.key, shown });
+            roster.push_back({ menu_label.empty() ? col.title : std::move(menu_label), col.key, shown });
             if (shown) cols.push_back(std::move(col));
         }
 
@@ -731,7 +733,6 @@ namespace netxs::app::parvion
     }
     inline void q_context_menu(auto& boss, table_state& st, si32 mx, si32 my, qtable const& t, qmenu_cfg const& cfg)
     {
-        namespace m = app::shared::menu;
         auto at = twod{ mx, my };
         if (my == st.body_top - 1 && st.body_top > 0) // Column-header row: the intrinsic show/hide menu.
         {
@@ -749,7 +750,7 @@ namespace netxs::app::parvion
         {
             if (cfg.on_blank_rclick) { cfg.on_blank_rclick(); st.sel_anchor = st.nav_cursor = -1; }
         }
-        if (cfg.items) m::open_dropdown_popup(boss, cfg.items(), faux, -1, at);
+        q_open_table_menu(boss, cfg, at);
     }
 
     // Paint a caller-owned single-line editor inside one visible table cell. The editor scrolls its

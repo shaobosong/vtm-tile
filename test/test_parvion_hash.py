@@ -153,9 +153,7 @@ def test_checksums_context_menu():
         if not grid_contains(s.screen()[0], "Select All"):
             print("FAIL test_checksums_context_menu: disabled Copy submenu was interactive")
             return False
-        chars = s.screen()[0]
-        select_all = find_text(chars, "Select All")
-        s.click(select_all[1] + 1, select_all[0] + 1)
+        s.write("a")  # Select &All.
         report = find_text(s.screen()[0], "report.pdf")
         s.click(report[1] + 1, report[0] + 1, button=2)
         rm = find_text(s.screen()[0], "Remove")
@@ -229,12 +227,12 @@ def test_local_file_hash_end_to_end():
         if not cc:
             print("FAIL test_local_file_hash_end_to_end: 'Calculate Checksum' submenu missing")
             return False
-        s.click(cc[1] + 1, cc[0] + 1); s.feed(0.7)                    # open the algorithm submenu
+        s.write("h")                                                   # Calculate C&hecksum submenu
         algo = find_text(s.screen()[0], "SHA-256")
         if not algo:
             print("FAIL test_local_file_hash_end_to_end: 'SHA-256' item missing")
             return False
-        s.click(algo[1] + 1, algo[0] + 1); s.feed(0.8)                # enqueue the SHA-256 task
+        s.write("2", settle=0.8)                                      # SHA-&256
         tab = find_text(s.screen()[0], "Checksums (")
         s.click(tab[1] + 1, tab[0] + 1); s.feed(0.6)                  # show the Checksums tab
         for _ in range(25):                                           # poll until the digest computes

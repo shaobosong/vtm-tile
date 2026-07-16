@@ -114,12 +114,14 @@ namespace
     auto test_add_column_keeps_roster_in_sync() -> bool
     {
         auto table = qtable{};
-        table.add_column(qtable::column{ .title = text{ "Shown" }, .key = 4 }, true);
+        table.add_column(qtable::column{ .title = text{ "Shown" }, .key = 4 }, true, "&Shown");
         table.add_column(qtable::column{ .title = text{ "Hidden" }, .key = 7 }, faux);
         return table.cols.size() == 1
             && table.cols.front().key == 4
             && table.roster.size() == 2
+            && table.roster[0].title == "&Shown"
             && table.roster[0].shown
+            && table.roster[1].title == "Hidden"
             && !table.roster[1].shown
             && table.roster[1].key == 7;
     }
@@ -134,6 +136,32 @@ namespace
         if (width != g_col_max) return faux;
         q_set_col_w(table, 0, g_col_min - 10);
         return width == g_col_min;
+    }
+
+    auto test_numeric_menu_shortcuts() -> bool
+    {
+        namespace m = app::shared::menu;
+        return m::label_shortcut_char("SHA-&256") == '2'
+            && m::label_display_length("SHA-&256") == 7;
+    }
+
+    auto test_column_menu_uses_caller_shortcuts() -> bool
+    {
+        namespace m = app::shared::menu;
+        auto roster = std::vector<qtable::col_toggle>{
+            { "&Source",    0, true },
+            { "&Path",      1, true },
+            { "&Algorithm", 2, true },
+            { "S&ize",      3, true },
+            { "P&rogress",  4, true },
+            { "R&esult",    5, true },
+        };
+        auto items = build_columns_menu(roster, {}, {});
+        auto keys = text{};
+        for (auto& row : items) keys += m::label_shortcut_char(row.label);
+        auto plain = build_columns_menu({ { "Plain", 0, true } }, {}, {});
+        return keys == "spaire"
+            && m::label_shortcut_char(plain.front().label) == 0;
     }
 
     auto test_page_navigation_visits_edges_first() -> bool
@@ -305,6 +333,8 @@ int main()
         { "empty_sortable_table_fits_header", test_empty_sortable_table_fits_header },
         { "add_column_keeps_roster_in_sync", test_add_column_keeps_roster_in_sync },
         { "column_width_write_is_clamped", test_column_width_write_is_clamped },
+        { "numeric_menu_shortcuts", test_numeric_menu_shortcuts },
+        { "column_menu_uses_caller_shortcuts", test_column_menu_uses_caller_shortcuts },
         { "page_navigation_edges_first", test_page_navigation_visits_edges_first },
         { "page_navigation_scroll_from_edges", test_page_navigation_scrolls_from_edges },
         { "page_navigation_partial_last_page", test_page_navigation_partial_last_page },

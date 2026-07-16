@@ -14,6 +14,7 @@
 namespace netxs::app::parvion
 {
     static constexpr auto hash_headers = std::array<view, 6>{ "Source", "Path", "Algorithm", "Size", "Progress", "Result" };
+    static constexpr auto hash_menu_headers = std::array<view, 6>{ "&Source", "&Path", "&Algorithm", "S&ize", "P&rogress", "R&esult" };
 
     // Per-instance session-only column widths (0 = auto-size to content).
     struct hash_cols { std::array<si32, 6> w{}; };
@@ -107,7 +108,7 @@ namespace netxs::app::parvion
         {
             auto w = cols->w[(size_t)i] > 0 ? cols->w[(size_t)i] : autow[(size_t)i];
             t.add_column({ text{ hash_headers[(size_t)i] }, w, right[(size_t)i], true, i },
-                         ctrl->hash_col_shown[(size_t)i]);
+                         ctrl->hash_col_shown[(size_t)i], text{ hash_menu_headers[(size_t)i] });
         }
         t.set_shown = [ctrl](si32 key, bool on){ if (key >= 0 && key < (si32)ctrl->hash_col_shown.size()) ctrl->hash_col_shown[(size_t)key] = on; };
         t.resize    = [cols](si32 key, si32 w){ if (key >= 0 && key < (si32)cols->w.size()) cols->w[(size_t)key] = w; };
@@ -188,21 +189,21 @@ namespace netxs::app::parvion
             auto items = std::vector<m::item>{};
             auto paths = hash_copy_path_payload(ctrl);
             auto digests = hash_copy_digest_payload(ctrl);
-            auto copy = m::item{ .alive = true, .label = "Copy", .type = m::kind::dropdown, .disabled = paths.empty() };
-            auto path = m::item{ .alive = true, .label = "Path", .disabled = paths.empty() };
+            auto copy = m::item{ .alive = true, .label = "&Copy", .type = m::kind::dropdown, .disabled = paths.empty() };
+            auto path = m::item{ .alive = true, .label = "&Path", .disabled = paths.empty() };
             path.action = [paths](hids& g){ if (!paths.empty()) g.set_clipboard(dot_00, paths, mime::textonly); };
             copy.children.push_back(std::move(path));
-            auto digest = m::item{ .alive = true, .label = "Digest", .disabled = digests.empty() };
+            auto digest = m::item{ .alive = true, .label = "&Digest", .disabled = digests.empty() };
             digest.action = [digests](hids& g){ if (!digests.empty()) g.set_clipboard(dot_00, digests, mime::textonly); };
             copy.children.push_back(std::move(digest));
             items.push_back(std::move(copy));
 
-            auto rm = m::item{ .alive = true, .label = "Remove", .disabled = !ctrl->hash_selected_count() };
+            auto rm = m::item{ .alive = true, .label = "&Remove", .disabled = !ctrl->hash_selected_count() };
             rm.action = [ctrl, panel_wp, window_wp](hids&){ hash_confirm_remove_selected(ctrl, panel_wp, window_wp); };
             items.push_back(std::move(rm));
 
             items.push_back(m::item{ .alive = true, .type = m::kind::separator });
-            auto select_all = m::item{ .alive = true, .label = "Select All", .disabled = ctrl->hash_queue.empty() };
+            auto select_all = m::item{ .alive = true, .label = "Select &All", .disabled = ctrl->hash_queue.empty() };
             select_all.action = [ctrl, deface](hids&)
             {
                 for (auto& it : ctrl->hash_queue) it.selected = true;

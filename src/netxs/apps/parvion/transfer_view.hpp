@@ -23,6 +23,7 @@ namespace netxs::app::parvion
     // the column builder, the cell accessor, and ctrl->col_shown.
     static constexpr auto q_ncol      = si32{ 5 };
     static constexpr auto q_headers   = std::array<view, q_ncol + 1>{ "Local Name", "Remote Name", "Size", "Progress", "Speed", "Reason" };
+    static constexpr auto q_menu_headers = std::array<view, q_ncol + 1>{ "&Local Name", "&Remote Name", "&Size", "&Progress", "Sp&eed", "Re&ason" };
     static constexpr auto q_name_x    = si32{ 7 };  // First resizable column x (after the arrow + expand gutter).
     static constexpr auto q_reason_w0 = si32{ 20 }; // Initial Failed-tab "Reason" column width.
 
@@ -162,7 +163,7 @@ namespace netxs::app::parvion
         {
             auto width = i < q_ncol ? cols->col_w[(size_t)i] : xfer_reason_w(*cols, status);
             t.add_column({ text{ q_headers[(size_t)i] }, width, i >= 2 && i <= 4, true, i },
-                         ctrl->col_shown[(size_t)i]);
+                         ctrl->col_shown[(size_t)i], text{ q_menu_headers[(size_t)i] });
         }
         t.set_shown = [ctrl](si32 key, bool on){ if (key >= 0 && key < (si32)ctrl->col_shown.size()) ctrl->col_shown[(size_t)key] = on; };
         t.resize    = [cols](si32 key, si32 w){ if (key >= 0 && key < q_ncol) cols->col_w[(size_t)key] = w; else if (key == q_ncol) cols->reason_w_override = w; };
@@ -205,9 +206,9 @@ namespace netxs::app::parvion
             row.action = [deface, fn](hids&){ fn(); deface(); };
             items.push_back(std::move(row));
         };
-        add("Start", !any_selected, [ctrl, sel]{ ctrl->queue_start(sel); });
-        if (status == 0) add("Pause", !any_selected, [ctrl, sel]{ ctrl->queue_pause(sel); });
-        add("Remove", !any_selected, [ctrl, sel, panel_wp, window_wp]
+        add("&Start", !any_selected, [ctrl, sel]{ ctrl->queue_start(sel); });
+        if (status == 0) add("&Pause", !any_selected, [ctrl, sel]{ ctrl->queue_pause(sel); });
+        add("&Remove", !any_selected, [ctrl, sel, panel_wp, window_wp]
         {
             auto count = si32{}; for (auto& it : ctrl->queue) if (it.selected) ++count;
             if (!count) return;
@@ -216,22 +217,22 @@ namespace netxs::app::parvion
             app::shared::show_close_confirmation(*window, run, {}, app::shared::confirm_dialog_text{
                 count == 1 ? text{ "Remove this transfer from the queue?" } : "Remove " + std::to_string(count) + " transfers from the queue?", "Remove", "Cancel" });
         });
-        if (status == 0) add("Pin to Top", !pinnable, [ctrl, sel]{ ctrl->queue_pin_top(sel); });
+        if (status == 0) add("Pin to &Top", !pinnable, [ctrl, sel]{ ctrl->queue_pin_top(sel); });
 
         {
             auto local = xfer_copy_payload(ctrl, status, &queue_item::local_path);
             auto remote = xfer_copy_payload(ctrl, status, &queue_item::remote_path);
             auto reason = status == 1 ? xfer_copy_payload(ctrl, status, &queue_item::error) : text{};
-            auto copy = m::item{ .alive = true, .label = "Copy", .type = m::kind::dropdown, .disabled = local.empty() && remote.empty() && reason.empty() };
-            auto local_name = m::item{ .alive = true, .label = "Local Name", .disabled = local.empty() };
+            auto copy = m::item{ .alive = true, .label = "&Copy", .type = m::kind::dropdown, .disabled = local.empty() && remote.empty() && reason.empty() };
+            auto local_name = m::item{ .alive = true, .label = "&Local Name", .disabled = local.empty() };
             local_name.action = [local](hids& g){ if (!local.empty()) g.set_clipboard(dot_00, local, mime::textonly); };
             copy.children.push_back(std::move(local_name));
-            auto remote_name = m::item{ .alive = true, .label = "Remote Name", .disabled = remote.empty() };
+            auto remote_name = m::item{ .alive = true, .label = "&Remote Name", .disabled = remote.empty() };
             remote_name.action = [remote](hids& g){ if (!remote.empty()) g.set_clipboard(dot_00, remote, mime::textonly); };
             copy.children.push_back(std::move(remote_name));
             if (status == 1)
             {
-                auto failed_reason = m::item{ .alive = true, .label = "Failed Reason", .disabled = reason.empty() };
+                auto failed_reason = m::item{ .alive = true, .label = "&Failed Reason", .disabled = reason.empty() };
                 failed_reason.action = [reason](hids& g){ if (!reason.empty()) g.set_clipboard(dot_00, reason, mime::textonly); };
                 copy.children.push_back(std::move(failed_reason));
             }
@@ -239,7 +240,7 @@ namespace netxs::app::parvion
         }
 
         items.push_back(m::item{ .alive = true, .type = m::kind::separator });
-        add("Select All", !any_in_scope, [ctrl, scope]
+        add("Select &All", !any_in_scope, [ctrl, scope]
         {
             for (auto& it : ctrl->queue) it.selected = scope(it);
         });

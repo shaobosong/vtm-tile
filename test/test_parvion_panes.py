@@ -538,22 +538,19 @@ def test_copy_name_and_full_path():
             if pos is None:
                 print("FAIL - alpha.txt not listed")
                 return False
-            for leaf, row_offset, want in (("Name", 0, "alpha.txt"),
-                                           ("Full Path", 1, os.path.join(d, "alpha.txt"))):
+            for leaf, shortcut, want in (("Name", "n", "alpha.txt"),
+                                         ("Full Path", "f", os.path.join(d, "alpha.txt"))):
                 s.click(pos[1] + 1, pos[0] + 1, button=2)
-                cp = find_text(s.screen()[0], "Copy")
-                if cp is None:
+                if find_text(s.screen()[0], "Copy") is None:
                     print("FAIL - 'Copy' submenu not in menu")
                     return False
-                s.click(cp[1] + 1, cp[0] + 1, button=0)
-                s.feed(0.4)
-                item = find_text_on_row(s.screen()[0], leaf, cp[0] + row_offset)
+                s.write("c")  # &Copy opens the submenu.
+                item = find_text(s.screen()[0], leaf)
                 if item is None:
                     print(f"FAIL - '{leaf}' not in Copy submenu")
                     return False
                 before = len(s._buf)
-                s.click(item[1] + 1, item[0] + 1, button=0)
-                s.feed(0.6)
+                s.write(shortcut)  # &Name / &Full Path activates the leaf.
                 hits = _OSC52.findall(s._buf[before:])
                 if not hits:
                     print(f"FAIL - {leaf} emitted no clipboard sequence")

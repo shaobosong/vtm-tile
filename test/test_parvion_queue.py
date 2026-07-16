@@ -922,8 +922,7 @@ def test_blank_area_menu_is_unified():
         if not grid_contains(s.screen()[0], "Select All"):
             print("FAIL - disabled Start action dismissed the blank-area menu")
             return False
-        select_all = find_text(s.screen()[0], "Select All")
-        s.click(select_all[1] + 1, select_all[0] + 1)
+        s.write("a")  # Select &All.
         bg_after = s.screen()[1]
         if (bg_after[pos[0]][pos[1]] == bg_before[pos[0]][pos[1]]
             or bg_after[queued[0]][queued[1]] == bg_before[queued[0]][queued[1]]):
