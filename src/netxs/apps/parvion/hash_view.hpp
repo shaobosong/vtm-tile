@@ -20,7 +20,7 @@ namespace netxs::app::parvion
 
     inline auto hash_content_w(sftp_remote* ctrl, si32 col) -> si32
     {
-        auto w = (si32)cell_width(hash_headers[(size_t)std::clamp(col, 0, 5)]) + 2; // Space + sort glyph.
+        auto w = si32{};
         if (!ctrl) return w;
         auto pct = [](double p){ auto b = std::array<char, 24>{}; std::snprintf(b.data(), b.size(), "%.2f%%", p); return text{ b.data() }; };
         for (auto& it : ctrl->hash_queue)

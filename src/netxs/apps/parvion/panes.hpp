@@ -561,11 +561,11 @@ namespace netxs::app::parvion
         if (col == 1) return e.is_dir ? text{} : human_size(e.size);
         return e.mtime ? fmt_time(e.mtime) : text{};
     }
-    // Display-cell width of the widest content in column `col` (floored by the header) — drives the
-    // double-click auto-fit. The Modified header renders with a leading space, so floor it likewise.
+    // Display-cell width of the widest body content in column `col`; the shared table adds the
+    // rendered header width and divider for double-click auto-fit.
     inline auto pane_col_content_w(pane_state const& st, si32 col) -> si32
     {
-        auto w = cell_width(p_headers[(size_t)col]);
+        auto w = si32{};
         for (auto row = si32{}; row < st.total(); ++row) w = std::max(w, cell_width(pane_cell_text(st, col, row)));
         return w;
     }

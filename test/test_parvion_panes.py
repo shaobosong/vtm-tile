@@ -365,6 +365,14 @@ def test_shared_table_file_sort_configuration():
             if bad:
                 print(f"FAIL - headers are not sortable: {bad}"); return False
 
+            # Size values ("1 B"/"9 B") are narrower than the header. Auto-fit must retain the
+            # complete title and sort glyph; that presentation allowance belongs to the table core.
+            size = table_header_field(chars, "Size", hr)
+            s.double_click(size[3] + 1, hr + 1)
+            size = table_header_field(s.screen()[0], "Size", hr)
+            if size is None or size[5] != "↕":
+                print(f"FAIL - Size auto-fit clipped its sortable header: {size}"); return False
+
             # Name descending reverses values within the directory/file groups, never the groups.
             click_table_header(s, "Name", hr)  # ascending
             click_table_header(s, "Name", hr)  # descending

@@ -66,7 +66,8 @@ namespace netxs::app::parvion
         std::vector<col_toggle>                roster;    // All columns (shown + hidden) for the header menu.
         std::function<void(si32 key, bool on)> set_shown; // Flip a column's visibility (backing write).
         std::function<void(si32 key, si32 w)>  resize;    // Persist a dragged column width.
-        std::function<si32(si32 key)>          autofit;   // Auto-fit (widest-content) width for a column.
+        // Return the widest body-cell width. The core adds any header decoration and the divider.
+        std::function<si32(si32 key)>          autofit;
 
         auto col_x(si32 i) const -> si32
         {
@@ -481,7 +482,14 @@ namespace netxs::app::parvion
         return -1;
     }
     inline void q_set_col_w(qtable const& t, si32 v, si32 w) { if (v >= 0 && v < (si32)t.cols.size() && t.resize) t.resize(t.cols[(size_t)v].key, w); }
-    inline auto q_col_autofit(qtable const& t, si32 v) -> si32 { return v >= 0 && v < (si32)t.cols.size() && t.autofit ? t.autofit(t.cols[(size_t)v].key) : 0; }
+    inline auto q_col_autofit(qtable const& t, si32 v, bool sortable) -> si32
+    {
+        if (v < 0 || v >= (si32)t.cols.size()) return g_col_min;
+        auto& col = t.cols[(size_t)v];
+        auto body_w = t.autofit ? t.autofit(col.key) : si32{};
+        auto header_w = (si32)cell_width(col.title) + (sortable ? 2 : 0); // Separator + sort glyph.
+        return std::clamp(std::max(body_w, header_w) + 1, g_col_min, g_col_max); // Trailing divider.
+    }
     inline auto q_row_at(table_state const& st, si32 mx, si32 my) -> si32
     {
         for (auto& [b, key] : st.row_hit)
@@ -1207,8 +1215,7 @@ namespace netxs::app::parvion
                 auto v = q_border_hit(tbl, mx, st.hscroll);
                 if (v >= 0)
                 {
-                    auto cw = q_col_autofit(tbl, v);
-                    q_set_col_w(tbl, v, std::clamp(cw + 1, g_col_min, g_col_max));
+                    q_set_col_w(tbl, v, q_col_autofit(tbl, v, (bool)cfg.compare));
                     boss.base::deface();
                     gear.dismiss();
                     return;

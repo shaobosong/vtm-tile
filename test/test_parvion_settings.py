@@ -316,6 +316,28 @@ def test_key_table_sort_configuration():
     print("PASS"); return True
 
 
+def test_empty_key_table_autofit_preserves_sort_header():
+    """Header-derived auto-fit retains the full title and glyph when the table has no rows."""
+    print("TEST: empty key table auto-fit preserves sortable header ... ", end="", flush=True)
+    cfg = tempfile.mkdtemp(prefix="pvset_")
+    try:
+        _write_settings_with_keys(cfg, [])
+        with _session(cfg) as s:
+            _open_dialog(s)
+            _goto_sftp(s)
+            filename = T.table_header_field(s.screen()[0], "Filename")
+            if filename is None:
+                print("FAIL - Filename header not found"); return False
+            hr = filename[0]
+            s.double_click(filename[3] + 1, hr + 1)
+            filename = T.table_header_field(s.screen()[0], "Filename", hr)
+            if filename is None or filename[5] != "↕":
+                print(f"FAIL - Filename auto-fit clipped its sortable header: {filename}"); return False
+        print("PASS"); return True
+    finally:
+        shutil.rmtree(cfg, ignore_errors=True)
+
+
 def _find_column_menu_item(chars, name):
     """Return the menu row and label column for a shared-table column toggle."""
     for r in range(len(chars)):
@@ -833,6 +855,7 @@ TESTS = [
     test_save_picker_click_updates_name,
     test_encrypted_key_wrong_passphrase_retries,
     test_key_table_sort_configuration,
+    test_empty_key_table_autofit_preserves_sort_header,
     test_key_table_vertical_scrollbar,
     test_key_table_vertical_scrollbar_drag_reaches_last_key,
     test_key_table_column_resize,

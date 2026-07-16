@@ -373,10 +373,10 @@ namespace netxs::app::parvion
         if (col == 1) return row < (si32)st.key_comment.size() ? st.key_comment[(size_t)row] : text{};
         return row < (si32)st.key_data.size() ? st.key_data[(size_t)row] : text{};
     }
-    // Widest content + header for column `col` (drives the double-click border auto-fit).
+    // Widest body content for column `col`; the shared table owns the rendered header allowance.
     inline auto kt_col_content_w(settings_state const& st, si32 col) -> si32
     {
-        auto w = cell_width(sd::kt_headers[(size_t)col]);
+        auto w = si32{};
         for (auto row = si32{}; row < (si32)st.draft.keyfiles.size(); ++row) w = std::max(w, cell_width(kt_cell(st, col, row)));
         return w;
     }

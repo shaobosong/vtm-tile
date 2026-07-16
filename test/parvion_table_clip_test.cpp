@@ -79,6 +79,38 @@ namespace
         return canvas.writes.empty();
     }
 
+    auto autofit_table(view title, si32 body_w) -> qtable
+    {
+        auto table = qtable{};
+        table.cols.push_back(qtable::column{ .title = text{ title }, .key = 7 });
+        table.autofit = [body_w](si32){ return body_w; };
+        return table;
+    }
+
+    auto test_sortable_header_controls_autofit() -> bool
+    {
+        auto table = autofit_table("Header", 3);
+        return q_col_autofit(table, 0, true) == 9; // 6 title + separator + glyph + divider.
+    }
+
+    auto test_body_content_controls_autofit() -> bool
+    {
+        auto table = autofit_table("Name", 12);
+        return q_col_autofit(table, 0, true) == 13; // 12 body cells + divider.
+    }
+
+    auto test_plain_header_has_no_sort_suffix() -> bool
+    {
+        auto table = autofit_table("Header", 0);
+        return q_col_autofit(table, 0, faux) == 7; // 6 title + divider.
+    }
+
+    auto test_empty_sortable_table_fits_header() -> bool
+    {
+        auto table = autofit_table("Name", 0);
+        return q_col_autofit(table, 0, true) == 7; // 4 title + separator + glyph + divider.
+    }
+
     auto test_page_navigation_visits_edges_first() -> bool
     {
         auto down = q_page_nav(50, 10, 0, 3, +1);
@@ -242,6 +274,10 @@ int main()
         { "left_clip_wide_cluster", test_left_clip_wide_cluster },
         { "fully_hidden_left",      test_fully_hidden_left },
         { "short_text_hidden",      test_short_text_hidden_in_wide_cell },
+        { "sortable_header_controls_autofit", test_sortable_header_controls_autofit },
+        { "body_content_controls_autofit", test_body_content_controls_autofit },
+        { "plain_header_has_no_sort_suffix", test_plain_header_has_no_sort_suffix },
+        { "empty_sortable_table_fits_header", test_empty_sortable_table_fits_header },
         { "page_navigation_edges_first", test_page_navigation_visits_edges_first },
         { "page_navigation_scroll_from_edges", test_page_navigation_scrolls_from_edges },
         { "page_navigation_partial_last_page", test_page_navigation_partial_last_page },
