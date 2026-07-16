@@ -317,11 +317,11 @@ namespace netxs::app::parvion
         namespace m = app::shared::menu;
         auto has  = tb_has_selection(st);
         auto out  = has ? tb_selection_text(st, cfg) : text{};
-        auto copy = m::item{ .alive = true, .label = "Copy", .disabled = !has };
+        auto copy = m::item{ .alive = true, .label = "&Copy", .disabled = !has };
         copy.action = [out](hids& g){ if (!out.empty()) g.set_clipboard(dot_00, out, mime::textonly); };
 
         auto n = cfg.line_count ? cfg.line_count() : 0;
-        auto select_all = m::item{ .alive = true, .label = "Select all", .disabled = n == 0 };
+        auto select_all = m::item{ .alive = true, .label = "Select &All", .disabled = n == 0 };
         select_all.action = [stp = &st, cfgp = &cfg, panel_wp](hids&)
         {
             if (tb_select_all(*stp, *cfgp))

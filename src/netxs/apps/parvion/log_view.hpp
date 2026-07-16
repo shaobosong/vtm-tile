@@ -73,7 +73,7 @@ namespace netxs::app::parvion
 
         items.push_back(std::move(select_all));
 
-        auto clear = m::item{ .alive = true, .label = "Clear all" };
+        auto clear = m::item{ .alive = true, .label = "C&lear All" };
         clear.action = [ctrl, deface](hids&){ ctrl->logger.clear(); ctrl->dirty = true; deface(); };
         items.push_back(std::move(clear));
         return items;

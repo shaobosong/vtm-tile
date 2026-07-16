@@ -358,7 +358,7 @@ def test_log_select_all_covers_full_log():
             print("FAIL: message log / seeded lines not found"); return False
         lr, lc, _ = info
         s.click(lc + 2, lr + 1, button=2)
-        select_all = T.find_text(s.screen()[0], "Select all")
+        select_all = T.find_text(s.screen()[0], "Select All")
         if select_all is None:
             print("FAIL: Select all menu item missing"); return False
         s.click(select_all[1] + 1, select_all[0] + 1)
@@ -378,21 +378,69 @@ def test_log_context_menu_grouping():
         s.click(lc + 2, lr + 1, button=2)
         chars, _ = s.screen()
         blob = "\n".join(T.row_text(chars, r) for r in range(len(chars)))
-        for needle in ("Copy", "Select all", "Clear all"):
+        for needle in ("Copy", "Select All", "Clear All"):
             if needle not in blob:
                 print(f"FAIL: '{needle}' missing from menu"); return False
         if "Copy to clipboard" in blob or "Show detailed log" in blob or "Log level" in blob:
             print("FAIL: obsolete message-log menu item is still present"); return False
         copy = _find_copy_cell(chars)
-        select_all = T.find_text(chars, "Select all")
-        clear = T.find_text(chars, "Clear all")
+        select_all = T.find_text(chars, "Select All")
+        clear = T.find_text(chars, "Clear All")
         if not (copy and select_all and clear
                 and copy[0] < select_all[0] < clear[0]):
             print("FAIL: message-log menu groups are out of order"); return False
-        if not T.menu_has_separator_between(chars, "Copy", "Select all"):
+        if not T.menu_has_separator_between(chars, "Copy", "Select All"):
             print("FAIL: Copy is not separated from the remaining log actions"); return False
-        if T.menu_has_separator_between(chars, "Select all", "Clear all"):
+        if T.menu_has_separator_between(chars, "Select All", "Clear All"):
             print("FAIL: unexpected separator within the log-action group"); return False
+    print("PASS"); return True
+
+
+def test_log_context_menu_shortcuts():
+    print("TEST: parvion message log - context menu shortcuts ... ", end="", flush=True)
+    with _session() as s:
+        info = _enter_log(s)
+        if info is None:
+            print("FAIL: message log / seeded lines not found"); return False
+        lr, lc, _ = info
+
+        # Disabled shortcuts stay inert and leave the menu open.
+        s.click(lc + 2, lr + 1, button=2)
+        before = len(s._buf)
+        s.write("c")  # &Copy.
+        if _OSC52.findall(s._buf[before:]):
+            print("FAIL: disabled Copy shortcut wrote to the clipboard"); return False
+        if _find_copy_cell(s.screen()[0]) is None:
+            print("FAIL: disabled Copy shortcut dismissed the menu"); return False
+        s.write(b"\x1b", settle=0.4)
+
+        # Copy uses the current character selection.
+        s.drag_path([(lc + 1, lr + 1), (lc + 9, lr + 1)])
+        s.click(lc + 2, lr + 1, button=2)
+        before = len(s._buf)
+        s.write("c")  # &Copy.
+        hits = _OSC52.findall(s._buf[before:])
+        clip = base64.b64decode(hits[-1]).decode("utf-8", "replace") if hits else None
+        if clip != "log line":
+            print(f"FAIL: Copy shortcut copied {clip!r}, expected 'log line'"); return False
+
+        # Select all updates the textbox's selection, then Copy returns the complete log.
+        s.click(lc + 2, lr + 1, button=2)
+        s.write("a")  # Select &All.
+        s.click(lc + 2, lr + 1, button=2)
+        before = len(s._buf)
+        s.write("c")
+        hits = _OSC52.findall(s._buf[before:])
+        clip = base64.b64decode(hits[-1]).decode("utf-8", "replace") if hits else None
+        if clip is None or "log line 00" not in clip or "log line 19" not in clip:
+            print(f"FAIL: Select-All shortcut produced incomplete copied text: {clip!r}"); return False
+
+        # The instance-specific shortcut clears the live log and reveals its empty state.
+        s.click(lc + 2, lr + 1, button=2)
+        s.write("l")  # C&lear All.
+        chars, _ = s.screen()
+        if not T.grid_contains(chars, "(no messages)") or T.grid_contains(chars, "Status:"):
+            print("FAIL: Clear-All shortcut did not empty the message log"); return False
     print("PASS"); return True
 
 
@@ -439,6 +487,7 @@ TESTS = [
     test_log_copy_present_disabled_no_selection,
     test_log_select_all_covers_full_log,
     test_log_context_menu_grouping,
+    test_log_context_menu_shortcuts,
     test_log_live_appends_arrive,
     test_log_selection_survives_log_update,
 ]
