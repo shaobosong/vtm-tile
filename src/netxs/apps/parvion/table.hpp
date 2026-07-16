@@ -60,7 +60,7 @@ namespace netxs::app::parvion
             si32 key = -1;       // Caller tag (a logical column id, stable across show/hide + reorder).
         };
         std::vector<column> cols; // Visible columns, left to right.
-        si32 left = 1;            // Content-x of the first column (the gutter width before it).
+        si32 left = 1;            // Requested first-column x; cell 0 is reserved for the header menu.
 
         struct col_toggle { text title; si32 key = -1; bool shown = true; };
         std::vector<col_toggle>                roster;    // All columns (shown + hidden) for the header menu.
@@ -70,12 +70,12 @@ namespace netxs::app::parvion
 
         auto col_x(si32 i) const -> si32
         {
-            auto x = left;
+            auto x = std::max(1, left);
             for (auto j = si32{}; j < i && j < (si32)cols.size(); ++j) x += cols[(size_t)j].width;
             return x;
         }
         auto border_cx(si32 i) const -> si32 { return i < 0 || i >= (si32)cols.size() ? -1 : col_x(i) + cols[(size_t)i].width - 1; }
-        auto content_w() const -> si32 { auto x = left; for (auto& c : cols) x += c.width; return x; }
+        auto content_w() const -> si32 { auto x = std::max(1, left); for (auto& c : cols) x += c.width; return x; }
 
         void paint_cell(auto& canvas, si32 i, si32 y, view s, ui32 fg, ui32 bg, si32 hscroll, si32 disp_w) const
         {
@@ -126,6 +126,15 @@ namespace netxs::app::parvion
                 if      (col.key == press_key) canvas.fill(box, [](cell& c){ c.xlight(2); });
                 else if (col.key == hover_key) canvas.fill(box, [](cell& c){ c.xlight(); });
             }
+        }
+        void paint_header_menu(auto& canvas, si32 row, si32 disp_w, bool hover, bool press,
+                               bool enabled, table_palette const& pal) const
+        {
+            if (disp_w <= 0 || !enabled) return;
+            auto box = rect{{ 0, row }, { 1, 1 }};
+            put_str(canvas, 0, row, "\xE2\x89\xA1", pal.subtext, pal.header, 1); // ≡
+            if      (press) canvas.fill(box, [](cell& c){ c.xlight(2); });
+            else if (hover) canvas.fill(box, [](cell& c){ c.xlight(); });
         }
         void paint_dividers(auto& canvas, si32 top, si32 bottom, si32 hscroll, si32 disp_w,
                             si32 hover_idx, si32 drag_idx, table_palette const& pal) const
@@ -196,6 +205,7 @@ namespace netxs::app::parvion
         si32 hover_border = -1, col_drag = -1;
         si32 sort_key = -1, sort_dir = sort_default;
         si32 hover_header = -1, press_header = -1;
+        bool hover_header_menu = faux, press_header_menu = faux;
         si32 sel_anchor = -1; // Fixed endpoint for Shift ranges.
         si32 nav_cursor = -1; // Movable keyboard/range endpoint.
         si32 rubber_a = -1, rubber_b = -1;
@@ -682,18 +692,34 @@ namespace netxs::app::parvion
         }
         return items;
     }
+    inline auto q_has_columns_menu(qtable const& t) -> bool
+    {
+        return !t.roster.empty() && (bool)t.set_shown;
+    }
+    inline auto q_header_menu_hit(table_state const& st, bool enabled, si32 mx, si32 my) -> bool
+    {
+        return enabled && st.disp_w > 0 && mx == 0 && my == st.body_top - 1;
+    }
+    inline void q_open_columns_menu(auto& boss, qtable const& t, twod at)
+    {
+        namespace m = app::shared::menu;
+        if (!q_has_columns_menu(t)) return;
+        auto panel_wp = ptr::shadow(boss.This());
+        auto deface   = [panel_wp]{ if (auto p = panel_wp.lock()) p->base::deface(); };
+        m::open_dropdown_popup(boss, build_columns_menu(t.roster, t.set_shown, deface), faux, -1, at);
+    }
+    inline void q_open_table_menu(auto& boss, qmenu_cfg const& cfg, twod at)
+    {
+        namespace m = app::shared::menu;
+        if (cfg.items) m::open_dropdown_popup(boss, cfg.items(), faux, -1, at);
+    }
     inline void q_context_menu(auto& boss, table_state& st, si32 mx, si32 my, qtable const& t, qmenu_cfg const& cfg)
     {
         namespace m = app::shared::menu;
         auto at = twod{ mx, my };
         if (my == st.body_top - 1 && st.body_top > 0) // Column-header row: the intrinsic show/hide menu.
         {
-            if (!t.roster.empty() && t.set_shown)
-            {
-                auto panel_wp = ptr::shadow(boss.This());
-                auto deface   = [panel_wp]{ if (auto p = panel_wp.lock()) p->base::deface(); };
-                m::open_dropdown_popup(boss, build_columns_menu(t.roster, t.set_shown, deface), faux, -1, at);
-            }
+            q_open_columns_menu(boss, t, at);
             return;
         }
         if (my < st.body_top || my >= st.tab_row) return;
@@ -865,6 +891,10 @@ namespace netxs::app::parvion
         st.div_bottom = st.body_top + rows_drawn;
         t.paint_dividers(canvas, st.body_top - 1, st.div_bottom, hs, clipw, st.hover_border, st.col_drag, pal);
         tbl_paint_scrollbars(st, canvas, pal);
+        // Keep the fixed menu affordance above horizontally-scrolled headers and dividers.
+        t.paint_header_menu(canvas, st.body_top - 1, clipw,
+                            st.hover_header_menu, st.press_header_menu,
+                            (bool)cfg.menu, pal);
     }
 
     // ---- Widget ------------------------------------------------------------------------------------
@@ -922,6 +952,14 @@ namespace netxs::app::parvion
                     if (cfg.edit_active && cfg.edit_active() && cfg.edit_commit) cfg.edit_commit();
                 };
                 if (cfg.selection) q_sel_snapshot(st, cfg.selection());
+                auto tbl = cfg.columns();
+                if (q_header_menu_hit(st, (bool)cfg.menu, mx, my))
+                {
+                    if (!st.press_header_menu) { st.press_header_menu = true; boss.base::deface(); }
+                    commit_edit();
+                    gear.dismiss();
+                    return;
+                }
                 if (auto sb = tbl_vsb(st); sb.ok && mx == sb.x && my >= sb.top && my < sb.top + sb.track_h) { commit_edit(); return; }
                 if (auto sb = tbl_hsb(st); sb.ok && my == sb.top && mx >= sb.x && mx < sb.x + sb.track_h) { commit_edit(); return; }
                 for (auto& [b, id] : st.expand_hit)
@@ -931,7 +969,6 @@ namespace netxs::app::parvion
                     if (q_border_hit(cfg.columns(), mx, st.hscroll) >= 0) { commit_edit(); return; }
                 if (my == st.body_top - 1 && cfg.compare)
                 {
-                    auto tbl = cfg.columns();
                     auto v = q_header_hit(tbl, mx, st.hscroll);
                     auto key = v >= 0 ? tbl.cols[(size_t)v].key : -1;
                     if (st.press_header != key) { st.press_header = key; boss.base::deface(); }
@@ -952,9 +989,10 @@ namespace netxs::app::parvion
             });
             boss.on(tier::mouserelease, input::key::LeftUp, [&](hids&)
             {
-                if (st.press_expand != -1 || st.press_header != -1)
+                if (st.press_expand != -1 || st.press_header != -1 || st.press_header_menu)
                 {
                     st.press_expand = st.press_header = -1;
+                    st.press_header_menu = faux;
                     boss.base::deface();
                 }
             });
@@ -962,9 +1000,18 @@ namespace netxs::app::parvion
             {
                 pro::focus::set(boss.This(), gear.id, solo::on);
                 auto mx = (si32)gear.coord.x, my = (si32)gear.coord.y;
+                auto tbl = cfg.columns();
+                if (q_header_menu_hit(st, (bool)cfg.menu, mx, my))
+                {
+                    auto panel_wp = ptr::shadow(boss.This());
+                    q_open_table_menu(boss, cfg.menu(panel_wp), twod{ mx, my + 2 });
+                    st.press_header_menu = faux;
+                    boss.base::deface();
+                    gear.dismiss();
+                    return;
+                }
                 if (my == st.body_top - 1 && cfg.compare)
                 {
-                    auto tbl = cfg.columns();
                     if (q_border_hit(tbl, mx, st.hscroll) < 0)
                     {
                         auto v = q_header_hit(tbl, mx, st.hscroll);
@@ -1025,6 +1072,10 @@ namespace netxs::app::parvion
             boss.on(tier::mouserelease, input::key::MouseMove, [&](hids& gear)
             {
                 auto mx = (si32)gear.coord.x, my = (si32)gear.coord.y;
+                auto tbl = cfg.columns();
+                auto nmenu = q_header_menu_hit(st, (bool)cfg.menu, mx, my);
+                if (st.hover_header_menu != nmenu) { st.hover_header_menu = nmenu; boss.base::deface(); }
+                if (st.press_header_menu && !nmenu) { st.press_header_menu = faux; boss.base::deface(); }
                 auto over = si32{ -1 };
                 for (auto& [b, id] : st.expand_hit) if (my == b.coor.y && mx >= b.coor.x && mx < b.coor.x + b.size.x) { over = id; break; }
                 if (st.hover_expand != over) { st.hover_expand = over; boss.base::deface(); }
@@ -1034,9 +1085,8 @@ namespace netxs::app::parvion
                 auto hsb = tbl_hsb(st); auto nhsb = hsb.ok && my == hsb.top && mx >= hsb.x && mx < hsb.x + hsb.track_h;
                 if (st.hsb_hover != nhsb) { st.hsb_hover = nhsb; boss.base::deface(); }
                 auto nhdr = si32{ -1 };
-                if (cfg.compare && my == st.body_top - 1)
+                if (!nmenu && cfg.compare && my == st.body_top - 1)
                 {
-                    auto tbl = cfg.columns();
                     if (q_border_hit(tbl, mx, st.hscroll) < 0)
                     {
                         auto v = q_header_hit(tbl, mx, st.hscroll);
@@ -1046,7 +1096,7 @@ namespace netxs::app::parvion
                 if (st.hover_header != nhdr) { st.hover_header = nhdr; boss.base::deface(); }
                 if (st.press_header != -1 && st.press_header != nhdr) { st.press_header = -1; boss.base::deface(); }
                 auto nb = si32{ -1 };
-                if (my >= st.body_top - 1 && my < st.div_bottom) nb = q_border_hit(cfg.columns(), mx, st.hscroll);
+                if (!nmenu && my >= st.body_top - 1 && my < st.div_bottom) nb = q_border_hit(tbl, mx, st.hscroll);
                 if (st.hover_border != nb) { st.hover_border = nb; boss.base::deface(); }
             });
             boss.on(tier::mouserelease, input::key::MouseLeave, [&](hids&)
@@ -1056,6 +1106,11 @@ namespace netxs::app::parvion
                 if (st.sb_hover)  { st.sb_hover = faux;  boss.base::deface(); }
                 if (st.hsb_hover) { st.hsb_hover = faux; boss.base::deface(); }
                 if (st.hover_border != -1) { st.hover_border = -1; boss.base::deface(); }
+                if (st.hover_header_menu || st.press_header_menu)
+                {
+                    st.hover_header_menu = st.press_header_menu = faux;
+                    boss.base::deface();
+                }
                 if (st.hover_header != -1 || st.press_header != -1)
                 {
                     st.hover_header = st.press_header = -1;
@@ -1072,6 +1127,8 @@ namespace netxs::app::parvion
             boss.LISTEN(tier::release, e2::form::drag::start::_<hids::buttons::left>, gear)
             {
                 auto px = (si32)gear.click.x, py = (si32)gear.click.y;
+                auto tbl = cfg.columns();
+                if (q_header_menu_hit(st, (bool)cfg.menu, px, py)) return;
                 if (auto sb = tbl_vsb(st); sb.ok && px == sb.x && py >= sb.top && py < sb.top + sb.track_h)
                 {
                     pro::focus::set(boss.This(), gear.id, solo::on);
@@ -1090,7 +1147,6 @@ namespace netxs::app::parvion
                 }
                 if (py >= st.body_top - 1 && py < st.div_bottom)
                 {
-                    auto tbl = cfg.columns();
                     auto v = q_border_hit(tbl, px, st.hscroll);
                     if (v >= 0)
                     {
@@ -1147,6 +1203,7 @@ namespace netxs::app::parvion
                 auto mx = (si32)gear.coord.x, my = (si32)gear.coord.y;
                 if (my < st.body_top - 1 || my >= st.div_bottom) return;
                 auto tbl = cfg.columns();
+                if (q_header_menu_hit(st, (bool)cfg.menu, mx, my)) { gear.dismiss(); return; }
                 auto v = q_border_hit(tbl, mx, st.hscroll);
                 if (v >= 0)
                 {

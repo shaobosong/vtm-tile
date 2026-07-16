@@ -119,6 +119,63 @@ def _copy_via_menu(s, row, col):
     return base64.b64decode(hits[-1]).decode("utf-8", "replace") if hits else None
 
 
+def test_log_menu_button_tracks_selection():
+    print("TEST: parvion message log - textbox menu button selection state ... ", end="", flush=True)
+    with _session() as s:
+        info = _enter_log(s)
+        if info is None:
+            print("FAIL: message log / seeded lines not found"); return False
+        lr, lc, _ = info
+        chars, bg = s.screen()
+        log_rows = [r for r in range(T.ROWS) if "Status:" in T.row_text(chars, r)]
+        if not log_rows:
+            print("FAIL: visible log body not found"); return False
+        top = min(log_rows)
+        if chars[top][0] != "≡":
+            print(f"FAIL: textbox button is {chars[top][0]!r}, expected '≡'"); return False
+
+        # Reuse the sortable-header feedback contract: resting, hover, and held are distinct.
+        os.write(s.master_fd, f"\x1b[<35;100;{top + 1}M".encode()); s.feed(0.3)
+        resting = s.screen()[1][top][0]
+        os.write(s.master_fd, f"\x1b[<35;1;{top + 1}M".encode()); s.feed(0.6)
+        hover = s.screen()[1][top][0]
+        if hover is None or hover == resting:
+            print(f"FAIL: no textbox-button hover highlight ({resting} -> {hover})"); return False
+        os.write(s.master_fd, f"\x1b[<0;1;{top + 1}M".encode()); s.feed(0.6)
+        held = s.screen()[1][top][0]
+        if held is None or held in (resting, hover):
+            print(f"FAIL: textbox-button hold is not distinct ({resting}, {hover}, {held})"); return False
+        os.write(s.master_fd, f"\x1b[<0;1;{top + 1}m".encode()); s.feed(0.6)
+
+        # With no selection, Copy is present but disabled and inert.
+        cell = _find_copy_cell(s.screen()[0])
+        if cell is None:
+            print("FAIL: button did not open the no-selection menu"); return False
+        if cell[0] != top + 2:
+            print(f"FAIL: button menu opened on row {cell[0]}, expected {top + 2}"); return False
+        before = len(s._buf)
+        s.click(cell[1] + 1, cell[0] + 1)
+        if _OSC52.findall(s._buf[before:]) or _find_copy_cell(s.screen()[0]) is None:
+            print("FAIL: no-selection Copy was interactive"); return False
+        os.write(s.master_fd, b"\x1b"); s.feed(0.4)
+
+        # Preserve a character selection and build the enabled menu from that exact selection.
+        s.drag_path([(lc + 1, lr + 1), (lc + 9, lr + 1)])
+        if not _selbg_cells(s, lr):
+            print("FAIL: selection was not established"); return False
+        s.click(1, top + 1)
+        cell = _find_copy_cell(s.screen()[0])
+        if cell is None:
+            print("FAIL: selected-text menu missing Copy"); return False
+        before = len(s._buf)
+        s.click(cell[1] + 1, cell[0] + 1)
+        hits = _OSC52.findall(s._buf[before:])
+        clip = base64.b64decode(hits[-1]).decode("utf-8", "replace") if hits else None
+        if clip != "log line":
+            print(f"FAIL: button copied {clip!r}, expected selected text"); return False
+    print("PASS"); return True
+
+
 def test_log_char_drag_selects():
     print("TEST: parvion message log - character drag selects ... ", end="", flush=True)
     with _session() as s:
@@ -371,6 +428,7 @@ def test_log_selection_survives_log_update():
 
 
 TESTS = [
+    test_log_menu_button_tracks_selection,
     test_log_char_drag_selects,
     test_log_drag_selection_autoscrolls_vertically,
     test_log_drag_selection_autoscrolls_horizontally,

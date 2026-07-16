@@ -49,6 +49,7 @@ namespace netxs::app::parvion
         bool follow = true;
         bool sb_hover = faux,  sb_drag = faux;  si32 sb_grab = 0;
         bool hsb_hover = faux, hsb_drag = faux; si32 hsb_grab = 0;
+        bool menu_hover = faux, menu_press = faux;
         si32 body_top = 0, body_rows = 0, bottom = 0;
         si32 content_w = 0, disp_w = 0, vsb_x = 0, hsb_y = 0, total = 0;
         bool has_vsb = faux, has_hsb = faux;
@@ -255,6 +256,10 @@ namespace netxs::app::parvion
         if (auto sb = tb_hsb(st); sb.ok && my == sb.top && mx >= sb.x && mx < sb.x + sb.track_h) return true;
         return faux;
     }
+    inline auto tb_menu_hit(textbox_state const& st, si32 mx, si32 my) -> bool
+    {
+        return st.disp_w > 0 && mx == 0 && my == st.body_top;
+    }
     inline auto tb_drag_step(si32 distance) -> si32
     {
         return std::clamp(distance, si32{ 1 }, si32{ 8 });
@@ -303,6 +308,45 @@ namespace netxs::app::parvion
         }
         if (changed) tb_drag_head(st, cfg, st.drag_x, st.drag_y);
         return changed;
+    }
+
+    // Build the same selection-aware menu for either a body right-click or the fixed menu button.
+    inline auto tb_context_menu(textbox_state& st, textbox_cfg& cfg, netxs::wptr<ui::base> panel_wp)
+        -> std::vector<app::shared::menu::item>
+    {
+        namespace m = app::shared::menu;
+        auto has  = tb_has_selection(st);
+        auto out  = has ? tb_selection_text(st, cfg) : text{};
+        auto copy = m::item{ .alive = true, .label = "Copy", .disabled = !has };
+        copy.action = [out](hids& g){ if (!out.empty()) g.set_clipboard(dot_00, out, mime::textonly); };
+
+        auto n = cfg.line_count ? cfg.line_count() : 0;
+        auto select_all = m::item{ .alive = true, .label = "Select all", .disabled = n == 0 };
+        select_all.action = [stp = &st, cfgp = &cfg, panel_wp](hids&)
+        {
+            if (tb_select_all(*stp, *cfgp))
+                if (auto panel = panel_wp.lock()) panel->base::deface();
+        };
+
+        if (cfg.menu) return cfg.menu(panel_wp, std::move(copy), std::move(select_all));
+        auto items = std::vector<m::item>{};
+        items.push_back(std::move(copy));
+        items.push_back(m::item{ .alive = true, .type = m::kind::separator });
+        items.push_back(std::move(select_all));
+        return items;
+    }
+    inline void tb_open_context_menu(auto& boss, textbox_state& st, textbox_cfg& cfg, twod at)
+    {
+        app::shared::menu::open_dropdown_popup(
+            boss, tb_context_menu(st, cfg, ptr::shadow(boss.This())), faux, -1, at);
+    }
+    inline void tb_paint_menu_button(textbox_state const& st, auto& canvas)
+    {
+        if (st.disp_w <= 0) return;
+        auto box = rect{{ 0, st.body_top }, { 1, 1 }};
+        put_str(canvas, 0, st.body_top, "\xE2\x89\xA1", theme::subtext, theme::bg, 1); // ≡
+        if      (st.menu_press) canvas.fill(box, [](cell& c){ c.xlight(2); });
+        else if (st.menu_hover) canvas.fill(box, [](cell& c){ c.xlight(); });
     }
 
     // ---- Render ------------------------------------------------------------------------------------
@@ -363,6 +407,8 @@ namespace netxs::app::parvion
             }
         }
         tb_paint_scrollbars(st, canvas);
+        // Paint last so the fixed button stays above selection and horizontally-scrolled text.
+        tb_paint_menu_button(st, canvas);
     }
 
     // ---- Widget ------------------------------------------------------------------------------------
@@ -402,14 +448,32 @@ namespace netxs::app::parvion
             {
                 pro::focus::set(boss.This(), gear.id, solo::on);
                 auto mx = (si32)gear.coord.x, my = (si32)gear.coord.y;
+                if (tb_menu_hit(st, mx, my))
+                {
+                    if (!st.menu_press) { st.menu_press = true; boss.base::deface(); }
+                    gear.dismiss();
+                    return;
+                }
                 if (auto sb = tb_vsb(st); sb.ok && mx == sb.x && my >= sb.top && my < sb.top + sb.track_h) return;
                 if (auto sb = tb_hsb(st); sb.ok && my == sb.top && mx >= sb.x && mx < sb.x + sb.track_h) return;
                 boss.base::deface(); gear.dismiss();
+            });
+            boss.on(tier::mouserelease, input::key::LeftUp, [&](hids&)
+            {
+                if (st.menu_press) { st.menu_press = faux; boss.base::deface(); }
             });
             boss.on(tier::mouserelease, input::key::LeftClick, [&](hids& gear)
             {
                 pro::focus::set(boss.This(), gear.id, solo::on);
                 auto mx = (si32)gear.coord.x, my = (si32)gear.coord.y;
+                if (tb_menu_hit(st, mx, my))
+                {
+                    tb_open_context_menu(boss, st, cfg, twod{ mx, my + 2 });
+                    st.menu_press = faux;
+                    boss.base::deface();
+                    gear.dismiss();
+                    return;
+                }
                 if (auto sb = tb_vsb(st); sb.ok && mx == sb.x && my >= sb.top && my < sb.top + sb.track_h)
                 {
                     auto page = std::max(1, st.body_rows);
@@ -430,44 +494,30 @@ namespace netxs::app::parvion
             boss.on(tier::mouserelease, input::key::RightClick, [&](hids& gear)
             {
                 pro::focus::set(boss.This(), gear.id, solo::on);
-                namespace m = app::shared::menu;
-                auto at   = twod{ (si32)gear.coord.x, (si32)gear.coord.y };
-                auto has  = tb_has_selection(st);
-                auto out  = has ? tb_selection_text(st, cfg) : text{};
-                auto copy = m::item{ .alive = true, .label = "Copy", .disabled = !has };
-                copy.action = [out](hids& g){ if (!out.empty()) g.set_clipboard(dot_00, out, mime::textonly); };
-
-                auto n = cfg.line_count ? cfg.line_count() : 0;
-                auto select_all = m::item{ .alive = true, .label = "Select all", .disabled = n == 0 };
-                auto panel_wp = ptr::shadow(boss.This());
-                select_all.action = [stp = &st, cfgp = &cfg, panel_wp](hids&)
-                {
-                    if (tb_select_all(*stp, *cfgp))
-                        if (auto panel = panel_wp.lock()) panel->base::deface();
-                };
-                auto items = std::vector<m::item>{};
-                if (cfg.menu) items = cfg.menu(panel_wp, std::move(copy), std::move(select_all));
-                else
-                {
-                    items.push_back(std::move(copy));
-                    items.push_back(m::item{ .alive = true, .type = m::kind::separator });
-                    items.push_back(std::move(select_all));
-                }
-                m::open_dropdown_popup(boss, items, faux, -1, at);
+                tb_open_context_menu(boss, st, cfg,
+                                     twod{ (si32)gear.coord.x, (si32)gear.coord.y });
                 gear.dismiss();
             });
             boss.on(tier::mouserelease, input::key::MouseMove, [&](hids& gear)
             {
                 auto mx = (si32)gear.coord.x, my = (si32)gear.coord.y;
-                auto vsb = tb_vsb(st); auto nsb = vsb.ok && mx == vsb.x && my >= vsb.top && my < vsb.top + vsb.track_h;
+                auto nmenu = tb_menu_hit(st, mx, my);
+                if (st.menu_hover != nmenu) { st.menu_hover = nmenu; boss.base::deface(); }
+                if (st.menu_press && !nmenu) { st.menu_press = faux; boss.base::deface(); }
+                auto vsb = tb_vsb(st); auto nsb = !nmenu && vsb.ok && mx == vsb.x && my >= vsb.top && my < vsb.top + vsb.track_h;
                 if (st.sb_hover != nsb) { st.sb_hover = nsb; boss.base::deface(); }
-                auto hsb = tb_hsb(st); auto nhsb = hsb.ok && my == hsb.top && mx >= hsb.x && mx < hsb.x + hsb.track_h;
+                auto hsb = tb_hsb(st); auto nhsb = !nmenu && hsb.ok && my == hsb.top && mx >= hsb.x && mx < hsb.x + hsb.track_h;
                 if (st.hsb_hover != nhsb) { st.hsb_hover = nhsb; boss.base::deface(); }
             });
             boss.on(tier::mouserelease, input::key::MouseLeave, [&](hids&)
             {
                 if (st.sb_hover)  { st.sb_hover = faux;  boss.base::deface(); }
                 if (st.hsb_hover) { st.hsb_hover = faux; boss.base::deface(); }
+                if (st.menu_hover || st.menu_press)
+                {
+                    st.menu_hover = st.menu_press = faux;
+                    boss.base::deface();
+                }
             });
             boss.on(tier::mouserelease, input::key::MouseWheel, [&](hids& gear)
             {
@@ -479,6 +529,7 @@ namespace netxs::app::parvion
             boss.LISTEN(tier::release, e2::form::drag::start::_<hids::buttons::left>, gear)
             {
                 auto px = (si32)gear.click.x, py = (si32)gear.click.y;
+                if (tb_menu_hit(st, px, py)) return;
                 if (auto sb = tb_vsb(st); sb.ok && px == sb.x && py >= sb.top && py < sb.top + sb.track_h)
                 {
                     pro::focus::set(boss.This(), gear.id, solo::on);
@@ -533,6 +584,7 @@ namespace netxs::app::parvion
             auto span_select = [&](hids& gear, textbox_state::selmode mode, bool dragging)
             {
                 auto mx = (si32)gear.coord.x, my = (si32)gear.coord.y;
+                if (tb_menu_hit(st, mx, my)) return;
                 if (tb_over_scrollbar(st, mx, my)) return;
                 auto n = cfg.line_count ? cfg.line_count() : 0;
                 if (n == 0) return;

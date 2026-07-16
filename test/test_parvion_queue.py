@@ -481,6 +481,123 @@ def test_table_header_paints_scrollbar_corner():
         return True
 
 
+def test_table_header_menu_button():
+    """The fixed ≡ cell opens the selection-aware table menu, preserves sorting, and
+    reflects empty, single, and multiple selection states."""
+    print("TEST: parvion - table header menu button ... ", end="", flush=True)
+    names = ("bigfile.iso", "notes.txt", "queued_00.dat", "queued_01.dat", "queued_02.dat")
+    with ParvionSession(DEMO_ENV) as s:
+        chars = s.screen()[0]
+        local = header_field(chars, "Local Name")
+        if local is None:
+            print("FAIL - Local Name header not found")
+            return False
+        hr = local[0]
+        if chars[hr][0] != "≡":
+            print(f"FAIL - leftmost header cell is {chars[hr][0]!r}, expected '≡'")
+            return False
+
+        if not click_header(s, "Local Name", hr):
+            print("FAIL - could not establish ascending sort")
+            return False
+        chars = s.screen()[0]
+        before = named_row_order(chars, names)
+        local = header_field(chars, "Local Name", hr)
+        if local is None or local[5] != "↑":
+            print(f"FAIL - ascending sort was not established ({local})")
+            return False
+
+        # Match the sortable-header feedback test: move on, hold, then release the button.
+        s._write(f"\x1b[<35;{100};{hr + 1}M".encode())
+        s.feed(0.3)
+        resting = s.screen()[1][hr][0]
+        s._write(f"\x1b[<35;1;{hr + 1}M".encode())
+        s.feed(0.6)
+        hover = s.screen()[1][hr][0]
+        if hover is None or hover == resting:
+            print(f"FAIL - no menu-button hover highlight (bg {resting} -> {hover})")
+            return False
+        s._write(f"\x1b[<0;1;{hr + 1}M".encode())
+        s.feed(0.6)
+        held = s.screen()[1][hr][0]
+        if held is None or held in (resting, hover):
+            print(f"FAIL - held menu button is not distinct (rest {resting}, hover {hover}, held {held})")
+            return False
+        s._write(f"\x1b[<0;1;{hr + 1}m".encode())
+        s.feed(0.6)
+
+        chars = s.screen()[0]
+        missing = [name for name in ("Start", "Pause", "Remove", "Copy", "Select All")
+                   if not grid_contains(chars, name)]
+        if missing:
+            print(f"FAIL - left-click did not open the table menu: missing {missing}")
+            return False
+        menu_start = find_text(chars, "Start")
+        if menu_start is None or menu_start[0] != hr + 2:
+            print(f"FAIL - table-button menu opened on row "
+                  f"{None if menu_start is None else menu_start[0]}, expected {hr + 2}")
+            return False
+        if find_menu_item(chars, "Speed") is not None:
+            print("FAIL - button opened the column menu instead of the table menu")
+            return False
+
+        # With no selection, a selected-item command is present but disabled.
+        remove = find_text(chars, "Remove")
+        s.click(remove[1] + 1, remove[0] + 1)
+        if not grid_contains(s.screen()[0], "Select All"):
+            print("FAIL - no-selection Remove command was interactive")
+            return False
+        s._write(b"\x1b")
+        s.feed(0.4)
+        chars = s.screen()[0]
+        local = header_field(chars, "Local Name", hr)
+        after = named_row_order(chars, names)
+        if local is None or local[5] != "↑" or after != before:
+            print(f"FAIL - menu activation changed sort (field={local}, {before} -> {after})")
+            return False
+
+        # A single selected row supplies the enabled Copy payload.
+        note = find_text(chars, "notes.txt")
+        s.click(note[1] + 1, note[0] + 1)
+        s.click(1, hr + 1)
+        copy = find_text(s.screen()[0], "Copy")
+        if copy is None:
+            print("FAIL - single-selection menu missing Copy")
+            return False
+        s.click(copy[1] + 1, copy[0] + 1)
+        local_name = find_text_on_row(s.screen()[0], "Local Name", copy[0])
+        if local_name is None:
+            print("FAIL - single-selection Copy submenu was disabled")
+            return False
+        clip_at = len(s._buf)
+        s.click(local_name[1] + 1, local_name[0] + 1)
+        hits = _OSC52.findall(s._buf[clip_at:])
+        got = base64.b64decode(hits[-1]).decode("utf-8", "replace") if hits else ""
+        if got != "notes.txt":
+            print(f"FAIL - single-selection payload is {got!r}")
+            return False
+
+        # Ctrl-add a second row; the same button now builds a multi-selection payload.
+        big = find_text(s.screen()[0], "bigfile.iso")
+        s.click(big[1] + 1, big[0] + 1, button=16)
+        s.click(1, hr + 1)
+        copy = find_text(s.screen()[0], "Copy")
+        s.click(copy[1] + 1, copy[0] + 1)
+        local_name = find_text_on_row(s.screen()[0], "Local Name", copy[0])
+        if local_name is None:
+            print("FAIL - multi-selection Copy submenu was disabled")
+            return False
+        clip_at = len(s._buf)
+        s.click(local_name[1] + 1, local_name[0] + 1)
+        hits = _OSC52.findall(s._buf[clip_at:])
+        got = base64.b64decode(hits[-1]).decode("utf-8", "replace") if hits else ""
+        if set(got.splitlines()) != { "notes.txt", "/local/bigfile.iso" }:
+            print(f"FAIL - multi-selection payload is {got!r}")
+            return False
+        print("PASS")
+        return True
+
+
 def test_sortable_headers_cycle_and_feedback():
     """Every transfer header starts at ↕; Local Name behaves like a connect-bar button and
     cycles through ascending, descending, then the original source order."""
@@ -1688,6 +1805,7 @@ def test_pane_selection_ends_at_last_column():
 
 TESTS = [
     test_table_header_paints_scrollbar_corner,
+    test_table_header_menu_button,
     test_sortable_headers_cycle_and_feedback,
     test_queue_numeric_size_sort_and_column_switch,
     test_sort_keeps_expanded_children_with_parent,
