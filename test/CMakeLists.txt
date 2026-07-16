@@ -243,7 +243,7 @@ if(Python3_FOUND)
         LABELS "tui;tile;parvion;queue")
 
     # Regression test for the file-preview pane operations (blank-area selection rules, right-click
-    # context menus, and the local Create Directory / Delete / Rename filesystem operations).
+    # context menus, and the local Create Folder / Delete / Rename filesystem operations).
     add_test(NAME parvion_panes_test
              COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test_parvion_panes.py")
     set_tests_properties(parvion_panes_test PROPERTIES

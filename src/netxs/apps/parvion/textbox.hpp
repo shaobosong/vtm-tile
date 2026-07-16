@@ -338,7 +338,8 @@ namespace netxs::app::parvion
     inline void tb_open_context_menu(auto& boss, textbox_state& st, textbox_cfg& cfg, twod at)
     {
         app::shared::menu::open_dropdown_popup(
-            boss, tb_context_menu(st, cfg, ptr::shadow(boss.This())), faux, -1, at);
+            boss, tb_context_menu(st, cfg, ptr::shadow(boss.This())),
+            { .source = app::shared::menu::popup_source::context_menu, .cursor = at });
     }
     inline void tb_paint_menu_button(textbox_state const& st, auto& canvas)
     {

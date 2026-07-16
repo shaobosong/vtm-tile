@@ -388,7 +388,8 @@ namespace netxs::app::parvion
         {
             boss.on(tier::mouserelease, input::key::LeftClick, [&boss, sp](hids& gear)
             {
-                app::shared::menu::open_dropdown_popup(boss, build_history_menu(sp));
+                app::shared::menu::open_dropdown_popup(boss, build_history_menu(sp),
+                    { .source = app::shared::menu::popup_source::control });
                 gear.dismiss();
             });
         });

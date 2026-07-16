@@ -724,12 +724,14 @@ namespace netxs::app::parvion
         if (!q_has_columns_menu(t)) return;
         auto panel_wp = ptr::shadow(boss.This());
         auto deface   = [panel_wp]{ if (auto p = panel_wp.lock()) p->base::deface(); };
-        m::open_dropdown_popup(boss, build_columns_menu(t.roster, t.set_shown, deface), faux, -1, at);
+        m::open_dropdown_popup(boss, build_columns_menu(t.roster, t.set_shown, deface),
+            { .source = m::popup_source::context_menu, .cursor = at });
     }
     inline void q_open_table_menu(auto& boss, qmenu_cfg const& cfg, twod at)
     {
         namespace m = app::shared::menu;
-        if (cfg.items) m::open_dropdown_popup(boss, cfg.items(), faux, -1, at);
+        if (cfg.items) m::open_dropdown_popup(boss, cfg.items(),
+            { .source = m::popup_source::context_menu, .cursor = at });
     }
     inline void q_context_menu(auto& boss, table_state& st, si32 mx, si32 my, qtable const& t, qmenu_cfg const& cfg)
     {

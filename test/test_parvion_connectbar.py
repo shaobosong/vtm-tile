@@ -142,11 +142,48 @@ def test_connect_fires_on_click():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_history_dropdown_does_not_arm_menubar_hover_switch():
+    """A control dropdown must not start a menu-bar hover-switch session."""
+    print("TEST: parvion connect history does not arm menu-bar hover ... ", end="", flush=True)
+    d = tempfile.mkdtemp(prefix="parvioncb_")
+    try:
+        with T.ParvionSession(d) as s:
+            chars = s.screen()[0]
+            connect = T.find_text(chars, " Connect ")
+            history = T.find_text_on_row(chars, "▾", connect[0]) if connect else None
+            if history is None:
+                print("FAIL - Quick Connect history button not found")
+                return False
+            s.click(history[1] + 1, history[0] + 1)
+            chars = s.screen()[0]
+            if not T.grid_contains(chars, "Clear history"):
+                print("FAIL - Quick Connect history dropdown did not open")
+                return False
+            edit = T.find_text(chars, "Edit")
+            if edit is None:
+                print("FAIL - Edit menu-bar trigger not found")
+                return False
+
+            s.hover(edit[1] + 1, edit[0] + 1)
+            chars = s.screen()[0]
+            if T.grid_contains(chars, "Settings"):
+                print("FAIL - control dropdown armed menu-bar hover switching")
+                return False
+            if not T.grid_contains(chars, "Clear history"):
+                print("FAIL - hovering Edit dismissed the history dropdown")
+                return False
+            print("PASS")
+            return True
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 TESTS = [
     test_field_press_focuses,
     test_field_drag_scrubs_caret,
     test_field_drag_clamps_to_text,
     test_connect_fires_on_click,
+    test_history_dropdown_does_not_arm_menubar_hover_switch,
 ]
 
 

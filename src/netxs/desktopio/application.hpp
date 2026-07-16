@@ -838,6 +838,25 @@ namespace netxs::app::shared
             check,
         };
 
+        // Popup provenance is independent from its anchor position. For
+        // example, settings dropdowns use a cursor-style explicit anchor but
+        // are still control popups, while table/textbox menus are true context
+        // menus. Only menu_bar chains participate in hover-to-switch.
+        enum class popup_source : si32
+        {
+            control,
+            menu_bar,
+            context_menu,
+        };
+
+        struct popup_options
+        {
+            popup_source source;
+            bool radio{ faux };
+            si32 radio_checked{ -1 };
+            twod cursor{ -1, -1 };
+        };
+
         struct item
         {
             bool alive{};
@@ -950,19 +969,16 @@ namespace netxs::app::shared
             netxs::sptr<hook> leave_hook;                 // mouse-left-the-host dismisser
             std::vector<popup_nav> navs;                  // per-overlay kbd nav state
             si32 padding{ 1 };                            // horizontal cell padding per item
+            popup_source source{ popup_source::control }; // Interaction scope of the root popup.
         };
         using popup_chain_ptr = netxs::sptr<popup_chain>;
 
-        // Process-wide slot for the currently open popup chain. The
-        // menu bar is a single, shared piece of UI: at most one
-        // dropdown should be open across all triggers. Tracking the
-        // active chain here lets a click on another menu-bar button
-        // dismiss the existing dropdown while still letting that
-        // button receive its own click (event passthrough: no host
-        // overlay claims menu-bar cells, so the button's own
-        // LeftClick handler fires; if it is itself a dropdown
-        // trigger, open_dropdown_popup uses this slot to close the
-        // previous chain before opening its own).
+        // Process-wide slot for the currently open popup chain. All popup
+        // sources share one dismissal/replacement mechanism, while the typed
+        // source on the chain controls source-specific interactions such as
+        // menu-bar hover switching. Tracking the active chain also lets a
+        // click on another menu-bar button dismiss the old popup while still
+        // reaching the new button through normal event passthrough.
         //
         // Held by sptr (not weak_ptr) because the chain's own
         // dismissal callbacks may run synchronously during the
@@ -1211,17 +1227,19 @@ namespace netxs::app::shared
         //     row's script via luafx and dismisses the whole chain; clicking
         //     a submenu trigger row opens the submenu without dismissing.
         // The popup auto-flips above the trigger if there isn't room below.
-        // `cursor` (when its x >= 0) requests a context-menu anchored at that
-        // point inside the trigger (e.g. a right-click on a canvas panel) rather
-        // than beneath the trigger's bottom edge. The trigger may be any ui::base
-        // (a plain button for the menu-bar/▾ case, or a content panel for a
-        // right-click context menu).
+        // `options.cursor` (when its x >= 0) requests an explicit anchor point
+        // inside the trigger rather than the trigger's bottom edge. Provenance
+        // is carried separately by `options.source`; an explicitly anchored
+        // settings control is therefore not mistaken for a context menu or a
+        // menu-bar interaction. The trigger may be any ui::base.
         static auto open_dropdown_popup(ui::base& trigger, std::vector<menu::item> const& items,
-                                        bool radio = faux, si32 radio_checked = -1,
-                                        twod cursor = twod{ -1, -1 }) -> void
+                                        popup_options const& options) -> void
         {
             if (items.empty()) return;
-            auto context_mode = cursor.x >= 0; // Cursor-anchored right-click context menu.
+            auto radio = options.radio;
+            auto radio_checked = options.radio_checked;
+            auto cursor = options.cursor;
+            auto context_mode = cursor.x >= 0; // Explicit point anchor (context menu or anchored control).
             // Event-passthrough handshake on the menu bar:
             //
             //  - If THIS trigger already has its chain open (popup_open
@@ -1291,6 +1309,9 @@ namespace netxs::app::shared
             chain->kbd_hook = ptr::shared<hook>();
             chain->mouse_hook = ptr::shared<hook>();
             chain->leave_hook = ptr::shared<hook>();
+            // Keep provenance on the chain: all popup kinds share the global
+            // active slot, but only a menu-bar chain can arm hover switching.
+            chain->source = options.source;
             // Inherit the horizontal padding configured on the
             // trigger button so popup rows match the menu-bar
             // appearance. mini()/makeitem stamps this property on
@@ -1308,9 +1329,10 @@ namespace netxs::app::shared
             // dismissing in preview tier would clear popup_open BEFORE
             // the trigger handler runs, and the trigger would
             // immediately re-open the chain (flash close-then-open).
-            // For a context menu the trigger is the whole content panel, so there
-            // is no "own trigger" cell to carve out — any click outside the popups
-            // should dismiss. An empty rect never hit-tests, giving exactly that.
+            // With an explicit point anchor the trigger is typically a broad
+            // panel/dialog, not the small control that visually opened the popup,
+            // so there is no "own trigger" cell to carve out. An empty rect never
+            // hit-tests, making any click outside the popup dismiss it.
             auto own_trigger_rect = context_mode ? rect{} : rect{ anchor, trigger.base::region.size };
             // Mouse-event interceptor on the host. Fires at mousepreview
             // tier so it runs BEFORE the targeted widget receives the
@@ -2590,23 +2612,30 @@ namespace netxs::app::shared
                     boss.on(tier::mouserelease, input::key::LeftClick, [&boss, &item, radio](hids& gear)
                     {
                         auto checked = radio ? menu::radio_resolve_index(boss, item) : -1;
-                        menu::open_dropdown_popup(boss, item.children, radio, checked);
+                        menu::open_dropdown_popup(boss, item.children,
+                            { .source = menu::popup_source::menu_bar,
+                              .radio = radio,
+                              .radio_checked = checked });
                         gear.dismiss();
                     });
-                    // Hover-switch: once any dropdown has been opened, moving
-                    // the cursor onto another menu-bar dropdown trigger swaps
-                    // the chain over to it. When no chain is open, hover is
-                    // a no-op (clicks remain the only way to first open one).
+                    // Hover-switch: once a menu-bar dropdown has been opened,
+                    // moving the cursor onto another menu-bar dropdown trigger
+                    // swaps the chain over to it. Other popup users (notably
+                    // right-click context menus) do not arm this interaction.
+                    // When no eligible chain is open, hover remains a no-op.
                     boss.on(tier::mouserelease, input::key::MouseEnter, [&boss, &item, radio](hids& /*gear*/)
                     {
                         auto active = menu::active_chain_slot();
-                        if (!active) return;
+                        if (!active || active->source != menu::popup_source::menu_bar) return;
                         if (auto trigger_lock = active->trigger_shadow.lock())
                         {
                             if (trigger_lock.get() == static_cast<ui::base*>(&boss)) return;
                         }
                         auto checked = radio ? menu::radio_resolve_index(boss, item) : -1;
-                        menu::open_dropdown_popup(boss, item.children, radio, checked);
+                        menu::open_dropdown_popup(boss, item.children,
+                            { .source = menu::popup_source::menu_bar,
+                              .radio = radio,
+                              .radio_checked = checked });
                     });
                 }
                 else

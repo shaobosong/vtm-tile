@@ -1539,12 +1539,12 @@ def test_click_another_trigger_closes_current_and_opens_new():
         return True
 
 
-def test_hover_another_trigger_shows_hover_feedback():
-    """Event-passthrough hover contract: while trigger A's dropdown is
-    open, moving the mouse over trigger B must change B's rendered
-    cell appearance — the xlight shader (registered on every menu-bar
-    button via `shader(xlight, e2::form::state::hover)`) must still
-    fire on B because the backdrop no longer claims menu-bar cells.
+def test_hover_another_trigger_switches_dropdown_and_shows_feedback():
+    """Menu-bar hover-switch contract: while trigger A's dropdown is
+    open, moving the mouse over trigger B must open B's dropdown and
+    change B's rendered cell appearance. The xlight shader (registered
+    on every menu-bar button via `shader(xlight, e2::form::state::hover)`)
+    must still fire because the backdrop does not claim menu-bar cells.
 
     We capture B's bg color in three phases:
       1. Idle baseline — mouse moved far from B, before any popup
@@ -1554,7 +1554,7 @@ def test_hover_another_trigger_shows_hover_feedback():
     A passing test requires the bg captured in phase 3 to differ
     from the phase 1 baseline — proving hover events reached B.
     """
-    print("TEST: hover another trigger shows hover feedback ... ",
+    print("TEST: hover another trigger switches dropdown + shows feedback ... ",
           end="", flush=True)
     with VtmTileSession(PASSTHROUGH_TILE_ARGS, vtm_config=PASSTHROUGH_TILE_CONFIG) as s:
         if not s.is_alive():
@@ -1598,6 +1598,13 @@ def test_hover_another_trigger_shows_hover_feedback():
         time.sleep(0.4)
         rendered = s.snapshot(timeout=1.5)
 
+        if PASSTHROUGH_CHILD_B not in rendered:
+            return fail(
+                "hovering '[DRPB]' while A's menu-bar dropdown was open "
+                "did not open B's dropdown — the menu-bar hover-switch "
+                "session was not armed"
+            )
+
         hover_bg = find_bg_rgb_before_marker(s._screen_buf, "[DRPB]")
         if hover_bg is None:
             return fail(
@@ -1610,16 +1617,6 @@ def test_hover_another_trigger_shows_hover_feedback():
                 f"not change B's bg color (idle={idle_bg}, "
                 f"hover={hover_bg}) — the backdrop is probably still "
                 f"blocking hover events on the menu bar row"
-            )
-
-        # Sanity: A's dropdown should still be visible in the
-        # cumulative paint — hovering B is not a click and must
-        # not dismiss A.
-        if PASSTHROUGH_CHILD_A not in rendered:
-            return fail(
-                "A's popup labels missing from cumulative paint — "
-                "hover on the menu bar should not dismiss the open "
-                "chain (only clicks dismiss)"
             )
 
         if not s.is_alive():
@@ -2676,7 +2673,7 @@ TESTS = [
     test_submenu_background_progressively_darker,
     test_hover_brightens_bg_keeps_fg_unchanged,
     test_click_another_trigger_closes_current_and_opens_new,
-    test_hover_another_trigger_shows_hover_feedback,
+    test_hover_another_trigger_switches_dropdown_and_shows_feedback,
     test_click_non_dropdown_button_dismisses_open_chain,
     test_click_empty_menubar_area_dismisses_chain,
     test_amp_label_strips_marker_and_underlines_shortcut,

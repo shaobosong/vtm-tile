@@ -6,7 +6,7 @@
 End-to-end TUI tests for the Parvion local file-preview pane operations:
   - clicking the blank area (right of / below the columns) never selects an item;
   - unified right-click context menus with disabled item actions on blank space;
-  - Create Directory, Delete and Rename act on the real local filesystem.
+  - Create Folder, Delete and Rename act on the real local filesystem.
 
 The app is launched as `vtm-tile -r parvion` with the child's cwd set to a fresh temp directory, so the
 local pane lists a known, controlled set of files and the filesystem effects can be asserted on disk.
@@ -214,6 +214,10 @@ class ParvionSession:
         os.write(self.master_fd, f"\x1b[<{button};{col};{row}M".encode())
         time.sleep(0.05)
         os.write(self.master_fd, f"\x1b[<{button};{col};{row}m".encode())
+        self.feed(settle)
+
+    def hover(self, col, row, settle=0.6):
+        os.write(self.master_fd, f"\x1b[<35;{col};{row}M".encode())
         self.feed(settle)
 
     def double_click(self, col, row, button=0, settle=0.6):
@@ -474,7 +478,7 @@ def test_blank_context_menu():
             s.click(5, dd[0] + 7, button=2)  # Right-click a blank row below the list.
             chars = s.screen()[0]
             labels = ("Upload", "Delete", "Rename", "Copy",
-                      "Calculate Checksum", "Refresh", "Create Directory")
+                      "Calculate Checksum", "Refresh", "Create Folder")
             missing = [w for w in labels
                        if not grid_contains(chars, w)]
             if missing:
@@ -510,7 +514,7 @@ def test_item_context_menu():
             s.click(pos[1] + 1, pos[0] + 1, button=2)
             chars = s.screen()[0]
             labels = ("Upload", "Delete", "Rename", "Copy",
-                      "Calculate Checksum", "Refresh", "Create Directory")
+                      "Calculate Checksum", "Refresh", "Create Folder")
             missing = [w for w in labels
                        if not grid_contains(chars, w)]
             if missing:
@@ -521,6 +525,40 @@ def test_item_context_menu():
                 return False
             if not menu_has_separator_between(chars, "Calculate Checksum", "Refresh"):
                 print("FAIL - item and pane-wide actions are not separated")
+                return False
+            print("PASS")
+            return True
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_context_menu_does_not_arm_menubar_hover_switch():
+    """A panes-table context menu must not turn menu-bar hover into open."""
+    print("TEST: parvion context menu does not arm menu-bar hover ... ", end="", flush=True)
+    d = make_tree()
+    try:
+        with ParvionSession(d) as s:
+            pos = find_text(s.screen()[0], "alpha.txt")
+            if pos is None:
+                print("FAIL - alpha.txt not listed")
+                return False
+            s.click(pos[1] + 1, pos[0] + 1, button=2)
+            chars = s.screen()[0]
+            if not grid_contains(chars, "Upload"):
+                print("FAIL - panes context menu did not open")
+                return False
+            edit = find_text(chars, "Edit")
+            if edit is None:
+                print("FAIL - Edit menu-bar trigger not found")
+                return False
+
+            s.hover(edit[1] + 1, edit[0] + 1)
+            chars = s.screen()[0]
+            if grid_contains(chars, "Settings"):
+                print("FAIL - hovering Edit opened its dropdown from a context-menu chain")
+                return False
+            if not grid_contains(chars, "Upload"):
+                print("FAIL - hovering Edit dismissed the panes context menu")
                 return False
             print("PASS")
             return True
@@ -566,16 +604,16 @@ def test_copy_name_and_full_path():
 
 
 def test_create_directory():
-    """Blank menu -> Create Directory -> type a name -> Enter creates the directory on disk."""
-    print("TEST: parvion pane - Create Directory ... ", end="", flush=True)
+    """Blank menu -> Create Folder -> type a name -> Enter creates the directory on disk."""
+    print("TEST: parvion pane - Create Folder ... ", end="", flush=True)
     d = make_tree()
     try:
         with ParvionSession(d) as s:
             dd = find_text(s.screen()[0], "/..")
             s.click(5, dd[0] + 7, button=2)         # Right-click blank -> blank menu.
-            cd = find_text(s.screen()[0], "Create Directory")
+            cd = find_text(s.screen()[0], "Create Folder")
             if cd is None:
-                print("FAIL - 'Create Directory' not in menu")
+                print("FAIL - 'Create Folder' not in menu")
                 return False
             s.click(cd[1] + 1, cd[0] + 1, button=0)  # Click it -> input mode.
             if not os.path.isdir(os.path.join(d, "New folder")):
@@ -604,7 +642,7 @@ def test_create_directory():
 
 def test_create_directory_reveals_new_row():
     """A successful create scrolls a long listing to the selected new directory."""
-    print("TEST: parvion pane - Create Directory reveals new row ... ", end="", flush=True)
+    print("TEST: parvion pane - Create Folder reveals new row ... ", end="", flush=True)
     d = tempfile.mkdtemp(prefix="parvionpane_create_view_")
     try:
         for i in range(48):
@@ -615,9 +653,9 @@ def test_create_directory_reveals_new_row():
                 print("FAIL - parent row not found")
                 return False
             s.click(54, parent[0] + 2, button=2)
-            cd = find_text(s.screen()[0], "Create Directory")
+            cd = find_text(s.screen()[0], "Create Folder")
             if cd is None:
-                print("FAIL - Create Directory menu item not found")
+                print("FAIL - Create Folder menu item not found")
                 return False
             s.click(cd[1] + 1, cd[0] + 1)
             s.write("\x7f" * len("New folder"))
@@ -643,7 +681,7 @@ def test_create_directory_reveals_new_row():
 
 def test_create_directory_preserves_visible_viewport():
     """Creating a directory that sorts into the current page selects it without moving the viewport."""
-    print("TEST: parvion pane - Create Directory preserves visible viewport ... ", end="", flush=True)
+    print("TEST: parvion pane - Create Folder preserves visible viewport ... ", end="", flush=True)
     d = tempfile.mkdtemp(prefix="parvionpane_create_keep_view_")
     try:
         for i in range(48):
@@ -667,9 +705,9 @@ def test_create_directory_preserves_visible_viewport():
                 return False
             newname = f"dir_{target:02d}a"
             s.click(54, anchor[0] + 1, button=2)
-            cd = find_text(s.screen()[0], "Create Directory")
+            cd = find_text(s.screen()[0], "Create Folder")
             if cd is None:
-                print("FAIL - Create Directory menu item not found")
+                print("FAIL - Create Folder menu item not found")
                 return False
             s.click(cd[1] + 1, cd[0] + 1)
             s.write("\x7f" * len("New folder"))
@@ -701,7 +739,7 @@ def test_create_directory_preserves_visible_viewport():
 
 def test_create_directory_unique_default_and_cancel():
     """Create happens immediately, skips occupied defaults, and Esc keeps the generated directory."""
-    print("TEST: parvion pane - Create Directory unique default / cancel ... ", end="", flush=True)
+    print("TEST: parvion pane - Create Folder unique default / cancel ... ", end="", flush=True)
     d = make_tree()
     try:
         os.mkdir(os.path.join(d, "New folder"))
@@ -709,9 +747,9 @@ def test_create_directory_unique_default_and_cancel():
         with ParvionSession(d) as s:
             parent = find_text(s.screen()[0], "/..")
             s.click(54, parent[0] + 2, button=2)
-            cd = find_text(s.screen()[0], "Create Directory")
+            cd = find_text(s.screen()[0], "Create Folder")
             if cd is None:
-                print("FAIL - Create Directory menu item not found")
+                print("FAIL - Create Folder menu item not found")
                 return False
             s.click(cd[1] + 1, cd[0] + 1)
             default = os.path.join(d, "New folder (3)")
@@ -739,13 +777,13 @@ def test_create_directory_unique_default_and_cancel():
 
 def test_create_directory_invalid_rename_keeps_default():
     """An invalid follow-up rename closes the editor and leaves the already-created default intact."""
-    print("TEST: parvion pane - Create Directory invalid rename reverts ... ", end="", flush=True)
+    print("TEST: parvion pane - Create Folder invalid rename reverts ... ", end="", flush=True)
     d = make_tree()
     try:
         with ParvionSession(d) as s:
             parent = find_text(s.screen()[0], "/..")
             s.click(54, parent[0] + 2, button=2)
-            cd = find_text(s.screen()[0], "Create Directory")
+            cd = find_text(s.screen()[0], "Create Folder")
             s.click(cd[1] + 1, cd[0] + 1)
             s.write("\x7f" * len("New folder"))
             s.write("bad/name")
@@ -1736,6 +1774,7 @@ TESTS = [
     test_ctrl_drag_deselects,
     test_blank_context_menu,
     test_item_context_menu,
+    test_context_menu_does_not_arm_menubar_hover_switch,
     test_copy_name_and_full_path,
     test_create_directory,
     test_create_directory_reveals_new_row,

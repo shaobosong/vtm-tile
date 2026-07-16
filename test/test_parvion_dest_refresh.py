@@ -647,7 +647,7 @@ def test_upload_success_clears_state_row():
 def test_remote_create_and_inline_rename():
     """The writable SFTP pane creates a unique default, enters inline Rename after refresh,
     commits the new name, and refuses a duplicate without letting server rename overwrite it."""
-    print("TEST: parvion remote pane - Create Directory / inline Rename ... ", end="", flush=True)
+    print("TEST: parvion remote pane - Create Folder / inline Rename ... ", end="", flush=True)
     sroot = tempfile.mkdtemp(prefix="parvionsrv_remote_name_")
     d = tempfile.mkdtemp(prefix="parvionremote_name_")
     os.mkdir(os.path.join(sroot, "New folder"))
@@ -663,9 +663,9 @@ def test_remote_create_and_inline_rename():
                 print("FAIL - remote parent row not found")
                 return False
             s.click(T.COLS - 5, parent[0] + 2, button=2)
-            create = T.find_text(s.screen()[0], "Create Directory")
+            create = T.find_text(s.screen()[0], "Create Folder")
             if create is None:
-                print("FAIL - remote Create Directory menu item not found")
+                print("FAIL - remote Create Folder menu item not found")
                 return False
             s.click(create[1] + 1, create[0] + 1)
             if not wait_in_pane(s, "New folder (2)", remote=True, timeout=10.0):

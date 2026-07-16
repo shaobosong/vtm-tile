@@ -996,14 +996,22 @@ namespace netxs::app::parvion
                     else if (sd_hit(st.hit.unit, mx, my)) // Open the threshold-unit dropdown (item 3).
                     {
                         auto at = twod{ st.hit.unit.coor.x, st.hit.unit.coor.y + 1 };
-                        app::shared::menu::open_dropdown_popup(boss, sd_build_unit_menu(st, st.card_wp), true, st.threshold_unit, at);
+                        app::shared::menu::open_dropdown_popup(boss, sd_build_unit_menu(st, st.card_wp),
+                            { .source = app::shared::menu::popup_source::control,
+                              .radio = true,
+                              .radio_checked = st.threshold_unit,
+                              .cursor = at });
                         fired = true;
                     }
                     else if (sd_hit(st.hit.hash_algo, mx, my)) // Open the transfer-hash dropdown (None + algorithms).
                     {
                         auto at  = twod{ st.hit.hash_algo.coor.x, st.hit.hash_algo.coor.y + 1 };
                         auto sel = st.hash_on_transfer ? st.hash_algo + 1 : 0; // 0 = None.
-                        app::shared::menu::open_dropdown_popup(boss, sd_build_hash_menu(st, st.card_wp), true, sel, at);
+                        app::shared::menu::open_dropdown_popup(boss, sd_build_hash_menu(st, st.card_wp),
+                            { .source = app::shared::menu::popup_source::control,
+                              .radio = true,
+                              .radio_checked = sel,
+                              .cursor = at });
                         fired = true;
                     }
                 }
@@ -1012,7 +1020,11 @@ namespace netxs::app::parvion
                     if (sd_hit(st.hit.log_level, mx, my))
                     {
                         auto at = twod{ st.hit.log_level.coor.x, st.hit.log_level.coor.y + 1 };
-                        app::shared::menu::open_dropdown_popup(boss, sd_build_log_level_menu(st, st.card_wp), true, st.log_debug_level, at);
+                        app::shared::menu::open_dropdown_popup(boss, sd_build_log_level_menu(st, st.card_wp),
+                            { .source = app::shared::menu::popup_source::control,
+                              .radio = true,
+                              .radio_checked = st.log_debug_level,
+                              .cursor = at });
                         fired = true;
                     }
                 }
