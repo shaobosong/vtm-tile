@@ -814,8 +814,8 @@ namespace netxs::app::shared
         //                       <script> (e.g. to switch the underlying mode) and
         //                       dismisses the chain, exactly like a dropdown leaf.
         //   separator         : non-interactive horizontal rule rendered as a row of
-        //                       '─' characters spanning the popup width. Skipped by
-        //                       mouse hover and keyboard navigation.
+        //                       '─' characters inset one cell from each popup edge.
+        //                       Skipped by mouse hover and keyboard navigation.
         //   check             : checkbox toggle row rendered with ▣ (checked) / □
         //                       (unchecked) in a left gutter (FileZilla's wxITEM_CHECK
         //                       style). The checked state is published by the item's own
@@ -1783,16 +1783,21 @@ namespace netxs::app::shared
                     for (auto i = si32{ 0 }; i < popup_h; ++i)
                     {
                         auto& row_item = items[(size_t)i];
-                        // Separator rows: fill the full popup width with '─'
-                        // glyphs at the level background. Never highlighted
-                        // (hover/keyboard skip them) and never linked to the
-                        // overlay's hit-test id, so the row is also inert to
-                        // mouse clicks landing directly on the line.
+                        // Separator rows: keep the full popup-width background,
+                        // but inset the '─' rule one cell on each side to
+                        // preserve horizontal padding. Never highlighted
+                        // (hover/keyboard skip them), and the popup's input
+                        // handlers keep the entire row inert.
                         if (!is_selectable(row_item))
                         {
                             auto bg = level_bg;
                             auto fg = row_fg;
                             parent_canvas.fill(rect{{ px, py + i }, { popup_w, 1 }}, [=](cell& c)
+                            {
+                                c.wipe();
+                                c.bgc(bg).fgc(fg).txt(whitespace).link(ovl_id);
+                            });
+                            parent_canvas.fill(rect{{ px + 1, py + i }, { popup_w - 2, 1 }}, [=](cell& c)
                             {
                                 c.wipe();
                                 c.bgc(bg).fgc(fg).txt("\xE2\x94\x80").link(ovl_id);
