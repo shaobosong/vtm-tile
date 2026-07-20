@@ -13,10 +13,11 @@
 // Rendered command_bar-style (direct canvas paint + manual keyboard/mouse handling) as a
 // centered modal card inside a dimming full-window overlay, exactly like the settings
 // dialog and its file picker (settings_dialog.hpp make_settings_dialog / sd_open_key_picker).
-// Reuse: the masked field is painted by the shared paint_field(secret=true) and buttons by
-// paint_button (panes.hpp); sd_hit (panes.hpp) hit-tests the boxes.
+// Reuse: the masked field is painted by the shared paint_field(secret=true), and OK/Cancel are
+// independent make_button() widgets layered over the card.
 
-#include "panes.hpp" // theme, put_str, paint_field, paint_button, edit_*, sd_hit, cluster_count
+#include "panes.hpp" // theme, put_str, paint_field, edit_*, sd_hit, cluster_count
+#include "button.hpp"
 
 #include <thread>
 #include <atomic>
@@ -52,7 +53,7 @@ namespace netxs::app::parvion
         bool is_retry = faux;
         input_field fld;          // The shared connect-bar input box (fld.secret masks a passphrase).
         rect ok_box{}, cancel_box{};
-        bool hov_ok = faux, hov_cancel = faux, prs_ok = faux, prs_cancel = faux;
+        netxs::wptr<ui::base> ok_button_wp, cancel_button_wp;
         bool focused = faux;
         bool dragging = faux;     // A left-drag that began in the field is scrubbing the caret.
         bool done = faux;         // Submit/cancel fire exactly once.
@@ -78,8 +79,8 @@ namespace netxs::app::parvion
         auto cnw  = si32{ 10 }, okw = si32{ 6 };
         st.cancel_box = rect{ { sz.x - 2 - cnw, by }, { cnw, 1 } };
         st.ok_box     = rect{ { st.cancel_box.coor.x - 2 - okw, by }, { okw, 1 } };
-        paint_button(canvas, st.ok_box,     " OK ",     st.hov_ok,     st.prs_ok);
-        paint_button(canvas, st.cancel_box, " Cancel ", st.hov_cancel, st.prs_cancel);
+        if (auto button = st.ok_button_wp.lock())     button->base::extend(st.ok_box);
+        if (auto button = st.cancel_button_wp.lock()) button->base::extend(st.cancel_box);
     }
 
     // A centered, dimming-overlay modal collecting one masked line. `on_submit(value)` runs on
@@ -117,14 +118,16 @@ namespace netxs::app::parvion
             };
             boss.on(tier::mouserelease, input::key::LeftClick, [finish](hids& gear){ finish(nullptr); gear.dismiss(); });
         });
-        auto card = overlay->attach(ui::mock::ctor())
-            ->active()
+        auto card_layer = overlay->attach(ui::cake::ctor())
             ->alignment({ snap::center, snap::center })
-            ->limits({ 44, 10 }, { 64, 12 })
+            ->limits({ 44, 10 }, { 64, 12 });
+        auto card_layer_wp = ptr::shadow(card_layer);
+        auto card = card_layer->attach(ui::mock::ctor())
+            ->active()
             ->plugin<pro::mouse>()
             ->plugin<pro::focus>(pro::focus::mode::focused)
             ->plugin<pro::keybd>();
-        card->invoke([finish, title, prompt, is_retry, secret, initial, on_submit, on_cancel](auto& boss)
+        card->invoke([finish, title, prompt, is_retry, secret, initial, on_submit, on_cancel, card_layer_wp](auto& boss)
         {
             auto& st = boss.base::field(secret_state{});
             st.title = title; st.prompt = prompt; st.is_retry = is_retry;
@@ -144,6 +147,21 @@ namespace netxs::app::parvion
                 auto cb = st.on_cancel;
                 finish([cb]{ if (cb) cb(); });
             };
+            if (auto layer = card_layer_wp.lock())
+            {
+                auto ok = make_button({
+                    .label = []{ return text{ " OK " }; },
+                    .activate = [submit](hids&, ui::base&){ submit(); },
+                });
+                st.ok_button_wp = ptr::shadow(ok);
+                layer->base::attach(ok);
+                auto cancel_button = make_button({
+                    .label = []{ return text{ " Cancel " }; },
+                    .activate = [cancel](hids&, ui::base&){ cancel(); },
+                });
+                st.cancel_button_wp = ptr::shadow(cancel_button);
+                layer->base::attach(cancel_button);
+            }
             boss.LISTEN(tier::release, e2::render::any, parent_canvas)
             {
                 secret_render(st, parent_canvas, boss.base::size());
@@ -157,35 +175,12 @@ namespace netxs::app::parvion
             {
                 pro::focus::set(boss.This(), gear.id, solo::on);
                 auto mx = (si32)gear.coord.x, my = (si32)gear.coord.y;
-                if (sd_hit(st.ok_box, mx, my))     st.prs_ok = true;
-                if (sd_hit(st.cancel_box, mx, my)) st.prs_cancel = true;
                 if (field_hit(st.fld, mx, my))     field_caret_to(st.fld, mx);
                 boss.base::deface(); gear.dismiss();
             });
-            boss.on(tier::mouserelease, input::key::MouseMove, [&boss, &st](hids& gear)
+            boss.on(tier::mouserelease, input::key::LeftClick, [&boss](hids& gear)
             {
-                auto mx = (si32)gear.coord.x, my = (si32)gear.coord.y;
-                auto o = sd_hit(st.ok_box, mx, my), c = sd_hit(st.cancel_box, mx, my);
-                auto dirty = faux;
-                if (st.hov_ok != o)     { st.hov_ok = o;     dirty = true; }
-                if (st.hov_cancel != c) { st.hov_cancel = c; dirty = true; }
-                if (st.prs_ok && !o)     { st.prs_ok = faux;     dirty = true; }
-                if (st.prs_cancel && !c) { st.prs_cancel = faux; dirty = true; }
-                if (dirty) boss.base::deface();
-            });
-            boss.on(tier::mouserelease, input::key::LeftUp, [&boss, &st](hids&)
-            {
-                if (st.prs_ok || st.prs_cancel) { st.prs_ok = st.prs_cancel = faux; boss.base::deface(); }
-            });
-            boss.on(tier::mouserelease, input::key::MouseLeave, [&boss, &st](hids&)
-            {
-                if (st.hov_ok || st.hov_cancel || st.prs_ok || st.prs_cancel) { st.hov_ok = st.hov_cancel = st.prs_ok = st.prs_cancel = faux; boss.base::deface(); }
-            });
-            boss.on(tier::mouserelease, input::key::LeftClick, [&st, submit, cancel](hids& gear)
-            {
-                auto mx = (si32)gear.coord.x, my = (si32)gear.coord.y;
-                if      (sd_hit(st.ok_box, mx, my))     submit();
-                else if (sd_hit(st.cancel_box, mx, my)) cancel();
+                pro::focus::set(boss.This(), gear.id, solo::on);
                 gear.dismiss();
             });
             // Connect-bar caret scrubbing: a left-drag that began in the field keeps the caret under the

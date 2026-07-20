@@ -142,6 +142,64 @@ def test_connect_fires_on_click():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_connect_button_visual_states():
+    """The shared button owns distinct resting, hover, and held feedback."""
+    print("TEST: parvion connect bar - shared button visual states ... ", end="", flush=True)
+    d = tempfile.mkdtemp(prefix="parvioncb_")
+    try:
+        with T.ParvionSession(d) as s:
+            pos = T.find_text(s.screen()[0], " Connect ")
+            if pos is None:
+                print("FAIL - Connect button not found")
+                return False
+            row = pos[0] + 1
+            col = pos[1] + 2
+            sample = (pos[0], col - 1)
+            resting = s.screen()[1][sample[0]][sample[1]]
+            # The first motion packet seeds vtm's pointer position; the second is delivered.
+            s.hover(100, row, settle=0.3)
+            s.hover(col, row)
+            hover = s.screen()[1][sample[0]][sample[1]]
+            os.write(s.master_fd, f"\x1b[<0;{col};{row}M".encode())
+            s.feed(0.5)
+            held = s.screen()[1][sample[0]][sample[1]]
+            os.write(s.master_fd, f"\x1b[<0;{col};{row}m".encode())
+            s.feed(0.5)
+            released = s.screen()[1][sample[0]][sample[1]]
+            if resting == hover or hover == held:
+                print(f"FAIL - button shades are not distinct ({resting}, {hover}, {held})")
+                return False
+            if released != hover:
+                print(f"FAIL - release did not restore hover shade ({released} vs {hover})")
+                return False
+            print("PASS")
+            return True
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_connect_drag_off_cancels_click():
+    """A press dragged away from Connect must not activate it on release."""
+    print("TEST: parvion connect bar - drag off cancels Connect ... ", end="", flush=True)
+    d = tempfile.mkdtemp(prefix="parvioncb_")
+    try:
+        with T.ParvionSession(d) as s:
+            pos = T.find_text(s.screen()[0], " Connect ")
+            host = _host_field(s)
+            if pos is None or host is None:
+                print("FAIL - Connect button or Host field not found")
+                return False
+            row = pos[0] + 1
+            s.drag_path([(pos[1] + 2, row), (host[1] + 1, row)])
+            if T.grid_contains(s.screen()[0], "Enter a host name."):
+                print("FAIL - Connect fired after its press was dragged away")
+                return False
+            print("PASS")
+            return True
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_history_dropdown_does_not_arm_menubar_hover_switch():
     """A control dropdown must not start a menu-bar hover-switch session."""
     print("TEST: parvion connect history does not arm menu-bar hover ... ", end="", flush=True)
@@ -183,6 +241,8 @@ TESTS = [
     test_field_drag_scrubs_caret,
     test_field_drag_clamps_to_text,
     test_connect_fires_on_click,
+    test_connect_button_visual_states,
+    test_connect_drag_off_cancels_click,
     test_history_dropdown_does_not_arm_menubar_hover_switch,
 ]
 

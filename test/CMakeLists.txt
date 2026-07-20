@@ -48,6 +48,13 @@ target_include_directories(parvion_table_clip_test PRIVATE "${CMAKE_SOURCE_DIR}/
 target_link_libraries(parvion_table_clip_test PRIVATE Lua::Lua)
 add_test(NAME parvion_table_clip_test COMMAND parvion_table_clip_test)
 
+# Unit test for the shared Parvion button renderer and palette contract.
+add_executable(parvion_button_test "parvion_button_test.cpp")
+target_include_directories(parvion_button_test PRIVATE "${CMAKE_SOURCE_DIR}/src"
+                                                        ${LUA_INCLUDE_DIR})
+target_link_libraries(parvion_button_test PRIVATE Lua::Lua)
+add_test(NAME parvion_button_test COMMAND parvion_button_test)
+
 # Unit test for the Parvion message logger (FileZilla-style detailed queueing).
 add_executable(parvion_logging_test "parvion_logging_test.cpp")
 target_include_directories(parvion_logging_test PRIVATE "${CMAKE_SOURCE_DIR}/src")

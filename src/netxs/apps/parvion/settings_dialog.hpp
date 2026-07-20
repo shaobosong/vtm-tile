@@ -9,12 +9,13 @@
 // style (direct canvas paint + manual keyboard/mouse handling) as a centered modal
 // card inside a dimming full-window overlay, mirroring show_close_confirmation.
 //
-// Reuse: input fields and buttons are painted by the shared paint_field / paint_button
-// helpers (panes.hpp) so they are identical to the Quick Connect bar's; the private-key
+// Reuse: input fields use the shared paint_field helper and buttons are independent
+// make_button() widgets, matching the Quick Connect bar; the private-key
 // file picker instantiates the Local Site browser (make_file_pane); the private-key list
 // is the shared table component (table.hpp).
 
-#include "panes.hpp"     // theme, put_str, paint_field, paint_button, edit_*, make_file_pane, sd_hit
+#include "panes.hpp"     // theme, put_str, paint_field, edit_*, make_file_pane, sd_hit
+#include "button.hpp"    // button_cfg, make_button
 #include "table.hpp"     // table_cfg, make_table (Public Key Authentication list).
 #include "connectbar.hpp" // connect-bar field/secret editor conventions
 #include "prompts.hpp"   // make_secret_dialog (passphrase / save-path modal for key conversion)
@@ -89,8 +90,9 @@ namespace netxs::app::parvion
         std::vector<text>  key_data;
         rect               card{};            // Cached card rect within the overlay (render -> mouse).
         sd::hitboxes       hit{};
-        bool               hover_ok = faux, hover_cancel = faux, hover_add = faux, hover_remove = faux, hover_unit = faux, hover_hashalgo = faux, hover_loglevel = faux;
-        bool               press_ok = faux, press_cancel = faux, press_add = faux, press_remove = faux;
+        netxs::wptr<ui::base> button_ok_wp, button_cancel_wp;
+        netxs::wptr<ui::base> button_add_wp, button_remove_wp;
+        netxs::wptr<ui::base> button_unit_wp, button_hash_wp, button_log_wp;
         bool               focused = faux;
         si32               drag_field = -1;   // Field whose caret a left-drag is scrubbing.
         netxs::wptr<ui::base> overlay_wp;     // The overlay cake (to close on OK/Cancel).
@@ -501,8 +503,6 @@ namespace netxs::app::parvion
             st.key_table_area = rect{{ ix + 2, tbl_top }, { inner, tbl_h }};
             st.hit.addkey    = rect{{ ix + 2, btn_y }, { (si32)cell_width(sd::btn_addkey), 1 }};
             st.hit.removekey = rect{{ st.hit.addkey.coor.x + st.hit.addkey.size.x + 1, btn_y }, { (si32)cell_width(sd::btn_removekey), 1 }};
-            paint_button(canvas, st.hit.addkey,    sd::btn_addkey,    st.hover_add,    st.press_add);
-            paint_button(canvas, st.hit.removekey, sd::btn_removekey, st.hover_remove, st.press_remove);
 
             // Other SFTP options group (compression checkbox).
             sd_box(canvas, rect{{ ix, other_y }, { iw, other_h }}, "Other SFTP options");
@@ -516,7 +516,6 @@ namespace netxs::app::parvion
             auto hax     = ix + 2 + (si32)cell_width(sd::lbl_hash_xfer) + 1;
             auto halabel = text{ " " } + text{ st.hash_on_transfer ? hash_algo_label(st.hash_algo) : sd::hash_none } + " \xE2\x96\xBE "; // " None ▾ " / " SHA-256 ▾ "
             st.hit.hash_algo = rect{{ hax, hash_y + 1 }, { std::max(0, std::min((si32)cell_width(halabel), cr - hax)), 1 }};
-            paint_button(canvas, st.hit.hash_algo, halabel, st.hover_hashalgo, faux);
 
             // Parallel transfers group — both input fields aligned to the longer label (item 4).
             // Label/field/control all clip to the box content edge (cr) so nothing bleeds out.
@@ -529,7 +528,6 @@ namespace netxs::app::parvion
             auto ux = fx + sd::field_w[sd::f_threshold] + 2;
             auto ulabel = text{ " " } + text{ sftp_unit_label(st.threshold_unit) } + " \xE2\x96\xBE "; // " MiB ▾ "
             st.hit.unit = rect{{ ux, par_y + 1 }, { std::max(0, std::min((si32)cell_width(ulabel), cr - ux)), 1 }};
-            paint_button(canvas, st.hit.unit, ulabel, st.hover_unit, faux);
             // Row 2: max connections field (aligned to fx) + range hint.
             put_str(canvas, ix + 2, par_y + 2, sd::lbl_maxconn, theme::text_fg, theme::bg, std::max(0, std::min(fx - 1, cr) - (ix + 2)));
             st.fields[sd::f_maxconn].box = rect{{ fx, par_y + 2 }, { sd::field_w[sd::f_maxconn], 1 }};
@@ -547,7 +545,6 @@ namespace netxs::app::parvion
             auto lx = ix + 2 + (si32)cell_width(sd::lbl_log_level) + 1;
             auto level_label = text{ " " } + std::to_string(st.log_debug_level) + " - " + text{ log_debug_label(st.log_debug_level) } + " \xE2\x96\xBE ";
             st.hit.log_level = rect{{ lx, y + 1 }, { std::max(0, std::min((si32)cell_width(level_label), cr - lx)), 1 }};
-            paint_button(canvas, st.hit.log_level, level_label, st.hover_loglevel, faux);
             sd_help(canvas, ix + 2, y + 2, inner, sd::help_debug);
             y += info_h + 1;
 
@@ -562,8 +559,6 @@ namespace netxs::app::parvion
         auto cx = W - 1 - cnw;
         st.hit.cancel = rect{{ cx, by }, { cnw, 1 }};
         st.hit.ok     = rect{{ cx - 1 - okw, by }, { okw, 1 }};
-        paint_button(canvas, st.hit.ok,     " OK ",     st.hover_ok,     st.press_ok);
-        paint_button(canvas, st.hit.cancel, " Cancel ", st.hover_cancel, st.press_cancel);
     }
 
     // Insert a digit string into the active numeric field (digits only, like the Port field).
@@ -927,7 +922,73 @@ namespace netxs::app::parvion
             auto key_table = make_table(sd_key_table_cfg(st));
             st.key_table_wp = ptr::shadow(key_table);
             key_table->base::hidden = true; // Only the SFTP tab exposes this card layer.
-            if (auto layer = card_layer_wp.lock()) layer->base::attach(key_table);
+            if (auto layer = card_layer_wp.lock())
+            {
+                layer->base::attach(key_table);
+                auto attach_button = [&](button_cfg cfg)
+                {
+                    auto button = make_button(std::move(cfg));
+                    auto weak = ptr::shadow(button);
+                    layer->base::attach(button);
+                    return weak;
+                };
+                st.button_ok_wp = attach_button({
+                    .label = []{ return text{ " OK " }; },
+                    .activate = [&st](hids&, ui::base&){ sd_accept(st); },
+                });
+                st.button_cancel_wp = attach_button({
+                    .label = []{ return text{ " Cancel " }; },
+                    .activate = [&st](hids&, ui::base&){ sd_close(st); },
+                });
+                st.button_add_wp = attach_button({
+                    .label = []{ return text{ sd::btn_addkey }; },
+                    .activate = [&st](hids& gear, ui::base&){ sd_open_key_picker(st, gear.id); },
+                });
+                st.button_remove_wp = attach_button({
+                    .label = []{ return text{ sd::btn_removekey }; },
+                    .activate = [&st](hids&, ui::base&){ sd_remove_keys(st); },
+                });
+                st.button_unit_wp = attach_button({
+                    .label = [&st]{ return text{ " " } + text{ sftp_unit_label(st.threshold_unit) } + " ▾ "; },
+                    .activate = [&st](hids&, ui::base& button)
+                    {
+                        app::shared::menu::open_dropdown_popup(button, sd_build_unit_menu(st, st.card_wp),
+                            { .source = app::shared::menu::popup_source::control,
+                              .radio = true,
+                              .radio_checked = st.threshold_unit });
+                    },
+                });
+                st.button_hash_wp = attach_button({
+                    .label = [&st]
+                    {
+                        return text{ " " }
+                             + text{ st.hash_on_transfer ? hash_algo_label(st.hash_algo) : sd::hash_none }
+                             + " ▾ ";
+                    },
+                    .activate = [&st](hids&, ui::base& button)
+                    {
+                        auto selected = st.hash_on_transfer ? st.hash_algo + 1 : 0;
+                        app::shared::menu::open_dropdown_popup(button, sd_build_hash_menu(st, st.card_wp),
+                            { .source = app::shared::menu::popup_source::control,
+                              .radio = true,
+                              .radio_checked = selected });
+                    },
+                });
+                st.button_log_wp = attach_button({
+                    .label = [&st]
+                    {
+                        return text{ " " } + std::to_string(st.log_debug_level)
+                             + " - " + text{ log_debug_label(st.log_debug_level) } + " ▾ ";
+                    },
+                    .activate = [&st](hids&, ui::base& button)
+                    {
+                        app::shared::menu::open_dropdown_popup(button, sd_build_log_level_menu(st, st.card_wp),
+                            { .source = app::shared::menu::popup_source::control,
+                              .radio = true,
+                              .radio_checked = st.log_debug_level });
+                    },
+                });
+            }
 
             boss.base::signal(tier::release, e2::form::draggable::_<hids::buttons::left>, true);
             boss.LISTEN(tier::release, e2::render::any, parent_canvas)
@@ -939,6 +1000,22 @@ namespace netxs::app::parvion
                     table->base::hidden = !show;
                     if (show) table->base::extend(st.key_table_area);
                 }
+                auto place = [](netxs::wptr<ui::base> const& weak, rect area, bool show)
+                {
+                    if (auto button = weak.lock())
+                    {
+                        show = show && area.size.x > 0 && area.size.y > 0;
+                        button->base::hidden = !show;
+                        if (show) button->base::extend(area);
+                    }
+                };
+                place(st.button_ok_wp,     st.hit.ok,        true);
+                place(st.button_cancel_wp, st.hit.cancel,    true);
+                place(st.button_add_wp,    st.hit.addkey,    st.tab == sd::tab_sftp);
+                place(st.button_remove_wp, st.hit.removekey, st.tab == sd::tab_sftp);
+                place(st.button_unit_wp,   st.hit.unit,      st.tab == sd::tab_sftp);
+                place(st.button_hash_wp,   st.hit.hash_algo, st.tab == sd::tab_sftp);
+                place(st.button_log_wp,    st.hit.log_level, st.tab == sd::tab_debug);
             };
             boss.LISTEN(tier::release, e2::form::state::focus::count, count)
             {
@@ -961,13 +1038,8 @@ namespace netxs::app::parvion
                     if (st.tab != i) { st.tab = i; st.active = -1; }
                     boss.base::deface(); gear.dismiss(); return;
                 }
-                // Buttons: arm press (fire on click).
-                if (sd_hit(st.hit.ok, mx, my))        st.press_ok = true;
-                if (sd_hit(st.hit.cancel, mx, my))    st.press_cancel = true;
                 if (st.tab == sd::tab_sftp)
                 {
-                    if (sd_hit(st.hit.addkey, mx, my))    st.press_add = true;
-                    if (sd_hit(st.hit.removekey, mx, my)) st.press_remove = true;
                     if (sd_hit(st.hit.compression, mx, my)) { st.compression = !st.compression; }
                 }
                 else if (st.tab == sd::tab_debug)
@@ -985,78 +1057,8 @@ namespace netxs::app::parvion
             boss.on(tier::mouserelease, input::key::LeftClick, [&](hids& gear)
             {
                 pro::focus::set(boss.This(), gear.id, solo::on);
-                auto mx = (si32)gear.coord.x, my = (si32)gear.coord.y;
-                auto fired = faux;
-                if (sd_hit(st.hit.ok, mx, my))     { sd_accept(st); fired = true; }
-                else if (sd_hit(st.hit.cancel, mx, my)) { sd_close(st); fired = true; }
-                else if (st.tab == sd::tab_sftp)
-                {
-                    if (sd_hit(st.hit.addkey, mx, my))    { sd_open_key_picker(st, gear.id); fired = true; }
-                    else if (sd_hit(st.hit.removekey, mx, my)) { sd_remove_keys(st); fired = true; }
-                    else if (sd_hit(st.hit.unit, mx, my)) // Open the threshold-unit dropdown (item 3).
-                    {
-                        auto at = twod{ st.hit.unit.coor.x, st.hit.unit.coor.y + 1 };
-                        app::shared::menu::open_dropdown_popup(boss, sd_build_unit_menu(st, st.card_wp),
-                            { .source = app::shared::menu::popup_source::control,
-                              .radio = true,
-                              .radio_checked = st.threshold_unit,
-                              .cursor = at });
-                        fired = true;
-                    }
-                    else if (sd_hit(st.hit.hash_algo, mx, my)) // Open the transfer-hash dropdown (None + algorithms).
-                    {
-                        auto at  = twod{ st.hit.hash_algo.coor.x, st.hit.hash_algo.coor.y + 1 };
-                        auto sel = st.hash_on_transfer ? st.hash_algo + 1 : 0; // 0 = None.
-                        app::shared::menu::open_dropdown_popup(boss, sd_build_hash_menu(st, st.card_wp),
-                            { .source = app::shared::menu::popup_source::control,
-                              .radio = true,
-                              .radio_checked = sel,
-                              .cursor = at });
-                        fired = true;
-                    }
-                }
-                else if (st.tab == sd::tab_debug)
-                {
-                    if (sd_hit(st.hit.log_level, mx, my))
-                    {
-                        auto at = twod{ st.hit.log_level.coor.x, st.hit.log_level.coor.y + 1 };
-                        app::shared::menu::open_dropdown_popup(boss, sd_build_log_level_menu(st, st.card_wp),
-                            { .source = app::shared::menu::popup_source::control,
-                              .radio = true,
-                              .radio_checked = st.log_debug_level,
-                              .cursor = at });
-                        fired = true;
-                    }
-                }
-                st.press_ok = st.press_cancel = st.press_add = st.press_remove = faux;
-                if (!fired) boss.base::deface();
-                else boss.base::deface();
-            });
-            boss.on(tier::mouserelease, input::key::MouseLeave, [&](hids&)
-            {
-                auto dirty = faux;
-                if (st.hover_loglevel) { st.hover_loglevel = faux; dirty = true; }
-                if (dirty) boss.base::deface();
-            });
-            boss.on(tier::mouserelease, input::key::MouseMove, [&](hids& gear)
-            {
-                auto mx = (si32)gear.coord.x, my = (si32)gear.coord.y;
-                auto dirty = faux;
-                auto upd = [&](bool& h, rect const& b){ auto o = sd_hit(b, mx, my); if (h != o) { h = o; dirty = true; } };
-                upd(st.hover_ok, st.hit.ok);
-                upd(st.hover_cancel, st.hit.cancel);
-                if (st.tab == sd::tab_sftp)
-                {
-                    upd(st.hover_add, st.hit.addkey);
-                    upd(st.hover_remove, st.hit.removekey);
-                    upd(st.hover_unit, st.hit.unit);
-                    upd(st.hover_hashalgo, st.hit.hash_algo);
-                }
-                else if (st.tab == sd::tab_debug)
-                {
-                    upd(st.hover_loglevel, st.hit.log_level);
-                }
-                if (dirty) boss.base::deface();
+                boss.base::deface();
+                gear.dismiss();
             });
             // Left-drag scrubs the active numeric field's caret. The shared table owns its own drags.
             boss.LISTEN(tier::release, e2::form::drag::start::_<hids::buttons::left>, gear)

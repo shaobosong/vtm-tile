@@ -14,6 +14,7 @@
 
 #include "session.hpp" // brings model.hpp + proto.hpp + sftp_remote
 #include "ui.hpp"
+#include "button.hpp"
 #include "table.hpp"
 
 #include <functional>
@@ -189,20 +190,6 @@ namespace netxs::app::parvion
             auto cx = ccell - off;
             if (cx >= 0 && cx < fw) canvas.fill(rect{{ x + cx, y }, { 1, 1 }}, [&](cell& c){ c.bgc(theme::sel_bg_act).fgc(theme::surface); });
         }
-    }
-
-    // Paint a Connect-style button: muted slate fill + light centered label, brightened
-    // by the cell::xlight overlay on hover and doubly on press (the same effect as the
-    // menu-bar buttons in application.hpp). `label` may carry its own padding.
-    inline void paint_button(auto& canvas, rect box, view label, bool hover, bool press)
-    {
-        if (box.size.x <= 0 || box.size.y <= 0) return;
-        canvas.fill(box, [&](cell& c){ c.bgc(theme::sel_bg); });
-        auto lw = cell_width(label);
-        auto lx = box.coor.x + std::max(0, (box.size.x - lw) / 2);
-        put_str(canvas, lx, box.coor.y, label, theme::text_fg, theme::sel_bg, box.size.x);
-        if      (press) canvas.fill(box, [](cell& c){ c.xlight(2); });
-        else if (hover) canvas.fill(box, [](cell& c){ c.xlight(); });
     }
 
     // Point-in-rect hit test (shared by the settings dialog, the file/save pickers and the
@@ -1451,7 +1438,7 @@ namespace netxs::app::parvion
         bool saving = faux;
         text accept_label;            // " Open " or " Save ".
         rect accept_box{}, cancel_box{};
-        std::array<bool, 2> hov{}, prs{}; // [accept, cancel] hover / press.
+        netxs::wptr<ui::base> accept_button_wp, cancel_button_wp;
         bool focused = faux;          // The bottom bar (save-mode Name field) has keyboard focus.
     };
     // Attaches itself over `window_wp`; restores focus to `focus_back_wp` on close. `on_accept` receives
@@ -1519,9 +1506,20 @@ namespace netxs::app::parvion
             close();
         };
         auto bs = ptr::shared(picker_btn{ saving, saving ? text{ " Save " } : text{ " Open " } });
-        auto bottom = frame->attach(slot::_2, ui::mock::ctor())->limits({ -1, 1 }, { -1, 1 });
+        auto bottom_layer = frame->attach(slot::_2, ui::cake::ctor())->limits({ -1, 1 }, { -1, 1 });
+        auto bottom = bottom_layer->attach(ui::mock::ctor());
         bottom->active()->plugin<pro::mouse>();
         if (saving) bottom->plugin<pro::focus>(pro::focus::mode::focused)->plugin<pro::keybd>();
+        auto accept_button = bottom_layer->attach(make_button({
+            .label = [bs]{ return bs->accept_label; },
+            .activate = [do_accept](hids&, ui::base&){ do_accept(); },
+        }));
+        bs->accept_button_wp = ptr::shadow(accept_button);
+        auto cancel_button = bottom_layer->attach(make_button({
+            .label = []{ return text{ " Cancel " }; },
+            .activate = [do_cancel](hids&, ui::base&){ do_cancel(); },
+        }));
+        bs->cancel_button_wp = ptr::shadow(cancel_button);
         bottom->invoke([bs, fname, do_accept, do_cancel](auto& boss)
         {
             boss.LISTEN(tier::release, e2::render::any, parent_canvas, -, (bs, fname))
@@ -1538,47 +1536,24 @@ namespace netxs::app::parvion
                     auto fw = std::max(0, bs->accept_box.coor.x - 1 - fx);
                     field_paint(parent_canvas, *fname, rect{{ fx, 0 }, { fw, 1 }}, bs->focused);
                 }
-                paint_button(parent_canvas, bs->accept_box, bs->accept_label, bs->hov[0], bs->prs[0]);
-                paint_button(parent_canvas, bs->cancel_box, " Cancel ",       bs->hov[1], bs->prs[1]);
+                if (auto button = bs->accept_button_wp.lock()) button->base::extend(bs->accept_box);
+                if (auto button = bs->cancel_button_wp.lock()) button->base::extend(bs->cancel_box);
             };
             boss.LISTEN(tier::release, e2::form::state::focus::count, count, -, (bs))
             {
                 bs->focused = !!count;
                 boss.base::deface();
             };
-            boss.on(tier::mouserelease, input::key::MouseMove, [&boss, bs](hids& gear)
-            {
-                auto mx = (si32)gear.coord.x, my = (si32)gear.coord.y;
-                auto a = sd_hit(bs->accept_box, mx, my), c = sd_hit(bs->cancel_box, mx, my);
-                auto dirty = faux;
-                if (bs->hov[0] != a) { bs->hov[0] = a; dirty = true; }
-                if (bs->hov[1] != c) { bs->hov[1] = c; dirty = true; }
-                if (bs->prs[0] && !a) { bs->prs[0] = faux; dirty = true; } // Drag-off cancels press.
-                if (bs->prs[1] && !c) { bs->prs[1] = faux; dirty = true; }
-                if (dirty) boss.base::deface();
-            });
             boss.on(tier::mouserelease, input::key::LeftDown, [&boss, bs, fname](hids& gear)
             {
                 auto mx = (si32)gear.coord.x, my = (si32)gear.coord.y;
                 if (bs->saving) pro::focus::set(boss.This(), gear.id, solo::on); // Click the bar -> edit the name.
-                if (sd_hit(bs->accept_box, mx, my)) bs->prs[0] = true;
-                if (sd_hit(bs->cancel_box, mx, my)) bs->prs[1] = true;
                 if (bs->saving && field_hit(*fname, mx, my)) field_caret_to(*fname, mx);
                 boss.base::deface();
             });
-            boss.on(tier::mouserelease, input::key::LeftUp, [&boss, bs](hids&)
+            boss.on(tier::mouserelease, input::key::LeftClick, [&boss, bs](hids& gear)
             {
-                if (bs->prs[0] || bs->prs[1]) { bs->prs[0] = bs->prs[1] = faux; boss.base::deface(); }
-            });
-            boss.on(tier::mouserelease, input::key::MouseLeave, [&boss, bs](hids&)
-            {
-                if (bs->hov[0] || bs->hov[1] || bs->prs[0] || bs->prs[1]) { bs->hov = {}; bs->prs = {}; boss.base::deface(); }
-            });
-            boss.on(tier::mouserelease, input::key::LeftClick, [bs, do_accept, do_cancel](hids& gear)
-            {
-                auto mx = (si32)gear.coord.x, my = (si32)gear.coord.y;
-                if      (sd_hit(bs->accept_box, mx, my)) do_accept();
-                else if (sd_hit(bs->cancel_box, mx, my)) do_cancel();
+                if (bs->saving) pro::focus::set(boss.This(), gear.id, solo::on);
                 gear.dismiss();
             });
             if (bs->saving)

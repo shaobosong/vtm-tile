@@ -10,6 +10,7 @@
 // later phases (for now it reports the target into the status area).
 
 #include "panes.hpp" // theme, put_str, cell_width, cluster_count, cluster_to_byte, cell_to_cluster, edit_*
+#include "button.hpp"
 
 namespace netxs::app::parvion
 {
@@ -111,15 +112,14 @@ namespace netxs::app::parvion
     struct connect_state
     {
         std::array<input_field, 4> fld{}; // Host/User/Pass/Port input boxes (shared input_field; see panes.hpp).
-        rect connect_box{};             // Cached Connect button box.
         si32 active = cf_host;          // Field receiving input.
         si32 drag_field = -1;           // Field whose caret a left-drag is scrubbing (-1 = none).
         bool focused = faux;            // Bar has keyboard focus.
-        bool hover_connect = faux;      // Cursor is over the Connect button.
-        bool press_connect = faux;      // Connect button held down (mouse).
+        text connect_label;             // Live responsive caption consumed by the shared button.
         text status;                    // Result/hint shown to the right.
         sftp_remote* ctrl = nullptr;    // SFTP controller driven by Connect.
         netxs::wptr<ui::base> form_wptr;   // Painted form widget (to deface after dropdown actions).
+        netxs::wptr<ui::base> connect_wptr;// Shared Connect button, positioned by connect_render().
         netxs::wptr<ui::base> status_wptr; // Status strip widget (to deface when the status text changes).
     };
 
@@ -169,20 +169,13 @@ namespace netxs::app::parvion
             field_paint(canvas, st.fld[i], rect{{ x, 0 }, { fw, 1 }}, sel);
             x += fw + 1; // One-cell gap after each field.
         }
-        auto& label = layout.connect;
-        auto bw = cell_width(label); // Display cells (the padded compact glyph " » " is three cells).
+        st.connect_label = layout.connect;
+        auto bw = cell_width(st.connect_label); // Display cells (the padded compact glyph " » " is three cells).
         // Right-align the Connect button against the form's right edge so it stays flush with the
         // ▾ history button (the next sibling) at every width; the gap left of it (between the Port
         // field and Connect) is the responsive spacer that absorbs the slack as the form shrinks.
         auto cx = std::max(x, w - bw);
-        st.connect_box = rect{{ cx, 0 }, { bw, 1 }};
-        // Resting button: muted slate with light text. Hover/press add a bright overlay via the
-        // cell's xlight — the same effect as cell::shaders::xlight on the menu-bar buttons in
-        // application.hpp; a held press doubles the lift (factor 2) for a "pushed" look.
-        canvas.fill(st.connect_box, [&](cell& c){ c.bgc(theme::sel_bg); });
-        put_str(canvas, cx, 0, label, theme::text_fg, theme::sel_bg, bw);
-        if      (st.press_connect) canvas.fill(st.connect_box, [](cell& c){ c.xlight(2); });
-        else if (st.hover_connect) canvas.fill(st.connect_box, [](cell& c){ c.xlight(); });
+        if (auto button = st.connect_wptr.lock()) button->base::extend(rect{{ cx, 0 }, { bw, 1 }});
         // The status hint is painted by a separate strip to the right of the ▾ button.
     }
 
@@ -239,8 +232,10 @@ namespace netxs::app::parvion
         sp->fld[cf_port].val = "22";
         sp->fld[cf_port].caret = 2;
 
-        // The editable Host/User/Pass/Port + Connect form (painted directly, per command_bar).
-        auto form = ui::mock::ctor()
+        // The editable fields remain the focusable back layer; Connect is a standalone shared
+        // button on the front layer, positioned by the same responsive resolver as before.
+        auto form_layer = ui::cake::ctor();
+        auto form = form_layer->attach(ui::mock::ctor())
             ->active()
             ->plugin<pro::mouse>()
             ->plugin<pro::focus>(pro::focus::mode::focusable)
@@ -259,33 +254,14 @@ namespace netxs::app::parvion
                 boss.base::deface();
             };
             // Focus and field activation happen on the press (mousedown), mirroring the file
-            // panes / queue; the Connect button keeps button semantics and fires on the click.
+            // panes / queue. Connect owns its pointer behavior in make_button().
             boss.on(tier::mouserelease, input::key::LeftClick, [&](hids& gear)
             {
                 // Re-assert focus on the click release: the pro::focus plugin's Ctrl+LeftClick
                 // handler toggles focus off when the bar is already focused (see the panes).
                 pro::focus::set(boss.This(), gear.id, solo::on);
-                auto mx = (si32)gear.coord.x;
-                auto& cb = st.connect_box;
-                if (mx >= cb.coor.x && mx < cb.coor.x + cb.size.x) cb_connect(st);
                 boss.base::deface();
                 gear.dismiss();
-            });
-            // Hover / press feedback on the Connect button (the bar is a single row). connect_box
-            // is recomputed each render and reused here as the hitbox; mirrors queue.hpp's hover.
-            boss.on(tier::mouserelease, input::key::MouseMove, [&](hids& gear)
-            {
-                auto& cb = st.connect_box;
-                auto mx = (si32)gear.coord.x;
-                auto over = mx >= cb.coor.x && mx < cb.coor.x + cb.size.x;
-                auto dirty = faux;
-                if (st.hover_connect != over)  { st.hover_connect = over; dirty = true; }
-                if (st.press_connect && !over) { st.press_connect = faux; dirty = true; } // Drag-off cancels.
-                if (dirty) boss.base::deface();
-            });
-            boss.on(tier::mouserelease, input::key::MouseLeave, [&](hids&)
-            {
-                if (st.hover_connect || st.press_connect) { st.hover_connect = st.press_connect = faux; boss.base::deface(); }
             });
             boss.on(tier::mouserelease, input::key::LeftDown, [&](hids& gear)
             {
@@ -300,13 +276,7 @@ namespace netxs::app::parvion
                         cb_caret_to(st, i, mx);
                     }
                 }
-                auto& cb = st.connect_box;
-                if (mx >= cb.coor.x && mx < cb.coor.x + cb.size.x && !st.press_connect) st.press_connect = true;
                 boss.base::deface();
-            });
-            boss.on(tier::mouserelease, input::key::LeftUp, [&](hids&)
-            {
-                if (st.press_connect) { st.press_connect = faux; boss.base::deface(); }
             });
             // Caret scrubbing: a left-drag that began on a field keeps the caret under the
             // cursor on every pull (the render's window clamp auto-scrolls at the field edges).
@@ -371,10 +341,19 @@ namespace netxs::app::parvion
                 }
             };
         });
+        auto connect = form_layer->attach(make_button({
+            .label = [sp]{ return sp->connect_label; },
+            .activate = [sp](hids& gear, ui::base&)
+            {
+                if (auto form = sp->form_wptr.lock()) pro::focus::set(form, gear.id, solo::on);
+                cb_connect(*sp);
+            },
+        }));
+        sp->connect_wptr = ptr::shadow(connect);
         // Min = fully-compressed width so the form never pins a large window min-width (keeps the
         // menu controls on-screen when narrow); max = full uncompressed width. Between the two,
         // connect_render compresses smoothly to whatever width the parent fork hands it.
-        form->limits({ cb_min_width(), 1 }, { cb_form_width(), 1 });
+        form_layer->limits({ cb_min_width(), 1 }, { cb_form_width(), 1 });
         sp->form_wptr = ptr::shadow(form);
 
         // The ▾ Quick Connect history button: a real ui::item so menu::open_dropdown_popup can
@@ -411,7 +390,7 @@ namespace netxs::app::parvion
         // [ fields+Connect form | ▾ | status ]: ratio s1=1,s2=0 grows the form up to its (tier)
         // max and hands the remainder to the tail, so ▾ sits flush right after the Connect button.
         auto bar  = ui::fork::ctor(axis::X, 0, 1, 0);
-        bar->attach(slot::_1, form);
+        bar->attach(slot::_1, form_layer);
         auto tail = bar->attach(slot::_2, ui::fork::ctor(axis::X, 0, 0, 1));
         tail->attach(slot::_1, drop);
         tail->attach(slot::_2, strip);
