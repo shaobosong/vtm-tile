@@ -95,6 +95,29 @@ def test_dialog_opens():
     print("PASS"); return True
 
 
+def test_numeric_input_tab_is_noop():
+    print("TEST: settings numeric input keeps focus on Tab ... ", end="", flush=True)
+    cfg = tempfile.mkdtemp(prefix="pvset_")
+    with _session(cfg) as s:
+        chars = _open_dialog(s)
+        label = T.find_text(chars, "Timeout in seconds:")
+        if not label:
+            print("FAIL - Timeout field label missing"); return False
+        # The six-cell field starts one blank after the label.
+        s.click(label[1] + len("Timeout in seconds:") + 7, label[0] + 1)
+        s.write("\x7f" * 8)
+        s.write("1")
+        s.write("\t")
+        s.write("2")
+        chars = s.screen()[0]
+        ok = T.find_text(chars, " OK ")
+        s.click(ok[1] + 2, ok[0] + 1); s.feed(1.0)
+    vals = _settings_file(cfg)
+    if vals.get("Timeout") != ["12"]:
+        print(f"FAIL - Timeout persisted as {vals.get('Timeout')}, want ['12']"); return False
+    print("PASS"); return True
+
+
 def test_debug_tab_persists():
     print("TEST: settings dialog Debug tab persists log controls ... ", end="", flush=True)
     cfg = tempfile.mkdtemp(prefix="pvset_")
@@ -770,7 +793,7 @@ def test_save_picker_double_click_overwrite():
 
 def test_save_picker_click_updates_name():
     # Requirement: in the Save picker, single-clicking a file copies its name into the Name field
-    # (overwrite target), using the shared input_field component.
+    # (overwrite target), using the shared make_input component.
     print("TEST: save picker single-click a file updates the Name field ... ", end="", flush=True)
     keydir = tempfile.mkdtemp(prefix="pvkey_")
     key = _gen_encrypted_key(keydir)
@@ -847,6 +870,7 @@ def test_encrypted_key_wrong_passphrase_retries():
 
 TESTS = [
     test_dialog_opens,
+    test_numeric_input_tab_is_noop,
     test_sftp_tab,
     test_debug_tab_persists,
     test_add_encrypted_key_converts_to_ppk,

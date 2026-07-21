@@ -175,14 +175,11 @@ def _rebex_reachable():
 
 def _connect_rebex(s):
     """Type the rebex credentials into the Quick Connect bar and connect; wait for the / listing."""
-    rt = T.row_text(s.screen()[0], 1)
-    hpos = rt.find("Host")
-    if hpos < 0:
+    if not T.fill_connect_field(s, "Host", REBEX_HOST):
         return False
-    s.click(hpos + 7, 2, button=0)                       # Focus the Host field.
-    s.write(REBEX_HOST); s.write("\t")                   # Tab -> User.
-    s.write(REBEX_USER); s.write("\t")                   # Tab -> Pass.
-    s.write(REBEX_PASS); s.write("\r")                   # Enter -> Connect.
+    T.fill_connect_field(s, "User", REBEX_USER)
+    T.fill_connect_field(s, "Pass", REBEX_PASS)
+    s.write("\r")
     for _ in range(45):
         s.feed(1.0)
         if T.grid_contains(s.screen()[0], "/pub"):       # The remote / listing has arrived.
@@ -603,10 +600,11 @@ def test_upload_parallel_pooling():
     try:
         max_conn = 3
         with T.ParvionSession(d, env={"PARVION_THRESHOLD_BYTES": "4096", "PARVION_MAX_CONN": str(max_conn)}) as s:
-            rt = T.row_text(s.screen()[0], 1)
-            s.click(rt.find("Host") + 7, 2, button=0)
-            s.write(host); s.write("\t"); s.write(user); s.write("\t"); s.write(pw)
-            s.write("\t"); s.write("\x7f\x7f"); s.write(str(port)); s.write("\r")  # Port field (clear "22").
+            T.fill_connect_field(s, "Host", host)
+            T.fill_connect_field(s, "User", user)
+            T.fill_connect_field(s, "Pass", pw)
+            T.fill_connect_field(s, "Port", str(port), clear=True)
+            s.write("\r")
             ok_conn = False
             for _ in range(30):
                 s.feed(1.0)

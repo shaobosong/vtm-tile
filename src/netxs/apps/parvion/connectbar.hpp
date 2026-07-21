@@ -4,12 +4,11 @@
 #pragma once
 
 // parvion/connectbar.hpp: FileZilla-style Quick Connect bar — editable Host / User /
-// Pass / Port fields + a Connect button, rendered in the command_bar style
-// (direct canvas paint + manual keyboard/mouse text editing, per tile.hpp).
+// Pass / Port fields + a Connect button, rendered in the command_bar style.
 // Phase 1 wires the input form; the Connect action drives the SFTP session in
 // later phases (for now it reports the target into the status area).
 
-#include "panes.hpp" // theme, put_str, cell_width, cluster_count, cluster_to_byte, cell_to_cluster, edit_*
+#include "panes.hpp" // theme, shared menus, and SFTP/controller types
 #include "button.hpp"
 
 namespace netxs::app::parvion
@@ -111,10 +110,8 @@ namespace netxs::app::parvion
 
     struct connect_state
     {
-        std::array<input_field, 4> fld{}; // Host/User/Pass/Port input boxes (shared input_field; see panes.hpp).
-        si32 active = cf_host;          // Field receiving input.
-        si32 drag_field = -1;           // Field whose caret a left-drag is scrubbing (-1 = none).
-        bool focused = faux;            // Bar has keyboard focus.
+        std::array<text, 4> fld{};      // Host/User/Pass/Port values bound to make_input widgets.
+        std::array<netxs::wptr<ui::base>, 4> input_wp{};
         text connect_label;             // Live responsive caption consumed by the shared button.
         text status;                    // Result/hint shown to the right.
         sftp_remote* ctrl = nullptr;    // SFTP controller driven by Connect.
@@ -123,14 +120,6 @@ namespace netxs::app::parvion
         netxs::wptr<ui::base> status_wptr; // Status strip widget (to deface when the status text changes).
     };
 
-    // Field editing delegates to the shared single-line editor core (panes.hpp).
-    // Field editing delegates to the shared input_field core (panes.hpp). The Port field's digits-only
-    // filter and the Pass field's '*' mask live on the field (fld.digits / fld.secret), set at init.
-    inline void cb_insert(connect_state& st, view ins) { field_insert(st.fld[st.active], ins); }
-    inline void cb_backspace(connect_state& st) { edit_backspace(st.fld[st.active].val, st.fld[st.active].caret); }
-    inline void cb_delete(connect_state& st)    { edit_delete(st.fld[st.active].val, st.fld[st.active].caret); }
-    // Map the cursor's cell column `mx` to field i's caret cluster (through the secret mask).
-    inline void cb_caret_to(connect_state& st, si32 i, si32 mx) { field_caret_to(st.fld[i], mx); }
     // Set the bar's status hint and repaint the (separate) status strip widget.
     inline void cb_set_status(connect_state& st, text msg)
     {
@@ -139,12 +128,12 @@ namespace netxs::app::parvion
     }
     inline void cb_connect(connect_state& st)
     {
-        if (st.fld[cf_host].val.empty()) { cb_set_status(st, "Enter a host name."); return; }
-        if (!st.ctrl)                    { cb_set_status(st, "No SFTP controller."); return; }
+        if (st.fld[cf_host].empty()) { cb_set_status(st, "Enter a host name."); return; }
+        if (!st.ctrl)                { cb_set_status(st, "No SFTP controller."); return; }
         auto port = si32{ 0 };
-        for (auto c : st.fld[cf_port].val) if (c >= '0' && c <= '9') port = port * 10 + (c - '0');
+        for (auto c : st.fld[cf_port]) if (c >= '0' && c <= '9') port = port * 10 + (c - '0');
         if (port <= 0 || port > 65535) port = 22;
-        st.ctrl->connect(st.fld[cf_host].val, port, st.fld[cf_user].val, st.fld[cf_pass].val);
+        st.ctrl->connect(st.fld[cf_host], port, st.fld[cf_user], st.fld[cf_pass]);
         cb_set_status(st, {}); // The controller drives status from here on.
     }
 
@@ -162,11 +151,8 @@ namespace netxs::app::parvion
             put_str(canvas, x, 0, lbl, theme::subtext, theme::surface, std::max(0, w - x));
             x += cell_width(lbl) + 1; // Advance by the nominal label width (+ the trailing space).
             auto fw = layout.field[i];
-            // Fields share the labels' background; an underline marks the editable extent. When the bar
-            // is focused, the active field's whole foreground (text + underline) turns accent blue;
-            // otherwise the bar stays calm. The paint + caret scroll is the shared input_field core.
-            auto sel = st.focused && st.active == i;
-            field_paint(canvas, st.fld[i], rect{{ x, 0 }, { fw, 1 }}, sel);
+            if (auto input = st.input_wp[(size_t)i].lock())
+                input->base::extend(rect{{ x, 0 }, { fw, 1 }});
             x += fw + 1; // One-cell gap after each field.
         }
         st.connect_label = layout.connect;
@@ -190,8 +176,8 @@ namespace netxs::app::parvion
         auto clear_bar = m::item{ .alive = true, .label = "Clear Quickconnect bar" };
         clear_bar.action = [sp, deface_form](hids&)
         {
-            for (auto i = 0; i < 4; ++i) { sp->fld[i].val.clear(); sp->fld[i].caret = 0; sp->fld[i].off = 0; }
-            sp->fld[cf_port].val = "22"; sp->fld[cf_port].caret = 2;
+            for (auto& value : sp->fld) value.clear();
+            sp->fld[cf_port] = "22";
             cb_set_status(*sp, {});
             deface_form();
         };
@@ -209,10 +195,10 @@ namespace netxs::app::parvion
                 auto row = m::item{ .alive = true, .label = label };
                 row.action = [sp, deface_form, entry = r](hids&)
                 {
-                    sp->fld[cf_host].val = entry.host; sp->fld[cf_host].caret = cluster_count(entry.host); sp->fld[cf_host].off = 0;
-                    sp->fld[cf_user].val = entry.user; sp->fld[cf_user].caret = cluster_count(entry.user); sp->fld[cf_user].off = 0;
-                    sp->fld[cf_pass].val = entry.pass; sp->fld[cf_pass].caret = cluster_count(entry.pass); sp->fld[cf_pass].off = 0;
-                    sp->fld[cf_port].val = std::to_string(entry.port); sp->fld[cf_port].caret = cluster_count(sp->fld[cf_port].val); sp->fld[cf_port].off = 0;
+                    sp->fld[cf_host] = entry.host;
+                    sp->fld[cf_user] = entry.user;
+                    sp->fld[cf_pass] = entry.pass;
+                    sp->fld[cf_port] = std::to_string(entry.port);
                     cb_connect(*sp);
                     deface_form();
                 };
@@ -226,126 +212,35 @@ namespace netxs::app::parvion
     {
         // One shared connect_state drives both the painted form and the ▾ dropdown's row actions.
         auto sp = std::make_shared<connect_state>();
-        for (auto i = 0; i < 4; ++i) sp->fld[i].secret = connect_fields[i].secret; // Pass field masks with '*'.
-        sp->fld[cf_port].digits = true;                                            // Port accepts digits only.
         sp->ctrl = ctrl;
-        sp->fld[cf_port].val = "22";
-        sp->fld[cf_port].caret = 2;
+        sp->fld[cf_port] = "22";
 
-        // The editable fields remain the focusable back layer; Connect is a standalone shared
-        // button on the front layer, positioned by the same responsive resolver as before.
+        // The painter owns only labels/layout; four independent make_input children own editing.
         auto form_layer = ui::cake::ctor();
-        auto form = form_layer->attach(ui::mock::ctor())
-            ->active()
-            ->plugin<pro::mouse>()
-            ->plugin<pro::focus>(pro::focus::mode::focusable)
-            ->plugin<pro::keybd>();
+        auto form = form_layer->attach(ui::mock::ctor());
         form->invoke([sp](auto& boss)
         {
             auto& st = *boss.base::field(sp); // Shared state, kept alive for this widget's lifetime.
-
             boss.LISTEN(tier::release, e2::render::any, parent_canvas)
             {
                 connect_render(st, parent_canvas, boss.base::size());
             };
-            boss.LISTEN(tier::release, e2::form::state::focus::count, count)
-            {
-                st.focused = !!count;
-                boss.base::deface();
-            };
-            // Focus and field activation happen on the press (mousedown), mirroring the file
-            // panes / queue. Connect owns its pointer behavior in make_button().
-            boss.on(tier::mouserelease, input::key::LeftClick, [&](hids& gear)
-            {
-                // Re-assert focus on the click release: the pro::focus plugin's Ctrl+LeftClick
-                // handler toggles focus off when the bar is already focused (see the panes).
-                pro::focus::set(boss.This(), gear.id, solo::on);
-                boss.base::deface();
-                gear.dismiss();
-            });
-            boss.on(tier::mouserelease, input::key::LeftDown, [&](hids& gear)
-            {
-                pro::focus::set(boss.This(), gear.id, solo::on);
-                auto mx = (si32)gear.coord.x;
-                for (auto i = si32{}; i < 4; ++i)
-                {
-                    auto& b = st.fld[i].box;
-                    if (mx >= b.coor.x && mx < b.coor.x + b.size.x)
-                    {
-                        st.active = i;
-                        cb_caret_to(st, i, mx);
-                    }
-                }
-                boss.base::deface();
-            });
-            // Caret scrubbing: a left-drag that began on a field keeps the caret under the
-            // cursor on every pull (the render's window clamp auto-scrolls at the field edges).
-            // Enabling draggable turns on pointer capture, so pulls keep coming even when the
-            // cursor leaves the field (mirrors the panes' address bar).
-            boss.base::signal(tier::release, e2::form::draggable::_<hids::buttons::left>, true);
-            boss.LISTEN(tier::release, e2::form::drag::start::_<hids::buttons::left>, gear)
-            {
-                auto px = (si32)gear.click.x; // Press position localized to this widget.
-                st.drag_field = -1;
-                for (auto i = si32{}; i < 4; ++i)
-                {
-                    auto& b = st.fld[i].box;
-                    if (px >= b.coor.x && px < b.coor.x + b.size.x) { st.drag_field = i; break; }
-                }
-            };
-            boss.LISTEN(tier::release, e2::form::drag::pull::_<hids::buttons::left>, gear)
-            {
-                if (st.drag_field < 0) return;
-                cb_caret_to(st, st.drag_field, (si32)gear.coord.x);
-                boss.base::deface();
-            };
-            boss.LISTEN(tier::release, e2::form::drag::stop::_<hids::buttons::left>,   gear) { st.drag_field = -1; };
-            boss.LISTEN(tier::release, e2::form::drag::cancel::_<hids::buttons::left>, gear) { st.drag_field = -1; };
-            boss.LISTEN(tier::preview, input::events::keybd::any, gear)
-            {
-                if (!st.focused) return;
-                if (gear.payload == input::keybd::type::keypaste)
-                {
-                    cb_insert(st, edit_filter(gear.cluster));
-                    boss.base::deface();
-                    gear.set_handled();
-                    return;
-                }
-                if (gear.payload != input::keybd::type::keypress) return;
-                if (gear.keystat == input::key::interrupted) return;
-                if (gear.keybd::handled) return;
-                if (gear.keystat == input::key::released) return;
-                auto k = gear.keybd::generic();
-                auto shift = !!(gear.ctlstat & hids::anyShift);
-                auto& v = st.fld[st.active].val;
-                auto& c = st.fld[st.active].caret;
-                auto act = true;
-                     if (k == input::key::Backspace)     cb_backspace(st);
-                else if (k == input::key::KeyDelete)     cb_delete(st);
-                else if (k == input::key::KeyLeftArrow)  c = std::max(0, c - 1);
-                else if (k == input::key::KeyRightArrow) c = std::min(cluster_count(v), c + 1);
-                else if (k == input::key::KeyHome)       c = 0;
-                else if (k == input::key::KeyEnd)        c = cluster_count(v);
-                else if (k == input::key::Tab)           { st.active = (st.active + (shift ? 3 : 1)) % 4; }
-                else if (k == input::key::KeyEnter)      cb_connect(st);
-                else
-                {
-                    auto ins = edit_filter(gear.cluster);
-                    if (ins.size()) cb_insert(st, ins);
-                    else act = faux;
-                }
-                if (act)
-                {
-                    gear.set_handled();
-                    boss.base::deface();
-                }
-            };
         });
+        for (auto i = si32{}; i < 4; ++i)
+        {
+            auto input = form_layer->attach(make_input({
+                .value = [sp, i]{ return sp->fld[(size_t)i]; },
+                .set_value = [sp, i](text value){ sp->fld[(size_t)i] = std::move(value); },
+                .submit = [sp](text){ cb_connect(*sp); },
+                .secret = connect_fields[(size_t)i].secret,
+                .digits_only = i == cf_port,
+            }));
+            sp->input_wp[(size_t)i] = ptr::shadow(input);
+        }
         auto connect = form_layer->attach(make_button({
             .label = [sp]{ return sp->connect_label; },
-            .activate = [sp](hids& gear, ui::base&)
+            .activate = [sp](hids&, ui::base&)
             {
-                if (auto form = sp->form_wptr.lock()) pro::focus::set(form, gear.id, solo::on);
                 cb_connect(*sp);
             },
         }));
@@ -354,7 +249,7 @@ namespace netxs::app::parvion
         // menu controls on-screen when narrow); max = full uncompressed width. Between the two,
         // connect_render compresses smoothly to whatever width the parent fork hands it.
         form_layer->limits({ cb_min_width(), 1 }, { cb_form_width(), 1 });
-        sp->form_wptr = ptr::shadow(form);
+        sp->form_wptr = ptr::shadow(form_layer);
 
         // The ▾ Quick Connect history button: a real ui::item so menu::open_dropdown_popup can
         // anchor a dropdown overlay beneath it (hover uses the menu-bar xlight overlay). Placed

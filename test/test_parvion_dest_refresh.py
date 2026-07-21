@@ -249,16 +249,12 @@ class LocalSftpServer:
 
 def connect(s, port):
     """Fill the Quick Connect bar (host/user/pass/port) and wait for the remote listing."""
-    rt = T.row_text(s.screen()[0], 1)
-    hpos = rt.find("Host")
-    if hpos < 0:
+    if not T.fill_connect_field(s, "Host", "127.0.0.1"):
         return False
-    s.click(hpos + 7, 2, button=0)                    # Focus the Host field.
-    s.write("127.0.0.1"); s.write("\t")               # Tab -> User.
-    s.write(USER); s.write("\t")                      # Tab -> Pass.
-    s.write(PASS); s.write("\t")                      # Tab -> Port.
-    s.write("\x7f\x7f"); s.write(str(port))           # Clear the seeded "22", set ours.
-    s.write("\r")                                     # Enter -> Connect.
+    T.fill_connect_field(s, "User", USER)
+    T.fill_connect_field(s, "Pass", PASS)
+    T.fill_connect_field(s, "Port", str(port), clear=True)
+    s.write("\r")
     for _ in range(30):
         s.feed(1.0)
         if find_in_pane(s.screen()[0], "/..", remote=True):

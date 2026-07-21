@@ -14,6 +14,7 @@
 
 #include "session.hpp" // brings model.hpp + proto.hpp + sftp_remote
 #include "ui.hpp"
+#include "input.hpp"
 #include "button.hpp"
 #include "table.hpp"
 
@@ -66,18 +67,13 @@ namespace netxs::app::parvion
         std::set<si32>        marked{ 0 };
         // Explorer-style name editor painted in the selected row's Name cell.
         bool                  name_edit = faux;
-        text                  name_buf;
-        si32                  name_caret = 0;  // Grapheme-cluster index.
         text                  name_original;   // Stable operation identity; selection may move on an outside click.
         si32                  name_row = -1;    // Source row whose Name cell owns the editor.
         bool                  name_is_dir = faux;
         // Address-bar path entry (the row-0 path field, connect-bar style).
         bool                  addr_edit  = faux; // Editing the path in place.
         text                  addr_buf;          // The path being typed.
-        si32                  addr_caret = 0;    // Caret grapheme-cluster index.
-        si32                  addr_off   = 0;    // Horizontal scroll offset (display cells).
-        rect                  addr_box;          // Cached field box (render→mouse), like connect_state::box.
-        bool                  addr_drag  = faux; // Left-drag from the field scrubs the caret.
+        netxs::wptr<ui::base> addr_input_wp;     // Permanent path input, activated in place.
         // Transfer-table-style columns (Name, Size, Modified): session-only widths + visibility,
         // persisted by the shared table's resize / show-hide adapters.
         std::array<si32, 3>   col_w{ 24, 10, 17 }; // Name; Size (right-aligned); Modified ("YYYY-MM-DD HH:MM" + border cell).
@@ -118,132 +114,11 @@ namespace netxs::app::parvion
         auto total() const { return (si32)cur_items().size() + 1; }
     };
 
-    // --- single-line editor core (shared by the connect bar's fields and the panes'
-    // address bar): a text value + a grapheme-cluster caret index. ---------------
-
-    // Strip control characters from pasted/typed input.
-    inline auto edit_filter(view utf8) -> text
-    {
-        auto out = text{};
-        out.reserve(utf8.size());
-        for (auto i = size_t{}; i < utf8.size();)
-        {
-            auto c = (unsigned char)utf8[i];
-            if (c < 0x20 || c == 0x7f) { ++i; continue; }
-            auto n = u8_step(utf8, i);
-            out.append(utf8.data() + i, n);
-            i += n;
-        }
-        return out;
-    }
-    inline void edit_insert(text& v, si32& caret, view ins)
-    {
-        if (ins.empty()) return;
-        v.insert(cluster_to_byte(v, caret), ins);
-        caret += cluster_count(ins);
-    }
-    inline void edit_backspace(text& v, si32& caret)
-    {
-        if (caret <= 0) return;
-        auto e = cluster_to_byte(v, caret);
-        auto b = cluster_to_byte(v, caret - 1);
-        v.erase(b, e - b);
-        --caret;
-    }
-    inline void edit_delete(text& v, si32& caret)
-    {
-        if (caret >= cluster_count(v)) return;
-        auto b = cluster_to_byte(v, caret);
-        auto e = cluster_to_byte(v, caret + 1);
-        v.erase(b, e - b);
-    }
-
-    // --- Reusable Connect-bar-style widgets ------------------------------------------
-    // Painted by both the Quick Connect bar (connectbar.hpp) and the Settings dialog so
-    // their input fields and buttons are pixel-identical. Free functions over a canvas +
-    // box keep them callable from deferred render handlers (no widget coupling).
-
-    // Paint one editable single-line field into `box`: the shared surface background, an
-    // underline marking the editable extent (accent when active, else muted), the value
-    // scrolled so the caret stays inside the box, optional secret '*' masking, and the
-    // caret cell when active. `off` (the horizontal scroll offset) is updated in place,
-    // exactly as connect_render does. `active` means "focused and receiving input".
-    inline void paint_field(auto& canvas, rect box, view value, si32 caret, si32& off,
-                            bool active, bool secret = faux)
-    {
-        auto x  = box.coor.x;
-        auto y  = box.coor.y;
-        auto fw = box.size.x;
-        if (fw <= 0) return;
-        auto und_clr = active ? ui32{ theme::sel_bg_act } : ui32{ theme::subtext };
-        canvas.fill(box, [&](cell& c){ c.bgc(theme::surface).und(unln::line).unc(argb{ und_clr }); });
-        auto disp  = secret ? text((size_t)cluster_count(value), '*') : text{ value };
-        auto total = cell_width(disp);
-        auto ccell = secret ? caret : caret_cell(disp, caret);
-        if (off > ccell)       off = ccell;
-        if (ccell - off >= fw) off = ccell - fw + 1;
-        off = std::clamp(off, si32{ 0 }, std::max(si32{ 0 }, total - fw + 1));
-        auto shown = view{ disp }.substr(byte_at_cell(disp, off));
-        put_str(canvas, x, y, shown, active ? ui32{ theme::sel_bg_act } : ui32{ theme::text_fg }, theme::surface, fw);
-        if (active)
-        {
-            auto cx = ccell - off;
-            if (cx >= 0 && cx < fw) canvas.fill(rect{{ x + cx, y }, { 1, 1 }}, [&](cell& c){ c.bgc(theme::sel_bg_act).fgc(theme::surface); });
-        }
-    }
-
     // Point-in-rect hit test (shared by the settings dialog, the file/save pickers and the
     // secret-prompt modal). Boxes are widget-local; mx/my are gear.coord in the same space.
     inline auto sd_hit(rect const& b, si32 mx, si32 my) -> bool
     {
         return mx >= b.coor.x && mx < b.coor.x + b.size.x && my >= b.coor.y && my < b.coor.y + b.size.y;
-    }
-
-    // --- Generalized single-line input field (the Quick Connect bar's input box) -------------------
-    // One reusable text field with the connect bar's exact behavior: shared paint_field rendering
-    // (muted/accent underline, secret '*' mask, caret auto-scroll), click + left-drag caret placement
-    // (the caret follows a drag that began in the box, auto-scrolling at the edges), and the standard
-    // editing keys. Widgets compose one (passphrase prompt, save-as Name) or several (connect bar,
-    // Settings) of these; the free helpers below are the single source of that behavior.
-    struct input_field
-    {
-        text val;           // Field contents.
-        si32 caret = 0;     // Caret grapheme-cluster index.
-        si32 off   = 0;     // Horizontal scroll offset (display cells).
-        rect box{};         // Painted box (render -> mouse), widget-local; refreshed by field_paint.
-        bool secret = faux; // Mask the content with '*' (passwords / passphrases).
-        bool digits = faux; // Accept ASCII digits only (e.g. a port number).
-    };
-    // Paint the field at `box` (caching it for hit-testing); `active` means focused/receiving input.
-    inline void field_paint(auto& canvas, input_field& f, rect box, bool active)
-    {
-        f.box = box;
-        paint_field(canvas, box, f.val, f.caret, f.off, active, f.secret);
-    }
-    inline auto field_hit(input_field const& f, si32 mx, si32 my) -> bool { return sd_hit(f.box, mx, my); }
-    // Map a cursor cell-x (widget-local) to the caret, through the secret mask (mirrors cb_caret_to).
-    inline void field_caret_to(input_field& f, si32 mx)
-    {
-        auto disp = f.secret ? text((size_t)cluster_count(f.val), '*') : f.val;
-        f.caret = std::min(cell_to_cluster(disp, f.off + (mx - f.box.coor.x)), cluster_count(f.val));
-    }
-    inline void field_insert(input_field& f, view ins)
-    {
-        if (f.digits) { auto d = text{}; for (auto c : ins) if (c >= '0' && c <= '9') d += c; edit_insert(f.val, f.caret, d); }
-        else edit_insert(f.val, f.caret, ins);
-    }
-    // Apply one key press to the field. Returns true if it was an editing/navigation key (the caller
-    // then set_handled + defaces); false for anything else (e.g. a printable filtered to empty).
-    inline auto field_key(input_field& f, si32 k, view cluster) -> bool
-    {
-             if (k == input::key::Backspace)     edit_backspace(f.val, f.caret);
-        else if (k == input::key::KeyDelete)     edit_delete(f.val, f.caret);
-        else if (k == input::key::KeyLeftArrow)  f.caret = std::max(0, f.caret - 1);
-        else if (k == input::key::KeyRightArrow) f.caret = std::min(cluster_count(f.val), f.caret + 1);
-        else if (k == input::key::KeyHome)       f.caret = 0;
-        else if (k == input::key::KeyEnd)        f.caret = cluster_count(f.val);
-        else { auto ins = edit_filter(cluster); if (!ins.empty()) field_insert(f, ins); else return faux; }
-        return true;
     }
 
     // Make `boss` a vertical drag-resize handle for `target` fork's split: dragging the
@@ -303,8 +178,6 @@ namespace netxs::app::parvion
     inline void pane_name_cancel(pane_state& st)
     {
         st.name_edit = faux;
-        st.name_buf.clear();
-        st.name_caret = 0;
         st.name_original.clear();
         st.name_row = -1;
         st.name_is_dir = faux;
@@ -474,19 +347,13 @@ namespace netxs::app::parvion
     inline void pane_addr_begin(pane_state& st)
     {
         pane_name_cancel(st); // The two inline editors are mutually exclusive.
-        st.addr_buf   = st.cur_path();
-        st.addr_caret = cluster_count(st.addr_buf);
-        // Open scrolled to the tail (where the resting view is anchored), caret at the end.
-        st.addr_off   = std::max(0, cell_width(st.addr_buf) - st.addr_box.size.x);
-        st.addr_edit  = true;
+        st.addr_buf  = st.cur_path();
+        st.addr_edit = true;
     }
     inline void pane_addr_cancel(pane_state& st)
     {
         st.addr_edit = faux;
-        st.addr_drag = faux;
         st.addr_buf.clear();
-        st.addr_caret = 0;
-        st.addr_off = 0;
     }
     // Enter: navigate to the typed path. Edit mode ends before navigating, so a failed
     // remote cd leaves the field showing the unchanged remote->path.
@@ -674,8 +541,6 @@ namespace netxs::app::parvion
         st.sel = row;
         st.marked = { row };
         st.name_edit = true;
-        st.name_buf = items[(size_t)idx].name;
-        st.name_caret = cluster_count(st.name_buf);
         st.name_original = items[(size_t)idx].name;
         st.name_row = row;
         st.name_is_dir = items[(size_t)idx].is_dir;
@@ -683,10 +548,9 @@ namespace netxs::app::parvion
         ++st.revision; // Reveal the row and return the horizontal viewport to the Name field.
         return true;
     }
-    inline auto pane_name_commit(pane_state& st) -> bool
+    inline auto pane_name_commit(pane_state& st, text newname) -> bool
     {
         if (!st.name_edit) return true;
-        auto newname = st.name_buf;
         auto oldname = st.name_original;
         pane_name_cancel(st); // Every submission leaves edit mode; failures reveal the unchanged row.
 
@@ -1046,7 +910,10 @@ namespace netxs::app::parvion
                                           : ui32{ theme::text_fg };
             }
             if (st.name_edit && row == st.name_row)
-                return { row > 0 && st.cur_items()[(size_t)(row - 1)].is_dir ? text{ "/" } : text{ " " }, fg };
+            {
+                auto& item = st.cur_items()[(size_t)(row - 1)];
+                return { item.name, fg, table_cell_state::edit, item.is_dir ? text{ "/" } : text{ " " } };
+            }
         }
         return { pane_cell_text(st, key, row), fg };
     }
@@ -1119,42 +986,10 @@ namespace netxs::app::parvion
     inline auto pane_table_key(std::shared_ptr<pane_state> const& state, hids& gear, netxs::wptr<ui::base> self) -> table_viewport_action
     {
         auto& st = *state;
-        if (st.name_edit && gear.payload == input::keybd::type::keypaste)
-        {
-            edit_insert(st.name_buf, st.name_caret, edit_filter(gear.cluster));
-            if (auto p = self.lock()) p->base::deface();
-            return { table_viewport_action::handled };
-        }
         if (gear.payload != input::keybd::type::keypress
          || gear.keystat == input::key::released
          || gear.keystat == input::key::interrupted) return {};
         auto k = gear.keybd::generic();
-        if (st.name_edit)
-        {
-            if (k == input::key::Esc)
-            {
-                auto original = st.name_original;
-                pane_name_cancel(st);
-                pane_select_named_item(st, original);
-            }
-            else if (k == input::key::KeyEnter)
-            {
-                pane_name_commit(st);
-            }
-            else if (k == input::key::Backspace)     edit_backspace(st.name_buf, st.name_caret);
-            else if (k == input::key::KeyDelete)     edit_delete(st.name_buf, st.name_caret);
-            else if (k == input::key::KeyLeftArrow)  st.name_caret = std::max(0, st.name_caret - 1);
-            else if (k == input::key::KeyRightArrow) st.name_caret = std::min(cluster_count(st.name_buf), st.name_caret + 1);
-            else if (k == input::key::KeyHome)       st.name_caret = 0;
-            else if (k == input::key::KeyEnd)        st.name_caret = cluster_count(st.name_buf);
-            else
-            {
-                auto ins = edit_filter(gear.cluster);
-                if (!ins.empty()) edit_insert(st.name_buf, st.name_caret, ins);
-            }
-            if (auto p = self.lock()) p->base::deface();
-            return { table_viewport_action::handled };
-        }
         if (k == input::key::Esc && st.on_cancel)
         {
             auto cb = st.on_cancel;
@@ -1195,6 +1030,7 @@ namespace netxs::app::parvion
 
     inline void pane_title_render(pane_state& st, auto& canvas, twod size)
     {
+        if (auto input = st.addr_input_wp.lock()) input->base::hidden = true;
         auto w = size.x;
         if (w <= 0 || size.y <= 0) return;
         pane_sync(st);
@@ -1206,120 +1042,72 @@ namespace netxs::app::parvion
         auto fw = w - fx - 1;
         if (fw < 2)
         {
-            st.addr_box = {};
             if (st.addr_edit) pane_addr_cancel(st);
             put_str(canvas, 0, 0, lead + ' ' + disp, tfg, theme::header, w);
             return;
         }
         put_str(canvas, 0, 0, lead, tfg, theme::header, w);
-        st.addr_box = rect{{ fx, 0 }, { fw, 1 }};
-        auto und_clr = st.addr_edit ? ui32{ theme::sel_bg_act } : ui32{ theme::subtext };
-        canvas.fill(st.addr_box, [&](cell& c){ c.bgc(theme::header).und(unln::line).unc(argb{ und_clr }); });
-        if (st.addr_edit)
+        if (auto input = st.addr_input_wp.lock())
         {
-            auto total = cell_width(st.addr_buf);
-            auto ccell = caret_cell(st.addr_buf, st.addr_caret);
-            auto& off = st.addr_off;
-            if (off > ccell)       off = ccell;
-            if (ccell - off >= fw) off = ccell - fw + 1;
-            off = std::clamp(off, 0, std::max(0, total - fw + 1));
-            auto shown = view{ st.addr_buf }.substr(byte_at_cell(st.addr_buf, off));
-            put_str(canvas, fx, 0, shown, theme::sel_bg_act, theme::header, fw);
-            auto carx = ccell - off;
-            if (carx >= 0 && carx < fw)
-                canvas.fill(rect{{ fx + carx, 0 }, { 1, 1 }}, [&](cell& c){ c.bgc(theme::sel_bg_act).fgc(theme::header); });
-        }
-        else
-        {
-            auto off = std::max(0, cell_width(disp) - fw);
-            if (off > 0)
-            {
-                put_str(canvas, fx, 0, "\xE2\x80\xA6", tfg, theme::header, 1);
-                put_str(canvas, fx + 1, 0, view{ disp }.substr(byte_at_cell(disp, off + 1)), tfg, theme::header, fw - 1);
-            }
-            else put_str(canvas, fx, 0, disp, tfg, theme::header, fw);
+            input->base::hidden = faux;
+            input->base::extend(rect{{ fx, 0 }, { fw, 1 }});
         }
     }
 
     inline auto make_pane_title(std::shared_ptr<pane_state> state, netxs::wptr<ui::base> table_wp) -> ui::sptr
     {
-        auto title = ui::mock::ctor()->active()
+        auto title = ui::cake::ctor()->active()
             ->plugin<pro::mouse>()->plugin<pro::focus>(pro::focus::mode::focusable)->plugin<pro::keybd>();
-        title->invoke([state = std::move(state), table_wp](auto& boss)
+        auto painter = title->attach(ui::mock::ctor());
+        auto input = title->attach(make_input({
+            .value = [state]
+            {
+                auto& st = *state;
+                if (st.addr_edit) return st.addr_buf;
+                return st.is_local && st.cur_path().empty() ? text{ "Computer" }
+                                                            : text{ st.cur_path() };
+            },
+            .set_value = [state](text value){ state->addr_buf = std::move(value); },
+            .mode = [state]
+            {
+                if (state->remote && !state->remote->connected()) return input_mode::disabled;
+                return state->addr_edit ? input_mode::edit : input_mode::view;
+            },
+            .activate = [state]{ pane_addr_begin(*state); },
+            .submit = [state, table_wp](text value)
+            {
+                state->addr_buf = std::move(value);
+                pane_addr_commit(*state);
+                if (auto table = table_wp.lock()) table->base::deface();
+            },
+            .cancel = [state, table_wp]
+            {
+                pane_addr_cancel(*state);
+                if (auto table = table_wp.lock()) table->base::deface();
+            },
+            .blur = input_blur::cancel,
+            .palette = {
+                .bg = theme::header,
+                .text_fg = theme::title_fg_act,
+                .muted_fg = theme::title_fg,
+                .active = theme::sel_bg_act,
+            },
+        }));
+        state->addr_input_wp = ptr::shadow(input);
+        painter->invoke([state](auto& boss)
         {
             auto& st = *state;
-            boss.base::signal(tier::release, e2::form::draggable::_<hids::buttons::left>, true);
             boss.LISTEN(tier::release, e2::render::any, canvas) { pane_title_render(st, canvas, boss.base::size()); };
-            boss.LISTEN(tier::release, e2::form::state::focus::count, count)
-            {
-                if (!count && st.addr_edit) pane_addr_cancel(st);
-                boss.base::deface();
-            };
-            boss.on(tier::mouserelease, input::key::LeftDown, [&](hids& gear)
+        });
+        title->invoke([state](auto& boss)
+        {
+            boss.on(tier::mouserelease, input::key::LeftDown, [&boss, state](hids& gear)
             {
                 pro::focus::set(boss.This(), gear.id, solo::on);
-                auto mx = (si32)gear.coord.x;
-                auto& b = st.addr_box;
-                if (b.size.x > 0 && mx >= b.coor.x && mx < b.coor.x + b.size.x
-                 && !(st.remote && !st.remote->connected()))
-                {
-                    if (!st.addr_edit) pane_addr_begin(st);
-                    st.addr_caret = std::min(cell_to_cluster(st.addr_buf, st.addr_off + mx - b.coor.x), cluster_count(st.addr_buf));
-                }
-                else if (st.addr_edit) pane_addr_cancel(st);
+                if (state->addr_edit) pane_addr_cancel(*state);
                 boss.base::deface();
                 gear.dismiss();
             });
-            boss.LISTEN(tier::release, e2::form::drag::start::_<hids::buttons::left>, gear)
-            {
-                auto px = (si32)gear.click.x;
-                auto& b = st.addr_box;
-                st.addr_drag = st.addr_edit && b.size.x > 0 && px >= b.coor.x && px < b.coor.x + b.size.x;
-            };
-            boss.LISTEN(tier::release, e2::form::drag::pull::_<hids::buttons::left>, gear)
-            {
-                if (!st.addr_drag) return;
-                auto col = st.addr_off + (si32)gear.coord.x - st.addr_box.coor.x;
-                st.addr_caret = std::min(cell_to_cluster(st.addr_buf, col), cluster_count(st.addr_buf));
-                boss.base::deface();
-            };
-            boss.LISTEN(tier::release, e2::form::drag::stop::_<hids::buttons::left>, gear)   { st.addr_drag = faux; };
-            boss.LISTEN(tier::release, e2::form::drag::cancel::_<hids::buttons::left>, gear) { st.addr_drag = faux; };
-            boss.LISTEN(tier::preview, input::events::keybd::any, gear, -, (table_wp))
-            {
-                if (!st.addr_edit || gear.keybd::handled) return;
-                if (gear.payload == input::keybd::type::keypaste)
-                {
-                    edit_insert(st.addr_buf, st.addr_caret, edit_filter(gear.cluster));
-                    gear.set_handled();
-                    boss.base::deface();
-                    return;
-                }
-                if (gear.payload != input::keybd::type::keypress
-                 || gear.keystat == input::key::released
-                 || gear.keystat == input::key::interrupted) return;
-                auto k = gear.keybd::generic();
-                auto& v = st.addr_buf;
-                auto& c = st.addr_caret;
-                auto act = true;
-                     if (k == input::key::Esc)           pane_addr_cancel(st);
-                else if (k == input::key::KeyEnter)      pane_addr_commit(st);
-                else if (k == input::key::Backspace)     edit_backspace(v, c);
-                else if (k == input::key::KeyDelete)     edit_delete(v, c);
-                else if (k == input::key::KeyLeftArrow)  c = std::max(0, c - 1);
-                else if (k == input::key::KeyRightArrow) c = std::min(cluster_count(v), c + 1);
-                else if (k == input::key::KeyHome)       c = 0;
-                else if (k == input::key::KeyEnd)        c = cluster_count(v);
-                else
-                {
-                    auto ins = edit_filter(gear.cluster);
-                    if (!ins.empty()) edit_insert(v, c, ins); else act = faux;
-                }
-                if (!act) return;
-                gear.set_handled();
-                boss.base::deface();
-                if (auto p = table_wp.lock()) p->base::deface();
-            };
         });
         return title;
     }
@@ -1353,19 +1141,18 @@ namespace netxs::app::parvion
             return state->cur_msg().empty() ? state->total() : 0;
         };
         cfg.cell = [state](si32 row, si32 key){ return pane_cell(state, row, key); };
-        cfg.edit_cell = [state](si32 row, si32 key) -> std::optional<table_edit_cell>
-        {
-            if (!state->name_edit || row != state->name_row || key != 0) return std::nullopt;
-            return table_edit_cell{ state->name_buf, state->name_caret, 1 };
-        };
-        cfg.edit_active = [state]{ return state->name_edit; };
-        cfg.edit_caret = [state](si32 row, si32 key, si32 cell)
+        cfg.edit_submit = [state](si32 row, si32 key, text value)
         {
             if (!state->name_edit || row != state->name_row || key != 0) return;
-            state->name_caret = std::min(cell_to_cluster(state->name_buf, std::max(0, cell)),
-                                         cluster_count(state->name_buf));
+            pane_name_commit(*state, std::move(value));
         };
-        cfg.edit_commit = [state]{ pane_name_commit(*state); };
+        cfg.edit_cancel = [state](si32 row, si32 key)
+        {
+            if (!state->name_edit || row != state->name_row || key != 0) return;
+            auto original = state->name_original;
+            pane_name_cancel(*state);
+            pane_select_named_item(*state, original);
+        };
         cfg.selection = [state]{ return pane_selection(state); };
         cfg.menu = [state](netxs::wptr<ui::base> panel_wp){ return pane_menu(state, panel_wp); };
         cfg.empty_text = [state]{ return state->cur_msg(); };
@@ -1438,8 +1225,7 @@ namespace netxs::app::parvion
         bool saving = faux;
         text accept_label;            // " Open " or " Save ".
         rect accept_box{}, cancel_box{};
-        netxs::wptr<ui::base> accept_button_wp, cancel_button_wp;
-        bool focused = faux;          // The bottom bar (save-mode Name field) has keyboard focus.
+        netxs::wptr<ui::base> name_input_wp, accept_button_wp, cancel_button_wp;
     };
     // Attaches itself over `window_wp`; restores focus to `focus_back_wp` on close. `on_accept` receives
     // the chosen path; `on_cancel` (optional) fires on Cancel / Esc / click-outside.
@@ -1475,7 +1261,7 @@ namespace netxs::app::parvion
             ->alignment({ snap::center, snap::center })
             ->limits({ 50, 14 }, { 90, 32 })
             ->colors(theme::text_fg, theme::bg);
-        auto fname = ptr::shared(input_field{ name, cluster_count(name) }); // The Save-as Name field.
+        auto fname = ptr::shared(std::move(name)); // The Save-as Name field.
         pane_state* pane_st = nullptr;
         auto pane = frame->attach(slot::_1, make_file_pane(title, true, local_lister(), initial_dir, /*grab*/ !saving, nullptr, nullptr, &pane_st, window_wp));
         // Accept the chosen path: open -> the selected file; save -> <current dir>/<Name>.
@@ -1485,8 +1271,8 @@ namespace netxs::app::parvion
             auto path = text{};
             if (saving)
             {
-                if (fname->val.empty()) return;
-                path = child_path(pane_st->cur_path(), fname->val, true);
+                if (fname->empty()) return;
+                path = child_path(pane_st->cur_path(), *fname, true);
                 // Overwrite confirmation when the chosen Name already exists as a file (this is also the
                 // double-click-a-file path). Mirrors the queue/pane delete prompts (show_close_confirmation).
                 auto ec = std::error_code{};
@@ -1508,8 +1294,17 @@ namespace netxs::app::parvion
         auto bs = ptr::shared(picker_btn{ saving, saving ? text{ " Save " } : text{ " Open " } });
         auto bottom_layer = frame->attach(slot::_2, ui::cake::ctor())->limits({ -1, 1 }, { -1, 1 });
         auto bottom = bottom_layer->attach(ui::mock::ctor());
-        bottom->active()->plugin<pro::mouse>();
-        if (saving) bottom->plugin<pro::focus>(pro::focus::mode::focused)->plugin<pro::keybd>();
+        if (saving)
+        {
+            auto name_input = bottom_layer->attach(make_input({
+                .value = [fname]{ return *fname; },
+                .set_value = [fname](text value){ *fname = std::move(value); },
+                .submit = [do_accept](text){ do_accept(); },
+                .cancel = [do_cancel]{ do_cancel(); },
+                .focus_on_start = true,
+            }));
+            bs->name_input_wp = ptr::shadow(name_input);
+        }
         auto accept_button = bottom_layer->attach(make_button({
             .label = [bs]{ return bs->accept_label; },
             .activate = [do_accept](hids&, ui::base&){ do_accept(); },
@@ -1520,9 +1315,9 @@ namespace netxs::app::parvion
             .activate = [do_cancel](hids&, ui::base&){ do_cancel(); },
         }));
         bs->cancel_button_wp = ptr::shadow(cancel_button);
-        bottom->invoke([bs, fname, do_accept, do_cancel](auto& boss)
+        bottom->invoke([bs](auto& boss)
         {
-            boss.LISTEN(tier::release, e2::render::any, parent_canvas, -, (bs, fname))
+            boss.LISTEN(tier::release, e2::render::any, parent_canvas, -, (bs))
             {
                 auto sz = boss.base::size();
                 parent_canvas.fill(rect{{ 0, 0 }, sz }, [&](cell& c){ c.bgc(theme::surface); });
@@ -1534,60 +1329,11 @@ namespace netxs::app::parvion
                     put_str(parent_canvas, 0, 0, "Name:", theme::text_fg, theme::surface, 5);
                     auto fx = si32{ 6 };
                     auto fw = std::max(0, bs->accept_box.coor.x - 1 - fx);
-                    field_paint(parent_canvas, *fname, rect{{ fx, 0 }, { fw, 1 }}, bs->focused);
+                    if (auto input = bs->name_input_wp.lock()) input->base::extend(rect{{ fx, 0 }, { fw, 1 }});
                 }
                 if (auto button = bs->accept_button_wp.lock()) button->base::extend(bs->accept_box);
                 if (auto button = bs->cancel_button_wp.lock()) button->base::extend(bs->cancel_box);
             };
-            boss.LISTEN(tier::release, e2::form::state::focus::count, count, -, (bs))
-            {
-                bs->focused = !!count;
-                boss.base::deface();
-            };
-            boss.on(tier::mouserelease, input::key::LeftDown, [&boss, bs, fname](hids& gear)
-            {
-                auto mx = (si32)gear.coord.x, my = (si32)gear.coord.y;
-                if (bs->saving) pro::focus::set(boss.This(), gear.id, solo::on); // Click the bar -> edit the name.
-                if (bs->saving && field_hit(*fname, mx, my)) field_caret_to(*fname, mx);
-                boss.base::deface();
-            });
-            boss.on(tier::mouserelease, input::key::LeftClick, [&boss, bs](hids& gear)
-            {
-                if (bs->saving) pro::focus::set(boss.This(), gear.id, solo::on);
-                gear.dismiss();
-            });
-            if (bs->saving)
-            {
-                // Connect-bar caret scrubbing: a left-drag that began in the Name field keeps the caret
-                // under the cursor (auto-scrolling at the edges); enabling draggable adds pointer capture.
-                boss.base::signal(tier::release, e2::form::draggable::_<hids::buttons::left>, true);
-                auto dragging = ptr::shared(faux);
-                boss.LISTEN(tier::release, e2::form::drag::start::_<hids::buttons::left>, gear, -, (fname, dragging))
-                {
-                    *dragging = field_hit(*fname, (si32)gear.click.x, (si32)gear.click.y);
-                };
-                boss.LISTEN(tier::release, e2::form::drag::pull::_<hids::buttons::left>, gear, -, (fname, dragging))
-                {
-                    if (*dragging) { field_caret_to(*fname, (si32)gear.coord.x); boss.base::deface(); }
-                };
-                boss.LISTEN(tier::release, e2::form::drag::stop::_<hids::buttons::left>,   gear, -, (dragging)) { *dragging = faux; };
-                boss.LISTEN(tier::release, e2::form::drag::cancel::_<hids::buttons::left>, gear, -, (dragging)) { *dragging = faux; };
-                boss.LISTEN(tier::preview, input::events::keybd::any, gear, -, (bs, fname, do_accept, do_cancel))
-                {
-                    if (!bs->focused) return;
-                    if (gear.payload == input::keybd::type::keypaste) { field_insert(*fname, edit_filter(gear.cluster)); boss.base::deface(); gear.set_handled(); return; }
-                    if (gear.payload != input::keybd::type::keypress) return;
-                    if (gear.keystat == input::key::released || gear.keystat == input::key::interrupted) return;
-                    if (gear.keybd::handled) return;
-                    auto k = gear.keybd::generic();
-                    auto act = true;
-                         if (k == input::key::Esc)      do_cancel();
-                    else if (k == input::key::KeyEnter)  do_accept();
-                    else if (field_key(*fname, k, gear.cluster)) {} // Editing/navigation handled by the field.
-                    else act = faux;
-                    if (act) { gear.set_handled(); boss.base::deface(); }
-                };
-            }
         });
         // Wire the pane callbacks now that the bottom bar exists (its weak_ptr lets on_pick/on_select
         // repaint the Name field). Save: clicking or activating a file copies its name into the field
@@ -1596,12 +1342,10 @@ namespace netxs::app::parvion
         {
             if (saving)
             {
-                auto fill = [fname, bottom_wp = ptr::shadow(bottom)](text const& path)
+                auto fill = [fname, input_wp = bs->name_input_wp](text const& path)
                 {
-                    fname->val = fs::path{ path }.filename().string();
-                    fname->caret = cluster_count(fname->val);
-                    fname->off = 0;
-                    if (auto b = bottom_wp.lock()) b->base::deface();
+                    *fname = fs::path{ path }.filename().string();
+                    if (auto input = input_wp.lock()) input->base::deface();
                 };
                 pane_st->on_select = fill; // Single click / arrow-nav onto a file: just track the Name.
                 // Double-click / Enter on a file: set the Name to it, then Save (do_accept overwrite-confirms).
@@ -1615,7 +1359,7 @@ namespace netxs::app::parvion
         // plugin alone cannot reliably displace the Settings card. Hand focus over after attach,
         // using the initiating gear to keep Esc/Enter inside the topmost modal.
         auto focus_target = ui::sptr{};
-        if (saving) focus_target = bottom;
+        if (saving) focus_target = bs->name_input_wp.lock();
         else if (pane_st) focus_target = pane_st->table_wp.lock();
         if (focus_target)
         {

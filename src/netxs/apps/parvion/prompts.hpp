@@ -10,13 +10,13 @@
 //   - the live SFTP login (session.hpp / parvion.hpp): when the backend asks for an SSH
 //     key passphrase ("SSH key passphrase" preamble) or an account password.
 //
-// Rendered command_bar-style (direct canvas paint + manual keyboard/mouse handling) as a
+// Rendered command_bar-style as a
 // centered modal card inside a dimming full-window overlay, exactly like the settings
 // dialog and its file picker (settings_dialog.hpp make_settings_dialog / sd_open_key_picker).
-// Reuse: the masked field is painted by the shared paint_field(secret=true), and OK/Cancel are
-// independent make_button() widgets layered over the card.
+// Reuse: the masked value is a shared make_input child, and OK/Cancel are independent
+// make_button() widgets layered over the card.
 
-#include "panes.hpp" // theme, put_str, paint_field, edit_*, sd_hit, cluster_count
+#include "panes.hpp" // theme, put_str, sd_hit, and shared dialog helpers
 #include "button.hpp"
 
 #include <thread>
@@ -51,11 +51,9 @@ namespace netxs::app::parvion
     {
         text title, prompt;
         bool is_retry = faux;
-        input_field fld;          // The shared connect-bar input box (fld.secret masks a passphrase).
+        text value;               // Bound to the shared make_input child.
         rect ok_box{}, cancel_box{};
-        netxs::wptr<ui::base> ok_button_wp, cancel_button_wp;
-        bool focused = faux;
-        bool dragging = faux;     // A left-drag that began in the field is scrubbing the caret.
+        netxs::wptr<ui::base> input_wp, ok_button_wp, cancel_button_wp;
         bool done = faux;         // Submit/cancel fire exactly once.
         std::function<void(text)> on_submit;
         std::function<void()>     on_cancel;
@@ -74,7 +72,8 @@ namespace netxs::app::parvion
         for (auto i = size_t{}; i < lines.size() && i < 3; ++i) put_str(canvas, 2, y++, lines[i], theme::text_fg, theme::bg, inner);
         if (st.is_retry) put_str(canvas, 2, y++, "Incorrect passphrase, try again.", theme::err_fg, theme::bg, inner);
         // Field on the row two above the button row; buttons on the last-but-one row.
-        field_paint(canvas, st.fld, rect{ { 2, sz.y - 4 }, { inner, 1 } }, /*active*/true);
+        if (auto input = st.input_wp.lock())
+            input->base::extend(rect{ { 2, sz.y - 4 }, { inner, 1 } });
         auto by   = sz.y - 2;
         auto cnw  = si32{ 10 }, okw = si32{ 6 };
         st.cancel_box = rect{ { sz.x - 2 - cnw, by }, { cnw, 1 } };
@@ -122,22 +121,23 @@ namespace netxs::app::parvion
             ->alignment({ snap::center, snap::center })
             ->limits({ 44, 10 }, { 64, 12 });
         auto card_layer_wp = ptr::shadow(card_layer);
+        auto input_ref = std::make_shared<netxs::wptr<ui::base>>();
         auto card = card_layer->attach(ui::mock::ctor())
             ->active()
             ->plugin<pro::mouse>()
-            ->plugin<pro::focus>(pro::focus::mode::focused)
+            ->plugin<pro::focus>(pro::focus::mode::focusable)
             ->plugin<pro::keybd>();
-        card->invoke([finish, title, prompt, is_retry, secret, initial, on_submit, on_cancel, card_layer_wp](auto& boss)
+        card->invoke([finish, title, prompt, is_retry, secret, initial, on_submit, on_cancel, card_layer_wp, input_ref](auto& boss)
         {
             auto& st = boss.base::field(secret_state{});
             st.title = title; st.prompt = prompt; st.is_retry = is_retry;
-            st.fld.secret = secret; st.fld.val = initial; st.fld.caret = cluster_count(initial);
+            st.value = initial;
             st.on_submit = on_submit; st.on_cancel = on_cancel;
             auto submit = [&st, finish]
             {
                 if (st.done) return;
                 st.done = true;
-                auto v = st.fld.val; auto cb = st.on_submit;
+                auto v = st.value; auto cb = st.on_submit;
                 finish([cb, v]{ if (cb) cb(v); });
             };
             auto cancel = [&st, finish]
@@ -149,6 +149,19 @@ namespace netxs::app::parvion
             };
             if (auto layer = card_layer_wp.lock())
             {
+                auto input = make_input({
+                    .value = [&st]{ return st.value; },
+                    .set_value = [&st](text value){ st.value = std::move(value); },
+                    .submit = [submit](text){ submit(); },
+                    .cancel = [cancel]{ cancel(); },
+                    .secret = secret,
+                    .focus_on_start = true,
+                    .palette = { .bg = theme::bg, .text_fg = theme::text_fg,
+                                 .muted_fg = theme::subtext, .active = theme::sel_bg_act },
+                });
+                st.input_wp = ptr::shadow(input);
+                *input_ref = st.input_wp;
+                layer->base::attach(input);
                 auto ok = make_button({
                     .label = []{ return text{ " OK " }; },
                     .activate = [submit](hids&, ui::base&){ submit(); },
@@ -166,49 +179,14 @@ namespace netxs::app::parvion
             {
                 secret_render(st, parent_canvas, boss.base::size());
             };
-            boss.LISTEN(tier::release, e2::form::state::focus::count, count)
-            {
-                st.focused = !!count;
-                boss.base::deface();
-            };
-            boss.on(tier::mouserelease, input::key::LeftDown, [&boss, &st](hids& gear)
-            {
-                pro::focus::set(boss.This(), gear.id, solo::on);
-                auto mx = (si32)gear.coord.x, my = (si32)gear.coord.y;
-                if (field_hit(st.fld, mx, my))     field_caret_to(st.fld, mx);
-                boss.base::deface(); gear.dismiss();
-            });
-            boss.on(tier::mouserelease, input::key::LeftClick, [&boss](hids& gear)
-            {
-                pro::focus::set(boss.This(), gear.id, solo::on);
-                gear.dismiss();
-            });
-            // Connect-bar caret scrubbing: a left-drag that began in the field keeps the caret under the
-            // cursor (the render's window clamp auto-scrolls at the edges); draggable adds pointer capture.
-            boss.base::signal(tier::release, e2::form::draggable::_<hids::buttons::left>, true);
-            boss.LISTEN(tier::release, e2::form::drag::start::_<hids::buttons::left>, gear) { st.dragging = field_hit(st.fld, (si32)gear.click.x, (si32)gear.click.y); };
-            boss.LISTEN(tier::release, e2::form::drag::pull::_<hids::buttons::left>,  gear) { if (st.dragging) { field_caret_to(st.fld, (si32)gear.coord.x); boss.base::deface(); } };
-            boss.LISTEN(tier::release, e2::form::drag::stop::_<hids::buttons::left>,   gear) { st.dragging = faux; };
-            boss.LISTEN(tier::release, e2::form::drag::cancel::_<hids::buttons::left>, gear) { st.dragging = faux; };
             boss.LISTEN(tier::preview, input::events::keybd::any, gear, -, (submit, cancel))
             {
-                if (!st.focused) return;
-                if (gear.payload == input::keybd::type::keypaste)
-                {
-                    field_insert(st.fld, edit_filter(gear.cluster));
-                    boss.base::deface(); gear.set_handled();
-                    return;
-                }
                 if (gear.payload != input::keybd::type::keypress) return;
                 if (gear.keystat == input::key::released || gear.keystat == input::key::interrupted) return;
                 if (gear.keybd::handled) return;
                 auto k = gear.keybd::generic();
-                auto act = true;
-                     if (k == input::key::Esc)      cancel();
-                else if (k == input::key::KeyEnter)  submit();
-                else if (field_key(st.fld, k, gear.cluster)) {} // Editing/navigation handled by the field.
-                else act = faux;
-                if (act) { gear.set_handled(); boss.base::deface(); }
+                if      (k == input::key::Esc)      { gear.set_handled(); cancel(); }
+                else if (k == input::key::KeyEnter) { gear.set_handled(); submit(); }
             };
         });
         // Take real keyboard focus on the card once the caller has attached the overlay, so Esc/Enter/
@@ -218,7 +196,11 @@ namespace netxs::app::parvion
         if (auto w = window_wp.lock())
         {
             auto gid = w->bell::indexer.luafx.get_gear().id;
-            w->base::enqueue([cardw = ptr::shadow(card), gid](auto&){ if (auto c = cardw.lock()) pro::focus::set(c, gid, solo::on); });
+            w->base::enqueue([cardw = ptr::shadow(card), input_ref, gid](auto&)
+            {
+                if (auto input = input_ref->lock()) pro::focus::set(input, gid, solo::on);
+                else if (auto c = cardw.lock()) pro::focus::set(c, gid, solo::on);
+            });
         }
         return overlay;
     }

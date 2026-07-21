@@ -254,6 +254,19 @@ def find_text(chars, needle):
     return None
 
 
+def fill_connect_field(session, label, value, clear=False):
+    """Click and fill one Quick Connect input; Tab is intentionally not traversal."""
+    caption = label + ":"
+    pos = find_text(session.screen()[0], caption)
+    if pos is None:
+        return False
+    session.click(pos[1] + len(caption) + 2, pos[0] + 1)
+    if clear:
+        session.write("\x1b[F" + "\x7f" * 32)  # End, then clear the whole bound value.
+    session.write(value)
+    return True
+
+
 def grid_contains(chars, needle):
     return any(needle in row_text(chars, r) for r in range(ROWS))
 
@@ -974,6 +987,38 @@ def test_rename_item():
                 return False
             if not grid_contains(s.screen()[0], "renamed.txt"):
                 print("FAIL - renamed file not shown")
+                return False
+            print("PASS")
+            return True
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_rename_editor_keeps_focus_on_tab():
+    """The table-owned cell input consumes Tab chords without leaving edit mode."""
+    print("TEST: parvion pane - Rename Tab/Shift+Tab are no-ops ... ", end="", flush=True)
+    d = make_tree()
+    try:
+        with ParvionSession(d) as s:
+            pos = find_text(s.screen()[0], "alpha.txt")
+            if pos is None:
+                print("FAIL - alpha.txt not listed")
+                return False
+            s.click(pos[1] + 1, pos[0] + 1, button=2)
+            rn = find_text(s.screen()[0], "Rename")
+            if rn is None:
+                print("FAIL - 'Rename' not in menu")
+                return False
+            s.click(rn[1] + 1, rn[0] + 1)
+            s.write("\x7f" * len("alpha.txt"))
+            s.write("ren")
+            s.write("\t")
+            s.write("amed")
+            s.write("\x1b[Z")
+            s.write(".txt")
+            s.write("\r")
+            if os.path.exists(os.path.join(d, "alpha.txt")) or not os.path.exists(os.path.join(d, "renamed.txt")):
+                print("FAIL - Tab moved focus away from the Name-cell editor")
                 return False
             print("PASS")
             return True
@@ -1786,6 +1831,7 @@ TESTS = [
     test_delete_key_item,
     test_delete_preserves_viewport_and_navigation_selection,
     test_rename_item,
+    test_rename_editor_keeps_focus_on_tab,
     test_rename_click_elsewhere_commits,
     test_rename_rejects_duplicate_and_empty,
     test_rename_accepts_posix_characters,

@@ -4,9 +4,10 @@
 
 """
 End-to-end TUI tests for the Quick Connect bar's input fields (connectbar.hpp):
-a left mouse *press* (not the click release) focuses the bar and activates the
-field under the cursor, and a left press-drag scrubs the caret in real time,
-clamped to the field's text. The Connect button still fires on the click.
+a left mouse *press* (not the click release) focuses the make_input child under
+the cursor, and a left press-drag scrubs the caret in real time, clamped to the
+field's text. Tab chords are consumed without moving focus. The Connect button
+still fires on the click.
 
 The caret position is asserted behaviorally — by typing after the gesture and
 checking where the character lands — because the harness's replay() does not
@@ -115,6 +116,38 @@ def test_field_drag_clamps_to_text():
             got = _host_text(s, r, x0)
             if got != "abcZ":  # Caret clamped to the end of "abc", not stuck at cell 1.
                 print(f"FAIL - Host field shows {got!r}, want 'abcZ'")
+                return False
+            print("PASS")
+            return True
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_tab_and_shift_tab_are_noops():
+    """Tab chords are consumed by the active input and never move focus."""
+    print("TEST: parvion connect bar - Tab/Shift+Tab are no-ops ... ", end="", flush=True)
+    d = tempfile.mkdtemp(prefix="parvioncb_")
+    try:
+        with T.ParvionSession(d) as s:
+            hf = _host_field(s)
+            if hf is None:
+                print("FAIL - 'Host:' label not found")
+                return False
+            r, x0 = hf
+            s.click(x0 + 1, r + 1)
+            s.write("a")
+            s.write("\t")
+            s.write("b")
+            s.write("\x1b[Z")
+            s.write("c")
+            got = _host_text(s, r, x0)
+            if got != "abc":
+                print(f"FAIL - Host field shows {got!r}, want 'abc'")
+                return False
+            row = T.row_text(s.screen()[0], r)
+            user = row[row.find("User:") + len("User:"):row.find("Pass:")].strip()
+            if user:
+                print(f"FAIL - focus moved to User field, which contains {user!r}")
                 return False
             print("PASS")
             return True
@@ -240,6 +273,7 @@ TESTS = [
     test_field_press_focuses,
     test_field_drag_scrubs_caret,
     test_field_drag_clamps_to_text,
+    test_tab_and_shift_tab_are_noops,
     test_connect_fires_on_click,
     test_connect_button_visual_states,
     test_connect_drag_off_cancels_click,

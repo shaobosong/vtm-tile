@@ -6,15 +6,15 @@
 // parvion/settings_dialog.hpp: the Edit -> Settings dialog — a FileZilla-style,
 // top-tabbed settings form (Connection | SFTP) ported from FileZilla's Connection
 // and Connection/SFTP option pages (TLS excluded). Rendered in the command_bar
-// style (direct canvas paint + manual keyboard/mouse handling) as a centered modal
+// style as a centered modal
 // card inside a dimming full-window overlay, mirroring show_close_confirmation.
 //
-// Reuse: input fields use the shared paint_field helper and buttons are independent
+// Reuse: numeric fields use shared make_input children and buttons are independent
 // make_button() widgets, matching the Quick Connect bar; the private-key
 // file picker instantiates the Local Site browser (make_file_pane); the private-key list
 // is the shared table component (table.hpp).
 
-#include "panes.hpp"     // theme, put_str, paint_field, edit_*, make_file_pane, sd_hit
+#include "panes.hpp"     // theme, put_str, make_file_pane, sd_hit
 #include "button.hpp"    // button_cfg, make_button
 #include "table.hpp"     // table_cfg, make_table (Public Key Authentication list).
 #include "connectbar.hpp" // connect-bar field/secret editor conventions
@@ -29,16 +29,13 @@ namespace netxs::app::parvion
     namespace sd
     {
         enum tab_t { tab_connection, tab_sftp, tab_debug, tab_count };
-        // Editable numeric fields (both tabs). Each carries its text plus the connect-bar
-        // field editor state (caret/scroll) and its painted box for hit-testing.
+        // Editable numeric fields (both tabs). make_input owns all transient editor state.
         enum field_t { f_timeout, f_retries, f_delay, f_threshold, f_maxconn, f_count };
 
         struct field
         {
             text  val;       // The text being edited (digits only).
-            si32  caret = 0; // Grapheme-cluster caret index.
-            si32  off   = 0; // Horizontal scroll offset (cells).
-            rect  box{};     // Cached input box (render -> mouse).
+            rect  box{};     // Input child geometry, refreshed by the card layout.
             si32  lo = 0;    // Clamp range (inclusive)...
             si32  hi = 0;    // ...applied on commit.
             si32  tab = 0;   // Which tab hosts this field.
@@ -72,7 +69,7 @@ namespace netxs::app::parvion
         parvion_settings   draft;            // Edited copy; committed to ctrl on OK.
         si32               tab  = sd::tab_connection;
         std::array<sd::field, sd::f_count> fields{};
-        si32               active = -1;       // Field receiving input (-1 = none).
+        std::array<netxs::wptr<ui::base>, sd::f_count> input_wp{};
         bool               compression = faux;
         si32               threshold_unit = 2;
         bool               hash_on_transfer = faux; // "Calculate target file hash during transfers".
@@ -93,8 +90,6 @@ namespace netxs::app::parvion
         netxs::wptr<ui::base> button_ok_wp, button_cancel_wp;
         netxs::wptr<ui::base> button_add_wp, button_remove_wp;
         netxs::wptr<ui::base> button_unit_wp, button_hash_wp, button_log_wp;
-        bool               focused = faux;
-        si32               drag_field = -1;   // Field whose caret a left-drag is scrubbing.
         netxs::wptr<ui::base> overlay_wp;     // The overlay cake (to close on OK/Cancel).
         netxs::wptr<ui::base> window_wp;      // App window (anchor for the file picker overlay).
         netxs::wptr<ui::base> card_wp;        // The card widget (to deface after picker actions).
@@ -113,8 +108,7 @@ namespace netxs::app::parvion
             {
                 auto& f = fields[i];
                 f.val = std::to_string(v);
-                f.caret = cluster_count(f.val);
-                f.off = 0; f.lo = lo; f.hi = hi; f.tab = tab;
+                f.lo = lo; f.hi = hi; f.tab = tab;
             };
             setf(sd::f_timeout,   draft.timeout,         0, 9999, sd::tab_connection);
             setf(sd::f_retries,   draft.reconnect_count, 0,   99, sd::tab_connection);
@@ -401,8 +395,8 @@ namespace netxs::app::parvion
     // Paint one "Label  [field]  (hint)" row with the field anchored at a fixed column `fx`
     // (so every field in a group box lines up vertically). `cr` is the box content's right
     // edge (exclusive): the label and hint are clipped to it so nothing bleeds past the box
-    // border when the dialog is forced below its negotiated minimum width. Caches the field's
-    // input box for hit-testing and reuses paint_field so the input matches the Connect bar.
+    // border when the dialog is forced below its negotiated minimum width. The input child is
+    // positioned later by the card's shared layer placement pass.
     inline void sd_field_row(auto& canvas, settings_state& st, si32 x, si32 y, si32 fx, si32 cr,
                              view label, sd::field_t fi, view hint)
     {
@@ -410,8 +404,6 @@ namespace netxs::app::parvion
         auto fw = sd::field_w[fi];
         auto& f = st.fields[fi];
         f.box = rect{{ fx, y }, { fw, 1 }};
-        auto active = st.focused && st.active == (si32)fi;
-        paint_field(canvas, f.box, f.val, f.caret, f.off, active, faux);
         if (hint.size()) { auto hx = fx + fw + 2; put_str(canvas, hx, y, hint, theme::subtext, theme::bg, std::max(0, cr - hx)); }
     }
 
@@ -524,14 +516,12 @@ namespace netxs::app::parvion
             // Row 1: threshold value field + unit dropdown.
             put_str(canvas, ix + 2, par_y + 1, sd::lbl_threshold, theme::text_fg, theme::bg, std::max(0, std::min(fx - 1, cr) - (ix + 2)));
             st.fields[sd::f_threshold].box = rect{{ fx, par_y + 1 }, { sd::field_w[sd::f_threshold], 1 }};
-            paint_field(canvas, st.fields[sd::f_threshold].box, st.fields[sd::f_threshold].val, st.fields[sd::f_threshold].caret, st.fields[sd::f_threshold].off, st.focused && st.active == sd::f_threshold, faux);
             auto ux = fx + sd::field_w[sd::f_threshold] + 2;
             auto ulabel = text{ " " } + text{ sftp_unit_label(st.threshold_unit) } + " \xE2\x96\xBE "; // " MiB ▾ "
             st.hit.unit = rect{{ ux, par_y + 1 }, { std::max(0, std::min((si32)cell_width(ulabel), cr - ux)), 1 }};
             // Row 2: max connections field (aligned to fx) + range hint.
             put_str(canvas, ix + 2, par_y + 2, sd::lbl_maxconn, theme::text_fg, theme::bg, std::max(0, std::min(fx - 1, cr) - (ix + 2)));
             st.fields[sd::f_maxconn].box = rect{{ fx, par_y + 2 }, { sd::field_w[sd::f_maxconn], 1 }};
-            paint_field(canvas, st.fields[sd::f_maxconn].box, st.fields[sd::f_maxconn].val, st.fields[sd::f_maxconn].caret, st.fields[sd::f_maxconn].off, st.focused && st.active == sd::f_maxconn, faux);
             { auto hx = fx + sd::field_w[sd::f_maxconn] + 2; put_str(canvas, hx, par_y + 2, sd::hnt_maxconn, theme::subtext, theme::bg, std::max(0, cr - hx)); }
         }
         // --- Debug tab ---------------------------------------------------------------
@@ -559,16 +549,6 @@ namespace netxs::app::parvion
         auto cx = W - 1 - cnw;
         st.hit.cancel = rect{{ cx, by }, { cnw, 1 }};
         st.hit.ok     = rect{{ cx - 1 - okw, by }, { okw, 1 }};
-    }
-
-    // Insert a digit string into the active numeric field (digits only, like the Port field).
-    inline void sd_field_insert(settings_state& st, view ins)
-    {
-        if (st.active < 0 || st.active >= sd::f_count) return;
-        auto digits = text{};
-        for (auto c : ins) if (c >= '0' && c <= '9') digits += c;
-        auto& f = st.fields[st.active];
-        edit_insert(f.val, f.caret, digits);
     }
 
     // sd_hit (point-in-rect) now lives in panes.hpp so the secret-prompt modal can share it.
@@ -925,6 +905,20 @@ namespace netxs::app::parvion
             if (auto layer = card_layer_wp.lock())
             {
                 layer->base::attach(key_table);
+                for (auto i = si32{}; i < sd::f_count; ++i)
+                {
+                    auto input = make_input({
+                        .value = [&st, i]{ return st.fields[(size_t)i].val; },
+                        .set_value = [&st, i](text value){ st.fields[(size_t)i].val = std::move(value); },
+                        .submit = [&st](text){ sd_accept(st); },
+                        .cancel = [&st]{ sd_close(st); },
+                        .digits_only = true,
+                        .palette = { .bg = theme::bg, .text_fg = theme::text_fg,
+                                     .muted_fg = theme::subtext, .active = theme::sel_bg_act },
+                    });
+                    st.input_wp[(size_t)i] = ptr::shadow(input);
+                    layer->base::attach(input);
+                }
                 auto attach_button = [&](button_cfg cfg)
                 {
                     auto button = make_button(std::move(cfg));
@@ -990,7 +984,6 @@ namespace netxs::app::parvion
                 });
             }
 
-            boss.base::signal(tier::release, e2::form::draggable::_<hids::buttons::left>, true);
             boss.LISTEN(tier::release, e2::render::any, parent_canvas)
             {
                 settings_render(st, parent_canvas, boss.base::size());
@@ -1016,26 +1009,18 @@ namespace netxs::app::parvion
                 place(st.button_unit_wp,   st.hit.unit,      st.tab == sd::tab_sftp);
                 place(st.button_hash_wp,   st.hit.hash_algo, st.tab == sd::tab_sftp);
                 place(st.button_log_wp,    st.hit.log_level, st.tab == sd::tab_debug);
+                for (auto i = si32{}; i < sd::f_count; ++i)
+                    place(st.input_wp[(size_t)i], st.fields[(size_t)i].box,
+                          st.fields[(size_t)i].tab == st.tab);
             };
-            boss.LISTEN(tier::release, e2::form::state::focus::count, count)
-            {
-                st.focused = !!count;
-                boss.base::deface();
-            };
-            // Caret-to-click for a field box (card-local mx).
-            auto caret_to = [&](sd::field_t fi, si32 mx)
-            {
-                auto& f = st.fields[fi];
-                f.caret = std::min(cell_to_cluster(f.val, f.off + (mx - f.box.coor.x)), cluster_count(f.val));
-            };
-            boss.on(tier::mouserelease, input::key::LeftDown, [&, caret_to](hids& gear)
+            boss.on(tier::mouserelease, input::key::LeftDown, [&](hids& gear)
             {
                 pro::focus::set(boss.This(), gear.id, solo::on);
                 auto mx = (si32)gear.coord.x, my = (si32)gear.coord.y;
                 // Tabs.
                 for (auto i = si32{}; i < sd::tab_count; ++i) if (sd_hit(st.hit.tab_box[i], mx, my))
                 {
-                    if (st.tab != i) { st.tab = i; st.active = -1; }
+                    if (st.tab != i) st.tab = i;
                     boss.base::deface(); gear.dismiss(); return;
                 }
                 if (st.tab == sd::tab_sftp)
@@ -1046,12 +1031,6 @@ namespace netxs::app::parvion
                 {
                     if (sd_hit(st.hit.raw_listing, mx, my)) { st.log_raw_listing = !st.log_raw_listing; }
                 }
-                // Field activation (current tab only).
-                for (auto i = si32{}; i < sd::f_count; ++i) if (st.fields[i].tab == st.tab && sd_hit(st.fields[i].box, mx, my))
-                {
-                    st.active = i;
-                    caret_to((sd::field_t)i, mx);
-                }
                 boss.base::deface();
             });
             boss.on(tier::mouserelease, input::key::LeftClick, [&](hids& gear)
@@ -1060,66 +1039,14 @@ namespace netxs::app::parvion
                 boss.base::deface();
                 gear.dismiss();
             });
-            // Left-drag scrubs the active numeric field's caret. The shared table owns its own drags.
-            boss.LISTEN(tier::release, e2::form::drag::start::_<hids::buttons::left>, gear)
-            {
-                auto px = (si32)gear.click.x, py = (si32)gear.click.y;
-                st.drag_field = -1;
-                for (auto i = si32{}; i < sd::f_count; ++i) if (st.fields[i].tab == st.tab && sd_hit(st.fields[i].box, px, py)) { st.drag_field = i; break; }
-            };
-            boss.LISTEN(tier::release, e2::form::drag::pull::_<hids::buttons::left>, gear)
-            {
-                if (st.drag_field < 0) return;
-                auto& f = st.fields[st.drag_field];
-                f.caret = std::min(cell_to_cluster(f.val, f.off + ((si32)gear.coord.x - f.box.coor.x)), cluster_count(f.val));
-                boss.base::deface();
-            };
-            boss.LISTEN(tier::release, e2::form::drag::stop::_<hids::buttons::left>,   gear) { st.drag_field = -1; };
-            boss.LISTEN(tier::release, e2::form::drag::cancel::_<hids::buttons::left>, gear) { st.drag_field = -1; };
             boss.LISTEN(tier::preview, input::events::keybd::any, gear)
             {
-                if (!st.focused) return;
-                if (gear.payload == input::keybd::type::keypaste)
-                {
-                    if (st.active >= 0) { sd_field_insert(st, edit_filter(gear.cluster)); boss.base::deface(); gear.set_handled(); }
-                    return;
-                }
                 if (gear.payload != input::keybd::type::keypress) return;
                 if (gear.keystat == input::key::released || gear.keystat == input::key::interrupted) return;
                 if (gear.keybd::handled) return;
                 auto k = gear.keybd::generic();
-                auto shift = !!(gear.ctlstat & hids::anyShift);
-                auto act = true;
-                // Current tab's field order (for Tab navigation).
-                auto order = st.tab == sd::tab_connection ? std::vector<si32>{ sd::f_timeout, sd::f_retries, sd::f_delay }
-                           : st.tab == sd::tab_sftp       ? std::vector<si32>{ sd::f_threshold, sd::f_maxconn }
-                                                           : std::vector<si32>{};
-                if (k == input::key::Esc) { sd_close(st); }
-                else if (k == input::key::KeyEnter) { sd_accept(st); }
-                else if (k == input::key::Tab)
-                {
-                    if (order.empty()) { act = faux; }
-                    else
-                    {
-                    auto pos = 0;
-                    for (auto i = 0; i < (si32)order.size(); ++i) if (order[i] == st.active) pos = i;
-                    auto n = (si32)order.size();
-                    st.active = order[(pos + (shift ? n - 1 : 1)) % n];
-                    }
-                }
-                else if (st.active >= 0)
-                {
-                    auto& f = st.fields[st.active];
-                         if (k == input::key::Backspace)     edit_backspace(f.val, f.caret);
-                    else if (k == input::key::KeyDelete)     edit_delete(f.val, f.caret);
-                    else if (k == input::key::KeyLeftArrow)  f.caret = std::max(0, f.caret - 1);
-                    else if (k == input::key::KeyRightArrow) f.caret = std::min(cluster_count(f.val), f.caret + 1);
-                    else if (k == input::key::KeyHome)       f.caret = 0;
-                    else if (k == input::key::KeyEnd)        f.caret = cluster_count(f.val);
-                    else { auto ins = edit_filter(gear.cluster); if (ins.size()) sd_field_insert(st, ins); else act = faux; }
-                }
-                else act = faux;
-                if (act) { gear.set_handled(); boss.base::deface(); }
+                if      (k == input::key::Esc)      { gear.set_handled(); sd_close(st); }
+                else if (k == input::key::KeyEnter) { gear.set_handled(); sd_accept(st); }
             };
         });
         if (card_out) *card_out = card; // Expose the card so the caller can focus it after attach.

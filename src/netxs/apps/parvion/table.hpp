@@ -16,7 +16,7 @@
 //
 // make_table() returns the independent table widget. Containers can wrap it as needed.
 
-#include "ui.hpp"
+#include "input.hpp"
 
 #include <algorithm>
 #include <functional>
@@ -189,12 +189,15 @@ namespace netxs::app::parvion
     // exclusive bottom of the body (== canvas height).
     struct table_state
     {
-        struct edit_hit
+        struct editor_state
         {
+            bool active = faux;
+            bool seen = faux;
+            bool focus_pending = faux;
             rect box{};
-            si32 source_row = -1;
+            si32 row = -1;
             si32 key = -1;
-            si32 text_off = 0;
+            text value;
         };
 
         enum dmode { d_none, d_vsb, d_hsb, d_col, d_rubber };
@@ -220,8 +223,8 @@ namespace netxs::app::parvion
 
         std::vector<std::pair<rect, si32>> row_hit{};    // Row rect -> selection key.
         std::vector<std::pair<rect, si32>> expand_hit{}; // Expand-button box -> expand id.
-        std::vector<edit_hit>              edit_hits{};  // Visible inline editor box -> source cell.
-        si32                               edit_off = 0; // Inline editor's horizontal text scroll.
+        editor_state                       editor{};     // Table-owned in-cell input target and draft.
+        netxs::wptr<ui::base>              editor_wp{};  // The one make_input child owned by make_table().
         std::vector<si32> row_order{};                   // Visual row -> caller/source row.
         si32 hover_expand = -1, press_expand = -1;
 
@@ -236,16 +239,15 @@ namespace netxs::app::parvion
     // Optional left-gutter content for one row: a direction arrow + an expand indicator/button.
     enum expand_kind { xp_none, xp_muted, xp_collapsed, xp_expanded };
     struct gutterval { text arrow; ui32 arrow_fg = 0; si32 expand_id = -1; expand_kind expand = xp_none; };
-    // One cell's rendered content.
-    struct cellval { text s; ui32 fg = 0; };
-
-    // Optional single-line editor painted in place of a table cell's value. `prefix` leaves the
-    // caller-owned leading cells (for example a file/directory marker) outside the input box.
-    struct table_edit_cell
+    enum class table_cell_state { view, edit };
+    // One cell's rendered content. In edit state `s` seeds the table-owned input and `prefix`
+    // remains a non-editable part of the cell (for example a file/directory marker).
+    struct cellval
     {
-        text value;
-        si32 caret = 0; // Grapheme-cluster index.
-        si32 prefix = 0;
+        text s;
+        ui32 fg = 0;
+        table_cell_state state = table_cell_state::view;
+        text prefix;
     };
 
     // Persistent live-update target. Unlike a one-shot reveal, this target is reapplied on every
@@ -316,11 +318,9 @@ namespace netxs::app::parvion
         netxs::wptr<ui::base> window_wp;      // App window: anchor for confirm dialogs.
         std::function<qtable()>                          columns;     // Column model (rebuilt each render/hit).
         std::function<si32()>                            rows;        // Number of display rows.
-        std::function<cellval(si32 row, si32 key)>       cell;        // Cell text+fg for logical column `key`.
-        std::function<std::optional<table_edit_cell>(si32 row, si32 key)> edit_cell; // Optional in-cell text editor.
-        std::function<bool()>                            edit_active; // True while an editor is active (including off-screen).
-        std::function<void(si32 row, si32 key, si32 cell)> edit_caret;// Place its caret at a display-cell offset.
-        std::function<void()>                            edit_commit; // Commit when clicking/focusing outside the editor.
+        std::function<cellval(si32 row, si32 key)>       cell;        // Cell value/state for logical column `key`.
+        std::function<void(si32 row, si32 key, text)>    edit_submit; // Receive the table-owned editor's committed value.
+        std::function<void(si32 row, si32 key)>          edit_cancel; // Cancel the table-owned editor.
         std::function<gutterval(si32 row)>               gutter;      // Left-gutter arrow/expand (null => no gutter).
         std::function<void(si32 expand_id)>              toggle;      // Toggle a row's expansion.
         std::function<qsel_cfg()>                        selection;   // null => not selectable.
@@ -506,14 +506,6 @@ namespace netxs::app::parvion
             if (my == b.coor.y && mx >= b.coor.x && mx < b.coor.x + b.size.x) return key;
         return -1;
     }
-    inline auto q_edit_at(table_state const& st, si32 mx, si32 my) -> table_state::edit_hit const*
-    {
-        for (auto& hit : st.edit_hits)
-            if (my == hit.box.coor.y
-             && mx >= hit.box.coor.x
-             && mx < hit.box.coor.x + hit.box.size.x) return &hit;
-        return nullptr;
-    }
     inline auto q_source_row(table_state const& st, si32 visual_row) -> si32
     {
         return visual_row >= 0 && visual_row < (si32)st.row_order.size()
@@ -596,7 +588,6 @@ namespace netxs::app::parvion
         st.rubber_ctrl = faux;
         st.rubber_add = true;
         st.drag = table_state::d_none;
-        st.edit_off = 0;
     }
 
     // ---- Selection layer ---------------------------------------------------------------------------
@@ -755,51 +746,73 @@ namespace netxs::app::parvion
         q_open_table_menu(boss, cfg, at);
     }
 
-    // Paint a caller-owned single-line editor inside one visible table cell. The editor scrolls its
-    // value independently so the caret remains visible; the table keeps only the hit geometry needed
-    // to route a click back to the caller's caret model.
-    inline void q_paint_edit_cell(table_state& st, qtable const& t, si32 visible_col, si32 y,
-                                  si32 source_row, si32 key, table_edit_cell const& edit,
-                                  auto& canvas, si32 hscroll, si32 disp_w)
+    inline void q_edit_submit(table_state& st, table_cfg const& cfg)
+    {
+        if (!st.editor.active) return;
+        auto row = st.editor.row;
+        auto key = st.editor.key;
+        auto value = std::move(st.editor.value);
+        st.editor = {};
+        if (auto editor = st.editor_wp.lock()) editor->base::hidden = true;
+        if (cfg.edit_submit) cfg.edit_submit(row, key, std::move(value));
+    }
+    inline void q_edit_cancel(table_state& st, table_cfg const& cfg)
+    {
+        if (!st.editor.active) return;
+        auto row = st.editor.row;
+        auto key = st.editor.key;
+        st.editor = {};
+        if (auto editor = st.editor_wp.lock()) editor->base::hidden = true;
+        if (cfg.edit_cancel) cfg.edit_cancel(row, key);
+    }
+
+    // Activate and place the table-owned input in one visible edit-state cell.
+    inline void q_place_edit_cell(table_state& st, table_cfg const& cfg, qtable const& t,
+                                  si32 visible_col, si32 y, si32 source_row, si32 key,
+                                  cellval const& cell, auto& canvas, si32 hscroll, si32 disp_w,
+                                  ui32 row_bg)
     {
         if (visible_col < 0 || visible_col >= (si32)t.cols.size()) return;
         auto& col = t.cols[(size_t)visible_col];
         auto content_w = std::max(0, col.width - 1); // Exclude the divider.
-        auto prefix = std::clamp(edit.prefix, 0, content_w);
-        auto field_w = content_w - prefix;
-        if (field_w <= 0) return;
-
-        auto field_x = t.col_x(visible_col) + prefix;
+        auto prefix_w = std::clamp(cell_width(cell.prefix), 0, content_w);
+        if (prefix_w) qtable::paint_at(canvas, t.col_x(visible_col), prefix_w, y,
+                                       cell.prefix, cell.fg, row_bg, hscroll, disp_w);
+        auto field_w = content_w - prefix_w;
+        auto field_x = t.col_x(visible_col) + prefix_w;
         auto screen_x = field_x - hscroll;
-        auto x0 = std::max(0, screen_x);
-        auto x1 = std::min(disp_w, screen_x + field_w);
-        if (x1 <= x0) return;
+        if (field_w <= 0 || screen_x >= disp_w || screen_x + field_w <= 0) return;
 
-        auto caret = std::clamp(edit.caret, 0, cluster_count(edit.value));
-        auto ccell = caret_cell(edit.value, caret);
-        auto total = cell_width(edit.value);
-        auto off = st.edit_off;
-        if (off > ccell)             off = ccell;
-        if (ccell - off >= field_w)  off = ccell - field_w + 1;
-        off = std::clamp(off, 0, std::max(0, total - field_w + 1));
-        st.edit_off = off;
-
-        auto box = rect{{ x0, y }, { x1 - x0, 1 }};
-        canvas.fill(box, [&](cell& c)
+        if (st.editor.active && (st.editor.row != source_row || st.editor.key != key))
+            q_edit_cancel(st, cfg);
+        if (!st.editor.active)
         {
-            c.bgc(theme::surface).und(unln::line).unc(argb{ ui32{ theme::sel_bg_act } });
-        });
-
-        auto left_cut = std::max(0, -screen_x);
-        auto text_off = off + left_cut;
-        auto shown = view{ edit.value }.substr(byte_at_cell(edit.value, text_off));
-        put_str(canvas, x0, y, shown, theme::sel_bg_act, theme::surface, x1 - x0);
-
-        auto caret_x = screen_x + ccell - off;
-        if (caret_x >= x0 && caret_x < x1)
-            canvas.fill(rect{{ caret_x, y }, { 1, 1 }}, [&](cell& c){ c.bgc(theme::sel_bg_act).fgc(theme::surface); });
-
-        st.edit_hits.push_back({ box, source_row, key, text_off });
+            st.editor.active = true;
+            st.editor.focus_pending = true;
+            st.editor.row = source_row;
+            st.editor.key = key;
+            st.editor.value = cell.s;
+        }
+        st.editor.seen = true;
+        // Keep the child aligned to the complete cell and let the table layer clip it. Rebasing
+        // a partially visible editor would display the wrong slice of its value and caret.
+        st.editor.box = rect{{ screen_x, y }, { field_w, 1 }};
+        if (auto editor = st.editor_wp.lock())
+        {
+            editor->base::hidden = false;
+            editor->base::extend(st.editor.box);
+            editor->base::deface();
+            if (st.editor.focus_pending)
+            {
+                st.editor.focus_pending = faux;
+                auto gear_id = editor->bell::indexer.luafx.get_gear().id;
+                auto editor_wp = st.editor_wp;
+                editor->base::enqueue([editor_wp, gear_id](auto&)
+                {
+                    if (auto input = editor_wp.lock()) pro::focus::set(input, gear_id, solo::on);
+                });
+            }
+        }
     }
 
     // ---- Render ------------------------------------------------------------------------------------
@@ -811,7 +824,8 @@ namespace netxs::app::parvion
         canvas.fill(rect{{ 0, 0 }, { w, h }}, [&](cell& c){ c.bgc(pal.bg).fgc(pal.text_fg); });
         st.row_hit.clear();
         st.expand_hit.clear();
-        st.edit_hits.clear();
+        st.editor.seen = faux;
+        if (auto editor = st.editor_wp.lock()) editor->base::hidden = true;
 
         auto revision_row = si32{ -1 };
         if (cfg.revision)
@@ -898,10 +912,10 @@ namespace netxs::app::parvion
                 {
                     auto col_key = t.cols[(size_t)vc].key;
                     auto cv = cfg.cell(source_row, col_key);
-                    if (!cv.s.empty()) t.paint_cell(canvas, vc, y, cv.s, cv.fg, row_bg, hs, clipw);
-                    if (cfg.edit_cell)
-                        if (auto edit = cfg.edit_cell(source_row, col_key))
-                            q_paint_edit_cell(st, t, vc, y, source_row, col_key, *edit, canvas, hs, clipw);
+                    if (cv.state == table_cell_state::edit)
+                        q_place_edit_cell(st, cfg, t, vc, y, source_row, col_key, cv,
+                                          canvas, hs, clipw, row_bg);
+                    else if (!cv.s.empty()) t.paint_cell(canvas, vc, y, cv.s, cv.fg, row_bg, hs, clipw);
                 }
                 if (key >= 0) st.row_hit.emplace_back(rect{{ 0, y }, { cfg.wide_hit ? std::max(0, st.disp_w) : q_row_w(st), 1 }}, key);
             }
@@ -914,28 +928,57 @@ namespace netxs::app::parvion
         t.paint_header_menu(canvas, st.body_top - 1, clipw,
                             st.hover_header_menu, st.press_header_menu,
                             (bool)cfg.menu, pal);
+        // If the caller withdrew edit state (data refresh/cancel) or displaced the target,
+        // discard the private draft. User-driven displacement commits before the action.
+        if (st.editor.active && !st.editor.seen) q_edit_cancel(st, cfg);
     }
 
     // ---- Widget ------------------------------------------------------------------------------------
     inline auto make_table(table_cfg cfg) -> ui::sptr
     {
-        auto form = ui::mock::ctor()->active()
+        auto state = std::make_shared<table_state>();
+        auto config = std::make_shared<table_cfg>(std::move(cfg));
+        state->live_follow = !!config->follow;
+
+        // A layered root keeps the editor as a permanent child of the table. The back layer paints
+        // the table first; the one internal input is then rendered over its active cell.
+        auto form = ui::cake::ctor()->active()
             ->plugin<pro::mouse>()
-            ->plugin<pro::focus>(cfg.focus_on_start ? pro::focus::mode::focused : pro::focus::mode::focusable)
+            ->plugin<pro::focus>(config->focus_on_start ? pro::focus::mode::focused : pro::focus::mode::focusable)
             ->plugin<pro::keybd>()->plugin<pro::timer>();
-        form->invoke([&, cfgv = std::move(cfg)](auto& boss)
-        {
-            auto& st  = boss.base::field(table_state{});
-            auto& cfg = boss.base::field(table_cfg{ cfgv });
-            st.live_follow = !!cfgv.follow;
-            boss.LISTEN(tier::release, e2::render::any, parent_canvas)
+        auto painter = form->attach(ui::mock::ctor());
+        auto editor = form->attach(make_input({
+            .value = [state]{ return state->editor.value; },
+            .set_value = [state](text value){ state->editor.value = std::move(value); },
+            .mode = [state]{ return state->editor.active ? input_mode::edit : input_mode::disabled; },
+            .submit = [state, config](text value)
             {
-                table_render(st, cfg, parent_canvas, boss.base::size());
+                if (!state->editor.active) return;
+                state->editor.value = std::move(value);
+                q_edit_submit(*state, *config);
+            },
+            .cancel = [state, config]{ q_edit_cancel(*state, *config); },
+            .blur = input_blur::submit,
+            .palette = { .bg = theme::surface, .text_fg = theme::text_fg,
+                         .muted_fg = theme::subtext, .active = theme::sel_bg_act },
+        }));
+        editor->base::hidden = true;
+        state->editor_wp = ptr::shadow(editor);
+        painter->invoke([state, config](auto& boss)
+        {
+            boss.LISTEN(tier::release, e2::render::any, parent_canvas, -, (state, config))
+            {
+                table_render(*state, *config, parent_canvas, boss.base::size());
             };
+        });
+        form->invoke([state, config](auto& boss)
+        {
+            auto& st  = *state;
+            auto& cfg = *config;
             boss.LISTEN(tier::release, e2::form::state::focus::count, count)
             {
                 st.focused = !!count;
-                if (!count && cfg.edit_active && cfg.edit_active() && cfg.edit_commit) cfg.edit_commit();
+                if (!count) q_edit_submit(st, cfg);
                 boss.base::deface();
             };
             auto arm_autoscroll = [&boss, &st, &cfg]
@@ -956,40 +999,28 @@ namespace netxs::app::parvion
             {
                 pro::focus::set(boss.This(), gear.id, solo::on);
                 auto mx = (si32)gear.coord.x, my = (si32)gear.coord.y;
-                if (auto hit = q_edit_at(st, mx, my))
-                {
-                    if (cfg.edit_caret) cfg.edit_caret(hit->source_row, hit->key,
-                                                       hit->text_off + mx - hit->box.coor.x);
-                    boss.base::deface();
-                    gear.dismiss();
-                    return;
-                }
-                auto commit_edit = [&]
-                {
-                    if (cfg.edit_active && cfg.edit_active() && cfg.edit_commit) cfg.edit_commit();
-                };
                 if (cfg.selection) q_sel_snapshot(st, cfg.selection());
                 auto tbl = cfg.columns();
                 if (q_header_menu_hit(st, (bool)cfg.menu, mx, my))
                 {
                     if (!st.press_header_menu) { st.press_header_menu = true; boss.base::deface(); }
-                    commit_edit();
+                    q_edit_submit(st, cfg);
                     gear.dismiss();
                     return;
                 }
-                if (auto sb = tbl_vsb(st); sb.ok && mx == sb.x && my >= sb.top && my < sb.top + sb.track_h) { commit_edit(); return; }
-                if (auto sb = tbl_hsb(st); sb.ok && my == sb.top && mx >= sb.x && mx < sb.x + sb.track_h) { commit_edit(); return; }
+                if (auto sb = tbl_vsb(st); sb.ok && mx == sb.x && my >= sb.top && my < sb.top + sb.track_h) { q_edit_submit(st, cfg); return; }
+                if (auto sb = tbl_hsb(st); sb.ok && my == sb.top && mx >= sb.x && mx < sb.x + sb.track_h) { q_edit_submit(st, cfg); return; }
                 for (auto& [b, id] : st.expand_hit)
                     if (my == b.coor.y && mx >= b.coor.x && mx < b.coor.x + b.size.x)
-                    { if (st.press_expand != id) { st.press_expand = id; boss.base::deface(); } commit_edit(); return; }
+                    { if (st.press_expand != id) { st.press_expand = id; boss.base::deface(); } q_edit_submit(st, cfg); return; }
                 if (my >= st.body_top - 1 && my < st.div_bottom)
-                    if (q_border_hit(cfg.columns(), mx, st.hscroll) >= 0) { commit_edit(); return; }
+                    if (q_border_hit(cfg.columns(), mx, st.hscroll) >= 0) { q_edit_submit(st, cfg); return; }
                 if (my == st.body_top - 1 && cfg.compare)
                 {
                     auto v = q_header_hit(tbl, mx, st.hscroll);
                     auto key = v >= 0 ? tbl.cols[(size_t)v].key : -1;
                     if (st.press_header != key) { st.press_header = key; boss.base::deface(); }
-                    commit_edit();
+                    q_edit_submit(st, cfg);
                     gear.dismiss();
                     return;
                 }
@@ -998,10 +1029,10 @@ namespace netxs::app::parvion
                     auto ctl = !!(gear.ctlstat & hids::anyCtrl), shft = !!(gear.ctlstat & hids::anyShift);
                     auto s = q_ordered_sel(st, cfg.selection());
                     auto hit = q_row_at(st, mx, my);
-                    if (hit >= 0) { q_sel_press(st, s, hit, ctl, shft); commit_edit(); boss.base::deface(); gear.dismiss(); return; }
-                    if (!ctl && my >= st.body_top && my < st.tab_row && q_sel_clear_blank(st, s)) { commit_edit(); boss.base::deface(); gear.dismiss(); return; }
+                    if (hit >= 0) { q_sel_press(st, s, hit, ctl, shft); q_edit_submit(st, cfg); boss.base::deface(); gear.dismiss(); return; }
+                    if (!ctl && my >= st.body_top && my < st.tab_row && q_sel_clear_blank(st, s)) { q_edit_submit(st, cfg); boss.base::deface(); gear.dismiss(); return; }
                 }
-                commit_edit();
+                q_edit_submit(st, cfg);
                 boss.base::deface(); gear.dismiss();
             });
             boss.on(tier::mouserelease, input::key::LeftUp, [&](hids&)
@@ -1074,9 +1105,9 @@ namespace netxs::app::parvion
             boss.on(tier::mouserelease, input::key::RightClick, [&](hids& gear)
             {
                 pro::focus::set(boss.This(), gear.id, solo::on);
-                if (cfg.edit_active && cfg.edit_active() && cfg.edit_commit)
+                if (st.editor.active)
                 {
-                    cfg.edit_commit();
+                    q_edit_submit(st, cfg);
                     boss.base::deface();
                     gear.dismiss();
                     return;
@@ -1136,6 +1167,7 @@ namespace netxs::app::parvion
             });
             boss.on(tier::mouserelease, input::key::MouseWheel, [&](hids& gear)
             {
+                q_edit_submit(st, cfg);
                 if (gear.hzwhl || st.hsb_hover) { auto maxh = std::max(0, st.content_w - st.disp_w); st.hscroll = std::clamp(st.hscroll - gear.whlsi * 4, 0, maxh); }
                 else { auto maxv = std::max(0, st.total - st.body_rows); st.scroll = std::clamp(st.scroll - gear.whlsi, 0, maxv); st.live_follow = q_at_follow_target(st, cfg); }
                 boss.base::deface();
@@ -1245,6 +1277,8 @@ namespace netxs::app::parvion
             boss.LISTEN(tier::preview, input::events::keybd::any, gear)
             {
                 if (!st.focused) return;
+                // The permanent child input owns every key while a cell is in edit state.
+                if (st.editor.active) return;
                 if (gear.payload == input::keybd::type::keypaste)
                 {
                     if (gear.keybd::handled || !cfg.on_key) return;
@@ -1260,16 +1294,6 @@ namespace netxs::app::parvion
                 if (gear.keystat == input::key::released || gear.keystat == input::key::interrupted) return;
                 if (gear.keybd::handled) return;
                 auto k = gear.keybd::generic();
-                if (cfg.edit_active && cfg.edit_active() && cfg.on_key)
-                {
-                    auto action = cfg.on_key(gear, ptr::shadow(boss.This()));
-                    if (action.mode != table_viewport_action::unhandled)
-                    {
-                        gear.set_handled();
-                        boss.base::deface();
-                    }
-                    return;
-                }
                 if (k == input::key::KeyDelete
                  && cfg.deletion.enabled
                  && cfg.selection)

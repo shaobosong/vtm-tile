@@ -328,7 +328,7 @@ if(Python3_FOUND)
     add_test(NAME parvion_settings_test
              COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test_parvion_settings.py")
     set_tests_properties(parvion_settings_test PROPERTIES
-        ENVIRONMENT "VTM_TILE_BINARY=$<TARGET_FILE:vtm-tile>"
+        ENVIRONMENT "VTM_TILE_BINARY=$<TARGET_FILE:vtm-tile>;PUTTYRANDOMSEED=${CMAKE_CURRENT_BINARY_DIR}/parvion-settings-randomseed"
         TIMEOUT 300
         LABELS "tui;tile;parvion;settings")
 endif()
