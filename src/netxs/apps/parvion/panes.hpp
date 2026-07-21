@@ -777,7 +777,11 @@ namespace netxs::app::parvion
             row.action = [panel_wp, fn](hids&){ if (auto p = panel_wp.lock()) { fn(); p->base::deface(); } };
             items.push_back(std::move(row));
         };
-        add(st.remote ? text{ "Down&load" } : text{ "Up&load" }, !selected, [&st]{ pane_transfer_selection(st); });
+        // A file picker reuses the local pane, but has no transfer/hash controller: its context
+        // menu should contain only file-management and pane-wide actions.
+        auto picker = !!st.on_pick;
+        if (!picker)
+            add(st.remote ? text{ "Down&load" } : text{ "Up&load" }, !selected, [&st]{ pane_transfer_selection(st); });
         add("&Delete", !selected, [&st, panel_wp]{ pane_confirm_delete_selection(st, panel_wp); });
         add("&Rename", !selected, [&st, panel_wp]
         {
@@ -803,6 +807,7 @@ namespace netxs::app::parvion
         // enqueues a hash task for every selected file; remote files stream-and-hash while
         // downloading (no local copy), local files are read directly. The row remains visible but is
         // disabled unless the selection contains a regular file.
+        if (!picker)
         {
             auto& its = st.cur_items();
             auto has_file = faux;

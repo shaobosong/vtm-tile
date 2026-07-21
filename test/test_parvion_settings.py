@@ -643,6 +643,31 @@ def _session_home(cfgdir, home):
                                               "XDG_CONFIG_HOME": cfgdir, "HOME": home})
 
 
+def test_add_key_picker_context_menu_omits_transfer_actions():
+    print("TEST: Add key file context menu omits Upload and Calculate Checksum ... ", end="", flush=True)
+    cfg = tempfile.mkdtemp(prefix="pvset_")
+    keydir = tempfile.mkdtemp(prefix="pvkey_")
+    with open(os.path.join(keydir, "picker_key.pem"), "w") as f:
+        f.write("test key\n")
+    with _session_home(cfg, keydir) as s:
+        _open_dialog(s)
+        _goto_sftp(s)
+        add = T.find_text(s.screen()[0], "Add key file")
+        s.click(add[1] + 1, add[0] + 1); s.feed(1.0)
+        key = T.find_text(s.screen()[0], "picker_key.pem")
+        if not key:
+            print("FAIL - picker file not listed"); return False
+        s.click(key[1] + 2, key[0] + 1, button=2)
+        chars = s.screen()[0]
+        if not all(T.grid_contains(chars, label) for label in ("Delete", "Refresh", "Create Folder")):
+            print("FAIL - file-picker context menu did not open"); return False
+        leaked = [label for label in ("Upload", "Calculate Checksum")
+                  if T.grid_contains(chars, label)]
+        if leaked:
+            print(f"FAIL - picker menu includes {leaked}"); return False
+    print("PASS"); return True
+
+
 def _pick_key(s, name):
     # In the open "Add key file" picker (rooted at HOME), activate the file `name`.
     chars = s.screen()[0]
@@ -889,6 +914,7 @@ TESTS = [
     test_picker_buttons_right_aligned,
     test_esc_closes_dialog_on_open,
     test_esc_closes_key_picker,
+    test_add_key_picker_context_menu_omits_transfer_actions,
     test_compression_persists,
     test_unit_dropdown_selects_and_persists,
     test_add_key_pubkey_parse_and_persist,
