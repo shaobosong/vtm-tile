@@ -641,13 +641,15 @@ def test_upload_success_clears_state_row():
 
 
 def test_remote_create_and_inline_rename():
-    """The writable SFTP pane creates a unique default, enters inline Rename after refresh,
-    commits the new name, and refuses a duplicate without letting server rename overwrite it."""
-    print("TEST: parvion remote pane - Create Folder / inline Rename ... ", end="", flush=True)
+    """The writable SFTP pane creates folders and empty documents through New, enters inline
+    Rename after refresh, and refuses a duplicate without letting server rename overwrite it."""
+    print("TEST: parvion remote pane - New Document / Folder / inline Rename ... ", end="", flush=True)
     sroot = tempfile.mkdtemp(prefix="parvionsrv_remote_name_")
     d = tempfile.mkdtemp(prefix="parvionremote_name_")
     os.mkdir(os.path.join(sroot, "New folder"))
     os.mkdir(os.path.join(sroot, "taken"))
+    with open(os.path.join(sroot, "New document"), "wb") as f:
+        f.write(b"keep remote contents")
     srv = LocalSftpServer(sroot)
     try:
         with T.ParvionSession(d, env=ENV) as s:
@@ -659,11 +661,9 @@ def test_remote_create_and_inline_rename():
                 print("FAIL - remote parent row not found")
                 return False
             s.click(T.COLS - 5, parent[0] + 2, button=2)
-            create = T.find_text(s.screen()[0], "Create Folder")
-            if create is None:
-                print("FAIL - remote Create Folder menu item not found")
+            if not T.click_new_action(s, "Folder"):
+                print("FAIL - remote New -> Folder menu item not found")
                 return False
-            s.click(create[1] + 1, create[0] + 1)
             if not wait_in_pane(s, "New folder (2)", remote=True, timeout=10.0):
                 print("FAIL - remote default was not created/refreshed")
                 return False
@@ -678,6 +678,34 @@ def test_remote_create_and_inline_rename():
                 return False
             if not os.path.isdir(os.path.join(sroot, "remote_named")):
                 print("FAIL - remote directory was not renamed on the server")
+                return False
+
+            renamed = find_in_pane(s.screen()[0], "remote_named", remote=True)
+            s.click(T.COLS - 5, renamed[0] + 1, button=2)
+            if not T.click_new_action(s, "Document"):
+                print("FAIL - remote New -> Document menu item not found")
+                return False
+            if not wait_in_pane(s, "New document (2)", remote=True, timeout=10.0):
+                print("FAIL - remote default document was not created/refreshed")
+                return False
+            default_doc = os.path.join(sroot, "New document (2)")
+            if not os.path.isfile(default_doc) or os.path.getsize(default_doc) != 0:
+                print("FAIL - generated remote document is missing or nonempty")
+                return False
+            with open(os.path.join(sroot, "New document"), "rb") as f:
+                original = f.read()
+            if original != b"keep remote contents":
+                print("FAIL - existing remote document was overwritten")
+                return False
+            s.write("\x7f" * len("New document (2)"))
+            s.write("remote_note.txt")
+            s.write("\r")
+            if not wait_in_pane(s, "remote_note.txt", remote=True, timeout=10.0):
+                print("FAIL - renamed remote document was not refreshed")
+                return False
+            remote_note = os.path.join(sroot, "remote_note.txt")
+            if not os.path.isfile(remote_note) or os.path.getsize(remote_note) != 0:
+                print("FAIL - remote document rename did not retain the empty file")
                 return False
 
             renamed = find_in_pane(s.screen()[0], "remote_named", remote=True)

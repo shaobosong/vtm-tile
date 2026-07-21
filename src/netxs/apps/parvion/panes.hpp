@@ -18,6 +18,8 @@
 #include "button.hpp"
 #include "table.hpp"
 
+#include <cerrno>
+#include <cstdio>
 #include <functional>
 #include <set>
 
@@ -88,7 +90,7 @@ namespace netxs::app::parvion
         ui64                  revision = 0;    // Navigation generation consumed by table_cfg::revision.
         si32                  revision_row = -1; // One-shot source row revealed after a revision change.
         text                  seen_path;       // Remote path associated with seen_gen (same-path refresh preserves viewport).
-        text                  create_pending; // Remote mkdir target; successful refresh selects it and starts Rename.
+        text                  create_pending; // Remote-created item; successful refresh selects it and starts Rename.
         text                  rename_pending; // Remote rename target, selected after its successful refreshed listing.
         bool                  delete_pending = faux; // Next same-directory refresh settles selection beside deleted rows.
         si32                  delete_anchor = 0;     // First deleted logical row; replacement selection keeps this position.
@@ -591,15 +593,23 @@ namespace netxs::app::parvion
         pane_select_named_item(st, newname);
         return true;
     }
-    inline auto pane_default_dir_name(pane_state const& st) -> text
+    inline auto pane_default_name(pane_state const& st, view base) -> text
     {
-        auto name = text{ "New folder" };
+        auto name = text{ base };
         if (!pane_name_duplicate(st, name)) return name;
         for (auto n = si32{ 2 };; ++n)
         {
-            name = "New folder (" + std::to_string(n) + ")";
+            name = text{ base } + " (" + std::to_string(n) + ")";
             if (!pane_name_duplicate(st, name)) return name;
         }
+    }
+    inline auto pane_default_dir_name(pane_state const& st) -> text
+    {
+        return pane_default_name(st, "New folder");
+    }
+    inline auto pane_default_document_name(pane_state const& st) -> text
+    {
+        return pane_default_name(st, "New document");
     }
     inline void pane_create_dir(pane_state& st)
     {
@@ -630,6 +640,40 @@ namespace netxs::app::parvion
             return;
         }
         pane_log_nav_error(st, "Create directory failed: could not choose an unused name");
+    }
+    inline void pane_create_document(pane_state& st)
+    {
+        auto name = pane_default_document_name(st);
+        if (st.remote)
+        {
+            if (st.remote->remote_touch(name)) st.create_pending = name;
+            else pane_log_nav_error(st, "Create document failed: the remote filesystem is busy or unavailable");
+            return;
+        }
+        for (auto attempt = si32{}; attempt < 64; ++attempt)
+        {
+            auto full = child_path(st.path, name, true);
+            errno = 0;
+            auto file = std::fopen(full.c_str(), "wbx"); // C11 exclusive-create: never truncate a racing entry.
+            if (file)
+            {
+                auto closed = std::fclose(file);
+                pane_refresh(st);
+                if (pane_select_named_item(st, name)) pane_name_begin(st, st.sel);
+                if (closed) pane_log_nav_error(st, "Create document failed: could not close the new file");
+                return;
+            }
+            auto ec = std::error_code{ errno, std::generic_category() };
+            if (ec == std::errc::file_exists)
+            {
+                pane_refresh(st); // A racing creator took the candidate; choose the next free name.
+                name = pane_default_document_name(st);
+                continue;
+            }
+            pane_log_nav_error(st, "Create document failed: " + ec.message());
+            return;
+        }
+        pane_log_nav_error(st, "Create document failed: could not choose an unused name");
     }
     inline void pane_delete_selection(pane_state& st) // Deletes every marked real item (skips ".."), folders included.
     {
@@ -828,11 +872,26 @@ namespace netxs::app::parvion
 
         items.push_back(m::item{ .alive = true, .type = m::kind::separator });
         add("R&efresh", faux, [&st]{ pane_reload_reset_view(st); });
-        add("Create &Folder", faux, [&st, panel_wp]
         {
-            pane_create_dir(st);
-            if (auto p = panel_wp.lock()) pro::focus::set(p, id_t{}, solo::on);
-        });
+            auto sub = m::item{ .alive = true, .label = "&New", .type = m::kind::dropdown };
+            auto add_new = [&](text label, auto fn)
+            {
+                auto row = m::item{ .alive = true, .label = std::move(label) };
+                row.action = [panel_wp, fn](hids&)
+                {
+                    if (auto p = panel_wp.lock())
+                    {
+                        fn();
+                        pro::focus::set(p, id_t{}, solo::on);
+                        p->base::deface();
+                    }
+                };
+                sub.children.push_back(std::move(row));
+            };
+            add_new("&Document", [&st]{ pane_create_document(st); });
+            add_new("&Folder",   [&st]{ pane_create_dir(st); });
+            items.push_back(std::move(sub));
+        }
         return items;
     }
 

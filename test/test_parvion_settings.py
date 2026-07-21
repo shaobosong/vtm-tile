@@ -659,12 +659,18 @@ def test_add_key_picker_context_menu_omits_transfer_actions():
             print("FAIL - picker file not listed"); return False
         s.click(key[1] + 2, key[0] + 1, button=2)
         chars = s.screen()[0]
-        if not all(T.grid_contains(chars, label) for label in ("Delete", "Refresh", "Create Folder")):
+        if not all(T.grid_contains(chars, label) for label in ("Delete", "Refresh", "New")):
             print("FAIL - file-picker context menu did not open"); return False
+        if T.grid_contains(chars, "Create Folder"):
+            print("FAIL - file-picker menu still has top-level Create Folder"); return False
         leaked = [label for label in ("Upload", "Calculate Checksum")
                   if T.grid_contains(chars, label)]
         if leaked:
             print(f"FAIL - picker menu includes {leaked}"); return False
+        new = T.find_rightmost_text(chars, "New")
+        s.click(new[1] + 1, new[0] + 1)
+        if not all(T.grid_contains(s.screen()[0], label) for label in ("Document", "Folder")):
+            print("FAIL - file-picker New submenu is incomplete"); return False
     print("PASS"); return True
 
 

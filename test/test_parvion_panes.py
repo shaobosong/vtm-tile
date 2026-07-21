@@ -6,7 +6,7 @@
 End-to-end TUI tests for the Parvion local file-preview pane operations:
   - clicking the blank area (right of / below the columns) never selects an item;
   - unified right-click context menus with disabled item actions on blank space;
-  - Create Folder, Delete and Rename act on the real local filesystem.
+  - New Document / Folder, Delete and Rename act on the real local filesystem.
 
 The app is launched as `vtm-tile -r parvion` with the child's cwd set to a fresh temp directory, so the
 local pane lists a known, controlled set of files and the filesystem effects can be asserted on disk.
@@ -282,6 +282,29 @@ def menu_items_are_ordered(chars, labels):
     return all(positions) and all(a[0] < b[0] for a, b in zip(positions, positions[1:]))
 
 
+def find_rightmost_text(chars, needle):
+    matches = []
+    for r in range(ROWS):
+        line = row_text(chars, r)
+        c = line.find(needle)
+        if c >= 0:
+            matches.append((r, c))
+    return max(matches, key=lambda p: p[1]) if matches else None
+
+
+def click_new_action(session, label):
+    """The file listing may itself contain a 'New ...' row; choose the rightmost popup match."""
+    new = find_rightmost_text(session.screen()[0], "New")
+    if new is None:
+        return False
+    session.click(new[1] + 1, new[0] + 1)
+    leaf = find_rightmost_text(session.screen()[0], label)
+    if leaf is None:
+        return False
+    session.click(leaf[1] + 1, leaf[0] + 1)
+    return True
+
+
 def find_text_on_row(chars, needle, row):
     c = row_text(chars, row).find(needle)
     return (row, c) if c >= 0 else None
@@ -491,7 +514,7 @@ def test_blank_context_menu():
             s.click(5, dd[0] + 7, button=2)  # Right-click a blank row below the list.
             chars = s.screen()[0]
             labels = ("Upload", "Delete", "Rename", "Copy",
-                      "Calculate Checksum", "Refresh", "Create Folder")
+                      "Calculate Checksum", "Refresh", "New")
             missing = [w for w in labels
                        if not grid_contains(chars, w)]
             if missing:
@@ -503,10 +526,18 @@ def test_blank_context_menu():
             if not menu_has_separator_between(chars, "Calculate Checksum", "Refresh"):
                 print("FAIL - item and pane-wide actions are not separated")
                 return False
+            if grid_contains(chars, "Create Folder"):
+                print("FAIL - obsolete top-level Create Folder item is still shown")
+                return False
             copy = find_text(chars, "Copy")
             s.click(copy[1] + 1, copy[0] + 1)
             if not grid_contains(s.screen()[0], "Refresh"):
                 print("FAIL - disabled Copy submenu dismissed the blank menu")
+                return False
+            new = find_rightmost_text(chars, "New")
+            s.click(new[1] + 1, new[0] + 1)
+            if not all(grid_contains(s.screen()[0], leaf) for leaf in ("Document", "Folder")):
+                print("FAIL - New submenu is missing Document or Folder")
                 return False
             print("PASS")
             return True
@@ -527,7 +558,7 @@ def test_item_context_menu():
             s.click(pos[1] + 1, pos[0] + 1, button=2)
             chars = s.screen()[0]
             labels = ("Upload", "Delete", "Rename", "Copy",
-                      "Calculate Checksum", "Refresh", "Create Folder")
+                      "Calculate Checksum", "Refresh", "New")
             missing = [w for w in labels
                        if not grid_contains(chars, w)]
             if missing:
@@ -538,6 +569,9 @@ def test_item_context_menu():
                 return False
             if not menu_has_separator_between(chars, "Calculate Checksum", "Refresh"):
                 print("FAIL - item and pane-wide actions are not separated")
+                return False
+            if grid_contains(chars, "Create Folder"):
+                print("FAIL - obsolete top-level Create Folder item is still shown")
                 return False
             print("PASS")
             return True
@@ -617,18 +651,16 @@ def test_copy_name_and_full_path():
 
 
 def test_create_directory():
-    """Blank menu -> Create Folder -> type a name -> Enter creates the directory on disk."""
-    print("TEST: parvion pane - Create Folder ... ", end="", flush=True)
+    """Blank menu -> New -> Folder -> type a name -> Enter creates the directory on disk."""
+    print("TEST: parvion pane - New Folder ... ", end="", flush=True)
     d = make_tree()
     try:
         with ParvionSession(d) as s:
             dd = find_text(s.screen()[0], "/..")
             s.click(5, dd[0] + 7, button=2)         # Right-click blank -> blank menu.
-            cd = find_text(s.screen()[0], "Create Folder")
-            if cd is None:
-                print("FAIL - 'Create Folder' not in menu")
+            if not click_new_action(s, "Folder"):
+                print("FAIL - New -> Folder not in menu")
                 return False
-            s.click(cd[1] + 1, cd[0] + 1, button=0)  # Click it -> input mode.
             if not os.path.isdir(os.path.join(d, "New folder")):
                 print("FAIL - default directory was not created before rename")
                 return False
@@ -655,7 +687,7 @@ def test_create_directory():
 
 def test_create_directory_reveals_new_row():
     """A successful create scrolls a long listing to the selected new directory."""
-    print("TEST: parvion pane - Create Folder reveals new row ... ", end="", flush=True)
+    print("TEST: parvion pane - New Folder reveals new row ... ", end="", flush=True)
     d = tempfile.mkdtemp(prefix="parvionpane_create_view_")
     try:
         for i in range(48):
@@ -666,11 +698,9 @@ def test_create_directory_reveals_new_row():
                 print("FAIL - parent row not found")
                 return False
             s.click(54, parent[0] + 2, button=2)
-            cd = find_text(s.screen()[0], "Create Folder")
-            if cd is None:
-                print("FAIL - Create Folder menu item not found")
+            if not click_new_action(s, "Folder"):
+                print("FAIL - New -> Folder menu item not found")
                 return False
-            s.click(cd[1] + 1, cd[0] + 1)
             s.write("\x7f" * len("New folder"))
             s.write("zz_new_directory")
             s.write("\r", settle=0.8)
@@ -694,7 +724,7 @@ def test_create_directory_reveals_new_row():
 
 def test_create_directory_preserves_visible_viewport():
     """Creating a directory that sorts into the current page selects it without moving the viewport."""
-    print("TEST: parvion pane - Create Folder preserves visible viewport ... ", end="", flush=True)
+    print("TEST: parvion pane - New Folder preserves visible viewport ... ", end="", flush=True)
     d = tempfile.mkdtemp(prefix="parvionpane_create_keep_view_")
     try:
         for i in range(48):
@@ -718,11 +748,9 @@ def test_create_directory_preserves_visible_viewport():
                 return False
             newname = f"dir_{target:02d}a"
             s.click(54, anchor[0] + 1, button=2)
-            cd = find_text(s.screen()[0], "Create Folder")
-            if cd is None:
-                print("FAIL - Create Folder menu item not found")
+            if not click_new_action(s, "Folder"):
+                print("FAIL - New -> Folder menu item not found")
                 return False
-            s.click(cd[1] + 1, cd[0] + 1)
             s.write("\x7f" * len("New folder"))
             s.write(newname)
             s.write("\r", settle=0.8)
@@ -752,7 +780,7 @@ def test_create_directory_preserves_visible_viewport():
 
 def test_create_directory_unique_default_and_cancel():
     """Create happens immediately, skips occupied defaults, and Esc keeps the generated directory."""
-    print("TEST: parvion pane - Create Folder unique default / cancel ... ", end="", flush=True)
+    print("TEST: parvion pane - New Folder unique default / cancel ... ", end="", flush=True)
     d = make_tree()
     try:
         os.mkdir(os.path.join(d, "New folder"))
@@ -760,11 +788,9 @@ def test_create_directory_unique_default_and_cancel():
         with ParvionSession(d) as s:
             parent = find_text(s.screen()[0], "/..")
             s.click(54, parent[0] + 2, button=2)
-            cd = find_text(s.screen()[0], "Create Folder")
-            if cd is None:
-                print("FAIL - Create Folder menu item not found")
+            if not click_new_action(s, "Folder"):
+                print("FAIL - New -> Folder menu item not found")
                 return False
-            s.click(cd[1] + 1, cd[0] + 1)
             default = os.path.join(d, "New folder (3)")
             if not os.path.isdir(default):
                 print("FAIL - numbered default was not created immediately")
@@ -790,14 +816,15 @@ def test_create_directory_unique_default_and_cancel():
 
 def test_create_directory_invalid_rename_keeps_default():
     """An invalid follow-up rename closes the editor and leaves the already-created default intact."""
-    print("TEST: parvion pane - Create Folder invalid rename reverts ... ", end="", flush=True)
+    print("TEST: parvion pane - New Folder invalid rename reverts ... ", end="", flush=True)
     d = make_tree()
     try:
         with ParvionSession(d) as s:
             parent = find_text(s.screen()[0], "/..")
             s.click(54, parent[0] + 2, button=2)
-            cd = find_text(s.screen()[0], "Create Folder")
-            s.click(cd[1] + 1, cd[0] + 1)
+            if not click_new_action(s, "Folder"):
+                print("FAIL - New -> Folder menu item not found")
+                return False
             s.write("\x7f" * len("New folder"))
             s.write("bad/name")
             s.write("\r")
@@ -814,6 +841,60 @@ def test_create_directory_invalid_rename_keeps_default():
             s.click(log[1] + 1, log[0] + 1)
             if not grid_contains(s.screen()[0], "Error: Rename failed"):
                 print("FAIL - invalid rename was not logged")
+                return False
+            print("PASS")
+            return True
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_create_document_unique_default_and_rename():
+    """New -> Document creates an exclusive empty file, supports Esc, and enters inline Rename."""
+    print("TEST: parvion pane - New Document unique default / rename ... ", end="", flush=True)
+    d = make_tree()
+    try:
+        for name, contents in (("New document", b"keep"), ("New document (2)", b"keep too")):
+            with open(os.path.join(d, name), "wb") as f:
+                f.write(contents)
+        with ParvionSession(d) as s:
+            parent = find_text(s.screen()[0], "/..")
+            s.click(54, parent[0] + 2, button=2)
+            s.write("n")
+            if not all(grid_contains(s.screen()[0], leaf) for leaf in ("Document", "Folder")):
+                print("FAIL - New mnemonic did not open the submenu")
+                return False
+            s.write("d")
+            default = os.path.join(d, "New document (3)")
+            if not os.path.isfile(default) or os.path.getsize(default) != 0:
+                print("FAIL - unique zero-byte default document was not created")
+                return False
+            with open(os.path.join(d, "New document"), "rb") as f:
+                original = f.read()
+            if original != b"keep":
+                print("FAIL - existing document was overwritten")
+                return False
+            s.write("\x1b")
+            if not os.path.isfile(default) or not grid_contains(s.screen()[0], "New document (3)"):
+                print("FAIL - Esc removed or hid the generated document")
+                return False
+
+            anchor = find_text(s.screen()[0], "alpha.txt")
+            s.click(anchor[1] + 1, anchor[0] + 1, button=2)
+            if not click_new_action(s, "Document"):
+                print("FAIL - New -> Document menu item not found")
+                return False
+            s.write("\x7f" * len("New document (4)"))
+            s.write("notes.txt")
+            s.write("\r")
+            target = os.path.join(d, "notes.txt")
+            if not os.path.isfile(target) or os.path.getsize(target) != 0:
+                print("FAIL - document rename did not retain the empty file")
+                return False
+            chars, bg = s.screen()
+            created = find_text(chars, "notes.txt")
+            other = find_text(chars, "alpha.txt")
+            if created is None or other is None or bg[created[0]][created[1]] == bg[other[0]][other[1]]:
+                print("FAIL - renamed document is not selected")
                 return False
             print("PASS")
             return True
@@ -1826,6 +1907,7 @@ TESTS = [
     test_create_directory_preserves_visible_viewport,
     test_create_directory_unique_default_and_cancel,
     test_create_directory_invalid_rename_keeps_default,
+    test_create_document_unique_default_and_rename,
     test_delete_item,
     test_delete_cancel,
     test_delete_key_item,

@@ -1038,6 +1038,50 @@ static int sftp_cmd_parvion_put(struct sftp_command *cmd)
     return ret;
 }
 
+static int sftp_cmd_parvion_touch(struct sftp_command *cmd)
+{
+    struct sftp_packet *pktin;
+    struct sftp_request *req;
+    struct fxp_handle *fh;
+    char *fname;
+
+    if (!backend) {
+        not_connected();
+        return 0;
+    }
+    if (cmd->nwords != 2) {
+        fzprintf(sftpError, "parvion-touch: expects a remote filename");
+        return 0;
+    }
+
+    fname = canonify(cmd->words[1], false);
+    if (!fname) {
+        fzprintf(sftpError, "%s: canonify: %s", cmd->words[1], fxp_error());
+        return 0;
+    }
+
+    req = fxp_open_send(fname, SSH_FXF_WRITE | SSH_FXF_CREAT | SSH_FXF_EXCL, NULL);
+    pktin = sftp_wait_for_reply(req);
+    fh = fxp_open_recv(pktin, req);
+    if (!fh) {
+        fzprintf(sftpError, "%s: create: %s", fname, fxp_error());
+        sfree(fname);
+        return 0;
+    }
+
+    req = fxp_close_send(fh);
+    pktin = sftp_wait_for_reply(req);
+    if (!fxp_close_recv(pktin, req)) {
+        fzprintf(sftpError, "%s: close: %s", fname, fxp_error());
+        sfree(fname);
+        return 0;
+    }
+
+    fzprintf(sftpReply, "parvion-touch %s: OK", fname);
+    sfree(fname);
+    return 1;
+}
+
 int sftp_cmd_mkdir(struct sftp_command *cmd)
 {
     char *dir;
@@ -1634,6 +1678,9 @@ static struct sftp_cmd_lookup {
     },
     {
         "parvion-put", sftp_cmd_parvion_put
+    },
+    {
+        "parvion-touch", sftp_cmd_parvion_touch
     },
     {
         "proxy", sftp_cmd_proxy

@@ -1901,6 +1901,14 @@ namespace netxs::app::parvion
         }
         // Remote file operations (psftp/parvionsftp verbs): each fires the command and then re-lists the
         // current directory once the backend reports done (handled as c_op in command_done).
+        auto remote_touch(text const& name) -> bool
+        {
+            if (!connected() || recop != rec_none || await != c_none || name.empty()) return faux;
+            await = c_op;
+            send_cmd("parvion-touch " + quote_name(child_path(path, name, faux)));
+            mark("Creating document " + name + "...");
+            return true;
+        }
         auto remote_mkdir(text const& name) -> bool
         {
             if (!connected() || recop != rec_none || await != c_none || name.empty()) return faux;
