@@ -40,7 +40,7 @@ namespace
             && progressbar_fill_width(10, std::numeric_limits<double>::quiet_NaN()) == 0;
     }
 
-    auto test_palette_fill_and_centered_label() -> bool
+    auto test_palette_fill_and_default_center_right_label() -> bool
     {
         auto canvas = mock_canvas{};
         auto track = ui32{ 0xFF010203u };
@@ -55,8 +55,30 @@ namespace
             && canvas.writes[0].value.bgc() == argb{ track }
             && canvas.writes[1].area == rect{{ 2, 3 }, { 4, 1 }}
             && canvas.writes[1].value.bgc() == argb{ fill }
-            && canvas.writes[2].area.coor == twod{ 4, 3 }
+            && canvas.writes[2].area.coor == twod{ 6, 3 }
             && canvas.writes[2].value.fgc() == argb{ fg };
+    }
+
+    auto test_percentage_alignment_preserves_centered_field_edges() -> bool
+    {
+        auto area = rect{{ 2, 3 }, { 11, 1 }};
+        auto zero_width = cell_width("0.00%");
+        auto partial_width = cell_width("12.34%");
+        auto full_width = cell_width("100.00%");
+        auto center_left_zero = progressbar_label_x(area, zero_width, progressbar_alignment::center_left);
+        auto center_left_full = progressbar_label_x(area, full_width, progressbar_alignment::center_left);
+        auto center_right_zero = progressbar_label_x(area, zero_width, progressbar_alignment::center_right);
+        auto center_right_partial = progressbar_label_x(area, partial_width, progressbar_alignment::center_right);
+        auto center_right_full = progressbar_label_x(area, full_width, progressbar_alignment::center_right);
+        auto odd_area = rect{{ 0, 0 }, { 10, 1 }};
+        return center_left_zero == center_left_full
+            && center_left_zero == 4
+            && center_right_zero + zero_width == center_right_partial + partial_width
+            && center_right_zero + zero_width == center_right_full + full_width
+            && center_right_full + full_width == 11
+            && progressbar_label_x(odd_area, full_width, progressbar_alignment::center_right) == 1
+            && progressbar_label_x(area, full_width, progressbar_alignment::left) == 2
+            && progressbar_label_x(area, zero_width, progressbar_alignment::right) + zero_width == 13;
     }
 
     auto test_embedded_clip_stays_inside_viewport() -> bool
@@ -123,7 +145,8 @@ namespace
 int main()
 {
     auto ok = test_fraction_clamping_and_fill_width()
-           && test_palette_fill_and_centered_label()
+           && test_palette_fill_and_default_center_right_label()
+           && test_percentage_alignment_preserves_centered_field_edges()
            && test_embedded_clip_stays_inside_viewport()
            && test_transfer_cell_uses_progressbar_contract()
            && test_checksum_cell_uses_stable_progressbar();
