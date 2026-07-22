@@ -26,13 +26,13 @@ namespace netxs::app::parvion
     static constexpr auto q_headers   = std::array<view, q_ncol + 1>{ "Local Name", "Remote Name", "Size", "Progress", "Speed", "Reason" };
     static constexpr auto q_menu_headers = std::array<view, q_ncol + 1>{ "&Local Name", "&Remote Name", "&Size", "&Progress", "Sp&eed", "Re&ason" };
     static constexpr auto q_name_x    = si32{ 7 };  // First resizable column x (after the arrow + expand gutter).
-    static constexpr auto q_reason_w0 = si32{ 20 }; // Initial Failed-tab "Reason" column width.
+    static constexpr auto q_reason_w0 = si32{ 31 }; // Initial Failed-tab "Reason" column width.
 
     // A flattened display row: a parent task (child == -1) or one of its expanded parallel subtasks.
     struct disp_row { si32 qi; si32 child; };
 
     // This view's session-only, per-instance column widths (0 override = auto / initial).
-    struct xfer_cols { std::array<si32, q_ncol> col_w{ 24, 24, 11, 11, 11 }; si32 reason_w_override = 0; };
+    struct xfer_cols { std::array<si32, q_ncol> col_w{ 25, 25, 9, 11, 11 }; si32 reason_w_override = 0; };
 
     inline auto xfer_progress_fraction(si64 done, si64 size) -> double
     {

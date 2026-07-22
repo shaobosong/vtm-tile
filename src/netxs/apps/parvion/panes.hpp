@@ -80,7 +80,7 @@ namespace netxs::app::parvion
         netxs::wptr<ui::base> addr_input_wp;     // Permanent path input, activated in place.
         // Transfer-table-style columns (Name, Size, Modified): session-only widths + visibility,
         // persisted by the shared table's resize / show-hide adapters.
-        std::array<si32, 3>   col_w{ 24, 10, 17 }; // Name; Size (right-aligned); Modified ("YYYY-MM-DD HH:MM" + border cell).
+        std::array<si32, 3>   col_w{ 25, 9, 17 }; // Name; Size (right-aligned); Modified ("YYYY-MM-DD HH:MM" + border cell).
         std::array<bool, 3>   col_shown{ true, true, true };
         bool                  focused = faux;   // Pane has keyboard focus.
         sftp_remote*          remote = nullptr; // Non-null: remote pane backed by the SFTP controller.
