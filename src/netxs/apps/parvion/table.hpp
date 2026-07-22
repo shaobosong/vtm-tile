@@ -685,10 +685,31 @@ namespace netxs::app::parvion
         else                s.on_clear();
         if (anchor_key >= 0) st.sel_anchor = st.nav_cursor = anchor_key;
     }
+    inline auto q_rubber_endpoint_key(qsel_cfg const& s, si32 anchor_row, si32 cur_row) -> si32
+    {
+        auto count = s.row_count();
+        if (count <= 0) return -1;
+        auto lo = std::max(0,         std::min(anchor_row, cur_row));
+        auto hi = std::min(count - 1, std::max(anchor_row, cur_row));
+        if (lo > hi) return -1; // The entire band is outside the row range.
+        auto downward = cur_row >= anchor_row;
+        auto row  = downward ? hi : lo;
+        auto end  = downward ? lo : hi;
+        auto step = downward ? -1 : 1;
+        while (true)
+        {
+            if (auto key = s.key_of_row(row); key >= 0) return key;
+            if (row == end) return -1;
+            row += step;
+        }
+    }
     inline void q_rubber_pull(table_state& st, qsel_cfg const& s, si32 cur_row)
     {
         st.rubber_b = cur_row;
-        if (auto key = cur_row >= 0 && cur_row < s.row_count() ? s.key_of_row(cur_row) : -1; key >= 0) st.nav_cursor = key;
+        // Mouse-move events are sampled, so a pull can jump directly from an earlier row into the
+        // blank area beyond the table.  Keep the keyboard cursor at the selectable edge of the
+        // rubber band instead of leaving it on whichever row happened to receive the last event.
+        if (auto key = q_rubber_endpoint_key(s, st.rubber_a, cur_row); key >= 0) st.nav_cursor = key;
         auto lo = std::min(st.rubber_a, st.rubber_b), hi = std::max(st.rubber_a, st.rubber_b);
         if (st.rubber_ctrl)
         {

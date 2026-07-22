@@ -328,6 +328,33 @@ namespace
             && q_rubber_row_at_drag(st) == 5;
     }
 
+    auto test_rubber_overshoot_keeps_last_row_as_keyboard_cursor() -> bool
+    {
+        auto st = table_state{};
+        auto selected = std::set<si32>{};
+        auto s = qsel_cfg{};
+        s.key_count = []{ return 6; };
+        s.is_selected = [&](si32 key){ return selected.contains(key); };
+        s.on_select = [&](si32 key, bool on)
+        {
+            if (on) selected.insert(key);
+            else    selected.erase(key);
+        };
+        s.on_clear = [&]{ selected.clear(); };
+        s.has_selection = [&]{ return !selected.empty(); };
+        s.in_scope = [](si32 key){ return key >= 0 && key < 6; };
+        s.row_count = []{ return 6; };
+        s.key_of_row = [](si32 row){ return row >= 0 && row < 6 ? row : -1; };
+
+        q_sel_press(st, s, 1, faux, faux);
+        q_sel_snapshot(st, s);
+        q_rubber_begin(st, s, 1, faux);
+        q_rubber_pull(st, s, 10); // No sampled move on rows 2-5 before entering blank space.
+
+        return selected == std::set<si32>{ 1, 2, 3, 4, 5 }
+            && st.nav_cursor == 5; // Up will therefore move exactly once, to row 4.
+    }
+
     auto test_component_cells_retain_and_reconcile_widgets() -> bool
     {
         auto st = table_state{};
@@ -446,6 +473,7 @@ int main()
         { "variable_row_line_geometry", test_variable_row_line_geometry },
         { "variable_row_reveal_uses_lines", test_variable_row_reveal_uses_lines },
         { "rubber_band_preserves_blank_endpoint", test_rubber_band_preserves_blank_endpoint },
+        { "rubber_overshoot_keeps_last_cursor", test_rubber_overshoot_keeps_last_row_as_keyboard_cursor },
         { "component_cells_retain_and_reconcile_widgets", test_component_cells_retain_and_reconcile_widgets },
         { "table_can_be_nested_as_component_content", test_table_can_be_nested_as_component_content },
         { "posix_name_validation", test_posix_name_validation },
