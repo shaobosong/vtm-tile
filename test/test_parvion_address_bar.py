@@ -85,6 +85,58 @@ def test_address_click_starts_edit():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_address_elided_click_tracks_visible_text_and_end():
+    """A tail-elided path maps visible text and its reserved final cell to the full value."""
+    print("TEST: parvion address bar - elided click tracks text and reserved end ... ", end="", flush=True)
+    base = tempfile.mkdtemp(prefix="parvionaddr_elided_")
+    leaf = "a_very_long_directory_name_that_forces_the_address_bar_to_elide_at_the_left_t"
+    d = os.path.join(base, leaf)
+    visible_target = d[:-1] + "X" + d[-1]
+    end_target = visible_target + "Y"
+    os.makedirs(d)
+    os.makedirs(visible_target)
+    os.makedirs(end_target)
+    open(os.path.join(visible_target, "visible_marker.txt"), "w").close()
+    open(os.path.join(end_target, "end_marker.txt"), "w").close()
+    try:
+        with T.ParvionSession(d) as s:
+            hdr = _local_header(s)
+            if hdr is None:
+                print("FAIL - Local site header not found")
+                return False
+            r, shown, col = hdr
+            if not shown.startswith("…") or not d.endswith(shown[1:]):
+                print(f"FAIL - path is not tail-elided as expected: {shown!r}")
+                return False
+
+            # The last visible character is the final 't'. Clicking it inserts before
+            # that character, even though the field's source starts well before the tail.
+            s.click(col + len(shown), r + 1)
+            s.write("X")
+            s.write("\r")
+            if not T.grid_contains(s.screen()[0], "visible_marker.txt"):
+                print("FAIL - visible-tail click was mapped from the start of the full path")
+                return False
+
+            hdr = _local_header(s)
+            if hdr is None:
+                print("FAIL - Local site header disappeared after visible-tail navigation")
+                return False
+            r, shown, col = hdr
+            # The cell immediately after the visible tail is deliberately left blank inside
+            # the field. Inserting Y there must append it to the full, unelided path.
+            s.click(col + len(shown) + 1, r + 1)
+            s.write("Y")
+            s.write("\r")
+            if not T.grid_contains(s.screen()[0], "end_marker.txt"):
+                print(f"FAIL - reserved-cell click missed the full-path end; after={_local_header(s)!r}")
+                return False
+            print("PASS")
+            return True
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
 def test_address_absolute_navigation():
     """Clearing the field and typing an absolute path + Enter lists that directory."""
     print("TEST: parvion address bar - absolute path navigation ... ", end="", flush=True)
@@ -344,6 +396,7 @@ def test_address_drag_scrubs_caret():
 
 TESTS = [
     test_address_click_starts_edit,
+    test_address_elided_click_tracks_visible_text_and_end,
     test_address_absolute_navigation,
     test_address_relative_navigation,
     test_address_relative_dotdot,

@@ -175,14 +175,25 @@ namespace netxs::app::parvion
                 if (mode == input_mode::view || mode == input_mode::disabled)
                 {
                     auto width = cell_width(disp);
-                    if (width > field_w)
+                    if (width >= field_w)
                     {
-                        put_str(canvas, prefix_w, 0, "\xE2\x80\xA6", cfg.palette.muted_fg, cfg.palette.bg, 1);
-                        auto tail = std::max(0, width - field_w + 1);
-                        put_str(canvas, prefix_w + 1, 0, view{ disp }.substr(byte_at_cell(disp, tail)),
-                                cfg.palette.muted_fg, cfg.palette.bg, field_w - 1);
+                        // Keep the final cell empty as a direct click target for the end of
+                        // the value.  `off` is the source column hidden under the ellipsis;
+                        // if this press changes a view field to edit mode, caret_to() can
+                        // therefore interpret every mouse column against what was painted.
+                        st.off = width - field_w + 1;
+                        if (field_w > 1)
+                        {
+                            put_str(canvas, prefix_w, 0, "\xE2\x80\xA6", cfg.palette.muted_fg, cfg.palette.bg, 1);
+                            put_str(canvas, prefix_w + 1, 0, view{ disp }.substr(byte_at_cell(disp, st.off + 1)),
+                                    cfg.palette.muted_fg, cfg.palette.bg, field_w - 2);
+                        }
                     }
-                    else put_str(canvas, prefix_w, 0, disp, cfg.palette.muted_fg, cfg.palette.bg, field_w);
+                    else
+                    {
+                        st.off = 0;
+                        put_str(canvas, prefix_w, 0, disp, cfg.palette.muted_fg, cfg.palette.bg, field_w);
+                    }
                     return;
                 }
 
