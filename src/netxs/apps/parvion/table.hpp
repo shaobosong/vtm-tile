@@ -1492,7 +1492,6 @@ namespace netxs::app::parvion
                 else if (k == input::key::KeyEnd       || k == input::key::NumpadEnd)      { st.scroll = maxv; select_at((si32)sels.size() - 1, extend); }
                 else if (k == input::key::KeyPageUp    || k == input::key::NumpadPageUp)     page_selection(-1, extend);
                 else if (k == input::key::KeyPageDown  || k == input::key::NumpadPageDown)   page_selection(+1, extend);
-                else if (k == input::key::Esc)         { s.on_clear(); st.sel_anchor = st.nav_cursor = -1; }
                 else act = false;
                 if (act) { gear.set_handled(); boss.base::deface(); }
             };
