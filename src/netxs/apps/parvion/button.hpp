@@ -23,7 +23,7 @@ namespace netxs::app::parvion
     struct button_cfg
     {
         std::function<text()> label;
-        std::function<void(hids&, ui::base&)> activate;
+        std::function<void(hids&, ui::base&)> on_activate;
         button_palette palette{};
     };
 
@@ -52,7 +52,7 @@ namespace netxs::app::parvion
         else if (state.hover) canvas.fill(rect{ {}, size }, [](cell& c){ c.xlight(); });
     }
 
-    inline auto make_button(button_cfg cfg) -> ui::sptr
+    inline auto make_button(button_cfg cfg) -> component
     {
         auto form = ui::mock::ctor()->active()->plugin<pro::mouse>();
         form->invoke([cfgv = std::move(cfg)](auto& boss)
@@ -99,10 +99,10 @@ namespace netxs::app::parvion
             });
             boss.on(tier::mouserelease, input::key::LeftClick, [&](hids& gear)
             {
-                if (cfg.activate) cfg.activate(gear, boss);
+                if (cfg.on_activate) cfg.on_activate(gear, boss);
                 gear.dismiss();
             });
         });
-        return form;
+        return { std::move(form) };
     }
 }

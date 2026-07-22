@@ -15,6 +15,7 @@ no_autostart so no real parvionhash backend is spawned. We verify:
      its algorithm, a final digest, and a failure reason.
   2. Every context menu exposes Copy -> Path / Digest, Remove, and Select All.
   3. Copy on a multi-selection writes newline-separated paths or successful digests.
+  4. The Progress column embeds retained proportional progress-bar components.
 """
 
 import os
@@ -108,6 +109,51 @@ def test_checksums_tab_lists_tasks():
             print(f"FAIL test_checksums_tab_lists_tasks: missing {missing}")
             return False
         print("OK test_checksums_tab_lists_tasks")
+        return True
+
+
+def test_checksums_progress_bars():
+    with ParvionSession(DEMO_ENV) as s:
+        chars = _open_checksums_tab(s)
+        field = header_field(chars, "Progress")
+        if field is None:
+            print("FAIL test_checksums_progress_bars: Progress header missing")
+            return False
+        _, _, left, right, _, _ = field
+        width = right - left
+
+        def bar_for(name):
+            screen, bg = s.screen()
+            pos = find_text(screen, name)
+            if pos is None:
+                return None, None
+            row = pos[0]
+            return "".join(screen[row][left:right]).strip(), bg[row][left:right]
+
+        label, bar = bar_for("backup.tar.gz")  # 90 / 200 MiB = 45%.
+        fill = int(0.45 * width)
+        if (label != "45.00%" or fill <= 0 or fill >= width
+                or len(set(bar[:fill])) != 1 or len(set(bar[fill:])) != 1
+                or bar[0] == bar[fill]):
+            print(f"FAIL test_checksums_progress_bars: hashing bar is {label!r}/{bar!r}")
+            return False
+
+        done_label, done_bar = bar_for("report.pdf")
+        queued_label, queued_bar = bar_for("image.iso")
+        failed_label, failed_bar = bar_for("missing.bin")
+        if done_label != "100.00%" or len(set(done_bar)) != 1:
+            print(f"FAIL test_checksums_progress_bars: completed bar is {done_label!r}/{done_bar!r}")
+            return False
+        if queued_label != "queued" or len(set(queued_bar)) != 1:
+            print(f"FAIL test_checksums_progress_bars: queued bar is {queued_label!r}/{queued_bar!r}")
+            return False
+        if failed_label != "failed" or len(set(failed_bar)) != 1:
+            print(f"FAIL test_checksums_progress_bars: failed bar is {failed_label!r}/{failed_bar!r}")
+            return False
+        if done_bar[0] == queued_bar[0]:
+            print("FAIL test_checksums_progress_bars: completed fill matches the empty track")
+            return False
+        print("OK test_checksums_progress_bars")
         return True
 
 
@@ -609,6 +655,7 @@ def test_hash_settings_single_dropdown():
 
 TESTS = [
     test_checksums_tab_lists_tasks,
+    test_checksums_progress_bars,
     test_checksums_context_menu,
     test_checksums_multiselect_copy_fields,
     test_local_file_hash_end_to_end,

@@ -17,6 +17,7 @@ tables — the behaviors added on top of parvion/queue.hpp:
      visible but disabled when the current selection cannot be pinned.
   5. Right-click with several rows selected applies the action to all of them.
   6. Transfer context menus copy the selected local/remote names and failed reasons.
+  7. Progress cells embed proportional bars on the Transferring, Failed, and Succeeded tabs.
 
 Driven via a pty using the SGR mouse protocol, mirroring the harness used by
 the existing test_dropdown_menu / test_tile_ctrl_click_focus suites. The app
@@ -1327,6 +1328,39 @@ def progress_text(chars, name_row):
     return "".join(chars[name_row][66:76]).strip()
 
 
+def test_transfer_tabs_use_progress_bars():
+    """Transfer progress cells retain their labels and paint proportional background fills."""
+    print("TEST: parvion - transfer tabs use progress bars ... ", end="", flush=True)
+    with ParvionSession(DEMO_ENV) as s:
+        def bar_for(name):
+            chars, bg = s.screen()
+            pos = find_text(chars, name)
+            return (None, None, None) if pos is None else (progress_text(chars, pos[0]), bg[pos[0]][66:76], bg[pos[0]][10])
+
+        label, bar, row_bg = bar_for("bigfile.iso")  # 90 / 200 MiB = 45%; 4 of 10 cells.
+        if label != "45.00%" or len(set(bar[:4])) != 1 or len(set(bar[4:])) != 1 or bar[0] == bar[4]:
+            print(f"FAIL - Transferring bar label/background is {label!r}/{bar!r}")
+            return False
+
+        if not click_label(s, "Failed ("):
+            print("FAIL - Failed tab not found")
+            return False
+        label, bar, row_bg = bar_for("upload.bin")  # 12 / 32 MiB = 37.5%; 3 of 10 cells.
+        if label != "37.50%" or len(set(bar[:3])) != 1 or len(set(bar[3:])) != 1 or bar[0] == bar[3]:
+            print(f"FAIL - Failed bar label/background is {label!r}/{bar!r}")
+            return False
+
+        if not click_label(s, "Succeeded ("):
+            print("FAIL - Succeeded tab not found")
+            return False
+        label, bar, row_bg = bar_for("archive.tar")
+        if label != "100.00%" or len(set(bar)) != 1 or bar[0] == row_bg:
+            print(f"FAIL - Succeeded bar label/background is {label!r}/{bar!r} (row={row_bg!r})")
+            return False
+        print("PASS")
+        return True
+
+
 def test_pause_then_start_progress_label():
     """Pause marks a queued item 'paused'; Start returns it to 'queued'."""
     print("TEST: parvion - Pause/Start toggles the progress label ... ", end="", flush=True)
@@ -1825,6 +1859,7 @@ TESTS = [
     test_multiselect_remove_all_selected,
     test_keyboard_delete_removes_selected_only,
     test_pin_to_top_reorders_pending,
+    test_transfer_tabs_use_progress_bars,
     test_pause_then_start_progress_label,
     test_local_and_remote_name_columns,
     test_column_dividers_extend_to_item_rows,

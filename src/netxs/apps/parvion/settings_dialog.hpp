@@ -700,11 +700,11 @@ namespace netxs::app::parvion
                     .key = i,
                 }, stp->key_col_shown[(size_t)i], text{ sd::kt_menu_headers[(size_t)i] });
             }
-            table.set_shown = [stp](si32 key, bool shown)
+            table.on_show_column = [stp](si32 key, bool shown)
             {
                 if (key >= 0 && key < sd::kt_ncol) stp->key_col_shown[(size_t)key] = shown;
             };
-            table.resize = [stp](si32 key, si32 width)
+            table.on_resize_column = [stp](si32 key, si32 width)
             {
                 if (key >= 0 && key < sd::kt_ncol)
                     stp->key_col_w[(size_t)key] = width;
@@ -715,11 +715,11 @@ namespace netxs::app::parvion
             };
             return table;
         };
-        cfg.rows = [stp]{ return (si32)stp->draft.keyfiles.size(); };
+        cfg.row_count = [stp]{ return (si32)stp->draft.keyfiles.size(); };
         cfg.revision = [stp]{ return stp->key_table_revision; };
         cfg.cell = [stp](si32 row, si32 key)
         {
-            return cellval{ kt_cell(*stp, key, row), theme::text_fg };
+            return table_cell{ kt_cell(*stp, key, row), theme::text_fg };
         };
         cfg.compare = [stp](si32 a, si32 b, si32 key)
         {
@@ -732,17 +732,17 @@ namespace netxs::app::parvion
         {
             auto sel = qsel_cfg{};
             sel.key_count = [stp]{ return (si32)stp->draft.keyfiles.size(); };
-            sel.is_sel = [stp](si32 key){ return stp->key_marked.contains(key); };
-            sel.set_sel = [stp](si32 key, bool on)
+            sel.is_selected = [stp](si32 key){ return stp->key_marked.contains(key); };
+            sel.on_select = [stp](si32 key, bool on)
             {
                 if (key < 0 || key >= (si32)stp->draft.keyfiles.size()) return;
                 if (on) stp->key_marked.insert(key);
                 else    stp->key_marked.erase(key);
             };
-            sel.clear = [stp]{ stp->key_marked.clear(); };
-            sel.any = [stp]{ return !stp->key_marked.empty(); };
+            sel.on_clear = [stp]{ stp->key_marked.clear(); };
+            sel.has_selection = [stp]{ return !stp->key_marked.empty(); };
             sel.in_scope = [stp](si32 key){ return key >= 0 && key < (si32)stp->draft.keyfiles.size(); };
-            sel.disp = [stp]{ return (si32)stp->draft.keyfiles.size(); };
+            sel.row_count = [stp]{ return (si32)stp->draft.keyfiles.size(); };
             sel.key_of_row = [stp](si32 row)
             {
                 return row >= 0 && row < (si32)stp->draft.keyfiles.size() ? row : -1;
@@ -767,7 +767,7 @@ namespace netxs::app::parvion
             return table_viewport_action{};
         };
         cfg.deletion.enabled = true;
-        cfg.deletion.remove_selected = [stp](netxs::wptr<ui::base>)
+        cfg.deletion.on_remove_selected = [stp](netxs::wptr<ui::base>)
         {
             sd_remove_keys(*stp);
             if (auto card = stp->card_wp.lock()) card->base::deface();
@@ -900,51 +900,51 @@ namespace netxs::app::parvion
             }
 
             auto key_table = make_table(sd_key_table_cfg(st));
-            st.key_table_wp = ptr::shadow(key_table);
-            key_table->base::hidden = true; // Only the SFTP tab exposes this card layer.
+            st.key_table_wp = ptr::shadow(key_table.widget);
+            key_table.widget->base::hidden = true; // Only the SFTP tab exposes this card layer.
             if (auto layer = card_layer_wp.lock())
             {
-                layer->base::attach(key_table);
+                layer->base::attach(key_table.widget);
                 for (auto i = si32{}; i < sd::f_count; ++i)
                 {
                     auto input = make_input({
                         .value = [&st, i]{ return st.fields[(size_t)i].val; },
-                        .set_value = [&st, i](text value){ st.fields[(size_t)i].val = std::move(value); },
-                        .submit = [&st](text){ sd_accept(st); },
-                        .cancel = [&st]{ sd_close(st); },
+                        .on_change = [&st, i](text value){ st.fields[(size_t)i].val = std::move(value); },
+                        .on_submit = [&st](text){ sd_accept(st); },
+                        .on_cancel = [&st]{ sd_close(st); },
                         .digits_only = true,
                         .palette = { .bg = theme::bg, .text_fg = theme::text_fg,
                                      .muted_fg = theme::subtext, .active = theme::sel_bg_act },
                     });
-                    st.input_wp[(size_t)i] = ptr::shadow(input);
-                    layer->base::attach(input);
+                    st.input_wp[(size_t)i] = ptr::shadow(input.widget);
+                    layer->base::attach(input.widget);
                 }
                 auto attach_button = [&](button_cfg cfg)
                 {
                     auto button = make_button(std::move(cfg));
-                    auto weak = ptr::shadow(button);
-                    layer->base::attach(button);
+                    auto weak = ptr::shadow(button.widget);
+                    layer->base::attach(button.widget);
                     return weak;
                 };
                 st.button_ok_wp = attach_button({
                     .label = []{ return text{ " OK " }; },
-                    .activate = [&st](hids&, ui::base&){ sd_accept(st); },
+                    .on_activate = [&st](hids&, ui::base&){ sd_accept(st); },
                 });
                 st.button_cancel_wp = attach_button({
                     .label = []{ return text{ " Cancel " }; },
-                    .activate = [&st](hids&, ui::base&){ sd_close(st); },
+                    .on_activate = [&st](hids&, ui::base&){ sd_close(st); },
                 });
                 st.button_add_wp = attach_button({
                     .label = []{ return text{ sd::btn_addkey }; },
-                    .activate = [&st](hids& gear, ui::base&){ sd_open_key_picker(st, gear.id); },
+                    .on_activate = [&st](hids& gear, ui::base&){ sd_open_key_picker(st, gear.id); },
                 });
                 st.button_remove_wp = attach_button({
                     .label = []{ return text{ sd::btn_removekey }; },
-                    .activate = [&st](hids&, ui::base&){ sd_remove_keys(st); },
+                    .on_activate = [&st](hids&, ui::base&){ sd_remove_keys(st); },
                 });
                 st.button_unit_wp = attach_button({
                     .label = [&st]{ return text{ " " } + text{ sftp_unit_label(st.threshold_unit) } + " ▾ "; },
-                    .activate = [&st](hids&, ui::base& button)
+                    .on_activate = [&st](hids&, ui::base& button)
                     {
                         app::shared::menu::open_dropdown_popup(button, sd_build_unit_menu(st, st.card_wp),
                             { .source = app::shared::menu::popup_source::control,
@@ -959,7 +959,7 @@ namespace netxs::app::parvion
                              + text{ st.hash_on_transfer ? hash_algo_label(st.hash_algo) : sd::hash_none }
                              + " ▾ ";
                     },
-                    .activate = [&st](hids&, ui::base& button)
+                    .on_activate = [&st](hids&, ui::base& button)
                     {
                         auto selected = st.hash_on_transfer ? st.hash_algo + 1 : 0;
                         app::shared::menu::open_dropdown_popup(button, sd_build_hash_menu(st, st.card_wp),
@@ -974,7 +974,7 @@ namespace netxs::app::parvion
                         return text{ " " } + std::to_string(st.log_debug_level)
                              + " - " + text{ log_debug_label(st.log_debug_level) } + " ▾ ";
                     },
-                    .activate = [&st](hids&, ui::base& button)
+                    .on_activate = [&st](hids&, ui::base& button)
                     {
                         app::shared::menu::open_dropdown_popup(button, sd_build_log_level_menu(st, st.card_wp),
                             { .source = app::shared::menu::popup_source::control,

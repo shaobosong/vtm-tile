@@ -4,9 +4,9 @@
 #pragma once
 
 // parvion/queue.hpp: the bottom transfer-queue panel, assembled from reusable core components — a
-// resize handle bar over a generic tabs container. The tabs hold five thin VIEWS built over the two
-// cores: three transfer views + one checksums view over the reusable table, and one message-log view
-// over the reusable read-only text box. Repainted by the applet's poll timer.
+// resize handle bar over a generic tabs container. The tabs hold five thin VIEWS: three transfer
+// views over the reusable table with embedded progress bars, one checksums view over the table, and
+// one message-log view over the reusable read-only text box. Repainted by the applet's poll timer.
 
 #include "transfer_view.hpp"  // make_transfer_view (table_cfg).
 #include "hash_view.hpp"      // make_hash_view (table_cfg).
@@ -46,7 +46,7 @@ namespace netxs::app::parvion
 
         // The five tab views. Each transfer view is an independent make_transfer_view() instance with
         // its own column widths + scroll; they share only the controller's queue data.
-        auto pages = std::vector<tab_page_ptr>{
+        auto pages = std::vector<tab_page_cfg>{
             make_transfer_view(ctrl, /*status*/ 0, window_wp), // Transferring
             make_transfer_view(ctrl, /*status*/ 1, window_wp), // Failed
             make_transfer_view(ctrl, /*status*/ 2, window_wp), // Succeeded
@@ -54,10 +54,10 @@ namespace netxs::app::parvion
             make_hash_view(ctrl, window_wp),                   // Checksums
         };
         auto tabs = make_tabs(std::move(pages), /*active*/ 0);
-        assembly->attach(slot::_2, tabs->widget());
+        assembly->attach(slot::_2, tabs.widget);
 
         // Keep the tabs container (and thus its views) alive for the assembly's lifetime.
-        assembly->invoke([tabs](auto& boss){ boss.base::field(tab_page_ptr{ tabs }); });
+        assembly->invoke([tabs](auto& boss){ boss.base::field(component{ tabs }); });
         return assembly;
     }
 }

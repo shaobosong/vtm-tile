@@ -151,29 +151,29 @@ namespace netxs::app::parvion
             {
                 auto input = make_input({
                     .value = [&st]{ return st.value; },
-                    .set_value = [&st](text value){ st.value = std::move(value); },
-                    .submit = [submit](text){ submit(); },
-                    .cancel = [cancel]{ cancel(); },
+                    .on_change = [&st](text value){ st.value = std::move(value); },
+                    .on_submit = [submit](text){ submit(); },
+                    .on_cancel = [cancel]{ cancel(); },
                     .secret = secret,
                     .focus_on_start = true,
                     .palette = { .bg = theme::bg, .text_fg = theme::text_fg,
                                  .muted_fg = theme::subtext, .active = theme::sel_bg_act },
                 });
-                st.input_wp = ptr::shadow(input);
+                st.input_wp = ptr::shadow(input.widget);
                 *input_ref = st.input_wp;
-                layer->base::attach(input);
+                layer->base::attach(input.widget);
                 auto ok = make_button({
                     .label = []{ return text{ " OK " }; },
-                    .activate = [submit](hids&, ui::base&){ submit(); },
+                    .on_activate = [submit](hids&, ui::base&){ submit(); },
                 });
-                st.ok_button_wp = ptr::shadow(ok);
-                layer->base::attach(ok);
+                st.ok_button_wp = ptr::shadow(ok.widget);
+                layer->base::attach(ok.widget);
                 auto cancel_button = make_button({
                     .label = []{ return text{ " Cancel " }; },
-                    .activate = [cancel](hids&, ui::base&){ cancel(); },
+                    .on_activate = [cancel](hids&, ui::base&){ cancel(); },
                 });
-                st.cancel_button_wp = ptr::shadow(cancel_button);
-                layer->base::attach(cancel_button);
+                st.cancel_button_wp = ptr::shadow(cancel_button.widget);
+                layer->base::attach(cancel_button.widget);
             }
             boss.LISTEN(tier::release, e2::render::any, parent_canvas)
             {

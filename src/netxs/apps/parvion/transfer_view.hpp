@@ -7,12 +7,13 @@
 // presents the controller's transfer queue, filtered to one status (Transferring / Failed /
 // Succeeded). This is a tab adapter over the independent table widget: it builds a table_cfg
 // (columns + per-cell data + selection/menu adapters + follow/expand hooks), calls make_table(), and
-// wraps the widget as a tab_page.
+// wraps the component in tab-page metadata.
 //
 // Each status tab is an INDEPENDENT make_transfer_view() instance with its own column widths and
 // scroll — the three tabs share nothing but the controller's data.
 
 #include "queue_actions.hpp"
+#include "progressbar.hpp"
 #include "tab_page.hpp"
 #include "table.hpp"
 
@@ -32,6 +33,24 @@ namespace netxs::app::parvion
 
     // This view's session-only, per-instance column widths (0 override = auto / initial).
     struct xfer_cols { std::array<si32, q_ncol> col_w{ 24, 24, 11, 11, 11 }; si32 reason_w_override = 0; };
+
+    inline auto xfer_progress_fraction(si64 done, si64 size) -> double
+    {
+        return size > 0 ? progressbar_fraction((double)done / (double)size) : 0.0;
+    }
+    inline auto xfer_progress_text(double fraction) -> text
+    {
+        auto buf = std::array<char, 24>{};
+        std::snprintf(buf.data(), buf.size(), "%.2f%%", progressbar_fraction(fraction) * 100.0);
+        return text{ buf.data() };
+    }
+    using xfer_progress_cache = progressbar_cache;
+    inline auto xfer_progress_cell(xfer_progress_cache& cache, si32 row,
+                                   double fraction, text label, ui32 foreground) -> table_cell
+    {
+        return { cached_progressbar(cache, (ui64)(ui32)row, fraction,
+                                    std::move(label), foreground) };
+    }
 
     inline auto tab_status_match(si32 status, queue_item const& it) -> bool
     {
@@ -87,7 +106,6 @@ namespace netxs::app::parvion
     {
         auto w = si32{};
         if (!ctrl) return w;
-        auto pct = [](double p){ auto b = std::array<char, 24>{}; std::snprintf(b.data(), b.size(), "%.2f%%", p); return text{ b.data() }; };
         for (auto& it : ctrl->queue)
         {
             if (!tab_status_match(status, it)) continue;
@@ -97,7 +115,7 @@ namespace netxs::app::parvion
                 case 0:  s = it.local_path;  break;
                 case 1:  s = it.remote_path; break;
                 case 2:  s = human_size(it.size); break;
-                case 3:  s = it.status == queue_item::queued ? (it.paused ? text{ "paused" } : text{ "queued" }) : pct(it.size > 0 ? 100.0 * (double)it.done / (double)it.size : 0.0); break;
+                case 3:  s = it.status == queue_item::queued ? (it.paused ? text{ "paused" } : text{ "queued" }) : xfer_progress_text(xfer_progress_fraction(it.done, it.size)); break;
                 case 4:  if (it.rate.speed > 0.0) s = human_size((si64)(it.rate.speed + 0.5)) + "/s"; break;
                 default: s = it.error; break;
             }
@@ -165,8 +183,8 @@ namespace netxs::app::parvion
             t.add_column({ text{ q_headers[(size_t)i] }, width, i >= 2 && i <= 4, true, i },
                          ctrl->col_shown[(size_t)i], text{ q_menu_headers[(size_t)i] });
         }
-        t.set_shown = [ctrl](si32 key, bool on){ if (key >= 0 && key < (si32)ctrl->col_shown.size()) ctrl->col_shown[(size_t)key] = on; };
-        t.resize    = [cols](si32 key, si32 w){ if (key >= 0 && key < q_ncol) cols->col_w[(size_t)key] = w; else if (key == q_ncol) cols->reason_w_override = w; };
+        t.on_show_column   = [ctrl](si32 key, bool on){ if (key >= 0 && key < (si32)ctrl->col_shown.size()) ctrl->col_shown[(size_t)key] = on; };
+        t.on_resize_column = [cols](si32 key, si32 w){ if (key >= 0 && key < q_ncol) cols->col_w[(size_t)key] = w; else if (key == q_ncol) cols->reason_w_override = w; };
         t.autofit   = [ctrl, status](si32 key){ return xfer_content_w(ctrl, status, key); };
         return t;
     }
@@ -177,12 +195,12 @@ namespace netxs::app::parvion
         auto rows = std::make_shared<std::vector<disp_row>>(xfer_rows(ctrl, status));
         auto cfg = qsel_cfg{};
         cfg.key_count  = [ctrl]{ return (si32)ctrl->queue.size(); };
-        cfg.is_sel     = [ctrl](si32 k){ return k >= 0 && k < (si32)ctrl->queue.size() && ctrl->queue[(size_t)k].selected; };
-        cfg.set_sel    = [ctrl](si32 k, bool v){ if (k >= 0 && k < (si32)ctrl->queue.size()) ctrl->queue[(size_t)k].selected = v; };
-        cfg.clear      = [ctrl]{ for (auto& it : ctrl->queue) it.selected = faux; };
-        cfg.any        = [ctrl]{ for (auto& it : ctrl->queue) if (it.selected) return true; return faux; };
+        cfg.is_selected   = [ctrl](si32 k){ return k >= 0 && k < (si32)ctrl->queue.size() && ctrl->queue[(size_t)k].selected; };
+        cfg.on_select     = [ctrl](si32 k, bool v){ if (k >= 0 && k < (si32)ctrl->queue.size()) ctrl->queue[(size_t)k].selected = v; };
+        cfg.on_clear      = [ctrl]{ for (auto& it : ctrl->queue) it.selected = faux; };
+        cfg.has_selection = [ctrl]{ for (auto& it : ctrl->queue) if (it.selected) return true; return faux; };
         cfg.in_scope   = [ctrl, status](si32 k){ return k >= 0 && k < (si32)ctrl->queue.size() && tab_status_match(status, ctrl->queue[(size_t)k]); };
-        cfg.disp       = [rows]{ return (si32)rows->size(); };
+        cfg.row_count  = [rows]{ return (si32)rows->size(); };
         cfg.key_of_row = [rows](si32 i){ return i >= 0 && i < (si32)rows->size() && (*rows)[(size_t)i].child == -1 ? (*rows)[(size_t)i].qi : -1; };
         return cfg;
     }
@@ -254,14 +272,14 @@ namespace netxs::app::parvion
                  "Remove", "Cancel" };
     }
     // One transfer cell's rendered text + colour.
-    inline auto xfer_cell(sftp_remote* ctrl, si32 status, si32 row, si32 key) -> cellval
+    inline auto xfer_cell(sftp_remote* ctrl, si32 status, si32 row, si32 key,
+                          xfer_progress_cache& progress) -> table_cell
     {
         auto rows = xfer_rows(ctrl, status);
         if (row < 0 || row >= (si32)rows.size()) return {};
         auto qi = rows[(size_t)row].qi, child = rows[(size_t)row].child;
         auto& it = ctrl->queue[(size_t)qi];
         auto dir_fg = it.download ? ui32{ theme::dir_fg } : ui32{ theme::link_fg };
-        auto pct = [](double p){ auto b = std::array<char, 24>{}; std::snprintf(b.data(), b.size(), "%.2f%%", p); return text{ b.data() }; };
         if (child == -1)
         {
             switch (key)
@@ -270,10 +288,18 @@ namespace netxs::app::parvion
                 case 1: return { it.remote_path, dir_fg };
                 case 2: return { human_size(it.size), theme::subtext };
                 case 3:
-                    if (it.status == queue_item::queued) return { it.paused ? text{ "paused" } : text{ "queued" }, theme::subtext };
-                    else return { pct(it.size > 0 ? 100.0 * (double)it.done / (double)it.size : 0.0), it.status == queue_item::succeeded ? ui32{ theme::dir_fg } : it.status == queue_item::failed ? ui32{ theme::err_fg } : ui32{ theme::text_fg } };
-                case 4: return it.rate.speed > 0.0 ? cellval{ human_size((si64)(it.rate.speed + 0.5)) + "/s", theme::subtext } : cellval{};
-                default: return it.status == queue_item::failed && !it.error.empty() ? cellval{ it.error, theme::err_fg } : cellval{}; // Reason.
+                    if (it.status == queue_item::queued)
+                        return xfer_progress_cell(progress, row, 0.0, it.paused ? text{ "paused" } : text{ "queued" }, theme::subtext);
+                    else
+                    {
+                        auto fraction = xfer_progress_fraction(it.done, it.size);
+                        auto foreground = it.status == queue_item::succeeded ? ui32{ theme::dir_fg }
+                                        : it.status == queue_item::failed    ? ui32{ theme::err_fg }
+                                                                             : ui32{ theme::text_fg };
+                        return xfer_progress_cell(progress, row, fraction, xfer_progress_text(fraction), foreground);
+                    }
+                case 4: return it.rate.speed > 0.0 ? table_cell{ human_size((si64)(it.rate.speed + 0.5)) + "/s", theme::subtext } : table_cell{};
+                default: return it.status == queue_item::failed && !it.error.empty() ? table_cell{ it.error, theme::err_fg } : table_cell{}; // Reason.
             }
         }
         // Expanded subtask child row: only the Local Name label + Progress cells.
@@ -288,12 +314,15 @@ namespace netxs::app::parvion
             {
                 auto& wkr = *ctrl->workers[(size_t)child];
                 auto full = (double)(end - start);
-                if (wkr.state == xfer_worker::s_ok) return { "100.00%", theme::dir_fg };
-                return { pct(full > 0.0 ? std::min(100.0, 100.0 * (double)wkr.done / full) : 0.0), wkr.state == xfer_worker::s_err ? ui32{ theme::err_fg } : ui32{ theme::text_fg } };
+                if (wkr.state == xfer_worker::s_ok) return xfer_progress_cell(progress, row, 1.0, "100.00%", theme::dir_fg);
+                auto fraction = full > 0.0 ? progressbar_fraction((double)wkr.done / full) : 0.0;
+                return xfer_progress_cell(progress, row, fraction, xfer_progress_text(fraction),
+                                          wkr.state == xfer_worker::s_err ? ui32{ theme::err_fg }
+                                                                          : ui32{ theme::text_fg });
             }
-            if (it.status == queue_item::succeeded) return { "100.00%", theme::dir_fg };
-            if (it.status == queue_item::queued)    return { "queued",  theme::subtext };
-            if (it.status == queue_item::failed)    return { "—",       theme::err_fg };
+            if (it.status == queue_item::succeeded) return xfer_progress_cell(progress, row, 1.0, "100.00%", theme::dir_fg);
+            if (it.status == queue_item::queued)    return xfer_progress_cell(progress, row, 0.0, "queued", theme::subtext);
+            if (it.status == queue_item::failed)    return xfer_progress_cell(progress, row, 0.0, "—", theme::err_fg);
         }
         return {};
     }
@@ -310,9 +339,10 @@ namespace netxs::app::parvion
     }
 
     // Build the complete transfer-view table_cfg for one status tab.
-    inline auto make_transfer_view(sftp_remote* ctrl, si32 status, netxs::wptr<ui::base> window_wp) -> tab_page_ptr
+    inline auto make_transfer_view(sftp_remote* ctrl, si32 status, netxs::wptr<ui::base> window_wp) -> tab_page_cfg
     {
         auto cols = std::make_shared<xfer_cols>();
+        auto progress = std::make_shared<xfer_progress_cache>();
         auto row_snapshot = std::make_shared<std::vector<disp_row>>();
         auto title = [ctrl, status]
         {
@@ -323,18 +353,18 @@ namespace netxs::app::parvion
         auto cfg = table_cfg{};
         cfg.window_wp = window_wp;
         cfg.columns   = [ctrl, status, cols]{ return xfer_columns(ctrl, status, cols); };
-        cfg.rows      = [ctrl, status, row_snapshot]
+        cfg.row_count = [ctrl, status, row_snapshot]
         {
             *row_snapshot = xfer_rows(ctrl, status);
             return (si32)row_snapshot->size();
         };
-        cfg.cell      = [ctrl, status](si32 row, si32 key){ return xfer_cell(ctrl, status, row, key); };
+        cfg.cell      = [ctrl, status, progress](si32 row, si32 key){ return xfer_cell(ctrl, status, row, key, *progress); };
         cfg.compare   = [ctrl, row_snapshot](si32 row_a, si32 row_b, si32 key)
         {
             return xfer_compare(ctrl, *row_snapshot, row_a, row_b, key);
         };
         cfg.gutter    = [ctrl, status](si32 row){ return xfer_gutter(ctrl, status, row); };
-        cfg.toggle    = [ctrl](si32 qi){ if (qi >= 0 && qi < (si32)ctrl->queue.size()) ctrl->queue[(size_t)qi].expanded = !ctrl->queue[(size_t)qi].expanded; };
+        cfg.on_toggle = [ctrl](si32 qi){ if (qi >= 0 && qi < (si32)ctrl->queue.size()) ctrl->queue[(size_t)qi].expanded = !ctrl->queue[(size_t)qi].expanded; };
         cfg.selection = [ctrl, status]{ return xfer_sel(ctrl, status); };
         cfg.menu      = [ctrl, status, window_wp](netxs::wptr<ui::base> panel_wp)
         {
@@ -356,7 +386,7 @@ namespace netxs::app::parvion
         cfg.on_col_grab = [status, cols](si32 key){ if (key == q_ncol && cols->reason_w_override == 0) cols->reason_w_override = xfer_reason_w(*cols, status); };
         cfg.empty_text  = []{ return text{ "(no transfers — press Enter on a file to queue one)" }; };
         cfg.deletion.enabled = true;
-        cfg.deletion.remove_selected = [ctrl](netxs::wptr<ui::base>)
+        cfg.deletion.on_remove_selected = [ctrl](netxs::wptr<ui::base>)
         {
             if (ctrl) ctrl->queue_remove([](queue_item const& it){ return it.selected; });
         };

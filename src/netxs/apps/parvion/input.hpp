@@ -32,11 +32,12 @@ namespace netxs::app::parvion
     struct input_cfg
     {
         std::function<text()>       value;
-        std::function<void(text)>   set_value;
+        std::function<void(text)>   on_change;
+        std::function<text()>       prefix;
         std::function<input_mode()> mode;
-        std::function<void()>       activate;
-        std::function<void(text)>   submit;
-        std::function<void()>       cancel;
+        std::function<void()>       on_activate;
+        std::function<void(text)>   on_submit;
+        std::function<void()>       on_cancel;
         input_blur                  blur = input_blur::keep;
         bool                        secret = faux;
         bool                        digits_only = faux;
@@ -44,8 +45,9 @@ namespace netxs::app::parvion
         input_palette               palette{};
     };
 
-    inline auto make_input(input_cfg cfg) -> ui::sptr
+    inline auto make_input(input_cfg cfg) -> component
     {
+        auto focus_on_activate = cfg.focus_on_start;
         struct state
         {
             si32 caret = 0;
@@ -67,7 +69,7 @@ namespace netxs::app::parvion
             {
                 seen = value;
                 caret = std::clamp(caret, 0, cluster_count(value));
-                if (cfg.set_value) cfg.set_value(std::move(value));
+                if (cfg.on_change) cfg.on_change(std::move(value));
             }
             auto sync(input_cfg const& cfg)
             {
@@ -126,12 +128,12 @@ namespace netxs::app::parvion
             {
                 auto value = sync(cfg);
                 original = value;
-                if (cfg.submit) cfg.submit(std::move(value));
+                if (cfg.on_submit) cfg.on_submit(std::move(value));
             }
             void cancel(input_cfg& cfg)
             {
                 restore(cfg);
-                if (cfg.cancel) cfg.cancel();
+                if (cfg.on_cancel) cfg.on_cancel();
             }
         };
 
@@ -156,6 +158,8 @@ namespace netxs::app::parvion
                 auto mode = st.mode(cfg);
                 auto value = st.sync(cfg);
                 auto disp = st.display(cfg, value);
+                auto prefix = cfg.prefix ? cfg.prefix() : text{};
+                auto prefix_w = std::min(size.x, cell_width(prefix));
                 auto active = mode == input_mode::edit && st.focused;
                 auto und = active ? cfg.palette.active : cfg.palette.muted_fg;
                 canvas.fill(rect{ {}, size }, [&](cell& c)
@@ -163,33 +167,38 @@ namespace netxs::app::parvion
                     c.bgc(cfg.palette.bg).und(unln::line).unc(argb{ und });
                 });
 
+                if (prefix_w > 0)
+                    put_str(canvas, 0, 0, prefix, cfg.palette.muted_fg, cfg.palette.bg, prefix_w);
+                auto field_w = std::max(0, size.x - prefix_w);
+                if (field_w <= 0) return;
+
                 if (mode == input_mode::view || mode == input_mode::disabled)
                 {
                     auto width = cell_width(disp);
-                    if (width > size.x)
+                    if (width > field_w)
                     {
-                        put_str(canvas, 0, 0, "\xE2\x80\xA6", cfg.palette.muted_fg, cfg.palette.bg, 1);
-                        auto tail = std::max(0, width - size.x + 1);
-                        put_str(canvas, 1, 0, view{ disp }.substr(byte_at_cell(disp, tail)),
-                                cfg.palette.muted_fg, cfg.palette.bg, size.x - 1);
+                        put_str(canvas, prefix_w, 0, "\xE2\x80\xA6", cfg.palette.muted_fg, cfg.palette.bg, 1);
+                        auto tail = std::max(0, width - field_w + 1);
+                        put_str(canvas, prefix_w + 1, 0, view{ disp }.substr(byte_at_cell(disp, tail)),
+                                cfg.palette.muted_fg, cfg.palette.bg, field_w - 1);
                     }
-                    else put_str(canvas, 0, 0, disp, cfg.palette.muted_fg, cfg.palette.bg, size.x);
+                    else put_str(canvas, prefix_w, 0, disp, cfg.palette.muted_fg, cfg.palette.bg, field_w);
                     return;
                 }
 
                 auto total = cell_width(disp);
                 auto ccell = cfg.secret ? st.caret : caret_cell(disp, st.caret);
                 if (st.off > ccell)             st.off = ccell;
-                if (ccell - st.off >= size.x)   st.off = ccell - size.x + 1;
-                st.off = std::clamp(st.off, 0, std::max(0, total - size.x + 1));
+                if (ccell - st.off >= field_w)  st.off = ccell - field_w + 1;
+                st.off = std::clamp(st.off, 0, std::max(0, total - field_w + 1));
                 auto shown = view{ disp }.substr(byte_at_cell(disp, st.off));
-                put_str(canvas, 0, 0, shown,
+                put_str(canvas, prefix_w, 0, shown,
                         active ? cfg.palette.active : cfg.palette.text_fg,
-                        cfg.palette.bg, size.x);
+                        cfg.palette.bg, field_w);
                 if (active)
                 {
-                    auto cx = ccell - st.off;
-                    if (cx >= 0 && cx < size.x)
+                    auto cx = prefix_w + ccell - st.off;
+                    if (cx >= prefix_w && cx < size.x)
                         canvas.fill(rect{{ cx, 0 }, { 1, 1 }}, [&](cell& c)
                         {
                             c.bgc(cfg.palette.active).fgc(cfg.palette.bg);
@@ -206,8 +215,8 @@ namespace netxs::app::parvion
                 }
                 else if (was && !st.focused && st.mode(cfg) == input_mode::edit)
                 {
-                    if      (cfg.blur == input_blur::submit && cfg.submit) st.submit(cfg);
-                    else if (cfg.blur == input_blur::cancel && cfg.cancel) st.cancel(cfg);
+                    if      (cfg.blur == input_blur::submit && cfg.on_submit) st.submit(cfg);
+                    else if (cfg.blur == input_blur::cancel && cfg.on_cancel) st.cancel(cfg);
                 }
                 boss.base::deface();
             };
@@ -215,11 +224,12 @@ namespace netxs::app::parvion
             {
                 auto mode = st.mode(cfg);
                 if (mode == input_mode::disabled) { gear.dismiss(); return; }
-                if (mode == input_mode::view && cfg.activate) cfg.activate();
+                if (mode == input_mode::view && cfg.on_activate) cfg.on_activate();
                 if (st.mode(cfg) != input_mode::edit) { gear.dismiss(); return; }
                 pro::focus::set(boss.This(), gear.id, solo::on);
                 st.original = st.sync(cfg);
-                st.caret_to(cfg, (si32)gear.coord.x);
+                auto prefix_w = cfg.prefix ? cell_width(cfg.prefix()) : 0;
+                st.caret_to(cfg, std::max(0, (si32)gear.coord.x - prefix_w));
                 boss.base::deface();
                 gear.dismiss();
             });
@@ -237,7 +247,8 @@ namespace netxs::app::parvion
             boss.LISTEN(tier::release, e2::form::drag::pull::_<hids::buttons::left>, gear)
             {
                 if (!st.dragging) return;
-                st.caret_to(cfg, (si32)gear.coord.x);
+                auto prefix_w = cfg.prefix ? cell_width(cfg.prefix()) : 0;
+                st.caret_to(cfg, std::max(0, (si32)gear.coord.x - prefix_w));
                 boss.base::deface();
             };
             boss.LISTEN(tier::release, e2::form::drag::stop::_<hids::buttons::left>, gear)
@@ -270,8 +281,8 @@ namespace netxs::app::parvion
                 auto value = st.sync(cfg);
                 auto handled = true;
                      if (k == input::key::Tab && !ctrl && !alt) {} // Deliberately consumed: no field traversal.
-                else if (k == input::key::Esc && cfg.cancel) st.cancel(cfg);
-                else if (k == input::key::KeyEnter && cfg.submit) st.submit(cfg);
+                else if (k == input::key::Esc && cfg.on_cancel) st.cancel(cfg);
+                else if (k == input::key::KeyEnter && cfg.on_submit) st.submit(cfg);
                 else if (k == input::key::Backspace)
                 {
                     if (st.caret > 0)
@@ -306,6 +317,17 @@ namespace netxs::app::parvion
                 }
             };
         });
-        return form;
+        auto activate = focus_on_activate ? std::function<void()>{ [weak = ptr::shadow(form)]
+        {
+            if (auto input = weak.lock())
+            {
+                auto gear_id = input->bell::indexer.luafx.get_gear().id;
+                input->base::enqueue([weak, gear_id](auto&)
+                {
+                    if (auto target = weak.lock()) pro::focus::set(target, gear_id, solo::on);
+                });
+            }
+        } } : std::function<void()>{};
+        return { std::move(form), std::move(activate), {} };
     }
 }

@@ -228,23 +228,25 @@ namespace netxs::app::parvion
         });
         for (auto i = si32{}; i < 4; ++i)
         {
-            auto input = form_layer->attach(make_input({
+            auto input = make_input({
                 .value = [sp, i]{ return sp->fld[(size_t)i]; },
-                .set_value = [sp, i](text value){ sp->fld[(size_t)i] = std::move(value); },
-                .submit = [sp](text){ cb_connect(*sp); },
+                .on_change = [sp, i](text value){ sp->fld[(size_t)i] = std::move(value); },
+                .on_submit = [sp](text){ cb_connect(*sp); },
                 .secret = connect_fields[(size_t)i].secret,
                 .digits_only = i == cf_port,
-            }));
-            sp->input_wp[(size_t)i] = ptr::shadow(input);
+            });
+            form_layer->attach(input.widget);
+            sp->input_wp[(size_t)i] = ptr::shadow(input.widget);
         }
-        auto connect = form_layer->attach(make_button({
+        auto connect = make_button({
             .label = [sp]{ return sp->connect_label; },
-            .activate = [sp](hids&, ui::base&)
+            .on_activate = [sp](hids&, ui::base&)
             {
                 cb_connect(*sp);
             },
-        }));
-        sp->connect_wptr = ptr::shadow(connect);
+        });
+        form_layer->attach(connect.widget);
+        sp->connect_wptr = ptr::shadow(connect.widget);
         // Min = fully-compressed width so the form never pins a large window min-width (keeps the
         // menu controls on-screen when narrow); max = full uncompressed width. Between the two,
         // connect_render compresses smoothly to whatever width the parent fork hands it.

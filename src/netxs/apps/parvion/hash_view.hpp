@@ -8,6 +8,7 @@
 // tab adapter over the independent table widget.
 
 #include "queue_actions.hpp"
+#include "progressbar.hpp"
 #include "tab_page.hpp"
 #include "table.hpp"
 
@@ -19,11 +20,42 @@ namespace netxs::app::parvion
     // Per-instance session-only column widths (0 = auto-size to content).
     struct hash_cols { std::array<si32, 6> w{}; };
 
+    inline auto hash_progress_fraction(hash_item const& item) -> double
+    {
+        if (item.status == hash_item::succeeded) return 1.0;
+        return item.size > 0 ? progressbar_fraction((double)item.done / (double)item.size) : 0.0;
+    }
+    inline auto hash_progress_text(double fraction) -> text
+    {
+        auto buf = std::array<char, 24>{};
+        std::snprintf(buf.data(), buf.size(), "%.2f%%", progressbar_fraction(fraction) * 100.0);
+        return text{ buf.data() };
+    }
+    inline auto hash_progress_label(hash_item const& item) -> text
+    {
+        if (item.status == hash_item::queued)    return "queued";
+        if (item.status == hash_item::hashing)   return item.size > 0 ? hash_progress_text(hash_progress_fraction(item))
+                                                                      : human_size(item.done);
+        if (item.status == hash_item::succeeded) return "100.00%";
+        return "failed";
+    }
+    inline auto hash_progress_foreground(hash_item const& item) -> ui32
+    {
+        if (item.status == hash_item::queued)    return theme::subtext;
+        if (item.status == hash_item::succeeded) return theme::dir_fg;
+        if (item.status == hash_item::failed)    return theme::err_fg;
+        return theme::text_fg;
+    }
+    inline auto hash_progress_cell(progressbar_cache& cache, hash_item const& item) -> table_cell
+    {
+        return { cached_progressbar(cache, item.id, hash_progress_fraction(item),
+                                    hash_progress_label(item), hash_progress_foreground(item)) };
+    }
+
     inline auto hash_content_w(sftp_remote* ctrl, si32 col) -> si32
     {
         auto w = si32{};
         if (!ctrl) return w;
-        auto pct = [](double p){ auto b = std::array<char, 24>{}; std::snprintf(b.data(), b.size(), "%.2f%%", p); return text{ b.data() }; };
         for (auto& it : ctrl->hash_queue)
         {
             auto s = text{};
@@ -33,7 +65,7 @@ namespace netxs::app::parvion
                 case 1:  s = it.path; break;
                 case 2:  s = text{ hash_algo_label(it.algo) }; break;
                 case 3:  s = it.size >= 0 ? human_size(it.size) : text{}; break;
-                case 4:  s = it.status == hash_item::queued ? text{ "queued" } : it.status == hash_item::hashing ? (it.size > 0 ? pct(100.0 * (double)it.done / (double)it.size) : human_size(it.done)) : it.status == hash_item::succeeded ? text{ "100.00%" } : text{ "failed" }; break;
+                case 4:  s = hash_progress_label(it); break;
                 default: s = it.status == hash_item::succeeded ? it.digest : it.status == hash_item::failed ? it.error : text{}; break;
             }
             w = std::max(w, (si32)cell_width(s));
@@ -110,8 +142,8 @@ namespace netxs::app::parvion
             t.add_column({ text{ hash_headers[(size_t)i] }, w, right[(size_t)i], true, i },
                          ctrl->hash_col_shown[(size_t)i], text{ hash_menu_headers[(size_t)i] });
         }
-        t.set_shown = [ctrl](si32 key, bool on){ if (key >= 0 && key < (si32)ctrl->hash_col_shown.size()) ctrl->hash_col_shown[(size_t)key] = on; };
-        t.resize    = [cols](si32 key, si32 w){ if (key >= 0 && key < (si32)cols->w.size()) cols->w[(size_t)key] = w; };
+        t.on_show_column   = [ctrl](si32 key, bool on){ if (key >= 0 && key < (si32)ctrl->hash_col_shown.size()) ctrl->hash_col_shown[(size_t)key] = on; };
+        t.on_resize_column = [cols](si32 key, si32 w){ if (key >= 0 && key < (si32)cols->w.size()) cols->w[(size_t)key] = w; };
         t.autofit   = [ctrl](si32 key){ return hash_content_w(ctrl, key); };
         return t;
     }
@@ -119,12 +151,12 @@ namespace netxs::app::parvion
     {
         auto cfg = qsel_cfg{};
         cfg.key_count  = [ctrl]{ return (si32)ctrl->hash_queue.size(); };
-        cfg.is_sel     = [ctrl](si32 k){ return k >= 0 && k < (si32)ctrl->hash_queue.size() && ctrl->hash_queue[(size_t)k].selected; };
-        cfg.set_sel    = [ctrl](si32 k, bool v){ if (k >= 0 && k < (si32)ctrl->hash_queue.size()) ctrl->hash_queue[(size_t)k].selected = v; };
-        cfg.clear      = [ctrl]{ for (auto& it : ctrl->hash_queue) it.selected = faux; };
-        cfg.any        = [ctrl]{ for (auto& it : ctrl->hash_queue) if (it.selected) return true; return faux; };
+        cfg.is_selected   = [ctrl](si32 k){ return k >= 0 && k < (si32)ctrl->hash_queue.size() && ctrl->hash_queue[(size_t)k].selected; };
+        cfg.on_select     = [ctrl](si32 k, bool v){ if (k >= 0 && k < (si32)ctrl->hash_queue.size()) ctrl->hash_queue[(size_t)k].selected = v; };
+        cfg.on_clear      = [ctrl]{ for (auto& it : ctrl->hash_queue) it.selected = faux; };
+        cfg.has_selection = [ctrl]{ for (auto& it : ctrl->hash_queue) if (it.selected) return true; return faux; };
         cfg.in_scope   = [ctrl](si32 k){ return k >= 0 && k < (si32)ctrl->hash_queue.size(); };
-        cfg.disp       = [ctrl]{ return (si32)ctrl->hash_queue.size(); };
+        cfg.row_count  = [ctrl]{ return (si32)ctrl->hash_queue.size(); };
         cfg.key_of_row = [ctrl](si32 i){ return i >= 0 && i < (si32)ctrl->hash_queue.size() ? i : -1; };
         return cfg;
     }
@@ -216,43 +248,40 @@ namespace netxs::app::parvion
         cfg.on_blank_rclick = [ctrl, deface]{ auto any = faux; for (auto& it : ctrl->hash_queue) { any |= it.selected; it.selected = faux; } if (any) deface(); };
         return cfg;
     }
-    inline auto hash_cell(sftp_remote* ctrl, si32 row, si32 key) -> cellval
+    inline auto hash_cell(sftp_remote* ctrl, si32 row, si32 key,
+                          progressbar_cache& progress) -> table_cell
     {
         if (row < 0 || row >= (si32)ctrl->hash_queue.size()) return {};
         auto& it = ctrl->hash_queue[(size_t)row];
-        auto pct = [](double p){ auto b = std::array<char, 24>{}; std::snprintf(b.data(), b.size(), "%.2f%%", p); return text{ b.data() }; };
         switch (key)
         {
             case 0: return { it.source(), theme::subtext };
             case 1: return { it.path, theme::text_fg };
             case 2: return { text{ hash_algo_label(it.algo) }, theme::subtext };
             case 3: return { it.size >= 0 ? human_size(it.size) : text{}, theme::subtext };
-            case 4:
-                if (it.status == hash_item::queued)    return { "queued",  theme::subtext };
-                if (it.status == hash_item::hashing)   return { it.size > 0 ? pct(100.0 * (double)it.done / (double)it.size) : human_size(it.done), theme::text_fg };
-                if (it.status == hash_item::succeeded) return { "100.00%", theme::dir_fg };
-                return { "failed", theme::err_fg };
+            case 4: return hash_progress_cell(progress, it);
             default:
                 return { it.status == hash_item::succeeded ? it.digest : it.status == hash_item::failed ? it.error : text{}, it.status == hash_item::failed ? ui32{ theme::err_fg } : ui32{ theme::text_fg } };
         }
     }
 
-    inline auto make_hash_view(sftp_remote* ctrl, netxs::wptr<ui::base> window_wp) -> tab_page_ptr
+    inline auto make_hash_view(sftp_remote* ctrl, netxs::wptr<ui::base> window_wp) -> tab_page_cfg
     {
         auto cols = std::make_shared<hash_cols>();
+        auto progress = std::make_shared<progressbar_cache>();
         auto title = [ctrl]{ return "Checksums (" + std::to_string(ctrl ? ctrl->hash_queue.size() : 0) + ")"; };
         auto cfg = table_cfg{};
         cfg.window_wp = window_wp;
         cfg.columns    = [ctrl, cols]{ return hash_columns(ctrl, cols); };
-        cfg.rows       = [ctrl]{ return (si32)ctrl->hash_queue.size(); };
-        cfg.cell       = [ctrl](si32 row, si32 key){ return hash_cell(ctrl, row, key); };
+        cfg.row_count  = [ctrl]{ return (si32)ctrl->hash_queue.size(); };
+        cfg.cell       = [ctrl, progress](si32 row, si32 key){ return hash_cell(ctrl, row, key, *progress); };
         cfg.compare    = [ctrl](si32 row_a, si32 row_b, si32 key){ return hash_compare(ctrl, row_a, row_b, key); };
         cfg.selection  = [ctrl]{ return hash_sel(ctrl); };
         cfg.menu       = [ctrl, window_wp](netxs::wptr<ui::base> panel_wp){ return hash_menu(ctrl, panel_wp, window_wp); };
         cfg.follow     = []{ return table_follow_target{ table_follow_target::tail }; };
         cfg.empty_text = []{ return text{ "(no checksums)" }; };
         cfg.deletion.enabled = true;
-        cfg.deletion.remove_selected = [ctrl](netxs::wptr<ui::base>)
+        cfg.deletion.on_remove_selected = [ctrl](netxs::wptr<ui::base>)
         {
             if (!ctrl) return;
             ctrl->hash_remove_selected();

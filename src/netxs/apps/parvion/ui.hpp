@@ -8,9 +8,25 @@
 // pane compose make_table() without creating an include cycle.
 
 #include <algorithm>
+#include <functional>
 
 namespace netxs::app::parvion
 {
+    // Common retained-component handle used by every reusable Parvion widget.  The widget owns
+    // rendering and input state; the optional lifecycle hooks let containers activate/deactivate
+    // children without introducing a second page/widget hierarchy.
+    struct component
+    {
+        ui::sptr widget;
+        std::function<void()> activate;
+        std::function<void()> deactivate;
+
+        explicit operator bool() const { return !!widget; }
+        void on_activate() const { if (activate) activate(); }
+        void on_deactivate() const { if (deactivate) deactivate(); }
+        void deface() const { if (widget) widget->base::deface(); }
+    };
+
     // Shared palette (aligned with tile.hpp's command_bar tones).
     namespace theme
     {

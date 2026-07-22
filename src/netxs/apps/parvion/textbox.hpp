@@ -12,7 +12,7 @@
 // stable line identity for selection survival + menu/keys) and calls make_textbox(). The message-log
 // tab is just one such config; the component knows nothing about logs.
 //
-// make_textbox() returns an independent widget handle. Containers can wrap it as needed.
+// make_textbox() returns the common retained component handle. Containers can wrap it as needed.
 
 #include "panes.hpp" // ui::sptr, theme, shared menu utilities.
 
@@ -413,13 +413,7 @@ namespace netxs::app::parvion
     }
 
     // ---- Widget ------------------------------------------------------------------------------------
-    struct textbox_component
-    {
-        ui::sptr widget;
-        std::function<void()> clear_selection;
-    };
-
-    inline auto make_textbox(textbox_cfg cfg) -> textbox_component
+    inline auto make_textbox(textbox_cfg cfg) -> component
     {
         auto state_ref = std::make_shared<textbox_state*>(nullptr);
         auto form = ui::mock::ctor()->active()
@@ -525,6 +519,7 @@ namespace netxs::app::parvion
                 if (gear.hzwhl || st.hsb_hover) { auto maxh = std::max(0, st.content_w - st.disp_w); st.hscroll = std::clamp(st.hscroll - gear.whlsi * 4, 0, maxh); }
                 else { auto maxv = std::max(0, st.total - st.body_rows); st.scroll = std::clamp(st.scroll - gear.whlsi, 0, maxv); st.follow = st.scroll == maxv; }
                 boss.base::deface();
+                gear.dismiss();
             });
             boss.base::signal(tier::release, e2::form::draggable::_<hids::buttons::left>, true);
             boss.LISTEN(tier::release, e2::form::drag::start::_<hids::buttons::left>, gear)
@@ -615,6 +610,11 @@ namespace netxs::app::parvion
                 if (cfg.on_key) cfg.on_key(gear, ptr::shadow(boss.This()));
             };
         });
-        return { form, [state_ref]{ if (*state_ref) tb_sel_clear(**state_ref); } };
+        auto deactivate = [state_ref, weak = ptr::shadow(form)]
+        {
+            if (*state_ref) tb_sel_clear(**state_ref);
+            if (auto widget = weak.lock()) widget->base::deface();
+        };
+        return { std::move(form), {}, std::move(deactivate) };
     }
 }

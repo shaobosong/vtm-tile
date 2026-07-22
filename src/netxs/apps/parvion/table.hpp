@@ -6,22 +6,24 @@
 // parvion/table.hpp: the reusable TABLE core component.
 //
 // This is the single place that owns ALL table behavior: the render frame (background, column
-// header, cells, dividers, selection highlight, scrollbars), vertical/horizontal scrolling (wheel,
-// scrollbar drag/paging), row selection (click / ctrl / shift / rubber-band), column resize + auto-
-// fit + show/hide menu, an optional tree gutter (direction arrow + expand button), optional single-
-// select arrow-key navigation, right-click menus, and focus. A caller does NOT write event handlers:
-// it supplies a `table_cfg` (column model + per-cell data + selection/menu adapters + a few hooks)
-// and calls make_table(). Concrete views (the transfer views, the checksums view) are just table_cfg
-// builders and optional container adapters — they own no widget code of their own.
+// header, text/arbitrary component cells, dividers, selection highlight, scrollbars), vertical/
+// horizontal scrolling (wheel, scrollbar drag/paging), row selection (click / ctrl / shift / rubber-
+// band), column resize + auto-fit + show/hide menu, an optional tree gutter (direction arrow + expand
+// button), optional single-select arrow-key navigation, right-click menus, and focus. A caller does
+// NOT write event handlers: it supplies a `table_cfg` (column model + per-cell data + selection/menu
+// adapters + a few hooks) and calls make_table(). Concrete views (the transfer views, the checksums
+// view) are just table_cfg builders and optional container adapters — they own no widget code of
+// their own.
 //
-// make_table() returns the independent table widget. Containers can wrap it as needed.
+// make_table() returns the common retained component handle. Containers can wrap it as needed.
 
 #include "input.hpp"
 
 #include <algorithm>
 #include <functional>
-#include <optional>
 #include <set>
+#include <unordered_map>
+#include <variant>
 #include <vector>
 
 namespace netxs::app::parvion
@@ -61,8 +63,8 @@ namespace netxs::app::parvion
         std::vector<column>                    cols;      // Visible columns, left to right.
         std::vector<col_toggle>                roster;    // All columns for the header show/hide menu.
         si32                                   left = 1;  // First-column x (cell 0 is reserved for the table menu).
-        std::function<void(si32 key, bool on)> set_shown; // Flip a column's visibility (backing write).
-        std::function<void(si32 key, si32 w)>  resize;    // Persist a dragged column width.
+        std::function<void(si32 key, bool on)> on_show_column;   // Flip a column's visibility.
+        std::function<void(si32 key, si32 w)>  on_resize_column; // Persist a dragged column width.
         // Return the widest body-cell width. The core adds any header decoration and the divider.
         std::function<si32(si32 key)>          autofit;
 
@@ -189,17 +191,6 @@ namespace netxs::app::parvion
     // exclusive bottom of the body (== canvas height).
     struct table_state
     {
-        struct editor_state
-        {
-            bool active = faux;
-            bool seen = faux;
-            bool focus_pending = faux;
-            rect box{};
-            si32 row = -1;
-            si32 key = -1;
-            text value;
-        };
-
         enum dmode { d_none, d_vsb, d_hsb, d_col, d_rubber };
         enum sort_mode { sort_default, sort_ascending, sort_descending };
 
@@ -223,15 +214,16 @@ namespace netxs::app::parvion
 
         std::vector<std::pair<rect, si32>> row_hit{};    // Row rect -> selection key.
         std::vector<std::pair<rect, si32>> expand_hit{}; // Expand-button box -> expand id.
-        editor_state                       editor{};     // Table-owned in-cell input target and draft.
-        netxs::wptr<ui::base>              editor_wp{};  // The one make_input child owned by make_table().
         std::vector<si32> row_order{};                   // Visual row -> caller/source row.
+        std::vector<si32> row_offsets{};                 // Visual row -> content-line offset; includes end sentinel.
+        std::unordered_map<id_t, component> attached{};  // Components currently attached to the clipped body host.
+        netxs::wptr<ui::base> cell_host_wp{};
         si32 hover_expand = -1, press_expand = -1;
 
         si32 body_top = 1, body_rows = 0, tab_row = 0;
         si32 content_w = 0, disp_w = 0, vsb_x = 0, hsb_y = 0;
         si32 div_bottom = 1;
-        si32 total = 0;
+        si32 total = 0, total_lines = 0;
         bool has_vsb = faux, has_hsb = faux;
         ui64 revision = ~ui64{}; // Last caller data/view revision (optional scroll-reset hook).
     };
@@ -239,15 +231,27 @@ namespace netxs::app::parvion
     // Optional left-gutter content for one row: a direction arrow + an expand indicator/button.
     enum expand_kind { xp_none, xp_muted, xp_collapsed, xp_expanded };
     struct gutterval { text arrow; ui32 arrow_fg = 0; si32 expand_id = -1; expand_kind expand = xp_none; };
-    enum class table_cell_state { view, edit };
-    // One cell's rendered content. In edit state `s` seeds the table-owned input and `prefix`
-    // remains a non-editable part of the cell (for example a file/directory marker).
-    struct cellval
+    struct table_text_cell
     {
-        text s;
-        ui32 fg = 0;
-        table_cell_state state = table_cell_state::view;
-        text prefix;
+        text value;
+        ui32 foreground = 0;
+    };
+    struct table_component_cell
+    {
+        component content;
+    };
+    struct table_cell
+    {
+        using value_type = std::variant<std::monostate, table_text_cell, table_component_cell>;
+        value_type value;
+
+        table_cell() = default;
+        table_cell(text text_value, ui32 foreground = 0)
+            : value{ table_text_cell{ std::move(text_value), foreground } } { }
+        table_cell(char const* text_value, ui32 foreground = 0)
+            : table_cell{ text{ text_value }, foreground } { }
+        table_cell(component content)
+            : value{ table_component_cell{ std::move(content) } } { }
     };
 
     // Persistent live-update target. Unlike a one-shot reveal, this target is reapplied on every
@@ -281,12 +285,12 @@ namespace netxs::app::parvion
     struct qsel_cfg
     {
         std::function<si32()>           key_count;
-        std::function<bool(si32)>       is_sel;
-        std::function<void(si32, bool)> set_sel;
-        std::function<void()>           clear;
-        std::function<bool()>           any;
+        std::function<bool(si32)>       is_selected;
+        std::function<void(si32, bool)> on_select;
+        std::function<void()>           on_clear;
+        std::function<bool()>           has_selection;
         std::function<bool(si32)>       in_scope;   // key -> selectable now (Shift-range filter).
-        std::function<si32()>           disp;       // Number of display rows.
+        std::function<si32()>           row_count;  // Number of display rows.
         std::function<si32(si32)>       key_of_row; // Display row -> key (-1 if not selectable).
     };
 
@@ -305,7 +309,7 @@ namespace netxs::app::parvion
     struct table_delete_cfg
     {
         bool                                             enabled = faux;
-        std::function<void(netxs::wptr<ui::base>)>       remove_selected;
+        std::function<void(netxs::wptr<ui::base>)>       on_remove_selected;
         std::function<app::shared::confirm_dialog_text()> confirm;
         std::function<bool(hids&, netxs::wptr<ui::base>)> on_delete;
     };
@@ -317,12 +321,11 @@ namespace netxs::app::parvion
     {
         netxs::wptr<ui::base> window_wp;      // App window: anchor for confirm dialogs.
         std::function<qtable()>                          columns;     // Column model (rebuilt each render/hit).
-        std::function<si32()>                            rows;        // Number of display rows.
-        std::function<cellval(si32 row, si32 key)>       cell;        // Cell value/state for logical column `key`.
-        std::function<void(si32 row, si32 key, text)>    edit_submit; // Receive the table-owned editor's committed value.
-        std::function<void(si32 row, si32 key)>          edit_cancel; // Cancel the table-owned editor.
+        std::function<si32()>                            row_count;   // Number of display rows.
+        std::function<si32(si32 source_row)>             row_height;  // Explicit content height; defaults to one line.
+        std::function<table_cell(si32 row, si32 key)>    cell;        // Text or retained component for logical column `key`.
         std::function<gutterval(si32 row)>               gutter;      // Left-gutter arrow/expand (null => no gutter).
-        std::function<void(si32 expand_id)>              toggle;      // Toggle a row's expansion.
+        std::function<void(si32 expand_id)>              on_toggle;   // Toggle a row's expansion.
         std::function<qsel_cfg()>                        selection;   // null => not selectable.
         std::function<qmenu_cfg(netxs::wptr<ui::base>)>  menu;        // Unified body menu (null => none; header menu still shows).
         std::function<table_follow_target()>             follow;      // Persistent live-update target (null => no live following).
@@ -330,7 +333,7 @@ namespace netxs::app::parvion
         std::function<si32()>                            revision_row;// One-shot source row to reveal after a revision change (-1 => top).
         std::function<si32(si32 source_row)>             sort_group;  // Fixed ascending group rank; direction only reverses within a group.
         std::function<si32(si32, si32, si32)>            compare;     // Source rows a/b + column key -> negative/equal/positive.
-        std::function<void(si32 source_row)>             activate;    // Double-click/Enter activation (null => none).
+        std::function<void(si32 source_row)>             on_activate; // Double-click/Enter activation (null => none).
         table_delete_cfg                                 deletion;    // Opt-in Delete-key selected-row removal.
         std::function<void(si32 key)>                    on_col_grab; // A column-border drag begins (null => none).
         std::function<text()>                            empty_text;  // Message shown when rows()==0 (null => none).
@@ -342,20 +345,20 @@ namespace netxs::app::parvion
     };
 
     // ---- Scroll layer ------------------------------------------------------------------------------
-    inline void tbl_layout(table_state& st, si32 w, si32 h, si32 total, si32 content_w, si32 body_top)
+    inline void tbl_layout(table_state& st, si32 w, si32 h, si32 total_lines, si32 content_w, si32 body_top)
     {
-        st.total     = total;
+        st.total_lines = std::max(0, total_lines);
         st.tab_row   = h; // Exclusive body bottom: the page canvas has no reserved strip/handle rows.
         st.body_top  = body_top;
         st.content_w = content_w;
         auto avail = std::max(0, st.tab_row - st.body_top);
         for (auto pass = si32{}; pass < 2; ++pass)
         {
-            st.has_vsb   = avail > 0 && total > avail;
+            st.has_vsb   = avail > 0 && st.total_lines > avail;
             st.disp_w    = w - (st.has_vsb ? 1 : 0);
             st.has_hsb   = st.content_w > st.disp_w;
             st.body_rows = std::max(0, avail - (st.has_hsb ? 1 : 0));
-            st.has_vsb   = st.body_rows > 0 && total > st.body_rows;
+            st.has_vsb   = st.body_rows > 0 && st.total_lines > st.body_rows;
             st.disp_w    = w - (st.has_vsb ? 1 : 0);
             st.has_hsb   = st.content_w > st.disp_w;
             st.body_rows = std::max(0, avail - (st.has_hsb ? 1 : 0));
@@ -367,11 +370,11 @@ namespace netxs::app::parvion
     inline auto tbl_vsb(table_state const& st) -> q_sb
     {
         auto sb = q_sb{};
-        sb.ok = st.has_vsb && st.body_rows > 0 && st.total > st.body_rows;
+        sb.ok = st.has_vsb && st.body_rows > 0 && st.total_lines > st.body_rows;
         if (!sb.ok) return sb;
         sb.x = st.vsb_x; sb.top = st.body_top; sb.track_h = st.body_rows;
-        sb.thumb_h = std::max(1, st.body_rows * st.body_rows / st.total);
-        sb.maxscroll = st.total - st.body_rows;
+        sb.thumb_h = std::max(1, st.body_rows * st.body_rows / st.total_lines);
+        sb.maxscroll = st.total_lines - st.body_rows;
         sb.thumb_y = sb.top + (st.body_rows - sb.thumb_h) * st.scroll / sb.maxscroll;
         return sb;
     }
@@ -417,7 +420,7 @@ namespace netxs::app::parvion
     }
     inline void tbl_clamp(table_state& st)
     {
-        st.scroll  = std::clamp(st.scroll,  0, std::max(0, st.total - st.body_rows));
+        st.scroll  = std::clamp(st.scroll,  0, std::max(0, st.total_lines - st.body_rows));
         st.hscroll = std::clamp(st.hscroll, 0, std::max(0, st.content_w - st.disp_w));
     }
     struct page_nav_state { si32 offset = 0, cursor = 0; };
@@ -490,8 +493,8 @@ namespace netxs::app::parvion
     }
     inline void q_set_col_w(qtable const& t, si32 v, si32 w)
     {
-        if (v >= 0 && v < (si32)t.cols.size() && t.resize)
-            t.resize(t.cols[(size_t)v].key, std::clamp(w, g_col_min, g_col_max));
+        if (v >= 0 && v < (si32)t.cols.size() && t.on_resize_column)
+            t.on_resize_column(t.cols[(size_t)v].key, std::clamp(w, g_col_min, g_col_max));
     }
     inline auto q_col_autofit(qtable const& t, si32 v, bool sortable) -> si32
     {
@@ -503,7 +506,8 @@ namespace netxs::app::parvion
     inline auto q_row_at(table_state const& st, si32 mx, si32 my) -> si32
     {
         for (auto& [b, key] : st.row_hit)
-            if (my == b.coor.y && mx >= b.coor.x && mx < b.coor.x + b.size.x) return key;
+            if (my >= b.coor.y && my < b.coor.y + b.size.y
+             && mx >= b.coor.x && mx < b.coor.x + b.size.x) return key;
         return -1;
     }
     inline auto q_source_row(table_state const& st, si32 visual_row) -> si32
@@ -518,14 +522,41 @@ namespace netxs::app::parvion
             if (st.row_order[(size_t)i] == source_row) return i;
         return -1;
     }
+    inline auto q_visual_at_line(table_state const& st, si32 line) -> si32
+    {
+        if (st.total <= 0 || st.row_offsets.size() < 2) return -1;
+        line = std::clamp(line, 0, std::max(0, st.total_lines - 1));
+        auto iter = std::upper_bound(st.row_offsets.begin(), st.row_offsets.end(), line);
+        return std::clamp((si32)(iter - st.row_offsets.begin()) - 1, 0, st.total - 1);
+    }
+    inline auto q_row_top(table_state const& st, si32 visual_row) -> si32
+    {
+        return visual_row >= 0 && visual_row < st.total ? st.row_offsets[(size_t)visual_row] : -1;
+    }
+    inline auto q_row_bottom(table_state const& st, si32 visual_row) -> si32
+    {
+        return visual_row >= 0 && visual_row < st.total ? st.row_offsets[(size_t)visual_row + 1] : -1;
+    }
+    inline auto q_reveal_visual(table_state const& st, si32 offset, si32 visual_row) -> si32
+    {
+        auto maxscroll = std::max(0, st.total_lines - st.body_rows);
+        offset = std::clamp(offset, 0, maxscroll);
+        if (visual_row < 0 || visual_row >= st.total || st.body_rows <= 0) return offset;
+        auto top = q_row_top(st, visual_row);
+        auto bottom = q_row_bottom(st, visual_row);
+        if (top < offset) return std::clamp(top, 0, maxscroll);
+        if (bottom > offset + st.body_rows)
+            return std::clamp(bottom - top > st.body_rows ? top : bottom - st.body_rows, 0, maxscroll);
+        return offset;
+    }
     inline auto q_follow_scroll(table_state const& st, table_cfg const& cfg) -> si32
     {
         if (!cfg.follow) return -1;
-        auto maxscroll = std::max(0, st.total - st.body_rows);
+        auto maxscroll = std::max(0, st.total_lines - st.body_rows);
         auto target = cfg.follow();
         if (target.mode == table_follow_target::tail) return maxscroll;
         auto row = q_visual_row(st, target.row);
-        return row >= 0 ? std::clamp(row - st.body_rows + 1, 0, maxscroll) : -1;
+        return row >= 0 ? std::clamp(q_row_bottom(st, row) - st.body_rows, 0, maxscroll) : -1;
     }
     inline auto q_at_follow_target(table_state const& st, table_cfg const& cfg) -> bool
     {
@@ -534,6 +565,7 @@ namespace netxs::app::parvion
     }
     inline void q_build_order(table_state& st, table_cfg const& cfg, si32 nrows)
     {
+        st.total = std::max(0, nrows);
         st.row_order.resize((size_t)std::max(0, nrows));
         for (auto i = si32{}; i < nrows; ++i) st.row_order[(size_t)i] = i;
         if (!cfg.compare || st.sort_key < 0 || st.sort_dir == table_state::sort_default) return;
@@ -550,10 +582,21 @@ namespace netxs::app::parvion
             return descending ? cmp > 0 : cmp < 0;
         });
     }
+    inline void q_build_row_offsets(table_state& st, table_cfg const& cfg)
+    {
+        st.row_offsets.assign((size_t)st.total + 1, 0);
+        for (auto visual = si32{}; visual < st.total; ++visual)
+        {
+            auto source = q_source_row(st, visual);
+            auto height = cfg.row_height && source >= 0 ? cfg.row_height(source) : 1;
+            st.row_offsets[(size_t)visual + 1] = st.row_offsets[(size_t)visual] + std::max(1, height);
+        }
+        st.total_lines = st.row_offsets.empty() ? 0 : st.row_offsets.back();
+    }
     inline auto q_ordered_sel(table_state const& st, qsel_cfg s) -> qsel_cfg
     {
         auto key_of_source = s.key_of_row;
-        s.disp = [&st]{ return (si32)st.row_order.size(); };
+        s.row_count = [&st]{ return (si32)st.row_order.size(); };
         s.key_of_row = [&st, key_of_source](si32 visual_row)
         {
             auto source_row = q_source_row(st, visual_row);
@@ -569,10 +612,10 @@ namespace netxs::app::parvion
     inline auto q_selected_row(qsel_cfg const& s, si32 preferred_key) -> si32
     {
         auto fallback = si32{ -1 };
-        for (auto row = si32{}; row < s.disp(); ++row)
+        for (auto row = si32{}; row < s.row_count(); ++row)
         {
             auto key = s.key_of_row(row);
-            if (key < 0 || !s.is_sel(key)) continue;
+            if (key < 0 || !s.is_selected(key)) continue;
             if (key == preferred_key) return row;
             if (fallback < 0) fallback = row;
         }
@@ -597,7 +640,7 @@ namespace netxs::app::parvion
         if (shft && st.sel_anchor >= 0 && st.sel_anchor < s.key_count())
         {
             auto anchor_row = si32{ -1 }, hit_row = si32{ -1 };
-            for (auto i = si32{}; i < s.disp(); ++i)
+            for (auto i = si32{}; i < s.row_count(); ++i)
             {
                 auto key = s.key_of_row(i);
                 if (key == st.sel_anchor) anchor_row = i;
@@ -606,70 +649,76 @@ namespace netxs::app::parvion
             if (anchor_row >= 0 && hit_row >= 0)
             {
                 auto lo = std::min(anchor_row, hit_row), hi = std::max(anchor_row, hit_row);
-                s.clear();
+                s.on_clear();
                 for (auto i = lo; i <= hi; ++i)
                 {
                     auto key = s.key_of_row(i);
-                    if (key >= 0 && s.in_scope(key)) s.set_sel(key, true);
+                    if (key >= 0 && s.in_scope(key)) s.on_select(key, true);
                 }
-                s.set_sel(hit, true); // Keep the caller's navigation cursor on the movable endpoint.
+                s.on_select(hit, true); // Keep the caller's navigation cursor on the movable endpoint.
             }
             else
             {
-                s.clear();
-                s.set_sel(hit, true);
+                s.on_clear();
+                s.on_select(hit, true);
                 st.sel_anchor = hit;
             }
         }
-        else if (ctl) { s.set_sel(hit, !s.is_sel(hit)); st.sel_anchor = hit; }
-        else          { s.clear(); s.set_sel(hit, true); st.sel_anchor = hit; }
+        else if (ctl) { s.on_select(hit, !s.is_selected(hit)); st.sel_anchor = hit; }
+        else          { s.on_clear(); s.on_select(hit, true); st.sel_anchor = hit; }
         st.nav_cursor = hit;
         return true;
     }
     inline auto q_sel_clear_blank(table_state& st, qsel_cfg const& s) -> bool
     {
-        if (!s.any()) { st.sel_anchor = st.nav_cursor = -1; return faux; }
-        s.clear(); st.sel_anchor = st.nav_cursor = -1; return true;
+        if (!s.has_selection()) { st.sel_anchor = st.nav_cursor = -1; return faux; }
+        s.on_clear(); st.sel_anchor = st.nav_cursor = -1; return true;
     }
-    inline void q_sel_snapshot(table_state& st, qsel_cfg const& s) { st.drag_base.clear(); for (auto k = si32{}; k < s.key_count(); ++k) if (s.is_sel(k)) st.drag_base.insert(k); }
+    inline void q_sel_snapshot(table_state& st, qsel_cfg const& s) { st.drag_base.clear(); for (auto k = si32{}; k < s.key_count(); ++k) if (s.is_selected(k)) st.drag_base.insert(k); }
     inline void q_rubber_begin(table_state& st, qsel_cfg const& s, si32 press_row, bool ctl)
     {
         st.rubber_a = st.rubber_b = std::max(0, press_row);
         st.drag = table_state::d_rubber;
-        auto anchor_key = press_row >= 0 && press_row < s.disp() ? s.key_of_row(press_row) : -1;
+        auto anchor_key = press_row >= 0 && press_row < s.row_count() ? s.key_of_row(press_row) : -1;
         st.rubber_ctrl = ctl;
         if (st.rubber_ctrl) st.rubber_add = !st.drag_base.count(anchor_key);
-        else                s.clear();
+        else                s.on_clear();
         if (anchor_key >= 0) st.sel_anchor = st.nav_cursor = anchor_key;
     }
     inline void q_rubber_pull(table_state& st, qsel_cfg const& s, si32 cur_row)
     {
         st.rubber_b = cur_row;
-        if (auto key = cur_row >= 0 && cur_row < s.disp() ? s.key_of_row(cur_row) : -1; key >= 0) st.nav_cursor = key;
+        if (auto key = cur_row >= 0 && cur_row < s.row_count() ? s.key_of_row(cur_row) : -1; key >= 0) st.nav_cursor = key;
         auto lo = std::min(st.rubber_a, st.rubber_b), hi = std::max(st.rubber_a, st.rubber_b);
         if (st.rubber_ctrl)
         {
-            for (auto k = si32{}; k < s.key_count(); ++k) s.set_sel(k, !!st.drag_base.count(k));
-            for (auto i = lo; i <= hi; ++i) { auto k = i >= 0 && i < s.disp() ? s.key_of_row(i) : -1; if (k >= 0) s.set_sel(k, st.rubber_add); }
+            for (auto k = si32{}; k < s.key_count(); ++k) s.on_select(k, !!st.drag_base.count(k));
+            for (auto i = lo; i <= hi; ++i) { auto k = i >= 0 && i < s.row_count() ? s.key_of_row(i) : -1; if (k >= 0) s.on_select(k, st.rubber_add); }
         }
         else
         {
-            s.clear();
-            for (auto i = lo; i <= hi; ++i) { auto k = i >= 0 && i < s.disp() ? s.key_of_row(i) : -1; if (k >= 0) s.set_sel(k, true); }
+            s.on_clear();
+            for (auto i = lo; i <= hi; ++i) { auto k = i >= 0 && i < s.row_count() ? s.key_of_row(i) : -1; if (k >= 0) s.on_select(k, true); }
         }
     }
     inline auto q_drag_step(si32 distance) -> si32
     {
         return std::clamp(distance, si32{ 1 }, si32{ 8 });
     }
+    inline auto q_rubber_visual_at_line(table_state const& st, si32 line) -> si32
+    {
+        return line >= st.total_lines ? st.total + (line - st.total_lines)
+                                      : q_visual_at_line(st, line);
+    }
     inline auto q_rubber_row_at_drag(table_state const& st) -> si32
     {
-        return st.scroll + std::clamp(st.drag_y - st.body_top, 0, std::max(0, st.body_rows - 1));
+        auto line = st.scroll + std::clamp(st.drag_y - st.body_top, 0, std::max(0, st.body_rows - 1));
+        return q_rubber_visual_at_line(st, line);
     }
     inline auto q_rubber_autoscroll(table_state& st, qsel_cfg const& s) -> bool
     {
         if (st.drag != table_state::d_rubber || st.body_rows <= 0) return faux;
-        auto maxv = std::max(0, st.total - st.body_rows);
+        auto maxv = std::max(0, st.total_lines - st.body_rows);
         auto next = st.scroll;
         if      (st.drag_y <  st.body_top)                next -= q_drag_step(st.body_top - st.drag_y);
         else if (st.drag_y >= st.body_top + st.body_rows) next += q_drag_step(st.drag_y - (st.body_top + st.body_rows - 1));
@@ -703,7 +752,7 @@ namespace netxs::app::parvion
     }
     inline auto q_has_columns_menu(qtable const& t) -> bool
     {
-        return !t.roster.empty() && (bool)t.set_shown;
+        return !t.roster.empty() && (bool)t.on_show_column;
     }
     inline auto q_header_menu_hit(table_state const& st, bool enabled, si32 mx, si32 my) -> bool
     {
@@ -715,7 +764,7 @@ namespace netxs::app::parvion
         if (!q_has_columns_menu(t)) return;
         auto panel_wp = ptr::shadow(boss.This());
         auto deface   = [panel_wp]{ if (auto p = panel_wp.lock()) p->base::deface(); };
-        m::open_dropdown_popup(boss, build_columns_menu(t.roster, t.set_shown, deface),
+        m::open_dropdown_popup(boss, build_columns_menu(t.roster, t.on_show_column, deface),
             { .source = m::popup_source::context_menu, .cursor = at });
     }
     inline void q_open_table_menu(auto& boss, qmenu_cfg const& cfg, twod at)
@@ -746,86 +795,71 @@ namespace netxs::app::parvion
         q_open_table_menu(boss, cfg, at);
     }
 
-    inline void q_edit_submit(table_state& st, table_cfg const& cfg)
+    inline void q_place_component(table_state& st, component content, rect area,
+                                  std::unordered_map<id_t, rect>& visible)
     {
-        if (!st.editor.active) return;
-        auto row = st.editor.row;
-        auto key = st.editor.key;
-        auto value = std::move(st.editor.value);
-        st.editor = {};
-        if (auto editor = st.editor_wp.lock()) editor->base::hidden = true;
-        if (cfg.edit_submit) cfg.edit_submit(row, key, std::move(value));
-    }
-    inline void q_edit_cancel(table_state& st, table_cfg const& cfg)
-    {
-        if (!st.editor.active) return;
-        auto row = st.editor.row;
-        auto key = st.editor.key;
-        st.editor = {};
-        if (auto editor = st.editor_wp.lock()) editor->base::hidden = true;
-        if (cfg.edit_cancel) cfg.edit_cancel(row, key);
-    }
-
-    // Activate and place the table-owned input in one visible edit-state cell.
-    inline void q_place_edit_cell(table_state& st, table_cfg const& cfg, qtable const& t,
-                                  si32 visible_col, si32 y, si32 source_row, si32 key,
-                                  cellval const& cell, auto& canvas, si32 hscroll, si32 disp_w,
-                                  ui32 row_bg)
-    {
-        if (visible_col < 0 || visible_col >= (si32)t.cols.size()) return;
-        auto& col = t.cols[(size_t)visible_col];
-        auto content_w = std::max(0, col.width - 1); // Exclude the divider.
-        auto prefix_w = std::clamp(cell_width(cell.prefix), 0, content_w);
-        if (prefix_w) qtable::paint_at(canvas, t.col_x(visible_col), prefix_w, y,
-                                       cell.prefix, cell.fg, row_bg, hscroll, disp_w);
-        auto field_w = content_w - prefix_w;
-        auto field_x = t.col_x(visible_col) + prefix_w;
-        auto screen_x = field_x - hscroll;
-        if (field_w <= 0 || screen_x >= disp_w || screen_x + field_w <= 0) return;
-
-        if (st.editor.active && (st.editor.row != source_row || st.editor.key != key))
-            q_edit_cancel(st, cfg);
-        if (!st.editor.active)
+        auto widget = content.widget;
+        auto host = st.cell_host_wp.lock();
+        if (!widget || !host || area.size.x <= 0 || area.size.y <= 0) return;
+        auto id = widget->id;
+        if (!visible.emplace(id, area).second) return; // A retained widget may occupy only one visible cell.
+        auto found = st.attached.find(id);
+        if (found == st.attached.end())
         {
-            st.editor.active = true;
-            st.editor.focus_pending = true;
-            st.editor.row = source_row;
-            st.editor.key = key;
-            st.editor.value = cell.s;
+            auto parent = widget->base::parent();
+            auto in_tree = parent && widget->base::holder != parent->base::subset.end();
+            if (in_tree && parent != host) return;
+            if (!in_tree) host->base::attach(widget);
+            content.on_activate();
+            found = st.attached.emplace(id, std::move(content)).first;
         }
-        st.editor.seen = true;
-        // Keep the child aligned to the complete cell and let the table layer clip it. Rebasing
-        // a partially visible editor would display the wrong slice of its value and caret.
-        st.editor.box = rect{{ screen_x, y }, { field_w, 1 }};
-        if (auto editor = st.editor_wp.lock())
+        else
         {
-            editor->base::hidden = false;
-            editor->base::extend(st.editor.box);
-            editor->base::deface();
-            if (st.editor.focus_pending)
-            {
-                st.editor.focus_pending = faux;
-                auto gear_id = editor->bell::indexer.luafx.get_gear().id;
-                auto editor_wp = st.editor_wp;
-                editor->base::enqueue([editor_wp, gear_id](auto&)
-                {
-                    if (auto input = editor_wp.lock()) pro::focus::set(input, gear_id, solo::on);
-                });
-            }
+            // Refresh lifecycle callbacks while retaining the same widget identity and state.
+            found->second.activate = std::move(content.activate);
+            found->second.deactivate = std::move(content.deactivate);
         }
+    }
+    inline void q_reconcile_components(table_state& st, std::unordered_map<id_t, rect> const& visible)
+    {
+        for (auto iter = st.attached.begin(); iter != st.attached.end();)
+        {
+            if (visible.contains(iter->first)) { ++iter; continue; }
+            iter->second.on_deactivate();
+            if (auto& widget = iter->second.widget; widget && widget->base::parent()) widget->base::detach();
+            iter = st.attached.erase(iter);
+        }
+        // host.attach() performs a normal host layout and can temporarily resize previously
+        // attached siblings. Apply every final cell rectangle only after all new children exist.
+        for (auto const& [id, area] : visible)
+        {
+            auto found = st.attached.find(id);
+            if (found == st.attached.end() || !found->second.widget) continue;
+            auto& widget = found->second.widget;
+            widget->base::hidden = faux;
+            widget->base::extend(area);
+            widget->base::deface();
+        }
+    }
+    inline auto q_component_has_focus(table_state const& st) -> bool
+    {
+        for (auto const& [id, content] : st.attached)
+            if (content.widget
+             && content.widget->base::signal(tier::request, e2::form::state::focus::count) > 0)
+                return true;
+        return faux;
     }
 
     // ---- Render ------------------------------------------------------------------------------------
     inline void table_render(table_state& st, table_cfg const& cfg, auto& canvas, twod size)
     {
         auto w = size.x, h = size.y;
-        if (w <= 0 || h <= 0) return;
+        auto visible_components = std::unordered_map<id_t, rect>{};
+        if (w <= 0 || h <= 0) { q_reconcile_components(st, visible_components); return; }
         auto& pal = cfg.palette;
         canvas.fill(rect{{ 0, 0 }, { w, h }}, [&](cell& c){ c.bgc(pal.bg).fgc(pal.text_fg); });
         st.row_hit.clear();
         st.expand_hit.clear();
-        st.editor.seen = faux;
-        if (auto editor = st.editor_wp.lock()) editor->base::hidden = true;
 
         auto revision_row = si32{ -1 };
         if (cfg.revision)
@@ -844,14 +878,21 @@ namespace netxs::app::parvion
         }
 
         auto t     = cfg.columns();
-        auto nrows = cfg.rows ? cfg.rows() : 0;
+        auto nrows = cfg.row_count ? cfg.row_count() : 0;
         q_build_order(st, cfg, nrows);
-        tbl_layout(st, w, h, nrows, t.content_w(), /*body_top=*/1);
+        q_build_row_offsets(st, cfg);
+        tbl_layout(st, w, h, st.total_lines, t.content_w(), /*body_top=*/1);
+
+        if (auto host = st.cell_host_wp.lock())
+        {
+            host->base::hidden = st.body_rows <= 0 || st.disp_w <= 0;
+            host->base::extend(rect{{ 0, st.body_top }, { std::max(0, st.disp_w), st.body_rows }});
+        }
 
         if (revision_row >= 0)
         {
             auto row = q_visual_row(st, revision_row);
-            st.scroll = q_reveal_scroll(st.total, st.body_rows, st.scroll, row);
+            st.scroll = q_reveal_visual(st, st.scroll, row);
         }
         if (st.live_follow && cfg.follow)
         {
@@ -876,20 +917,28 @@ namespace netxs::app::parvion
             auto sel = has_sel ? cfg.selection() : qsel_cfg{};
             auto rubber_on = st.drag == table_state::d_rubber && st.rubber_a >= 0;
             auto rlo = std::min(st.rubber_a, st.rubber_b), rhi = std::max(st.rubber_a, st.rubber_b);
-            auto first = st.scroll, last = std::min(nrows, st.scroll + st.body_rows);
-            for (auto i = first; i < last; ++i)
+            auto first = q_visual_at_line(st, st.scroll);
+            auto viewport_bottom = st.scroll + st.body_rows;
+            for (auto i = std::max(0, first); i < nrows && q_row_top(st, i) < viewport_bottom; ++i)
             {
                 auto source_row = q_source_row(st, i);
-                auto y   = st.body_top + (i - first);
+                auto row_top = q_row_top(st, i);
+                auto row_bottom = q_row_bottom(st, i);
+                auto y = st.body_top + row_top - st.scroll;
+                auto y0 = std::max(st.body_top, y);
+                auto y1 = std::min(st.body_top + st.body_rows,
+                                   st.body_top + row_bottom - st.scroll);
+                auto visible_h = std::max(0, y1 - y0);
+                if (visible_h <= 0) continue;
                 auto key = has_sel && source_row >= 0 ? sel.key_of_row(source_row) : -1;
-                auto selected = key >= 0 && (sel.is_sel(key) || (rubber_on && i >= rlo && i <= rhi));
+                auto selected = key >= 0 && (sel.is_selected(key) || (rubber_on && i >= rlo && i <= rhi));
                 auto row_bg = selected ? pal.sel_bg : pal.bg;
                 if (selected)
                 {
-                    canvas.fill(rect{{ 0, y }, { q_row_w(st), 1 }}, [&](cell& c){ c.bgc(pal.sel_bg); });
-                    if (st.focused) canvas.fill(rect{{ 0, y }, { 1, 1 }}, [&](cell& c){ c.bgc(pal.sel_bg_act); });
+                    canvas.fill(rect{{ 0, y0 }, { q_row_w(st), visible_h }}, [&](cell& c){ c.bgc(pal.sel_bg); });
+                    if (st.focused) canvas.fill(rect{{ 0, y0 }, { 1, visible_h }}, [&](cell& c){ c.bgc(pal.sel_bg_act); });
                 }
-                if (cfg.gutter)
+                if (cfg.gutter && y >= st.body_top && y < st.body_top + st.body_rows)
                 {
                     auto g = cfg.gutter(source_row);
                     if (!g.arrow.empty()) qtable::paint_at(canvas, g_arrow_x, g_arrow_w, y, g.arrow, g.arrow_fg, row_bg, hs, clipw);
@@ -912,58 +961,51 @@ namespace netxs::app::parvion
                 {
                     auto col_key = t.cols[(size_t)vc].key;
                     auto cv = cfg.cell(source_row, col_key);
-                    if (cv.state == table_cell_state::edit)
-                        q_place_edit_cell(st, cfg, t, vc, y, source_row, col_key, cv,
-                                          canvas, hs, clipw, row_bg);
-                    else if (!cv.s.empty()) t.paint_cell(canvas, vc, y, cv.s, cv.fg, row_bg, hs, clipw);
+                    if (auto value = std::get_if<table_text_cell>(&cv.value))
+                    {
+                        if (y >= st.body_top && y < st.body_top + st.body_rows && !value->value.empty())
+                            t.paint_cell(canvas, vc, y, value->value, value->foreground, row_bg, hs, clipw);
+                    }
+                    else if (auto component_value = std::get_if<table_component_cell>(&cv.value))
+                    {
+                        auto width = std::max(0, t.cols[(size_t)vc].width - 1);
+                        auto area = rect{{ t.col_x(vc) - hs, row_top - st.scroll },
+                                         { width, row_bottom - row_top }};
+                        if (area.coor.x < clipw && area.coor.x + area.size.x > 0)
+                            q_place_component(st, component_value->content, area, visible_components);
+                    }
                 }
-                if (key >= 0) st.row_hit.emplace_back(rect{{ 0, y }, { cfg.wide_hit ? std::max(0, st.disp_w) : q_row_w(st), 1 }}, key);
+                if (key >= 0) st.row_hit.emplace_back(rect{{ 0, y0 },
+                    { cfg.wide_hit ? std::max(0, st.disp_w) : q_row_w(st), visible_h }}, key);
             }
         }
-        auto rows_drawn = std::clamp(st.total - st.scroll, 0, st.body_rows);
-        st.div_bottom = st.body_top + rows_drawn;
+        auto lines_drawn = std::clamp(st.total_lines - st.scroll, 0, st.body_rows);
+        st.div_bottom = st.body_top + lines_drawn;
         t.paint_dividers(canvas, st.body_top - 1, st.div_bottom, hs, clipw, st.hover_border, st.col_drag, pal);
         tbl_paint_scrollbars(st, canvas, pal);
         // Keep the fixed menu affordance above horizontally-scrolled headers and dividers.
         t.paint_header_menu(canvas, st.body_top - 1, clipw,
                             st.hover_header_menu, st.press_header_menu,
                             (bool)cfg.menu, pal);
-        // If the caller withdrew edit state (data refresh/cancel) or displaced the target,
-        // discard the private draft. User-driven displacement commits before the action.
-        if (st.editor.active && !st.editor.seen) q_edit_cancel(st, cfg);
+        q_reconcile_components(st, visible_components);
     }
 
     // ---- Widget ------------------------------------------------------------------------------------
-    inline auto make_table(table_cfg cfg) -> ui::sptr
+    inline auto make_table(table_cfg cfg) -> component
     {
         auto state = std::make_shared<table_state>();
         auto config = std::make_shared<table_cfg>(std::move(cfg));
         state->live_follow = !!config->follow;
 
-        // A layered root keeps the editor as a permanent child of the table. The back layer paints
-        // the table first; the one internal input is then rendered over its active cell.
+        // Paint the frame first, then render arbitrary retained cell widgets through a clipped body
+        // host.  The painter reconciles the host before the cake renders that second layer.
         auto form = ui::cake::ctor()->active()
             ->plugin<pro::mouse>()
             ->plugin<pro::focus>(config->focus_on_start ? pro::focus::mode::focused : pro::focus::mode::focusable)
             ->plugin<pro::keybd>()->plugin<pro::timer>();
         auto painter = form->attach(ui::mock::ctor());
-        auto editor = form->attach(make_input({
-            .value = [state]{ return state->editor.value; },
-            .set_value = [state](text value){ state->editor.value = std::move(value); },
-            .mode = [state]{ return state->editor.active ? input_mode::edit : input_mode::disabled; },
-            .submit = [state, config](text value)
-            {
-                if (!state->editor.active) return;
-                state->editor.value = std::move(value);
-                q_edit_submit(*state, *config);
-            },
-            .cancel = [state, config]{ q_edit_cancel(*state, *config); },
-            .blur = input_blur::submit,
-            .palette = { .bg = theme::surface, .text_fg = theme::text_fg,
-                         .muted_fg = theme::subtext, .active = theme::sel_bg_act },
-        }));
-        editor->base::hidden = true;
-        state->editor_wp = ptr::shadow(editor);
+        auto cell_host = form->attach(ui::cake::ctor());
+        state->cell_host_wp = ptr::shadow(cell_host);
         painter->invoke([state, config](auto& boss)
         {
             boss.LISTEN(tier::release, e2::render::any, parent_canvas, -, (state, config))
@@ -978,7 +1020,6 @@ namespace netxs::app::parvion
             boss.LISTEN(tier::release, e2::form::state::focus::count, count)
             {
                 st.focused = !!count;
-                if (!count) q_edit_submit(st, cfg);
                 boss.base::deface();
             };
             auto arm_autoscroll = [&boss, &st, &cfg]
@@ -1004,23 +1045,21 @@ namespace netxs::app::parvion
                 if (q_header_menu_hit(st, (bool)cfg.menu, mx, my))
                 {
                     if (!st.press_header_menu) { st.press_header_menu = true; boss.base::deface(); }
-                    q_edit_submit(st, cfg);
                     gear.dismiss();
                     return;
                 }
-                if (auto sb = tbl_vsb(st); sb.ok && mx == sb.x && my >= sb.top && my < sb.top + sb.track_h) { q_edit_submit(st, cfg); return; }
-                if (auto sb = tbl_hsb(st); sb.ok && my == sb.top && mx >= sb.x && mx < sb.x + sb.track_h) { q_edit_submit(st, cfg); return; }
+                if (auto sb = tbl_vsb(st); sb.ok && mx == sb.x && my >= sb.top && my < sb.top + sb.track_h) return;
+                if (auto sb = tbl_hsb(st); sb.ok && my == sb.top && mx >= sb.x && mx < sb.x + sb.track_h) return;
                 for (auto& [b, id] : st.expand_hit)
                     if (my == b.coor.y && mx >= b.coor.x && mx < b.coor.x + b.size.x)
-                    { if (st.press_expand != id) { st.press_expand = id; boss.base::deface(); } q_edit_submit(st, cfg); return; }
+                    { if (st.press_expand != id) { st.press_expand = id; boss.base::deface(); } return; }
                 if (my >= st.body_top - 1 && my < st.div_bottom)
-                    if (q_border_hit(cfg.columns(), mx, st.hscroll) >= 0) { q_edit_submit(st, cfg); return; }
+                    if (q_border_hit(cfg.columns(), mx, st.hscroll) >= 0) return;
                 if (my == st.body_top - 1 && cfg.compare)
                 {
                     auto v = q_header_hit(tbl, mx, st.hscroll);
                     auto key = v >= 0 ? tbl.cols[(size_t)v].key : -1;
                     if (st.press_header != key) { st.press_header = key; boss.base::deface(); }
-                    q_edit_submit(st, cfg);
                     gear.dismiss();
                     return;
                 }
@@ -1029,10 +1068,9 @@ namespace netxs::app::parvion
                     auto ctl = !!(gear.ctlstat & hids::anyCtrl), shft = !!(gear.ctlstat & hids::anyShift);
                     auto s = q_ordered_sel(st, cfg.selection());
                     auto hit = q_row_at(st, mx, my);
-                    if (hit >= 0) { q_sel_press(st, s, hit, ctl, shft); q_edit_submit(st, cfg); boss.base::deface(); gear.dismiss(); return; }
-                    if (!ctl && my >= st.body_top && my < st.tab_row && q_sel_clear_blank(st, s)) { q_edit_submit(st, cfg); boss.base::deface(); gear.dismiss(); return; }
+                    if (hit >= 0) { q_sel_press(st, s, hit, ctl, shft); boss.base::deface(); gear.dismiss(); return; }
+                    if (!ctl && my >= st.body_top && my < st.tab_row && q_sel_clear_blank(st, s)) { boss.base::deface(); gear.dismiss(); return; }
                 }
-                q_edit_submit(st, cfg);
                 boss.base::deface(); gear.dismiss();
             });
             boss.on(tier::mouserelease, input::key::LeftUp, [&](hids&)
@@ -1099,19 +1137,22 @@ namespace netxs::app::parvion
                 }
                 for (auto& [b, id] : st.expand_hit)
                     if (my == b.coor.y && mx >= b.coor.x && mx < b.coor.x + b.size.x)
-                    { if (cfg.toggle) cfg.toggle(id); boss.base::deface(); gear.dismiss(); return; }
+                    {
+                        // Expanding can attach a retained child under the stationary pointer. The
+                        // ensuing target transition reports MouseLeave for the old paint layer, so
+                        // restore the logical button hover at the completed click position.
+                        st.press_expand = -1;
+                        st.hover_expand = id;
+                        if (cfg.on_toggle) cfg.on_toggle(id);
+                        boss.base::deface();
+                        gear.dismiss();
+                        return;
+                    }
                 gear.dismiss();
             });
             boss.on(tier::mouserelease, input::key::RightClick, [&](hids& gear)
             {
                 pro::focus::set(boss.This(), gear.id, solo::on);
-                if (st.editor.active)
-                {
-                    q_edit_submit(st, cfg);
-                    boss.base::deface();
-                    gear.dismiss();
-                    return;
-                }
                 auto mx = (si32)gear.coord.x, my = (si32)gear.coord.y;
                 auto panel_wp = ptr::shadow(boss.This());
                 q_context_menu(boss, st, mx, my, cfg.columns(), cfg.menu ? cfg.menu(panel_wp) : qmenu_cfg{});
@@ -1147,8 +1188,11 @@ namespace netxs::app::parvion
                 if (!nmenu && my >= st.body_top - 1 && my < st.div_bottom) nb = q_border_hit(tbl, mx, st.hscroll);
                 if (st.hover_border != nb) { st.hover_border = nb; boss.base::deface(); }
             });
-            boss.on(tier::mouserelease, input::key::MouseLeave, [&](hids&)
+            boss.LISTEN(tier::release, e2::form::state::mouse, hovered)
             {
+                // Raw MouseLeave is emitted when the pointer crosses between retained descendants.
+                // The aggregate state changes to false only after the pointer leaves the table tree.
+                if (hovered) return;
                 if (st.hover_expand != -1) { st.hover_expand = -1; boss.base::deface(); }
                 if (st.press_expand != -1) { st.press_expand = -1; boss.base::deface(); }
                 if (st.sb_hover)  { st.sb_hover = faux;  boss.base::deface(); }
@@ -1164,13 +1208,13 @@ namespace netxs::app::parvion
                     st.hover_header = st.press_header = -1;
                     boss.base::deface();
                 }
-            });
+            };
             boss.on(tier::mouserelease, input::key::MouseWheel, [&](hids& gear)
             {
-                q_edit_submit(st, cfg);
                 if (gear.hzwhl || st.hsb_hover) { auto maxh = std::max(0, st.content_w - st.disp_w); st.hscroll = std::clamp(st.hscroll - gear.whlsi * 4, 0, maxh); }
-                else { auto maxv = std::max(0, st.total - st.body_rows); st.scroll = std::clamp(st.scroll - gear.whlsi, 0, maxv); st.live_follow = q_at_follow_target(st, cfg); }
+                else { auto maxv = std::max(0, st.total_lines - st.body_rows); st.scroll = std::clamp(st.scroll - gear.whlsi, 0, maxv); st.live_follow = q_at_follow_target(st, cfg); }
                 boss.base::deface();
+                gear.dismiss();
             });
             boss.base::signal(tier::release, e2::form::draggable::_<hids::buttons::left>, true);
             boss.LISTEN(tier::release, e2::form::drag::start::_<hids::buttons::left>, gear)
@@ -1210,7 +1254,9 @@ namespace netxs::app::parvion
                     pro::focus::set(boss.This(), gear.id, solo::on);
                     st.drag_y = py;
                     st.live_follow = faux;
-                    q_rubber_begin(st, q_ordered_sel(st, cfg.selection()), st.scroll + (py - st.body_top), !!(gear.ctlstat & hids::anyCtrl));
+                    q_rubber_begin(st, q_ordered_sel(st, cfg.selection()),
+                                   q_rubber_visual_at_line(st, st.scroll + (py - st.body_top)),
+                                   !!(gear.ctlstat & hids::anyCtrl));
                     boss.base::deface(); return;
                 }
             };
@@ -1261,24 +1307,25 @@ namespace netxs::app::parvion
                     gear.dismiss();
                     return;
                 }
-                if (cfg.activate && my >= st.body_top)
+                if (cfg.on_activate && my >= st.body_top)
                 {
-                    auto visual = st.scroll + (my - st.body_top);
+                    auto visual = q_visual_at_line(st, st.scroll + (my - st.body_top));
                     auto source = q_source_row(st, visual);
                     auto hit_w = cfg.wide_hit ? st.disp_w : q_row_w(st);
                     if (source >= 0 && source < st.total && mx >= 0 && mx < hit_w)
                     {
                         boss.base::deface();
                         gear.dismiss();
-                        cfg.activate(source);
+                        cfg.on_activate(source);
                     }
                 }
             });
             boss.LISTEN(tier::preview, input::events::keybd::any, gear)
             {
                 if (!st.focused) return;
-                // The permanent child input owns every key while a cell is in edit state.
-                if (st.editor.active) return;
+                // Preview events reach ancestors before the focused descendant. Let a focused cell
+                // component (input, nested table, or future widget) own the key before this table.
+                if (q_component_has_focus(st)) return;
                 if (gear.payload == input::keybd::type::keypaste)
                 {
                     if (gear.keybd::handled || !cfg.on_key) return;
@@ -1299,7 +1346,7 @@ namespace netxs::app::parvion
                  && cfg.selection)
                 {
                     auto s = cfg.selection();
-                    if (s.any())
+                    if (s.has_selection())
                     {
                         auto self = ptr::shadow(boss.This());
                         if (cfg.deletion.on_delete && cfg.deletion.on_delete(gear, self))
@@ -1307,9 +1354,9 @@ namespace netxs::app::parvion
                             gear.set_handled();
                             return;
                         }
-                        if (!cfg.deletion.remove_selected) return;
+                        if (!cfg.deletion.on_remove_selected) return;
                         gear.set_handled();
-                        auto remove = cfg.deletion.remove_selected;
+                        auto remove = cfg.deletion.on_remove_selected;
                         auto run = [self, remove]
                         {
                             if (auto table = self.lock())
@@ -1337,10 +1384,7 @@ namespace netxs::app::parvion
                         if (action.mode == table_viewport_action::reveal_row)
                         {
                             auto row = q_visual_row(st, action.row);
-                            auto maxv = std::max(0, st.total - st.body_rows);
-                            if      (row >= 0 && row < st.scroll)                 st.scroll = row;
-                            else if (row >= 0 && row >= st.scroll + st.body_rows) st.scroll = row - st.body_rows + 1;
-                            st.scroll = std::clamp(st.scroll, 0, maxv);
+                            st.scroll = q_reveal_visual(st, st.scroll, row);
                             if (action.reset_horizontal) st.hscroll = 0;
                             if (cfg.selection)
                             {
@@ -1353,7 +1397,7 @@ namespace netxs::app::parvion
                         return;
                     }
                 }
-                if (k == input::key::KeyEnter && cfg.activate && cfg.selection)
+                if (k == input::key::KeyEnter && cfg.on_activate && cfg.selection)
                 {
                     auto s = q_ordered_sel(st, cfg.selection());
                     auto visual = q_selected_row(s, st.nav_cursor);
@@ -1363,14 +1407,14 @@ namespace netxs::app::parvion
                         st.nav_cursor = s.key_of_row(visual);
                         gear.set_handled();
                         boss.base::deface();
-                        cfg.activate(source);
+                        cfg.on_activate(source);
                         return;
                     }
                 }
                 if (!cfg.arrow_nav || !cfg.selection) return;
                 auto s = q_ordered_sel(st, cfg.selection());
-                auto n = cfg.rows ? cfg.rows() : 0;
-                auto maxv = std::max(0, st.total - st.body_rows);
+                auto n = cfg.row_count ? cfg.row_count() : 0;
+                auto maxv = std::max(0, st.total_lines - st.body_rows);
                 auto page = std::max(1, st.body_rows);
                 auto sels = std::vector<si32>{}; // Ordered selectable display rows.
                 for (auto i = si32{}; i < n; ++i) if (s.key_of_row(i) >= 0) sels.push_back(i);
@@ -1385,36 +1429,35 @@ namespace netxs::app::parvion
                         for (auto i = si32{}; i < (si32)sels.size(); ++i)
                         {
                             auto candidate = s.key_of_row(sels[(size_t)i]);
-                            if (candidate == st.sel_anchor && s.is_sel(candidate)) { anchor = i; break; }
+                            if (candidate == st.sel_anchor && s.is_selected(candidate)) { anchor = i; break; }
                         }
                         if (anchor < 0)
                             for (auto i = si32{}; i < (si32)sels.size(); ++i)
                             {
                                 auto candidate = s.key_of_row(sels[(size_t)i]);
-                                if (s.is_sel(candidate)) { anchor = i; st.sel_anchor = candidate; break; }
+                                if (s.is_selected(candidate)) { anchor = i; st.sel_anchor = candidate; break; }
                             }
                         if (anchor < 0) { anchor = p; st.sel_anchor = key; }
                         auto lo = std::min(anchor, p), hi = std::max(anchor, p);
-                        s.clear();
-                        for (auto i = lo; i <= hi; ++i) s.set_sel(s.key_of_row(sels[(size_t)i]), true);
-                        s.set_sel(key, true); // Finish on the movable endpoint for caller-owned cursors.
+                        s.on_clear();
+                        for (auto i = lo; i <= hi; ++i) s.on_select(s.key_of_row(sels[(size_t)i]), true);
+                        s.on_select(key, true); // Finish on the movable endpoint for caller-owned cursors.
                     }
                     else
                     {
-                        s.clear(); s.set_sel(key, true); st.sel_anchor = key;
+                        s.on_clear(); s.on_select(key, true); st.sel_anchor = key;
                     }
                     st.nav_cursor = key;
-                    if      (dr < st.scroll)                 st.scroll = dr;
-                    else if (dr >= st.scroll + st.body_rows) st.scroll = dr - st.body_rows + 1;
-                    st.scroll = std::clamp(st.scroll, 0, maxv); st.live_follow = q_at_follow_target(st, cfg);
+                    st.scroll = q_reveal_visual(st, st.scroll, dr);
+                    st.live_follow = q_at_follow_target(st, cfg);
                 };
                 auto cur = si32{ -1 };
                 for (auto p = si32{}; p < (si32)sels.size(); ++p)
                 {
                     auto key = s.key_of_row(sels[(size_t)p]);
-                    if (key == st.nav_cursor && s.is_sel(key)) { cur = p; break; }
+                    if (key == st.nav_cursor && s.is_selected(key)) { cur = p; break; }
                 }
-                if (cur < 0) for (auto p = si32{}; p < (si32)sels.size(); ++p) if (s.is_sel(s.key_of_row(sels[(size_t)p]))) { cur = p; break; }
+                if (cur < 0) for (auto p = si32{}; p < (si32)sels.size(); ++p) if (s.is_selected(s.key_of_row(sels[(size_t)p]))) { cur = p; break; }
                 auto select_visual = [&](si32 visual, si32 dir, bool extend)
                 {
                     if (sels.empty()) return;
@@ -1429,9 +1472,17 @@ namespace netxs::app::parvion
                 {
                     if (sels.empty()) return;
                     auto currow = cur >= 0 ? sels[(size_t)cur] : dir < 0 ? sels.back() : sels.front();
-                    auto next = q_page_nav(st.total, page, st.scroll, currow, dir);
-                    st.scroll = next.offset;
-                    select_visual(next.cursor, dir, extend);
+                    auto edge_line = dir < 0 ? st.scroll
+                                             : std::min(st.total_lines - 1, st.scroll + page - 1);
+                    auto edge_row = q_visual_at_line(st, edge_line);
+                    if (currow != edge_row) select_visual(edge_row, dir, extend);
+                    else
+                    {
+                        st.scroll = std::clamp(st.scroll + dir * page, 0, maxv);
+                        auto target_line = dir < 0 ? st.scroll
+                                                  : std::min(st.total_lines - 1, st.scroll + page - 1);
+                        select_visual(q_visual_at_line(st, target_line), dir, extend);
+                    }
                 };
                 auto extend = !!(gear.ctlstat & hids::anyShift);
                 auto act = true;
@@ -1441,11 +1492,11 @@ namespace netxs::app::parvion
                 else if (k == input::key::KeyEnd       || k == input::key::NumpadEnd)      { st.scroll = maxv; select_at((si32)sels.size() - 1, extend); }
                 else if (k == input::key::KeyPageUp    || k == input::key::NumpadPageUp)     page_selection(-1, extend);
                 else if (k == input::key::KeyPageDown  || k == input::key::NumpadPageDown)   page_selection(+1, extend);
-                else if (k == input::key::Esc)         { s.clear(); st.sel_anchor = st.nav_cursor = -1; }
+                else if (k == input::key::Esc)         { s.on_clear(); st.sel_anchor = st.nav_cursor = -1; }
                 else act = false;
                 if (act) { gear.set_handled(); boss.base::deface(); }
             };
         });
-        return form;
+        return { std::move(form) };
     }
 }

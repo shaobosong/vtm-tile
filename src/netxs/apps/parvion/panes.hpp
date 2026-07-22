@@ -70,8 +70,10 @@ namespace netxs::app::parvion
         // Explorer-style name editor painted in the selected row's Name cell.
         bool                  name_edit = faux;
         text                  name_original;   // Stable operation identity; selection may move on an outside click.
+        text                  name_draft;      // Live value owned by the generic input component.
         si32                  name_row = -1;    // Source row whose Name cell owns the editor.
         bool                  name_is_dir = faux;
+        component             name_editor;     // Stable retained component attached only for the active Name cell.
         // Address-bar path entry (the row-0 path field, connect-bar style).
         bool                  addr_edit  = faux; // Editing the path in place.
         text                  addr_buf;          // The path being typed.
@@ -181,6 +183,7 @@ namespace netxs::app::parvion
     {
         st.name_edit = faux;
         st.name_original.clear();
+        st.name_draft.clear();
         st.name_row = -1;
         st.name_is_dir = faux;
     }
@@ -544,6 +547,7 @@ namespace netxs::app::parvion
         st.marked = { row };
         st.name_edit = true;
         st.name_original = items[(size_t)idx].name;
+        st.name_draft = st.name_original;
         st.name_row = row;
         st.name_is_dir = items[(size_t)idx].is_dir;
         st.revision_row = row;
@@ -943,11 +947,11 @@ namespace netxs::app::parvion
         for (auto i = si32{}; i < p_ncol; ++i)
             t.add_column({ text{ p_headers[(size_t)i] }, st.col_w[(size_t)i], i == 1, true, i },
                          st.col_shown[(size_t)i], text{ p_menu_headers[(size_t)i] });
-        t.set_shown = [state](si32 key, bool on)
+        t.on_show_column = [state](si32 key, bool on)
         {
             if (key >= 0 && key < p_ncol) state->col_shown[(size_t)key] = on;
         };
-        t.resize = [state](si32 key, si32 width)
+        t.on_resize_column = [state](si32 key, si32 width)
         {
             if (key >= 0 && key < p_ncol) state->col_w[(size_t)key] = width;
         };
@@ -958,7 +962,7 @@ namespace netxs::app::parvion
         return t;
     }
 
-    inline auto pane_cell(std::shared_ptr<pane_state> const& state, si32 row, si32 key) -> cellval
+    inline auto pane_cell(std::shared_ptr<pane_state> const& state, si32 row, si32 key) -> table_cell
     {
         auto& st = *state;
         if (row < 0 || row >= st.total() || key < 0 || key >= p_ncol) return {};
@@ -974,10 +978,7 @@ namespace netxs::app::parvion
                                           : ui32{ theme::text_fg };
             }
             if (st.name_edit && row == st.name_row)
-            {
-                auto& item = st.cur_items()[(size_t)(row - 1)];
-                return { item.name, fg, table_cell_state::edit, item.is_dir ? text{ "/" } : text{ " " } };
-            }
+                return { st.name_editor };
         }
         return { pane_cell_text(st, key, row), fg };
     }
@@ -1009,8 +1010,8 @@ namespace netxs::app::parvion
     {
         auto s = qsel_cfg{};
         s.key_count = [state]{ return state->total(); };
-        s.is_sel    = [state](si32 key){ return state->marked.count(key) != 0; };
-        s.set_sel   = [state](si32 key, bool on)
+        s.is_selected = [state](si32 key){ return state->marked.count(key) != 0; };
+        s.on_select = [state](si32 key, bool on)
         {
             if (key < 0 || key >= state->total()) return;
             if (on)
@@ -1021,10 +1022,10 @@ namespace netxs::app::parvion
             }
             else state->marked.erase(key);
         };
-        s.clear      = [state]{ state->marked.clear(); };
-        s.any        = [state]{ return !state->marked.empty(); };
+        s.on_clear      = [state]{ state->marked.clear(); };
+        s.has_selection = [state]{ return !state->marked.empty(); };
         s.in_scope   = [state](si32 key){ return key >= 0 && key < state->total(); };
-        s.disp       = [state]{ return state->total(); };
+        s.row_count  = [state]{ return state->total(); };
         s.key_of_row = [state](si32 row){ return row >= 0 && row < state->total() ? row : -1; };
         return s;
     }
@@ -1123,7 +1124,7 @@ namespace netxs::app::parvion
         auto title = ui::cake::ctor()->active()
             ->plugin<pro::mouse>()->plugin<pro::focus>(pro::focus::mode::focusable)->plugin<pro::keybd>();
         auto painter = title->attach(ui::mock::ctor());
-        auto input = title->attach(make_input({
+        auto input = make_input({
             .value = [state]
             {
                 auto& st = *state;
@@ -1131,20 +1132,20 @@ namespace netxs::app::parvion
                 return st.is_local && st.cur_path().empty() ? text{ "Computer" }
                                                             : text{ st.cur_path() };
             },
-            .set_value = [state](text value){ state->addr_buf = std::move(value); },
+            .on_change = [state](text value){ state->addr_buf = std::move(value); },
             .mode = [state]
             {
                 if (state->remote && !state->remote->connected()) return input_mode::disabled;
                 return state->addr_edit ? input_mode::edit : input_mode::view;
             },
-            .activate = [state]{ pane_addr_begin(*state); },
-            .submit = [state, table_wp](text value)
+            .on_activate = [state]{ pane_addr_begin(*state); },
+            .on_submit = [state, table_wp](text value)
             {
                 state->addr_buf = std::move(value);
                 pane_addr_commit(*state);
                 if (auto table = table_wp.lock()) table->base::deface();
             },
-            .cancel = [state, table_wp]
+            .on_cancel = [state, table_wp]
             {
                 pane_addr_cancel(*state);
                 if (auto table = table_wp.lock()) table->base::deface();
@@ -1156,8 +1157,9 @@ namespace netxs::app::parvion
                 .muted_fg = theme::title_fg,
                 .active = theme::sel_bg_act,
             },
-        }));
-        state->addr_input_wp = ptr::shadow(input);
+        });
+        title->attach(input.widget);
+        state->addr_input_wp = ptr::shadow(input.widget);
         painter->invoke([state](auto& boss)
         {
             auto& st = *state;
@@ -1191,6 +1193,28 @@ namespace netxs::app::parvion
         if (!remote) pane_relist(*state, initial_path);
         if (out_state) *out_state = state.get();
 
+        state->name_editor = make_input({
+            .value = [state]{ return state->name_draft; },
+            .on_change = [state](text value){ state->name_draft = std::move(value); },
+            .prefix = [state]{ return state->name_is_dir ? text{ "/" } : text{ " " }; },
+            .mode = [state]{ return state->name_edit ? input_mode::edit : input_mode::disabled; },
+            .on_submit = [state](text value)
+            {
+                if (state->name_edit) pane_name_commit(*state, std::move(value));
+            },
+            .on_cancel = [state]
+            {
+                if (!state->name_edit) return;
+                auto original = state->name_original;
+                pane_name_cancel(*state);
+                pane_select_named_item(*state, original);
+            },
+            .blur = input_blur::submit,
+            .focus_on_start = true,
+            .palette = { .bg = theme::surface, .text_fg = theme::text_fg,
+                         .muted_fg = theme::subtext, .active = theme::sel_bg_act },
+        });
+
         auto cfg = table_cfg{};
         cfg.window_wp = window_wp;
         cfg.palette = table_palette{
@@ -1199,32 +1223,20 @@ namespace netxs::app::parvion
             .sort_fg = theme::sort_fg, .sb_track = theme::sb_track, .sb_thumb = theme::sb_thumb,
             .sb_hover = theme::sb_hover, .sb_drag = theme::sb_drag };
         cfg.columns = [state]{ return pane_columns(state); };
-        cfg.rows = [state]
+        cfg.row_count = [state]
         {
             pane_sync(*state);
             return state->cur_msg().empty() ? state->total() : 0;
         };
         cfg.cell = [state](si32 row, si32 key){ return pane_cell(state, row, key); };
-        cfg.edit_submit = [state](si32 row, si32 key, text value)
-        {
-            if (!state->name_edit || row != state->name_row || key != 0) return;
-            pane_name_commit(*state, std::move(value));
-        };
-        cfg.edit_cancel = [state](si32 row, si32 key)
-        {
-            if (!state->name_edit || row != state->name_row || key != 0) return;
-            auto original = state->name_original;
-            pane_name_cancel(*state);
-            pane_select_named_item(*state, original);
-        };
         cfg.selection = [state]{ return pane_selection(state); };
         cfg.menu = [state](netxs::wptr<ui::base> panel_wp){ return pane_menu(state, panel_wp); };
         cfg.empty_text = [state]{ return state->cur_msg(); };
         cfg.on_key = [state](hids& gear, netxs::wptr<ui::base> self){ return pane_table_key(state, gear, self); };
         cfg.deletion.enabled = true;
-        cfg.deletion.remove_selected = [state](netxs::wptr<ui::base>){ pane_delete_selection(*state); };
+        cfg.deletion.on_remove_selected = [state](netxs::wptr<ui::base>){ pane_delete_selection(*state); };
         cfg.deletion.confirm = [state]{ return pane_delete_confirmation(*state); };
-        cfg.activate = [state](si32 row)
+        cfg.on_activate = [state](si32 row)
         {
             pane_sync(*state);
             if (row < 0 || row >= state->total()) return;
@@ -1239,10 +1251,10 @@ namespace netxs::app::parvion
         cfg.focus_on_start = grab_focus;
 
         auto table = make_table(std::move(cfg));
-        auto table_wp = ptr::shadow(table);
+        auto table_wp = ptr::shadow(table.widget);
         state->table_wp = table_wp;
         auto table_layer = ui::cake::ctor()->alignment({ snap::both, snap::both });
-        table_layer->attach(table);
+        table_layer->attach(table.widget);
 
         auto pane = ui::fork::ctor(axis::Y);
         pane->attach(slot::_1, make_pane_title(state, table_wp))->limits({ -1, 1 }, { -1, 1 });
@@ -1360,25 +1372,28 @@ namespace netxs::app::parvion
         auto bottom = bottom_layer->attach(ui::mock::ctor());
         if (saving)
         {
-            auto name_input = bottom_layer->attach(make_input({
+            auto name_input = make_input({
                 .value = [fname]{ return *fname; },
-                .set_value = [fname](text value){ *fname = std::move(value); },
-                .submit = [do_accept](text){ do_accept(); },
-                .cancel = [do_cancel]{ do_cancel(); },
+                .on_change = [fname](text value){ *fname = std::move(value); },
+                .on_submit = [do_accept](text){ do_accept(); },
+                .on_cancel = [do_cancel]{ do_cancel(); },
                 .focus_on_start = true,
-            }));
-            bs->name_input_wp = ptr::shadow(name_input);
+            });
+            bottom_layer->attach(name_input.widget);
+            bs->name_input_wp = ptr::shadow(name_input.widget);
         }
-        auto accept_button = bottom_layer->attach(make_button({
+        auto accept_button = make_button({
             .label = [bs]{ return bs->accept_label; },
-            .activate = [do_accept](hids&, ui::base&){ do_accept(); },
-        }));
-        bs->accept_button_wp = ptr::shadow(accept_button);
-        auto cancel_button = bottom_layer->attach(make_button({
+            .on_activate = [do_accept](hids&, ui::base&){ do_accept(); },
+        });
+        bottom_layer->attach(accept_button.widget);
+        bs->accept_button_wp = ptr::shadow(accept_button.widget);
+        auto cancel_button = make_button({
             .label = []{ return text{ " Cancel " }; },
-            .activate = [do_cancel](hids&, ui::base&){ do_cancel(); },
-        }));
-        bs->cancel_button_wp = ptr::shadow(cancel_button);
+            .on_activate = [do_cancel](hids&, ui::base&){ do_cancel(); },
+        });
+        bottom_layer->attach(cancel_button.widget);
+        bs->cancel_button_wp = ptr::shadow(cancel_button.widget);
         bottom->invoke([bs](auto& boss)
         {
             boss.LISTEN(tier::release, e2::render::any, parent_canvas, -, (bs))

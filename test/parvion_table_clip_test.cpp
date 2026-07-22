@@ -131,7 +131,7 @@ namespace
         auto table = qtable{};
         auto width = si32{};
         table.add_column(qtable::column{ .title = text{ "Name" }, .key = 3 }, true);
-        table.resize = [&](si32 key, si32 w){ if (key == 3) width = w; };
+        table.on_resize_column = [&](si32 key, si32 w){ if (key == 3) width = w; };
         q_set_col_w(table, 0, g_col_max + 10);
         if (width != g_col_max) return faux;
         q_set_col_w(table, 0, g_col_min - 10);
@@ -221,9 +221,9 @@ namespace
         auto selected = std::set<si32>{ 0 };
         auto order = std::vector<si32>{ 2, 0, 1 };
         auto s = qsel_cfg{};
-        s.disp = [&]{ return (si32)order.size(); };
+        s.row_count = [&]{ return (si32)order.size(); };
         s.key_of_row = [&](si32 row){ return order[(size_t)row]; };
-        s.is_sel = [&](si32 key){ return selected.count(key) != 0; };
+        s.is_selected = [&](si32 key){ return selected.count(key) != 0; };
         // Key 2 was the cursor in the previous listing, but only key 0 is visibly selected now.
         return q_selected_row(s, 2) == 1;
     }
@@ -233,9 +233,9 @@ namespace
         auto selected = std::set<si32>{ 0, 2 };
         auto order = std::vector<si32>{ 2, 0, 1 };
         auto s = qsel_cfg{};
-        s.disp = [&]{ return (si32)order.size(); };
+        s.row_count = [&]{ return (si32)order.size(); };
         s.key_of_row = [&](si32 row){ return order[(size_t)row]; };
-        s.is_sel = [&](si32 key){ return selected.count(key) != 0; };
+        s.is_selected = [&](si32 key){ return selected.count(key) != 0; };
         return q_selected_row(s, 0) == 1;
     }
 
@@ -260,6 +260,7 @@ namespace
     {
         auto st = table_state{};
         st.total = 50;
+        st.total_lines = 50;
         st.body_rows = 10;
         st.scroll = 40;
         auto cfg = table_cfg{};
@@ -272,14 +273,109 @@ namespace
     {
         auto st = table_state{};
         st.total = 50;
+        st.total_lines = 50;
         st.body_rows = 10;
         st.scroll = 40;
         st.row_order.resize(50);
+        st.row_offsets.resize(51);
         for (auto i = si32{}; i < 50; ++i) st.row_order[(size_t)i] = i;
+        for (auto i = si32{}; i <= 50; ++i) st.row_offsets[(size_t)i] = i;
         auto cfg = table_cfg{};
         cfg.follow = []{ return table_follow_target{ table_follow_target::source_row, 0 }; };
         return q_follow_scroll(st, cfg) == 0
             && !q_at_follow_target(st, cfg);
+    }
+
+    auto test_variable_row_line_geometry() -> bool
+    {
+        auto st = table_state{};
+        auto cfg = table_cfg{};
+        cfg.row_height = [](si32 row){ return std::array<si32, 3>{ 2, 4, 1 }[(size_t)row]; };
+        q_build_order(st, cfg, 3);
+        q_build_row_offsets(st, cfg);
+        return st.total_lines == 7
+            && st.row_offsets == std::vector<si32>{ 0, 2, 6, 7 }
+            && q_visual_at_line(st, 0) == 0
+            && q_visual_at_line(st, 1) == 0
+            && q_visual_at_line(st, 2) == 1
+            && q_visual_at_line(st, 5) == 1
+            && q_visual_at_line(st, 6) == 2;
+    }
+
+    auto test_variable_row_reveal_uses_lines() -> bool
+    {
+        auto st = table_state{};
+        st.total = 3;
+        st.total_lines = 7;
+        st.body_rows = 3;
+        st.row_offsets = { 0, 2, 6, 7 };
+        return q_reveal_visual(st, 0, 0) == 0
+            && q_reveal_visual(st, 0, 1) == 2 // Taller than the viewport: reveal its top.
+            && q_reveal_visual(st, 2, 2) == 4
+            && q_reveal_visual(st, 4, 1) == 2;
+    }
+
+    auto test_rubber_band_preserves_blank_endpoint() -> bool
+    {
+        auto st = table_state{};
+        st.total = 3;
+        st.total_lines = 3;
+        st.body_top = 1;
+        st.body_rows = 8;
+        st.row_offsets = { 0, 1, 2, 3 };
+        st.drag_y = 6;
+        return q_rubber_visual_at_line(st, 1) == 1
+            && q_rubber_row_at_drag(st) == 5;
+    }
+
+    auto test_component_cells_retain_and_reconcile_widgets() -> bool
+    {
+        auto st = table_state{};
+        auto host = ui::cake::ctor();
+        host->base::extend(rect{{ 0, 0 }, { 40, 10 }});
+        st.cell_host_wp = ptr::shadow(host);
+        auto activated = 0;
+        auto deactivated = 0;
+        auto child = component{
+            ui::mock::ctor(),
+            [&]{ ++activated; },
+            [&]{ ++deactivated; },
+        };
+        auto value = table_cell{ child };
+        auto embedded = std::get_if<table_component_cell>(&value.value);
+        if (!embedded || embedded->content.widget != child.widget) return faux;
+
+        auto visible = std::unordered_map<id_t, rect>{};
+        q_place_component(st, embedded->content, rect{{ 2, 1 }, { 8, 3 }}, visible);
+        // The same retained object cannot be placed into a second visible cell.
+        q_place_component(st, embedded->content, rect{{ 20, 1 }, { 8, 3 }}, visible);
+        q_reconcile_components(st, visible);
+        if (activated != 1 || child.widget->base::parent() != host
+         || child.widget->base::area() != rect{{ 2, 1 }, { 8, 3 }}) return faux;
+
+        q_reconcile_components(st, {});
+        // base::detach() deliberately leaves its weak father link intact, so verify the
+        // visual-tree membership instead of parent().
+        if (deactivated != 1 || !host->base::subset.empty() || !st.attached.empty()) return faux;
+
+        // The same stable widget can be attached again when its cell scrolls back into view.
+        visible.clear();
+        q_place_component(st, embedded->content, rect{{ 4, 2 }, { 10, 2 }}, visible);
+        q_reconcile_components(st, visible);
+        return activated == 2 && host->base::subset.size() == 1
+            && child.widget->base::area() == rect{{ 4, 2 }, { 10, 2 }};
+    }
+
+    auto test_table_can_be_nested_as_component_content() -> bool
+    {
+        auto cfg = table_cfg{};
+        cfg.columns = []{ return qtable{}; };
+        cfg.row_count = []{ return 0; };
+        cfg.cell = [](si32, si32){ return table_cell{}; };
+        auto nested = make_table(std::move(cfg));
+        auto value = table_cell{ nested };
+        auto embedded = std::get_if<table_component_cell>(&value.value);
+        return embedded && embedded->content.widget == nested.widget;
     }
 
     auto test_posix_name_validation() -> bool
@@ -347,6 +443,11 @@ int main()
         { "revision_resets_selection_state", test_revision_resets_selection_state },
         { "tail_follow_rearms_at_bottom", test_tail_follow_rearms_at_bottom },
         { "source_follow_does_not_rearm_at_unrelated_bottom", test_source_follow_does_not_rearm_at_unrelated_bottom },
+        { "variable_row_line_geometry", test_variable_row_line_geometry },
+        { "variable_row_reveal_uses_lines", test_variable_row_reveal_uses_lines },
+        { "rubber_band_preserves_blank_endpoint", test_rubber_band_preserves_blank_endpoint },
+        { "component_cells_retain_and_reconcile_widgets", test_component_cells_retain_and_reconcile_widgets },
+        { "table_can_be_nested_as_component_content", test_table_can_be_nested_as_component_content },
         { "posix_name_validation", test_posix_name_validation },
         { "windows_name_validation", test_windows_name_validation },
         { "default_directory_numbering", test_default_directory_numbering },

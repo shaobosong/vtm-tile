@@ -4,31 +4,26 @@
 #pragma once
 
 // parvion/tabs.hpp: a generic, reusable multi-container — a bottom tab strip over a ui::veer that
-// shows one page at a time. It knows nothing about its pages beyond the sealed tab_page interface
-// (widget / title / activate lifecycle), so any tab_page (a table, the message log, or — in the
-// future — a nested tabs / layout container) drops in unchanged. The container itself implements
-// tab_page (Composite), so it can be nested inside another container later.
+// shows one component page at a time. Page-specific lifecycle is carried by the common component
+// handle, so tabs can be nested without a separate inheritance hierarchy.
 //
 // Structure:  fork(axis::Y) { slot::_1 = veer (pages, z-stacked; back() is visible)
 //                             slot::_2 = strip (1 row: labels + click-to-switch) }
 
-#include "tab_page.hpp" // tab_page, tab_page_ptr.
+#include "tab_page.hpp" // tab_page_cfg.
 
 namespace netxs::app::parvion
 {
-    struct tabs_ctrl : tab_page
+    struct tabs_ctrl
     {
-        std::vector<tab_page_ptr> pages;
+        std::vector<tab_page_cfg> pages;
         si32                      active = 0;   // Index (into `pages`) of the visible tab.
         netxs::wptr<ui::veer>     veer_wp;      // The page stack; back() is the visible page.
         netxs::wptr<ui::base>     strip_wp;     // The label strip (repainted on switch).
         ui::sptr                  root;         // fork(Y) [veer, strip] — the container widget.
-        text                      title_str;    // This container's own tab label (used only when nested).
 
-        auto widget() -> ui::sptr override { return root; }
-        auto title() const -> text override { return title_str; }
-        void on_activate()   override { if (active >= 0 && active < (si32)pages.size()) pages[(size_t)active]->on_activate(); }
-        void on_deactivate() override { if (active >= 0 && active < (si32)pages.size()) pages[(size_t)active]->on_deactivate(); }
+        void on_activate()   { if (active >= 0 && active < (si32)pages.size()) pages[(size_t)active].content.on_activate(); }
+        void on_deactivate() { if (active >= 0 && active < (si32)pages.size()) pages[(size_t)active].content.on_deactivate(); }
 
         // Bring page `target` to the front (visible): rotate the veer so its back() is that page,
         // run the deactivate/activate lifecycle, hand keyboard focus to the new page (when a gear is
@@ -44,10 +39,10 @@ namespace netxs::app::parvion
             // order, so this stays consistent across repeated switches.
             auto dt = ((active - target) % n + n) % n;
             veer->roll(dt);
-            pages[(size_t)active]->on_deactivate();
+            pages[(size_t)active].content.on_deactivate();
             veer->base::reflow(); // The veer sizes only back(); settle the newly-visible page.
-            if (gear) pro::focus::set(pages[(size_t)target]->widget(), gear->id, solo::on);
-            pages[(size_t)target]->on_activate();
+            if (gear) pro::focus::set(pages[(size_t)target].content.widget, gear->id, solo::on);
+            pages[(size_t)target].content.on_activate();
             active = target;
             if (auto s = strip_wp.lock()) s->base::deface();
         }
@@ -77,7 +72,8 @@ namespace netxs::app::parvion
                 auto n = (si32)tc->pages.size();
                 for (auto i = si32{}; i < n; ++i)
                 {
-                    auto label  = tc->pages[(size_t)i]->title();
+                    auto& page = tc->pages[(size_t)i];
+                    auto label  = page.title ? page.title() : text{};
                     auto active = tc->active == i;
                     auto fg = active ? ui32{ theme::text_fg } : ui32{ theme::subtext };
                     auto bg = active ? ui32{ theme::bg }      : ui32{ theme::surface };
@@ -106,18 +102,16 @@ namespace netxs::app::parvion
         return strip;
     }
 
-    // Assemble a tabs container over `pages`, initially showing `active`. `title` is this container's
-    // own tab label (used only when it is itself nested as a page in another container).
-    inline auto make_tabs(std::vector<tab_page_ptr> pages, si32 active = 0, text title = {}) -> tab_page_ptr
+    // Assemble a tabs component over `pages`, initially showing `active`.
+    inline auto make_tabs(std::vector<tab_page_cfg> pages, si32 active = 0) -> component
     {
         auto tc = std::make_shared<tabs_ctrl>();
         tc->pages     = std::move(pages);
-        tc->title_str = std::move(title);
         auto n = (si32)tc->pages.size();
 
         auto root = ui::fork::ctor(axis::Y);
         auto veer = ui::veer::ctor();
-        for (auto& p : tc->pages) veer->attach(p->widget()); // Attach in tab order.
+        for (auto& p : tc->pages) veer->attach(p.content.widget); // Attach in tab order.
         auto strip = make_tab_strip(std::weak_ptr<tabs_ctrl>(tc));
         root->attach(slot::_1, veer);
         root->attach(slot::_2, strip)->limits({ -1, 1 }, { -1, 1 }); // Strip pinned to 1 row.
@@ -128,9 +122,13 @@ namespace netxs::app::parvion
 
         // Detect the initially-visible (back) page, then rotate to the requested `active` tab.
         auto cur = std::max(0, n - 1);
-        for (auto i = si32{}; i < n; ++i) if (veer->back() == tc->pages[(size_t)i]->widget()) { cur = i; break; }
+        for (auto i = si32{}; i < n; ++i) if (veer->back() == tc->pages[(size_t)i].content.widget) { cur = i; break; }
         tc->active = cur;
         tc->select(std::clamp(active, 0, std::max(0, n - 1)), nullptr);
-        return tc;
+        return {
+            root,
+            [tc]{ tc->on_activate(); },
+            [tc]{ tc->on_deactivate(); },
+        };
     }
 }

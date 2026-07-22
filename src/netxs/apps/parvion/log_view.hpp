@@ -79,7 +79,7 @@ namespace netxs::app::parvion
         return items;
     }
 
-    inline auto make_log_view(sftp_remote* ctrl, netxs::wptr<ui::base> window_wp) -> tab_page_ptr
+    inline auto make_log_view(sftp_remote* ctrl, netxs::wptr<ui::base> window_wp) -> tab_page_cfg
     {
         auto cache = std::make_shared<log_vis_cache>();
         auto title = []{ return text{ "Message log" }; };
@@ -105,6 +105,6 @@ namespace netxs::app::parvion
         };
         cfg.on_key     = [ctrl, window_wp](hids& gear, netxs::wptr<ui::base> self){ return clear_finished_on_key(gear, ctrl, window_wp, self); };
         auto box = make_textbox(std::move(cfg));
-        return make_tab_page(std::move(box.widget), std::move(title), {}, std::move(box.clear_selection));
+        return make_tab_page(std::move(box), std::move(title));
     }
 }
