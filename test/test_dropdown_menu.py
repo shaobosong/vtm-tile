@@ -1109,6 +1109,76 @@ def test_nested_dropdown_submenu_opens_on_hover_no_click():
         return True
 
 
+def test_hover_menu_submenu_and_blank_keeps_chain_open():
+    """Hovering among a menu, its submenu, and blank content must not
+    dismiss the root dropdown.
+
+    Regression sequence from the shared-menu hover bug: open the root popup,
+    open its submenu, then repeatedly cross child rows, blank applet content,
+    the owning menu-bar trigger, and root rows.  Attaching/detaching retained
+    submenu overlays may transiently change aggregate mouse-focus state; that
+    is not a real mouse-device halt and must not dismiss the chain.
+    """
+    print("TEST: nested dropdown: menu/submenu/blank hover keeps root open ... ",
+          end="", flush=True)
+    with VtmTileSession(NEST_TILE_ARGS, vtm_config=NEST_TILE_CONFIG) as s:
+        if not s.is_alive():
+            return fail("vtm-tile did not start")
+        s.snapshot(timeout=2.0)
+
+        trigger = find_marker_position(s._screen_buf, "[NEST]")
+        if trigger is None:
+            return fail("trigger '[NEST]' not found")
+        trigger_row, trigger_col = trigger
+
+        s.click(trigger_col + 2, trigger_row)
+        s.snapshot(timeout=1.5)
+        sub = find_marker_position(s._screen_buf, NEST_SUB_1)
+        leaf_x = find_marker_position(s._screen_buf, NEST_LEAF_X)
+        leaf_y = find_marker_position(s._screen_buf, NEST_LEAF_Y)
+        if sub is None or leaf_x is None or leaf_y is None:
+            return fail("root popup rows were not rendered")
+
+        # Open the child, then exercise the reported continuous-hover path.
+        sub_row, sub_col = sub
+        s.hover(sub_col + 2, sub_row)
+        time.sleep(0.2)
+        submenu_rendered = s.snapshot(timeout=1.0)
+        if GRAND_LEAF_A not in submenu_rendered:
+            return fail("submenu did not open before the continuous-hover probe")
+        grand = find_marker_position(s._screen_buf, GRAND_LEAF_A)
+        if grand is None:
+            return fail("could not locate the open submenu row")
+        grand_row, grand_col = grand
+        leaf_y_row, leaf_y_col = leaf_y
+        for _ in range(8):
+            s.hover(grand_col + 2, grand_row)      # Child submenu.
+            s.hover(COLS - 10, ROWS - 5)          # Blank content outside both popups.
+            s.hover(trigger_col + 2, trigger_row) # Owning primary-menu trigger.
+            s.hover(leaf_y_col + 2, leaf_y_row)   # Root row; closes only the child.
+            s.hover(sub_col + 2, sub_row)          # Reattach the child.
+
+        # Force two distinct root-row hover states.  An attached popup repaints
+        # on the second move; a prematurely dismissed chain emits no row label.
+        leaf_x_row, leaf_x_col = leaf_x
+        s.hover(leaf_y_col + 2, leaf_y_row)
+        s.reset_buffer()
+        s.hover(leaf_x_col + 2, leaf_x_row)
+        rendered = s.snapshot(timeout=1.0)
+        if NEST_LEAF_X not in rendered:
+            return fail(
+                "continuous hover among the root menu, submenu, and blank "
+                "content dismissed the entire dropdown chain"
+            )
+
+        if not s.is_alive():
+            return fail("vtm-tile crashed during continuous-hover test")
+        if not s.normal_exit():
+            return fail("vtm-tile did not exit cleanly")
+        print("PASS")
+        return True
+
+
 def test_dropdown_esc_dismisses_chain():
     """Pressing Esc while a popup chain is open must dismiss every
     popup AND clear the trigger's open-guard so a subsequent click
@@ -2667,6 +2737,7 @@ TESTS = [
     test_nested_dropdown_submenu_opens_to_the_right,
     test_nested_dropdown_submenu_flips_left_when_no_room_on_right,
     test_nested_dropdown_submenu_opens_on_hover_no_click,
+    test_hover_menu_submenu_and_blank_keeps_chain_open,
     test_dropdown_esc_dismisses_chain,
     test_dropdown_outside_click_dismisses_chain,
     test_nested_dropdown_leaf_click_dismisses_chain,

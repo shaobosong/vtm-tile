@@ -966,7 +966,7 @@ namespace netxs::app::shared
             std::vector<netxs::wptr<ui::base>> overlays;  // open popups, root-first
             netxs::sptr<hook> kbd_hook;                   // Esc interceptor on host
             netxs::sptr<hook> mouse_hook;                 // outside-click dismisser on host
-            netxs::sptr<hook> leave_hook;                 // mouse-left-the-host dismisser
+            netxs::sptr<hook> halt_hook;                  // mouse-device halt dismisser
             std::vector<popup_nav> navs;                  // per-overlay kbd nav state
             si32 padding{ 1 };                            // horizontal cell padding per item
             popup_source source{ popup_source::control }; // Interaction scope of the root popup.
@@ -1006,8 +1006,8 @@ namespace netxs::app::shared
             chain->kbd_hook.reset();
             if (chain->mouse_hook) chain->mouse_hook->reset();
             chain->mouse_hook.reset();
-            if (chain->leave_hook) chain->leave_hook->reset();
-            chain->leave_hook.reset();
+            if (chain->halt_hook) chain->halt_hook->reset();
+            chain->halt_hook.reset();
             if (auto t = chain->trigger_shadow.lock())
             {
                 t->base::property("menu.dropdown.open", faux) = faux;
@@ -1308,7 +1308,7 @@ namespace netxs::app::shared
             chain->trigger_shadow = ptr::shadow(ui::sptr{ trigger.This() });
             chain->kbd_hook = ptr::shared<hook>();
             chain->mouse_hook = ptr::shared<hook>();
-            chain->leave_hook = ptr::shared<hook>();
+            chain->halt_hook = ptr::shared<hook>();
             // Keep provenance on the chain: all popup kinds share the global
             // active slot, but only a menu-bar chain can arm hover switching.
             chain->source = options.source;
@@ -1609,7 +1609,7 @@ namespace netxs::app::shared
                     gear.set_handled(faux);
                 };
 
-            // Mouse-left-the-host dismisser. The mouse_hook above can only
+            // Mouse-device halt dismisser. The mouse_hook above can only
             // dismiss on presses that land inside this host (the applet's
             // own area). When the applet runs inside a tile pane it is a
             // dtvt subprocess whose host covers only the pane's content
@@ -1617,25 +1617,27 @@ namespace netxs::app::shared
             // belong to the PARENT process and never deliver a mouse event
             // to this subprocess, so a press there can't reach mouse_hook.
             //
-            // What the subprocess DOES receive is a mouse-leave: when the
+            // What the subprocess DOES receive is a mouse-device halt: when the
             // cursor exits the pane viewport (on its way to the parent's
             // menu/title bars, another pane, the taskbar, etc.) the parent
-            // forwards a sysmouse halt, the gate deactivates the gear, and
-            // the host's e2::form::state::mouse toggles to faux. Tearing
-            // the chain down on that leave gives the user the expected
+            // forwards a sysmouse halt and the gate publishes
+            // input::events::halt. Tearing the chain down on that explicit
+            // device event gives the user the expected
             // "click outside the pane closes the open menu" behaviour even
             // across the dtvt bridge. For a top-level (non-pane) applet the
             // host spans the whole window, so this only fires when the
             // cursor leaves the window entirely — harmless and on-spec.
             //
-            // Guarded by overlays.empty(): the listener is installed before
-            // the first overlay attaches below, so a transient leave during
-            // the attach/reflow is ignored; only leaves observed once a
-            // popup is actually on screen dismiss the chain.
-            host_ptr->bell::submit(tier::release, e2::form::state::mouse, *chain->leave_hook)
-                = [chain](bool& hovered)
+            // Do not infer a device halt from e2::form::state::mouse=false.
+            // Cascading menus attach and detach retained overlays as hover
+            // moves between root rows, child rows, and transparent/blank
+            // cells.  Those target transitions can temporarily empty the
+            // host's aggregate mouse-focus path; treating that transient as
+            // a viewport exit intermittently dismissed the whole chain.
+            host_ptr->bell::submit(tier::general, input::events::halt, *chain->halt_hook)
+                = [chain](hids& /*gear*/)
                 {
-                    if (!hovered && !chain->overlays.empty())
+                    if (!chain->overlays.empty())
                     {
                         dismiss_dropdown_chain(chain);
                     }
@@ -2632,6 +2634,11 @@ namespace netxs::app::shared
                     {
                         auto active = menu::active_chain_slot();
                         if (!active || active->source != menu::popup_source::menu_bar) return;
+                        // Hover is a switch gesture, never a toggle gesture.
+                        // Returning from this trigger's popup/submenu to the
+                        // trigger itself therefore keeps its chain open;
+                        // LeftClick remains the only path that toggles it off.
+                        if (boss.base::property("menu.dropdown.open", faux)) return;
                         if (auto trigger_lock = active->trigger_shadow.lock())
                         {
                             if (trigger_lock.get() == static_cast<ui::base*>(&boss)) return;
