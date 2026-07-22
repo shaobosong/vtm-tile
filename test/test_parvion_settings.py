@@ -624,6 +624,85 @@ def test_esc_closes_key_picker():
     print("PASS"); return True
 
 
+def test_esc_closes_key_picker_after_address_cancel():
+    # Esc in the address editor first restores the path and ends editing. The editor remains the
+    # focus owner in view mode, so the next unhandled Esc must bubble to and close the picker.
+    print("TEST: second Esc closes key-file picker after address edit cancel ... ", end="", flush=True)
+    cfg = tempfile.mkdtemp(prefix="pvset_")
+    with _session(cfg) as s:
+        _open_dialog(s)
+        _goto_sftp(s)
+        chars = s.screen()[0]
+        add = T.find_text(chars, "Add key file")
+        s.click(add[1] + 1, add[0] + 1); s.feed(1.0)
+        chars = s.screen()[0]
+        title = T.find_text(chars, "Add key file")
+        home = os.path.expanduser("~")
+        line = T.row_text(chars, title[0]) if title else ""
+        path_col = line.find(home, title[1] + len("Add key file")) if title else -1
+        if path_col < 0:
+            print(f"FAIL - picker address {home!r} not found"); return False
+
+        # Click just past the displayed path, alter it, then cancel only that inline edit.
+        s.click(path_col + len(home) + 1, title[0] + 1)
+        s.write("/discard-me")
+        s.write("\x1b"); s.feed(0.7)
+        chars = s.screen()[0]
+        blob = "\n".join(T.row_text(chars, r) for r in range(len(chars)))
+        if "Add key file" not in blob or "Open" not in blob or "Cancel" not in blob:
+            print("FAIL - first Esc closed the picker instead of cancelling the address edit"); return False
+        if "/discard-me" in T.row_text(chars, title[0]):
+            print("FAIL - first Esc did not restore the picker address"); return False
+
+        s.write("\x1b"); s.feed(0.9)
+        chars = s.screen()[0]
+        blob = "\n".join(T.row_text(chars, r) for r in range(len(chars)))
+        if "Public Key Authentication" not in blob:
+            print("FAIL - did not return to the settings dialog"); return False
+        if "Add key file" in blob and "Open" in blob and "Cancel" in blob:
+            print("FAIL - picker still open after the second Esc"); return False
+    print("PASS"); return True
+
+
+def test_esc_closes_key_picker_after_rename_cancel():
+    # An inline filename editor owns its first Esc. Once the rename is cancelled, the next Esc
+    # bubbles beyond the table and is owned by the picker frame.
+    print("TEST: second Esc closes key-file picker after rename cancel ... ", end="", flush=True)
+    cfg = tempfile.mkdtemp(prefix="pvset_")
+    keydir = tempfile.mkdtemp(prefix="pvkey_")
+    original = os.path.join(keydir, "rename_me.pem")
+    with open(original, "w") as f:
+        f.write("test key\n")
+    with _session_home(cfg, keydir) as s:
+        _open_dialog(s)
+        _goto_sftp(s)
+        add = T.find_text(s.screen()[0], "Add key file")
+        s.click(add[1] + 1, add[0] + 1); s.feed(1.0)
+        key = T.find_text(s.screen()[0], "rename_me.pem")
+        if not key:
+            print("FAIL - picker file not listed"); return False
+        s.click(key[1] + 2, key[0] + 1, button=2)
+        rename = T.find_text(s.screen()[0], "Rename")
+        if not rename:
+            print("FAIL - Rename action not found"); return False
+        s.click(rename[1] + 1, rename[0] + 1); s.feed(0.6)
+        s.write("-discard")
+        s.write("\x1b"); s.feed(0.7)
+        blob = "\n".join(T.row_text(s.screen()[0], r) for r in range(T.ROWS))
+        if "Add key file" not in blob or "Open" not in blob or "Cancel" not in blob:
+            print("FAIL - first Esc closed the picker instead of cancelling Rename"); return False
+        if not os.path.isfile(original) or os.path.exists(original + "-discard"):
+            print("FAIL - first Esc committed the cancelled Rename"); return False
+
+        s.write("\x1b"); s.feed(0.9)
+        blob = "\n".join(T.row_text(s.screen()[0], r) for r in range(T.ROWS))
+        if "Public Key Authentication" not in blob:
+            print("FAIL - did not return to the settings dialog"); return False
+        if "Add key file" in blob and "Open" in blob and "Cancel" in blob:
+            print("FAIL - picker still open after the second Esc"); return False
+    print("PASS"); return True
+
+
 ENC_PASSPHRASE = "secret"
 
 
@@ -860,6 +939,38 @@ def test_save_picker_click_updates_name():
     print("PASS"); return True
 
 
+def test_save_picker_esc_bubbles_to_picker():
+    # The save Name field has no nested cancel operation: Esc remains unhandled there and the picker
+    # frame closes the modal, invoking its cancellation callback to discard the temporary .ppk.
+    print("TEST: Esc in save Name field bubbles to and closes picker ... ", end="", flush=True)
+    keydir = tempfile.mkdtemp(prefix="pvkey_")
+    key = _gen_encrypted_key(keydir)
+    if not key:
+        print("SKIP - ssh-keygen unavailable"); return True
+    cfg = tempfile.mkdtemp(prefix="pvset_")
+    with _session_home(cfg, keydir) as s:
+        _open_dialog(s)
+        _goto_sftp(s)
+        add = T.find_text(s.screen()[0], "Add key file")
+        s.click(add[1] + 1, add[0] + 1); s.feed(1.0)
+        if not _pick_key(s, "enc_key"):
+            print("FAIL - enc_key not listed"); return False
+        s.write(ENC_PASSPHRASE); s.feed(0.4); s.write("\r"); s.feed(1.3)
+        blob = "\n".join(T.row_text(s.screen()[0], r) for r in range(T.ROWS))
+        if "Save converted key" not in blob or "enc_key.ppk" not in blob:
+            print("FAIL - save picker with focused Name field not shown"); return False
+
+        s.write("\x1b"); s.feed(0.9)
+        blob = "\n".join(T.row_text(s.screen()[0], r) for r in range(T.ROWS))
+        if "Public Key Authentication" not in blob:
+            print("FAIL - did not return to the settings dialog"); return False
+        if "Save converted key" in blob:
+            print("FAIL - save picker still open after Esc"); return False
+    if os.path.isfile(key + ".ppk"):
+        print("FAIL - cancelled save picker wrote the converted key"); return False
+    print("PASS"); return True
+
+
 def test_encrypted_key_wrong_passphrase_retries():
     # New flow: decryption + conversion happen ONCE up front (behind a "Converting key..." spinner),
     # which also verifies the passphrase. A wrong one is caught there and re-prompts (with the retry
@@ -907,6 +1018,7 @@ TESTS = [
     test_add_encrypted_key_converts_to_ppk,
     test_save_picker_double_click_overwrite,
     test_save_picker_click_updates_name,
+    test_save_picker_esc_bubbles_to_picker,
     test_encrypted_key_wrong_passphrase_retries,
     test_key_table_sort_configuration,
     test_empty_key_table_autofit_preserves_sort_header,
@@ -920,6 +1032,8 @@ TESTS = [
     test_picker_buttons_right_aligned,
     test_esc_closes_dialog_on_open,
     test_esc_closes_key_picker,
+    test_esc_closes_key_picker_after_address_cancel,
+    test_esc_closes_key_picker_after_rename_cancel,
     test_add_key_picker_context_menu_omits_transfer_actions,
     test_compression_persists,
     test_unit_dropdown_selects_and_persists,

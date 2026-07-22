@@ -101,10 +101,6 @@ namespace netxs::app::parvion
         // enqueueing a transfer; directory navigation is unchanged. Lets the picker reuse the whole
         // Local Site browser (path bar, resizable columns, scrollbars, selection) verbatim.
         std::function<void(text const&)> on_pick;
-        // File-picker mode: Esc (when not editing the path / a name) cancels the picker. The picker
-        // wires this to a deferred close; it is unset for the Local/Remote site panes (Esc is a no-op
-        // there). on_cancel must enqueue/defer its work — it tears down the pane that is calling it.
-        std::function<void()> on_cancel;
         // Save-picker mode: fired whenever the selection moves to a FILE (single click / arrow nav),
         // with the file's full path, so the picker copies its name into the Name field (overwrite
         // target). Unset for the Local/Remote site panes and the Open picker.
@@ -1055,13 +1051,6 @@ namespace netxs::app::parvion
          || gear.keystat == input::key::released
          || gear.keystat == input::key::interrupted) return {};
         auto k = gear.keybd::generic();
-        if (k == input::key::Esc && st.on_cancel)
-        {
-            auto cb = st.on_cancel;
-            gear.set_handled();
-            cb(); // Deferred by the picker: do not touch st/self afterwards.
-            return { table_viewport_action::handled };
-        }
         auto action = table_viewport_action{};
         if (k == input::key::KeyEnter && st.ctrl && pane_selected_item_count(st) > 1)
         {
@@ -1337,6 +1326,23 @@ namespace netxs::app::parvion
             ->alignment({ snap::center, snap::center })
             ->limits({ 50, 14 }, { 90, 32 })
             ->colors(theme::text_fg, theme::bg);
+        // A focused child editor gets first refusal on Esc (cancel edit / restore its value).
+        // Esc with no child-local action — or a later Esc after an editor leaves edit mode — bubbles
+        // up as keybd::post. Catch it at the modal boundary so cancellation is independent of which
+        // picker child currently owns focus.
+        frame->invoke([do_cancel](auto& boss)
+        {
+            boss.LISTEN(tier::release, input::events::keybd::post, gear, -, (do_cancel))
+            {
+                if (gear.keybd::handled
+                 || gear.payload != input::keybd::type::keypress
+                 || gear.keystat == input::key::released
+                 || gear.keystat == input::key::interrupted
+                 || gear.keybd::generic() != input::key::Esc) return;
+                gear.set_handled();
+                do_cancel();
+            };
+        });
         auto fname = ptr::shared(std::move(name)); // The Save-as Name field.
         pane_state* pane_st = nullptr;
         auto pane = frame->attach(slot::_1, make_file_pane(title, true, local_lister(), initial_dir, /*grab*/ !saving, nullptr, nullptr, &pane_st, window_wp));
@@ -1376,7 +1382,6 @@ namespace netxs::app::parvion
                 .value = [fname]{ return *fname; },
                 .on_change = [fname](text value){ *fname = std::move(value); },
                 .on_submit = [do_accept](text){ do_accept(); },
-                .on_cancel = [do_cancel]{ do_cancel(); },
                 .focus_on_start = true,
             });
             bottom_layer->attach(name_input.widget);
@@ -1416,7 +1421,8 @@ namespace netxs::app::parvion
         });
         // Wire the pane callbacks now that the bottom bar exists (its weak_ptr lets on_pick/on_select
         // repaint the Name field). Save: clicking or activating a file copies its name into the field
-        // (overwrite target); Open: activating a file accepts it. Esc in the pane cancels the picker.
+        // (overwrite target); Open: activating a file accepts it. Unhandled Esc is owned by the picker
+        // frame above, independently of which child currently owns focus.
         if (pane_st)
         {
             if (saving)
@@ -1431,7 +1437,6 @@ namespace netxs::app::parvion
                 pane_st->on_pick   = [fill, do_accept](text const& path){ fill(path); do_accept(); };
             }
             else pane_st->on_pick = [on_accept, close](text const& path){ if (on_accept) on_accept(path); close(); };
-            pane_st->on_cancel = do_cancel; // Esc in the file list cancels the picker.
         }
         window->base::attach(overlay);
         // These controls are constructed before the overlay joins the window, so an initial-focus
