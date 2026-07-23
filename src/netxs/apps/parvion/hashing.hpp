@@ -66,8 +66,7 @@ namespace netxs::app::parvion
         // (the user@ part is dropped when no user is known), or empty for a local file.
         auto source() const -> text
         {
-            if (!remote || host.empty()) return {};
-            return (user.empty() ? text{} : user + "@") + host + ":" + std::to_string(port);
+            return remote ? server_source(host, user, port) : text{};
         }
     };
 

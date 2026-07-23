@@ -5,6 +5,7 @@
 #include "vtm-common.hpp"
 #include "netxs/apps/parvion/button.hpp"
 #include "netxs/apps/parvion/connectbar.hpp"
+#include "netxs/apps/parvion/tabs.hpp"
 
 #include <cstdio>
 #include <vector>
@@ -78,6 +79,27 @@ namespace
         return cb_resolve(cb_form_width()).connect == " Connect "
             && cb_resolve(cb_min_width()).connect == " » ";
     }
+
+    auto test_counted_tab_abbreviation_preserves_suffix() -> bool
+    {
+        return tab_abbreviate_count("Transferring (0)", 15) == "Transferri… (0)"
+            && tab_abbreviate_count("Transferring (0)", 6) == "T… (0)";
+    }
+
+    auto test_tab_abbreviation_is_balanced() -> bool
+    {
+        auto pages = std::vector<tab_page_cfg>{
+            { {}, []{ return text{ "Transferring (0)" }; }, tab_abbreviate_count },
+            { {}, []{ return text{ "Failed (0)" }; },       tab_abbreviate_count },
+        };
+        // Full buttons occupy 30 cells. With two cells removed, round-robin compression shortens
+        // each title once rather than exhausting the first title.
+        auto labels = resolve_tab_titles(pages, 28);
+        return labels.size() == 2
+            && labels[0] == "Transferri… (0)"
+            && labels[1] == "Fail… (0)"
+            && cell_width(labels[0]) + cell_width(labels[1]) + 4 == 28;
+    }
 }
 
 int main()
@@ -85,7 +107,9 @@ int main()
     auto ok = test_palette_and_centering()
            && test_hover_and_press_overlays()
            && test_hit_bounds()
-           && test_connect_caption_remains_responsive();
+           && test_connect_caption_remains_responsive()
+           && test_counted_tab_abbreviation_preserves_suffix()
+           && test_tab_abbreviation_is_balanced();
     if (!ok) std::fprintf(stderr, "parvion button tests failed\n");
     return ok ? 0 : 1;
 }

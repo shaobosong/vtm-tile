@@ -382,6 +382,19 @@ def test_checksums_column_resize():
         return True
 
 
+def test_checksums_size_column_width():
+    """Size occupies eight content cells plus its one-cell trailing divider."""
+    with ParvionSession(DEMO_ENV) as s:
+        chars = _open_checksums_tab(s)
+        field = header_field(chars, "Size")
+        width = None if field is None else field[3] - field[2] + 1
+        if width != 9:
+            print(f"FAIL test_checksums_size_column_width: total width is {width}, expected 9")
+            return False
+        print("OK test_checksums_size_column_width")
+        return True
+
+
 def test_checksums_row_selection():
     """Checksums rows are selectable via the shared table component: a left-click highlights the
     row, and a Ctrl-click adds a second row to the selection (multi-select)."""
@@ -663,6 +676,7 @@ TESTS = [
     test_backend_hash_all_algorithms,
     test_no_checksum_on_folder,
     test_checksums_column_resize,
+    test_checksums_size_column_width,
     test_checksums_row_selection,
     test_checksums_blank_area_matches_transfer_table,
     test_checksums_arrow_key_selection,

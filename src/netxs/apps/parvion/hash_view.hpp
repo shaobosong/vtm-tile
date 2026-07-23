@@ -16,6 +16,7 @@ namespace netxs::app::parvion
 {
     static constexpr auto hash_headers = std::array<view, 6>{ "Source", "Path", "Algorithm", "Size", "Progress", "Result" };
     static constexpr auto hash_menu_headers = std::array<view, 6>{ "&Source", "&Path", "&Algorithm", "S&ize", "P&rogress", "R&esult" };
+    static constexpr auto hash_size_body_w = si32{ 8 };
 
     // Per-instance session-only column widths (0 = auto-size to content).
     struct hash_cols { std::array<si32, 6> w{}; };
@@ -132,7 +133,8 @@ namespace netxs::app::parvion
             res  = std::max(res,  (si32)cell_width(it.status == hash_item::failed ? it.error : it.digest));
         }
         path = std::min(path, 48); // Cap the Path column; longer paths scroll horizontally.
-        auto bodyw = std::array<si32, 6>{ src, path, 9, 11, 10, res };
+        // Size is eight content cells plus the table's one-cell trailing divider.
+        auto bodyw = std::array<si32, 6>{ src, path, 9, hash_size_body_w, 10, res };
         auto autow = std::array<si32, 6>{};
         for (auto i = si32{}; i < 6; ++i)
             autow[(size_t)i] = q_col_fit_w(hash_headers[(size_t)i], bodyw[(size_t)i], true);
@@ -287,6 +289,6 @@ namespace netxs::app::parvion
             ctrl->hash_remove_selected();
         };
         cfg.deletion.confirm = [ctrl]{ return hash_remove_confirmation(ctrl); };
-        return make_tab_page(make_table(std::move(cfg)), std::move(title));
+        return make_tab_page(make_table(std::move(cfg)), std::move(title), tab_abbreviate_count);
     }
 }

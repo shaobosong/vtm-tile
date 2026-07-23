@@ -140,6 +140,16 @@ namespace
             && second_state.label == "100.00%"
             && second_state.foreground == theme::dir_fg;
     }
+
+    auto test_server_caption_and_hash_size_width() -> bool
+    {
+        return server_source("files.example", "alice", 22) == "alice@files.example:22"
+            && server_source("files.example", {}, 2222) == "files.example:2222"
+            && q_headers[(size_t)q_server] == "Server"
+            && q_headers[(size_t)q_local] == "Local Name"
+            && q_col_fit_w(hash_headers[3], hash_size_body_w, true) == 9
+            && xfer_reason_w(xfer_cols{}, 1) == 31;
+    }
 }
 
 int main()
@@ -149,7 +159,8 @@ int main()
            && test_percentage_alignment_preserves_centered_field_edges()
            && test_embedded_clip_stays_inside_viewport()
            && test_transfer_cell_uses_progressbar_contract()
-           && test_checksum_cell_uses_stable_progressbar();
+           && test_checksum_cell_uses_stable_progressbar()
+           && test_server_caption_and_hash_size_width();
     if (!ok) std::fprintf(stderr, "parvion progressbar tests failed\n");
     return ok ? 0 : 1;
 }

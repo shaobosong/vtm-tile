@@ -79,6 +79,14 @@ namespace netxs::app::parvion
         }
     };
 
+    // Queue-view server/source caption: keep transfer and checksum tables consistent.
+    // The explicit port matches the Checksums Source convention, including the default :22.
+    inline auto server_source(text const& host, text const& user, si32 port) -> text
+    {
+        if (host.empty()) return {};
+        return (user.empty() ? text{} : user + "@") + host + ":" + std::to_string(port);
+    }
+
     // Human-readable byte count, e.g. "1.2K", "410M". Empty for size < 0.
     inline auto human_size(si64 n) -> text
     {

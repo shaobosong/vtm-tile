@@ -19,12 +19,13 @@
 
 namespace netxs::app::parvion
 {
-    // Resizable transfer columns: Local Name, Remote Name, Size, Progress, Speed (+ a "Reason"
-    // column, logical index q_ncol, on the Failed tab). Index order is shared by the width array,
-    // the column builder, the cell accessor, and ctrl->col_shown.
-    static constexpr auto q_ncol      = si32{ 5 };
-    static constexpr auto q_headers   = std::array<view, q_ncol + 1>{ "Local Name", "Remote Name", "Size", "Progress", "Speed", "Reason" };
-    static constexpr auto q_menu_headers = std::array<view, q_ncol + 1>{ "&Local Name", "&Remote Name", "&Size", "&Progress", "Sp&eed", "Re&ason" };
+    // Resizable transfer columns: Server, Local Name, Remote Name, Size, Progress, Speed (+ a
+    // "Reason" column, logical index q_ncol, on the Failed tab). Index order is shared by the width
+    // array, column builder, cell accessor, and ctrl->col_shown.
+    enum xfer_col_key : si32 { q_server, q_local, q_remote, q_size, q_progress, q_speed };
+    static constexpr auto q_ncol      = si32{ 6 };
+    static constexpr auto q_headers   = std::array<view, q_ncol + 1>{ "Server", "Local Name", "Remote Name", "Size", "Progress", "Speed", "Reason" };
+    static constexpr auto q_menu_headers = std::array<view, q_ncol + 1>{ "Ser&ver", "&Local Name", "&Remote Name", "&Size", "&Progress", "Sp&eed", "Re&ason" };
     static constexpr auto q_name_x    = si32{ 7 };  // First resizable column x (after the arrow + expand gutter).
     static constexpr auto q_reason_w0 = si32{ 31 }; // Initial Failed-tab "Reason" column width.
 
@@ -32,7 +33,17 @@ namespace netxs::app::parvion
     struct disp_row { si32 qi; si32 child; };
 
     // This view's session-only, per-instance column widths (0 override = auto / initial).
-    struct xfer_cols { std::array<si32, q_ncol> col_w{ 25, 25, 9, 11, 11 }; si32 reason_w_override = 0; };
+    struct xfer_cols
+    {
+        // Server starts in auto mode so it fits the same user@host:port caption used by Checksums.
+        std::array<si32, q_ncol> col_w{ 0, 25, 25, 9, 11, 11 };
+        si32 reason_w_override = 0;
+    };
+
+    inline auto xfer_server(sftp_remote const* ctrl) -> text
+    {
+        return ctrl ? server_source(ctrl->host, ctrl->user, ctrl->port) : text{};
+    }
 
     inline auto xfer_progress_fraction(si64 done, si64 size) -> double
     {
@@ -112,15 +123,16 @@ namespace netxs::app::parvion
             auto s = text{};
             switch (col)
             {
-                case 0:  s = it.local_path;  break;
-                case 1:  s = it.remote_path; break;
-                case 2:  s = human_size(it.size); break;
-                case 3:  s = it.status == queue_item::queued ? (it.paused ? text{ "paused" } : text{ "queued" }) : xfer_progress_text(xfer_progress_fraction(it.done, it.size)); break;
-                case 4:  if (it.rate.speed > 0.0) s = human_size((si64)(it.rate.speed + 0.5)) + "/s"; break;
+                case q_server:   s = xfer_server(ctrl); break;
+                case q_local:    s = it.local_path;  break;
+                case q_remote:   s = it.remote_path; break;
+                case q_size:     s = human_size(it.size); break;
+                case q_progress: s = it.status == queue_item::queued ? (it.paused ? text{ "paused" } : text{ "queued" }) : xfer_progress_text(xfer_progress_fraction(it.done, it.size)); break;
+                case q_speed:    if (it.rate.speed > 0.0) s = human_size((si64)(it.rate.speed + 0.5)) + "/s"; break;
                 default: s = it.error; break;
             }
             w = std::max(w, (si32)cell_width(s));
-            if (col == 0 && it.expanded && it.chunk_count > 1)
+            if (col == q_local && it.expanded && it.chunk_count > 1)
             {
                 auto ranges = chunk_ranges(it.size, it.chunk_count);
                 for (auto c = si32{}; c < (si32)ranges.size(); ++c)
@@ -162,11 +174,12 @@ namespace netxs::app::parvion
         auto& b = ctrl->queue[(size_t)rows[(size_t)row_b].qi];
         switch (key)
         {
-            case 0:  return xfer_text_order(a.local_path, b.local_path);
-            case 1:  return xfer_text_order(a.remote_path, b.remote_path);
-            case 2:  return xfer_value_order(a.size, b.size);
-            case 3:  return xfer_progress_order(a, b);
-            case 4:  return xfer_value_order(a.rate.speed, b.rate.speed);
+            case q_server:   return 0; // Every row belongs to the controller's current server.
+            case q_local:    return xfer_text_order(a.local_path, b.local_path);
+            case q_remote:   return xfer_text_order(a.remote_path, b.remote_path);
+            case q_size:     return xfer_value_order(a.size, b.size);
+            case q_progress: return xfer_progress_order(a, b);
+            case q_speed:    return xfer_value_order(a.rate.speed, b.rate.speed);
             default: return xfer_text_order(a.error, b.error); // Failed-tab Reason.
         }
     }
@@ -180,7 +193,9 @@ namespace netxs::app::parvion
         for (auto i = si32{}; i < n; ++i)
         {
             auto width = i < q_ncol ? cols->col_w[(size_t)i] : xfer_reason_w(*cols, status);
-            t.add_column({ text{ q_headers[(size_t)i] }, width, i >= 2 && i <= 4, true, i },
+            if (i == q_server && width <= 0)
+                width = q_col_fit_w(q_headers[(size_t)i], cell_width(xfer_server(ctrl)), true);
+            t.add_column({ text{ q_headers[(size_t)i] }, width, i >= q_size && i <= q_speed, true, i },
                          ctrl->col_shown[(size_t)i], text{ q_menu_headers[(size_t)i] });
         }
         t.on_show_column   = [ctrl](si32 key, bool on){ if (key >= 0 && key < (si32)ctrl->col_shown.size()) ctrl->col_shown[(size_t)key] = on; };
@@ -284,10 +299,11 @@ namespace netxs::app::parvion
         {
             switch (key)
             {
-                case 0: return { it.local_path,  dir_fg };
-                case 1: return { it.remote_path, dir_fg };
-                case 2: return { human_size(it.size), theme::subtext };
-                case 3:
+                case q_server: return { xfer_server(ctrl), theme::subtext };
+                case q_local:  return { it.local_path,  dir_fg };
+                case q_remote: return { it.remote_path, dir_fg };
+                case q_size:   return { human_size(it.size), theme::subtext };
+                case q_progress:
                     if (it.status == queue_item::queued)
                         return xfer_progress_cell(progress, row, 0.0, it.paused ? text{ "paused" } : text{ "queued" }, theme::subtext);
                     else
@@ -298,7 +314,7 @@ namespace netxs::app::parvion
                                                                              : ui32{ theme::text_fg };
                         return xfer_progress_cell(progress, row, fraction, xfer_progress_text(fraction), foreground);
                     }
-                case 4: return it.rate.speed > 0.0 ? table_cell{ human_size((si64)(it.rate.speed + 0.5)) + "/s", theme::subtext } : table_cell{};
+                case q_speed: return it.rate.speed > 0.0 ? table_cell{ human_size((si64)(it.rate.speed + 0.5)) + "/s", theme::subtext } : table_cell{};
                 default: return it.status == queue_item::failed && !it.error.empty() ? table_cell{ it.error, theme::err_fg } : table_cell{}; // Reason.
             }
         }
@@ -306,8 +322,8 @@ namespace netxs::app::parvion
         auto ranges = chunk_ranges(it.size, it.chunk_count);
         if (child >= (si32)ranges.size()) return {};
         auto [start, end] = ranges[(size_t)child];
-        if (key == 0) return { "Part " + std::to_string(child + 1) + "/" + std::to_string(it.chunk_count) + "  (" + human_size(start) + "–" + human_size(end) + ")", theme::subtext };
-        if (key == 3)
+        if (key == q_local) return { "Part " + std::to_string(child + 1) + "/" + std::to_string(it.chunk_count) + "  (" + human_size(start) + "–" + human_size(end) + ")", theme::subtext };
+        if (key == q_progress)
         {
             auto live = qi == ctrl->active && ctrl->workers.size() == ranges.size();
             if (live)
@@ -391,6 +407,6 @@ namespace netxs::app::parvion
             if (ctrl) ctrl->queue_remove([](queue_item const& it){ return it.selected; });
         };
         cfg.deletion.confirm = [ctrl]{ return xfer_remove_confirmation(ctrl); };
-        return make_tab_page(make_table(std::move(cfg)), std::move(title));
+        return make_tab_page(make_table(std::move(cfg)), std::move(title), tab_abbreviate_count);
     }
 }

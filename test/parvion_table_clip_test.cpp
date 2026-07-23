@@ -8,6 +8,7 @@
 #include "netxs/apps.hpp"
 #include "vtm-common.hpp"
 #include "netxs/apps/parvion/table.hpp"
+#include "netxs/apps/parvion/textbox.hpp"
 
 #include <cstdio>
 #include <vector>
@@ -27,6 +28,20 @@ namespace
             writes.push_back(area);
             auto c = cell{};
             fx(c);
+        }
+    };
+
+    struct state_canvas
+    {
+        struct write { rect area; cell value; };
+        std::vector<write> writes;
+
+        template<class Fx>
+        void fill(rect area, Fx fx)
+        {
+            auto value = cell{};
+            fx(value);
+            writes.push_back({ area, value });
         }
     };
 
@@ -405,6 +420,52 @@ namespace
         return embedded && embedded->content.widget == nested.widget;
     }
 
+    auto test_table_scrollbar_press_promotes_to_drag_paint() -> bool
+    {
+        auto st = table_state{};
+        st.body_top = 1;
+        st.body_rows = 4;
+        st.total_lines = 8;
+        st.has_vsb = true;
+        st.vsb_x = 9;
+        st.sb_hover = st.sb_press = true;
+
+        auto pressed = state_canvas{};
+        auto pal = table_palette{};
+        tbl_paint_scrollbars(st, pressed, pal);
+        if (pressed.writes.size() != 3
+         || pressed.writes.back().area != rect{{ 9, 1 }, { 1, 2 }}) return faux;
+
+        st.sb_press = faux;
+        st.sb_drag = true;
+        auto dragging = state_canvas{};
+        tbl_paint_scrollbars(st, dragging, pal);
+        return dragging.writes.size() == 3
+            && dragging.writes[1].value.fgc() == argb{ pal.sb_drag };
+    }
+
+    auto test_textbox_scrollbar_press_promotes_to_drag_paint() -> bool
+    {
+        auto st = textbox_state{};
+        st.disp_w = 8;
+        st.content_w = 16;
+        st.has_hsb = true;
+        st.hsb_y = 5;
+        st.hsb_hover = st.hsb_press = true;
+
+        auto pressed = state_canvas{};
+        tb_paint_scrollbars(st, pressed);
+        if (pressed.writes.size() != 3
+         || pressed.writes.back().area != rect{{ 0, 5 }, { 4, 1 }}) return faux;
+
+        st.hsb_press = faux;
+        st.hsb_drag = true;
+        auto dragging = state_canvas{};
+        tb_paint_scrollbars(st, dragging);
+        return dragging.writes.size() == 3
+            && dragging.writes[1].value.fgc() == argb{ theme::sb_drag };
+    }
+
     auto test_posix_name_validation() -> bool
     {
         auto reason = text{};
@@ -476,6 +537,8 @@ int main()
         { "rubber_overshoot_keeps_last_cursor", test_rubber_overshoot_keeps_last_row_as_keyboard_cursor },
         { "component_cells_retain_and_reconcile_widgets", test_component_cells_retain_and_reconcile_widgets },
         { "table_can_be_nested_as_component_content", test_table_can_be_nested_as_component_content },
+        { "table_scrollbar_press_promotes_to_drag_paint", test_table_scrollbar_press_promotes_to_drag_paint },
+        { "textbox_scrollbar_press_promotes_to_drag_paint", test_textbox_scrollbar_press_promotes_to_drag_paint },
         { "posix_name_validation", test_posix_name_validation },
         { "windows_name_validation", test_windows_name_validation },
         { "default_directory_numbering", test_default_directory_numbering },

@@ -47,8 +47,8 @@ namespace netxs::app::parvion
         bool focused = faux;
         si32 scroll = 0, hscroll = 0;
         bool follow = true;
-        bool sb_hover = faux,  sb_drag = faux;  si32 sb_grab = 0;
-        bool hsb_hover = faux, hsb_drag = faux; si32 hsb_grab = 0;
+        bool sb_hover = faux,  sb_press = faux,  sb_drag = faux;  si32 sb_grab = 0;
+        bool hsb_hover = faux, hsb_press = faux, hsb_drag = faux; si32 hsb_grab = 0;
         bool menu_hover = faux, menu_press = faux;
         si32 body_top = 0, body_rows = 0, bottom = 0;
         si32 content_w = 0, disp_w = 0, vsb_x = 0, hsb_y = 0, total = 0;
@@ -241,6 +241,8 @@ namespace netxs::app::parvion
             canvas.fill(rect{{ sb.x, sb.top }, { 1, sb.track_h }}, [&](cell& c){ c.bgc(theme::bg).fgc(theme::sb_track).txt(mark); });
             auto tc = st.sb_drag ? ui32{ theme::sb_drag } : st.sb_hover ? ui32{ theme::sb_hover } : ui32{ theme::sb_thumb };
             canvas.fill(rect{{ sb.x, sb.thumb_y }, { 1, sb.thumb_h }}, [&](cell& c){ c.bgc(theme::bg).fgc(tc).txt(mark); });
+            if (st.sb_press || st.sb_drag)
+                canvas.fill(rect{{ sb.x, sb.thumb_y }, { 1, sb.thumb_h }}, [](cell& c){ c.xlight(2); });
         }
         if (auto sb = tb_hsb(st); sb.ok)
         {
@@ -248,6 +250,8 @@ namespace netxs::app::parvion
             canvas.fill(rect{{ sb.x, sb.top }, { sb.track_h, 1 }}, [&](cell& c){ c.bgc(theme::bg).fgc(theme::sb_track).txt(mark); });
             auto tc = st.hsb_drag ? ui32{ theme::sb_drag } : st.hsb_hover ? ui32{ theme::sb_hover } : ui32{ theme::sb_thumb };
             canvas.fill(rect{{ sb.x + sb.thumb_y, sb.top }, { sb.thumb_h, 1 }}, [&](cell& c){ c.bgc(theme::bg).fgc(tc).txt(mark); });
+            if (st.hsb_press || st.hsb_drag)
+                canvas.fill(rect{{ sb.x + sb.thumb_y, sb.top }, { sb.thumb_h, 1 }}, [](cell& c){ c.fgc().xlight(2); });
         }
     }
     inline auto tb_over_scrollbar(textbox_state const& st, si32 mx, si32 my) -> bool
@@ -449,13 +453,35 @@ namespace netxs::app::parvion
                     gear.dismiss();
                     return;
                 }
-                if (auto sb = tb_vsb(st); sb.ok && mx == sb.x && my >= sb.top && my < sb.top + sb.track_h) return;
-                if (auto sb = tb_hsb(st); sb.ok && my == sb.top && mx >= sb.x && mx < sb.x + sb.track_h) return;
+                if (auto sb = tb_vsb(st); sb.ok && mx == sb.x && my >= sb.top && my < sb.top + sb.track_h)
+                {
+                    if (!st.sb_press || st.hsb_press)
+                    {
+                        st.sb_press = true;
+                        st.hsb_press = faux;
+                        boss.base::deface();
+                    }
+                    return;
+                }
+                if (auto sb = tb_hsb(st); sb.ok && my == sb.top && mx >= sb.x && mx < sb.x + sb.track_h)
+                {
+                    if (!st.hsb_press || st.sb_press)
+                    {
+                        st.hsb_press = true;
+                        st.sb_press = faux;
+                        boss.base::deface();
+                    }
+                    return;
+                }
                 boss.base::deface(); gear.dismiss();
             });
             boss.on(tier::mouserelease, input::key::LeftUp, [&](hids&)
             {
-                if (st.menu_press) { st.menu_press = faux; boss.base::deface(); }
+                if (st.menu_press || st.sb_press || st.hsb_press)
+                {
+                    st.menu_press = st.sb_press = st.hsb_press = faux;
+                    boss.base::deface();
+                }
             });
             boss.on(tier::mouserelease, input::key::LeftClick, [&](hids& gear)
             {
@@ -501,13 +527,17 @@ namespace netxs::app::parvion
                 if (st.menu_press && !nmenu) { st.menu_press = faux; boss.base::deface(); }
                 auto vsb = tb_vsb(st); auto nsb = !nmenu && vsb.ok && mx == vsb.x && my >= vsb.top && my < vsb.top + vsb.track_h;
                 if (st.sb_hover != nsb) { st.sb_hover = nsb; boss.base::deface(); }
+                if (st.sb_press && !nsb) { st.sb_press = faux; boss.base::deface(); }
                 auto hsb = tb_hsb(st); auto nhsb = !nmenu && hsb.ok && my == hsb.top && mx >= hsb.x && mx < hsb.x + hsb.track_h;
                 if (st.hsb_hover != nhsb) { st.hsb_hover = nhsb; boss.base::deface(); }
+                if (st.hsb_press && !nhsb) { st.hsb_press = faux; boss.base::deface(); }
             });
             boss.on(tier::mouserelease, input::key::MouseLeave, [&](hids&)
             {
                 if (st.sb_hover)  { st.sb_hover = faux;  boss.base::deface(); }
                 if (st.hsb_hover) { st.hsb_hover = faux; boss.base::deface(); }
+                if (st.sb_press)  { st.sb_press = faux;  boss.base::deface(); }
+                if (st.hsb_press) { st.hsb_press = faux; boss.base::deface(); }
                 if (st.menu_hover || st.menu_press)
                 {
                     st.menu_hover = st.menu_press = faux;
@@ -531,6 +561,7 @@ namespace netxs::app::parvion
                     pro::focus::set(boss.This(), gear.id, solo::on);
                     if (py >= sb.thumb_y && py < sb.thumb_y + sb.thumb_h) st.sb_grab = py - sb.thumb_y;
                     else { st.sb_grab = sb.thumb_h / 2; tb_vsb_to(st, py, sb); }
+                    st.sb_press = faux;
                     st.sb_drag = st.sb_hover = true; st.drag = textbox_state::d_vsb;
                     st.follow = st.scroll == std::max(0, st.total - st.body_rows); boss.base::deface(); return;
                 }
@@ -540,6 +571,7 @@ namespace netxs::app::parvion
                     auto tx = sb.x + sb.thumb_y;
                     if (px >= tx && px < tx + sb.thumb_h) st.hsb_grab = px - tx;
                     else { st.hsb_grab = sb.thumb_h / 2; tb_hsb_to(st, px, sb); }
+                    st.hsb_press = faux;
                     st.hsb_drag = st.hsb_hover = true; st.drag = textbox_state::d_hsb; boss.base::deface(); return;
                 }
                 // Begin a character text selection (word/line modes are armed by double/triple-press).
@@ -573,9 +605,9 @@ namespace netxs::app::parvion
             // A drag ends: keep any text selection, else drop the scrollbar-drag flags (inlined into
             // both events — the LISTEN macro captures by reference, so a shared local would dangle).
             boss.LISTEN(tier::release, e2::form::drag::stop::_<hids::buttons::left>, gear)
-            { if (st.dragging) { boss.base::template plugin<pro::timer>().pacify(); st.dragging = faux; boss.base::deface(); return; } auto was = st.drag; st.drag = textbox_state::d_none; st.sb_drag = st.hsb_drag = faux; if (was != textbox_state::d_none) boss.base::deface(); };
+            { if (st.dragging) { boss.base::template plugin<pro::timer>().pacify(); st.dragging = faux; boss.base::deface(); return; } auto was = st.drag; st.drag = textbox_state::d_none; st.sb_press = st.hsb_press = st.sb_drag = st.hsb_drag = faux; if (was != textbox_state::d_none) boss.base::deface(); };
             boss.LISTEN(tier::release, e2::form::drag::cancel::_<hids::buttons::left>, gear)
-            { if (st.dragging) { boss.base::template plugin<pro::timer>().pacify(); st.dragging = faux; boss.base::deface(); return; } auto was = st.drag; st.drag = textbox_state::d_none; st.sb_drag = st.hsb_drag = faux; if (was != textbox_state::d_none) boss.base::deface(); };
+            { if (st.dragging) { boss.base::template plugin<pro::timer>().pacify(); st.dragging = faux; boss.base::deface(); return; } auto was = st.drag; st.drag = textbox_state::d_none; st.sb_press = st.hsb_press = st.sb_drag = st.hsb_drag = faux; if (was != textbox_state::d_none) boss.base::deface(); };
 
             auto span_select = [&](hids& gear, textbox_state::selmode mode, bool dragging)
             {

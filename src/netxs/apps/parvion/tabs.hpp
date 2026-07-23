@@ -14,6 +14,54 @@
 
 namespace netxs::app::parvion
 {
+    // Resolve current labels against the strip width. Like the connect bar, compression advances
+    // one title at a time in rounds, so several tabs lose width progressively and evenly. Each page
+    // callback sees its full title plus the next target width and can preserve any important suffix.
+    inline auto resolve_tab_titles(std::vector<tab_page_cfg> const& pages, si32 strip_w)
+        -> std::vector<text>
+    {
+        auto full = std::vector<text>{};
+        auto labels = std::vector<text>{};
+        auto widths = std::vector<si32>{};
+        full.reserve(pages.size());
+        labels.reserve(pages.size());
+        widths.reserve(pages.size());
+        auto total = si32{};
+        for (auto& page : pages)
+        {
+            auto title = page.title ? page.title() : text{};
+            auto width = cell_width(title);
+            full.push_back(title);
+            labels.push_back(std::move(title));
+            widths.push_back(width);
+            total += width + 2; // One padding cell on either side.
+        }
+
+        auto cursor = si32{};
+        auto n = (si32)pages.size();
+        while (n > 0 && total > std::max(0, strip_w))
+        {
+            auto moved = faux;
+            for (auto step = si32{}; step < n; ++step)
+            {
+                auto i = (cursor + step) % n;
+                auto next = pages[(size_t)i].abbreviate
+                          ? pages[(size_t)i].abbreviate(full[(size_t)i], widths[(size_t)i] - 1)
+                          : tab_abbreviate_tail(full[(size_t)i], widths[(size_t)i] - 1);
+                auto next_w = cell_width(next);
+                if (next_w >= widths[(size_t)i]) continue; // This title reached its callback's floor.
+                total -= widths[(size_t)i] - next_w;
+                widths[(size_t)i] = next_w;
+                labels[(size_t)i] = std::move(next);
+                cursor = (i + 1) % n;
+                moved = true;
+                break;
+            }
+            if (!moved) break;
+        }
+        return labels;
+    }
+
     struct tabs_ctrl
     {
         std::vector<tab_page_cfg> pages;
@@ -70,18 +118,22 @@ namespace netxs::app::parvion
                 tabbox.clear();
                 auto x = si32{ 0 };
                 auto n = (si32)tc->pages.size();
+                auto labels = resolve_tab_titles(tc->pages, w);
                 for (auto i = si32{}; i < n; ++i)
                 {
-                    auto& page = tc->pages[(size_t)i];
-                    auto label  = page.title ? page.title() : text{};
+                    auto& label = labels[(size_t)i];
                     auto active = tc->active == i;
                     auto fg = active ? ui32{ theme::text_fg } : ui32{ theme::subtext };
                     auto bg = active ? ui32{ theme::bg }      : ui32{ theme::surface };
-                    auto bw = (si32)label.size() + 2;
-                    auto box = rect{{ x, 0 }, { bw, 1 }};
+                    auto bw = cell_width(label) + 2;
+                    auto visible_w = std::max(0, std::min(bw, w - x));
+                    auto box = rect{{ x, 0 }, { visible_w, 1 }};
                     tabbox.push_back(box);
-                    canvas.fill(box, [&](cell& c){ c.bgc(bg); });
-                    put_str(canvas, x + 1, 0, label, fg, bg, bw);
+                    if (visible_w > 0)
+                    {
+                        canvas.fill(box, [&](cell& c){ c.bgc(bg); });
+                        put_str(canvas, x + 1, 0, label, fg, bg, std::max(0, visible_w - 1));
+                    }
                     x += bw;
                 }
             };

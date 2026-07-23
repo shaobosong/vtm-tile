@@ -411,6 +411,7 @@ def header_border_count(s, header_word):
 
 SORT_GLYPHS = ("↕", "↑", "↓")
 SORT_ACTIVE_FG = (250, 179, 135)  # 0xFFFAB387, emitted as an RGB SGR foreground.
+SCROLL_DRAG_FG = (137, 180, 250)  # theme::sb_drag (0xFF89B4FA).
 
 
 def header_field(chars, title, row=None):
@@ -478,6 +479,48 @@ def test_table_header_paints_scrollbar_corner():
         if header_bg is None or corner_bg != header_bg:
             print(f"FAIL - header corner bg {corner_bg}, expected {header_bg}")
             return False
+        print("PASS")
+        return True
+
+
+def test_table_scrollbar_press_and_drag_feedback():
+    """A held scrollbar uses button-like pushed feedback, then switches to the drag palette."""
+    print("TEST: parvion - table scrollbar hold promotes to drag feedback ... ", end="", flush=True)
+    with ParvionSession({"PARVION_DEMO_QUEUE": "1", "PARVION_DEMO_QUEUE_N": "40"}) as s:
+        chars = s.screen()[0]
+        tracks = {}
+        for r, row in enumerate(chars):
+            for c, ch in enumerate(row):
+                if ch in ("▐", "█"):
+                    tracks.setdefault(c, []).append(r)
+        if not tracks:
+            print("FAIL - vertical scrollbar not found")
+            return False
+        col, rows = max(tracks.items(), key=lambda item: len(item[1]))
+        target = rows[len(rows) // 2]
+
+        s._write(f"\x1b[<35;1;1M".encode())  # Seed pointer tracking away from the scrollbar.
+        s.feed(0.2)
+        resting = s.screen()[1][target][col]
+        s._write(f"\x1b[<35;{col + 1};{target + 1}M".encode())
+        s.feed(0.4)
+        hover = s.screen()[1][target][col]
+        s._write(f"\x1b[<0;{col + 1};{target + 1}M".encode())
+        s.feed(0.4)
+        held = s.screen()[1][target][col]
+        if held is None or held in (resting, hover):
+            print(f"FAIL - held scrollbar is not distinct (rest={resting}, hover={hover}, held={held})")
+            return False
+
+        drag_row = rows[-1]
+        s._write(f"\x1b[<32;{col + 1};{drag_row + 1}M".encode())
+        s.feed(0.5)
+        _, _, fg = s.screen_with_fg()
+        if not any(fg[r][col] == SCROLL_DRAG_FG for r in rows):
+            print("FAIL - scrollbar did not switch from held overlay to drag foreground")
+            return False
+        s._write(f"\x1b[<0;{col + 1};{drag_row + 1}m".encode())
+        s.feed(0.3)
         print("PASS")
         return True
 
@@ -612,7 +655,7 @@ def test_sortable_headers_cycle_and_feedback():
             return False
         hr = local[0]
         bad = []
-        for title in ("Local Name", "Remote Name", "Size", "Progress", "Speed"):
+        for title in ("Server", "Local Name", "Remote Name", "Size", "Progress", "Speed"):
             field = header_field(chars, title, hr)
             if field is None or field[5] != "↕":
                 bad.append((title, None if field is None else field[5]))
@@ -796,7 +839,7 @@ def test_sort_keeps_expanded_children_with_parent():
 
 
 def test_reason_column_has_resize_handle():
-    """Failed tab's Reason column adds a 5th draggable border vs. the 4 on Transferring."""
+    """The Failed tab exposes Reason's trailing resize handle after horizontal paging."""
     print("TEST: parvion - Reason column has a resize handle ... ", end="", flush=True)
     with ParvionSession(DEMO_ENV) as s:
         xfer = header_border_count(s, "Speed")  # Transferring tab (default).
@@ -806,12 +849,22 @@ def test_reason_column_has_resize_handle():
         if not click_label(s, "Failed ("):
             print("FAIL - Failed tab not found")
             return False
-        fail = header_border_count(s, "Reason")
-        if fail is None:
+        chars = s.screen()[0]
+        reason = find_text(chars, "Reason")
+        if reason is None:
             print("FAIL - Reason header not found on Failed tab")
             return False
-        if not (xfer == 5 and fail == 6):
-            print(f"FAIL - expected 5 borders on Transferring and 6 on Failed, got {xfer} and {fail}")
+        hr = reason[0]
+        scrollbar_row = next((r for r in range(hr + 1, ROWS)
+                              if "▂" in row_text(chars, r) or "▄" in row_text(chars, r)), None)
+        if scrollbar_row is None:
+            print("FAIL - horizontal scrollbar not found on Failed tab")
+            return False
+        s.click(COLS - 1, scrollbar_row + 1)  # Page toward the trailing Reason border.
+        chars = s.screen()[0]
+        reason = header_field(chars, "Reason", hr)
+        if xfer != 6 or reason is None or reason[3] >= COLS or chars[hr][reason[3]] != "│":
+            print(f"FAIL - trailing Reason handle not exposed after paging (xfer={xfer}, field={reason})")
             return False
         print("PASS")
         return True
@@ -1059,8 +1112,8 @@ def test_failed_succeeded_blank_menu_uses_select_all():
             if pos is None:
                 print(f"FAIL - item {item_name} not found")
                 return False
-            # Right-click well right of the columns (Failed content ends at col 107) -> blank-area menu.
-            s.click(115, pos[0] + 1, button=2)
+            # Right-click the last grid cell, beyond the Failed table's content.
+            s.click(COLS, pos[0] + 1, button=2)
             chars = s.screen()[0]
             missing = [w for w in ("Start", "Remove", "Copy", "Select All") if not grid_contains(chars, w)]
             if missing:
@@ -1139,7 +1192,7 @@ def test_header_menu_lists_column_toggles():
         chars = s.screen()[0]
         # Every column has a toggle row, each marked shown (▣) by default. The "▣ " prefix
         # distinguishes the menu rows from the identically-named column headers.
-        missing = [n for n in ("Local Name", "Remote Name", "Size", "Progress", "Speed")
+        missing = [n for n in ("Server", "Local Name", "Remote Name", "Size", "Progress", "Speed")
                    if not grid_contains(chars, "▣ " + n)]
         if missing:
             print(f"FAIL - menu missing shown (▣) toggles for {missing}")
@@ -1172,8 +1225,8 @@ def test_header_menu_toggles_column_visibility():
             print("FAIL - Speed column still shown after toggle")
             return False
         borders = row_text(chars, hr2).count("│")
-        if borders != 4:
-            print(f"FAIL - expected 4 column borders after hiding Speed, got {borders}")
+        if borders != 5:
+            print(f"FAIL - expected 5 column borders after hiding Speed, got {borders}")
             return False
         print("PASS")
         return True
@@ -1328,10 +1381,16 @@ def test_pin_to_top_reorders_pending():
         return True
 
 
+def column_span(chars, title):
+    """Return a visible column's content-cell span [left, right), derived from its header dividers."""
+    field = header_field(chars, title)
+    return None if field is None else (field[2], field[3])
+
+
 def progress_text(chars, name_row):
-    """Read the right-aligned Progress column content on a row. With columns Local Name(24) +
-    Remote Name(24) + Size(11), Progress content spans cols 66..75; its '│' border at col 76 is excluded."""
-    return "".join(chars[name_row][66:76]).strip()
+    """Read the right-aligned Progress content using the live header geometry."""
+    span = column_span(chars, "Progress")
+    return "" if span is None else "".join(chars[name_row][span[0]:span[1]]).strip()
 
 
 def test_transfer_tabs_use_progress_bars():
@@ -1341,7 +1400,9 @@ def test_transfer_tabs_use_progress_bars():
         def bar_for(name):
             chars, bg = s.screen()
             pos = find_text(chars, name)
-            return (None, None, None) if pos is None else (progress_text(chars, pos[0]), bg[pos[0]][66:76], bg[pos[0]][10])
+            span = column_span(chars, "Progress")
+            return (None, None, None) if pos is None or span is None else (
+                progress_text(chars, pos[0]), bg[pos[0]][span[0]:span[1]], bg[pos[0]][10])
 
         label, bar, row_bg = bar_for("bigfile.iso")  # 90 / 200 MiB = 45%; 4 of 10 cells.
         if label != "45.00%" or len(set(bar[:4])) != 1 or len(set(bar[4:])) != 1 or bar[0] == bar[4]:
@@ -1411,8 +1472,13 @@ def test_local_and_remote_name_columns():
             print("FAIL - item row not found")
             return False
         r = pos[0]
-        local  = "".join(chars[r][7:30]).strip()    # Local Name column (cols 7..29).
-        remote = "".join(chars[r][31:54]).strip()   # Remote Name column (cols 31..53).
+        local_span = column_span(chars, "Local Name")
+        remote_span = column_span(chars, "Remote Name")
+        if local_span is None or remote_span is None:
+            print("FAIL - could not resolve Local/Remote Name column geometry")
+            return False
+        local  = "".join(chars[r][local_span[0]:local_span[1]]).strip()
+        remote = "".join(chars[r][remote_span[0]:remote_span[1]]).strip()
         if local != "/local/bigfile.iso":
             print(f"FAIL - Local Name column shows {local!r}, expected '/local/bigfile.iso'")
             return False
@@ -1435,8 +1501,8 @@ def test_column_dividers_extend_to_item_rows():
             return False
         hc = row_text(chars, hdr[0]).count("│")
         ic = row_text(chars, item[0]).count("│")
-        if not (hc == 5 and ic == 5):
-            print(f"FAIL - expected 5 dividers on header and item rows, got {hc} and {ic}")
+        if not (hc == 6 and ic == 6):
+            print(f"FAIL - expected 6 dividers on header and item rows, got {hc} and {ic}")
             return False
         print("PASS")
         return True
@@ -1452,9 +1518,13 @@ def test_long_content_truncated_with_ellipsis():
             print("FAIL - long-named row not found")
             return False
         r = pos[0]
-        # Local Name column content spans cols 7..29 (width 24 - 1); the ellipsis lands on the last cell.
-        if chars[r][29] != "…":
-            print(f"FAIL - expected '…' at the Local Name column edge, got {chars[r][29]!r}")
+        span = column_span(chars, "Local Name")
+        if span is None:
+            print("FAIL - Local Name header geometry missing")
+            return False
+        # The ellipsis lands in the final content cell immediately before the divider.
+        if chars[r][span[1] - 1] != "…":
+            print(f"FAIL - expected '…' at the Local Name column edge, got {chars[r][span[1] - 1]!r}")
             return False
         if "hscroll" in row_text(chars, r):
             print("FAIL - long name not truncated (tail still visible)")
@@ -1463,9 +1533,9 @@ def test_long_content_truncated_with_ellipsis():
         return True
 
 
-def test_reason_initial_width_is_20():
-    """The Failed tab's Reason column starts 20 cells wide (right border at col 107)."""
-    print("TEST: parvion - Reason column initial width is 20 ... ", end="", flush=True)
+def test_reason_remains_visible_with_horizontal_overflow():
+    """The Failed tab keeps Reason visible when the added Server column forces horizontal overflow."""
+    print("TEST: parvion - Reason column remains available with horizontal overflow ... ", end="", flush=True)
     with ParvionSession(DEMO_ENV) as s:
         if not click_label(s, "Failed ("):
             print("FAIL - Failed tab not found")
@@ -1475,11 +1545,9 @@ def test_reason_initial_width_is_20():
         if pos is None:
             print("FAIL - Reason header not found")
             return False
-        borders = [c for c in range(COLS) if chars[pos[0]][c] == "│"]
-        # Progress gained one cell for its sort suffix, so Reason now begins at x=88;
-        # its 20-cell width puts the rightmost border at col 107.
-        if not borders or max(borders) != 107:
-            print(f"FAIL - Reason right border at col {max(borders) if borders else None}, expected 107")
+        field = header_field(chars, "Reason", pos[0])
+        if field is None or field[2] >= field[3]:
+            print(f"FAIL - Reason has no visible content cells ({field})")
             return False
         print("PASS")
         return True
@@ -1495,18 +1563,21 @@ def test_double_click_autofits_column():
             print("FAIL - header not found")
             return False
         hr = hdr[0]
-        # Shrink Local Name to the 2-cell minimum first (border 30 -> 8) so the auto-fit must grow it.
-        s.drag(31, hr + 1, 3, hr + 1)
-        mid = [c for c in range(7, COLS) if s.screen()[0][hr][c] == "│"]
-        if not mid or min(mid) != 8:
-            print(f"FAIL - Local Name border at {min(mid) if mid else None} after shrink, expected 8")
+        server_right = header_field(s.screen()[0], "Server", hr)[3]
+        local_right = header_field(s.screen()[0], "Local Name", hr)[3]
+        # Shrink Local Name to the 2-cell minimum first so auto-fit must grow it.
+        s.drag(local_right + 1, hr + 1, server_right + 2, hr + 1)
+        mid = [c for c in range(server_right + 1, COLS) if s.screen()[0][hr][c] == "│"]
+        expected_min = server_right + 2
+        if not mid or min(mid) != expected_min:
+            print(f"FAIL - Local Name border at {min(mid) if mid else None} after shrink, expected {expected_min}")
             return False
-        # Double-click the (now col-8) border -> auto-fit to the widest local path
-        # "/local/queued_00.dat" (20) + 1 for the border cell => width 21 => border at col 27.
-        s.double_click(9, hr + 1)
-        after = [c for c in range(7, COLS) if s.screen()[0][hr][c] == "│"]
-        if not after or min(after) != 27:
-            print(f"FAIL - Local Name border at {min(after) if after else None} after auto-fit, expected 27")
+        # Auto-fit to the widest local path (20 content cells + divider).
+        s.double_click(expected_min + 1, hr + 1)
+        after = [c for c in range(server_right + 1, COLS) if s.screen()[0][hr][c] == "│"]
+        expected_fit = server_right + 21
+        if not after or min(after) != expected_fit:
+            print(f"FAIL - Local Name border at {min(after) if after else None} after auto-fit, expected {expected_fit}")
             return False
         print("PASS")
         return True
@@ -1523,14 +1594,16 @@ def test_min_column_width_is_two():
             print("FAIL - header / item row not found")
             return False
         ir = item[0]
-        # The Local Name border sits at grid col 30 (q_name_x 7 + width 24 - 1) on every row; grab it
-        # on the item row and drag hard left.
-        s.drag(31, ir + 1, 5, ir + 1)
         chars = s.screen()[0]
-        borders = [c for c in range(7, COLS) if chars[hdr[0]][c] == "│"]
-        # Clamped to width 2 -> Name border at q_name_x 7 + 2 - 1 = 8 (would be 12 if the old min 6 held).
-        if not borders or min(borders) != 8:
-            print(f"FAIL - leftmost border at col {min(borders) if borders else None}, expected 8 (min width 2)")
+        server_right = header_field(chars, "Server", hdr[0])[3]
+        local_right = header_field(chars, "Local Name", hdr[0])[3]
+        # Grab Local Name on the item row and drag hard left.
+        s.drag(local_right + 1, ir + 1, server_right + 1, ir + 1)
+        chars = s.screen()[0]
+        borders = [c for c in range(server_right + 1, COLS) if chars[hdr[0]][c] == "│"]
+        expected = server_right + 2
+        if not borders or min(borders) != expected:
+            print(f"FAIL - Local Name border at col {min(borders) if borders else None}, expected {expected} (min width 2)")
             return False
         print("PASS")
         return True
@@ -1547,13 +1620,14 @@ def test_resize_handle_no_offset_drift_after_clamp():
             print("FAIL - header not found")
             return False
         hr = hdr[0]
-        b0 = 30       # Local Name border: q_name_x 7 + width 24 - 1.
-        target = 18   # Final cursor grid column (between the min-clamp at 8 and b0).
+        server_right = header_field(s.screen()[0], "Server", hr)[3]
+        b0 = header_field(s.screen()[0], "Local Name", hr)[3]
+        target = server_right + 10
         # One gesture: grab the border, overshoot hard left (clamps to the 2-cell min), then move
         # right to `target`. Mouse coords are 1-based, so the cursor's grid column is mouse_col - 1.
         s.drag_path([(b0 + 1, hr + 1), (2, hr + 1), (target + 1, hr + 1)])
         chars = s.screen()[0]
-        borders = [c for c in range(7, COLS) if chars[hr][c] == "│"]
+        borders = [c for c in range(server_right + 1, COLS) if chars[hr][c] == "│"]
         left = min(borders) if borders else None
         # Position-based resize lands the border exactly under the cursor; the old code would leave it
         # to the right (target + the overshoot it had absorbed at the min clamp).
@@ -1844,6 +1918,7 @@ def test_pane_selection_ends_at_last_column():
 
 TESTS = [
     test_table_header_paints_scrollbar_corner,
+    test_table_scrollbar_press_and_drag_feedback,
     test_table_header_menu_button,
     test_sortable_headers_cycle_and_feedback,
     test_queue_numeric_size_sort_and_column_switch,
@@ -1870,7 +1945,7 @@ TESTS = [
     test_local_and_remote_name_columns,
     test_column_dividers_extend_to_item_rows,
     test_long_content_truncated_with_ellipsis,
-    test_reason_initial_width_is_20,
+    test_reason_remains_visible_with_horizontal_overflow,
     test_double_click_autofits_column,
     test_min_column_width_is_two,
     test_resize_handle_no_offset_drift_after_clamp,

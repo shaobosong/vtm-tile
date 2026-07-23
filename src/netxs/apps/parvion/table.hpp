@@ -198,8 +198,8 @@ namespace netxs::app::parvion
 
         si32 scroll = 0, hscroll = 0;
         bool live_follow = faux;
-        bool sb_hover = faux,  sb_drag = faux;  si32 sb_grab = 0;
-        bool hsb_hover = faux, hsb_drag = faux; si32 hsb_grab = 0;
+        bool sb_hover = faux,  sb_press = faux,  sb_drag = faux;  si32 sb_grab = 0;
+        bool hsb_hover = faux, hsb_press = faux, hsb_drag = faux; si32 hsb_grab = 0;
         si32 hover_border = -1, col_drag = -1;
         si32 sort_key = -1, sort_dir = sort_default;
         si32 hover_header = -1, press_header = -1;
@@ -409,6 +409,8 @@ namespace netxs::app::parvion
             canvas.fill(rect{{ sb.x, sb.top }, { 1, sb.track_h }}, [&](cell& c){ c.bgc(pal.bg).fgc(pal.sb_track).txt(mark); });
             auto tc = st.sb_drag ? pal.sb_drag : st.sb_hover ? pal.sb_hover : pal.sb_thumb;
             canvas.fill(rect{{ sb.x, sb.thumb_y }, { 1, sb.thumb_h }}, [&](cell& c){ c.bgc(pal.bg).fgc(tc).txt(mark); });
+            if (st.sb_press || st.sb_drag)
+                canvas.fill(rect{{ sb.x, sb.thumb_y }, { 1, sb.thumb_h }}, [](cell& c){ c.xlight(2); });
         }
         if (auto sb = tbl_hsb(st); sb.ok)
         {
@@ -416,6 +418,8 @@ namespace netxs::app::parvion
             canvas.fill(rect{{ sb.x, sb.top }, { sb.track_h, 1 }}, [&](cell& c){ c.bgc(pal.bg).fgc(pal.sb_track).txt(mark); });
             auto tc = st.hsb_drag ? pal.sb_drag : st.hsb_hover ? pal.sb_hover : pal.sb_thumb;
             canvas.fill(rect{{ sb.x + sb.thumb_y, sb.top }, { sb.thumb_h, 1 }}, [&](cell& c){ c.bgc(pal.bg).fgc(tc).txt(mark); });
+            if (st.hsb_press || st.hsb_drag)
+                canvas.fill(rect{{ sb.x + sb.thumb_y, sb.top }, { sb.thumb_h, 1 }}, [](cell& c){ c.fgc().xlight(2); });
         }
     }
     inline void tbl_clamp(table_state& st)
@@ -1069,8 +1073,26 @@ namespace netxs::app::parvion
                     gear.dismiss();
                     return;
                 }
-                if (auto sb = tbl_vsb(st); sb.ok && mx == sb.x && my >= sb.top && my < sb.top + sb.track_h) return;
-                if (auto sb = tbl_hsb(st); sb.ok && my == sb.top && mx >= sb.x && mx < sb.x + sb.track_h) return;
+                if (auto sb = tbl_vsb(st); sb.ok && mx == sb.x && my >= sb.top && my < sb.top + sb.track_h)
+                {
+                    if (!st.sb_press || st.hsb_press)
+                    {
+                        st.sb_press = true;
+                        st.hsb_press = faux;
+                        boss.base::deface();
+                    }
+                    return;
+                }
+                if (auto sb = tbl_hsb(st); sb.ok && my == sb.top && mx >= sb.x && mx < sb.x + sb.track_h)
+                {
+                    if (!st.hsb_press || st.sb_press)
+                    {
+                        st.hsb_press = true;
+                        st.sb_press = faux;
+                        boss.base::deface();
+                    }
+                    return;
+                }
                 for (auto& [b, id] : st.expand_hit)
                     if (my == b.coor.y && mx >= b.coor.x && mx < b.coor.x + b.size.x)
                     { if (st.press_expand != id) { st.press_expand = id; boss.base::deface(); } return; }
@@ -1096,10 +1118,12 @@ namespace netxs::app::parvion
             });
             boss.on(tier::mouserelease, input::key::LeftUp, [&](hids&)
             {
-                if (st.press_expand != -1 || st.press_header != -1 || st.press_header_menu)
+                if (st.press_expand != -1 || st.press_header != -1 || st.press_header_menu
+                 || st.sb_press || st.hsb_press)
                 {
                     st.press_expand = st.press_header = -1;
                     st.press_header_menu = faux;
+                    st.sb_press = st.hsb_press = faux;
                     boss.base::deface();
                 }
             });
@@ -1192,8 +1216,10 @@ namespace netxs::app::parvion
                 if (st.press_expand != -1 && st.press_expand != over) { st.press_expand = -1; boss.base::deface(); }
                 auto vsb = tbl_vsb(st); auto nsb = vsb.ok && mx == vsb.x && my >= vsb.top && my < vsb.top + vsb.track_h;
                 if (st.sb_hover != nsb) { st.sb_hover = nsb; boss.base::deface(); }
+                if (st.sb_press && !nsb) { st.sb_press = faux; boss.base::deface(); }
                 auto hsb = tbl_hsb(st); auto nhsb = hsb.ok && my == hsb.top && mx >= hsb.x && mx < hsb.x + hsb.track_h;
                 if (st.hsb_hover != nhsb) { st.hsb_hover = nhsb; boss.base::deface(); }
+                if (st.hsb_press && !nhsb) { st.hsb_press = faux; boss.base::deface(); }
                 auto nhdr = si32{ -1 };
                 if (!nmenu && cfg.compare && my == st.body_top - 1)
                 {
@@ -1218,6 +1244,8 @@ namespace netxs::app::parvion
                 if (st.press_expand != -1) { st.press_expand = -1; boss.base::deface(); }
                 if (st.sb_hover)  { st.sb_hover = faux;  boss.base::deface(); }
                 if (st.hsb_hover) { st.hsb_hover = faux; boss.base::deface(); }
+                if (st.sb_press)  { st.sb_press = faux;  boss.base::deface(); }
+                if (st.hsb_press) { st.hsb_press = faux; boss.base::deface(); }
                 if (st.hover_border != -1) { st.hover_border = -1; boss.base::deface(); }
                 if (st.hover_header_menu || st.press_header_menu)
                 {
@@ -1248,6 +1276,7 @@ namespace netxs::app::parvion
                     pro::focus::set(boss.This(), gear.id, solo::on);
                     if (py >= sb.thumb_y && py < sb.thumb_y + sb.thumb_h) st.sb_grab = py - sb.thumb_y;
                     else { st.sb_grab = sb.thumb_h / 2; tbl_vsb_to(st, py, sb); }
+                    st.sb_press = faux;
                     st.sb_drag = st.sb_hover = true; st.drag = table_state::d_vsb;
                     st.live_follow = q_at_follow_target(st, cfg); boss.base::deface(); return;
                 }
@@ -1257,6 +1286,7 @@ namespace netxs::app::parvion
                     auto tx = sb.x + sb.thumb_y;
                     if (px >= tx && px < tx + sb.thumb_h) st.hsb_grab = px - tx;
                     else { st.hsb_grab = sb.thumb_h / 2; tbl_hsb_to(st, px, sb); }
+                    st.hsb_press = faux;
                     st.hsb_drag = st.hsb_hover = true; st.drag = table_state::d_hsb; boss.base::deface(); return;
                 }
                 if (py >= st.body_top - 1 && py < st.div_bottom)
@@ -1311,9 +1341,9 @@ namespace netxs::app::parvion
             // A drag ends: drop the gesture mode and transient drag flags (inlined into both events —
             // the LISTEN macro captures by reference, so a shared local lambda would dangle).
             boss.LISTEN(tier::release, e2::form::drag::stop::_<hids::buttons::left>,   gear)
-            { boss.base::template plugin<pro::timer>().pacify(); auto was = st.drag; st.drag = table_state::d_none; st.sb_drag = st.hsb_drag = faux; st.col_drag = -1; st.rubber_a = st.rubber_b = -1; if (was != table_state::d_none) boss.base::deface(); };
+            { boss.base::template plugin<pro::timer>().pacify(); auto was = st.drag; st.drag = table_state::d_none; st.sb_press = st.hsb_press = st.sb_drag = st.hsb_drag = faux; st.col_drag = -1; st.rubber_a = st.rubber_b = -1; if (was != table_state::d_none) boss.base::deface(); };
             boss.LISTEN(tier::release, e2::form::drag::cancel::_<hids::buttons::left>, gear)
-            { boss.base::template plugin<pro::timer>().pacify(); auto was = st.drag; st.drag = table_state::d_none; st.sb_drag = st.hsb_drag = faux; st.col_drag = -1; st.rubber_a = st.rubber_b = -1; if (was != table_state::d_none) boss.base::deface(); };
+            { boss.base::template plugin<pro::timer>().pacify(); auto was = st.drag; st.drag = table_state::d_none; st.sb_press = st.hsb_press = st.sb_drag = st.hsb_drag = faux; st.col_drag = -1; st.rubber_a = st.rubber_b = -1; if (was != table_state::d_none) boss.base::deface(); };
             boss.on(tier::mouserelease, input::key::LeftDoubleClick, [&](hids& gear)
             {
                 auto mx = (si32)gear.coord.x, my = (si32)gear.coord.y;

@@ -456,6 +456,47 @@ def test_log_live_appends_arrive():
     print("PASS"); return True
 
 
+def test_log_scrollbar_press_and_drag_feedback():
+    """The textbox scrollbar uses pushed feedback while held and the drag palette once moved."""
+    print("TEST: parvion message log - scrollbar hold promotes to drag feedback ... ", end="", flush=True)
+    with _session() as s:
+        if _enter_log(s) is None:
+            print("FAIL: message log / seeded lines not found"); return False
+        chars, _ = s.screen()
+        tracks = {}
+        for r, row in enumerate(chars):
+            for c, ch in enumerate(row):
+                if ch in ("▐", "█"):
+                    tracks.setdefault(c, []).append(r)
+        if not tracks:
+            print("FAIL: vertical scrollbar not found"); return False
+        col, rows = max(tracks.items(), key=lambda item: len(item[1]))
+        target = rows[len(rows) // 2]
+
+        os.write(s.master_fd, b"\x1b[<35;1;1M")
+        s.feed(0.2)
+        resting = s.screen()[1][target][col]
+        os.write(s.master_fd, f"\x1b[<35;{col + 1};{target + 1}M".encode())
+        s.feed(0.4)
+        hover = s.screen()[1][target][col]
+        os.write(s.master_fd, f"\x1b[<0;{col + 1};{target + 1}M".encode())
+        s.feed(0.4)
+        held = s.screen()[1][target][col]
+        if held is None or held in (resting, hover):
+            print(f"FAIL: held scrollbar is not distinct (rest={resting}, hover={hover}, held={held})")
+            return False
+
+        drag_row = rows[-1]
+        os.write(s.master_fd, f"\x1b[<32;{col + 1};{drag_row + 1}M".encode())
+        s.feed(0.5)
+        dragged = s.screen()[1][target][col]
+        if dragged == held:
+            print("FAIL: scrollbar retained the held overlay after drag started"); return False
+        os.write(s.master_fd, f"\x1b[<0;{col + 1};{drag_row + 1}m".encode())
+        s.feed(0.3)
+    print("PASS"); return True
+
+
 def test_log_selection_survives_log_update():
     print("TEST: parvion message log - selection survives live log updates ... ", end="", flush=True)
     with _session({"PARVION_DEMO_LOG_TICK": "4"}) as s:  # append a line every ~200ms.
@@ -488,6 +529,7 @@ TESTS = [
     test_log_select_all_covers_full_log,
     test_log_context_menu_grouping,
     test_log_context_menu_shortcuts,
+    test_log_scrollbar_press_and_drag_feedback,
     test_log_live_appends_arrive,
     test_log_selection_survives_log_update,
 ]

@@ -46,7 +46,7 @@ namespace netxs::app::parvion
         static constexpr auto sb_track     = 0xFF2C3047u;
         static constexpr auto sb_thumb     = 0xFF3B4261u;
         static constexpr auto sb_hover     = 0xFF565F89u;
-        static constexpr auto sb_drag      = 0xFF89B4FAu;
+        static constexpr auto sb_drag      = 0xFF3B4261u;
         static constexpr auto err_fg       = 0xFFF38BA8u;
         static constexpr auto trace_fg     = 0xFFCBA6F7u;
     }
