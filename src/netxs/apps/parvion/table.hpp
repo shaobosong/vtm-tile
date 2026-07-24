@@ -375,7 +375,7 @@ namespace netxs::app::parvion
         sb.x = st.vsb_x; sb.top = st.body_top; sb.track_h = st.body_rows;
         sb.thumb_h = std::max(1, st.body_rows * st.body_rows / st.total_lines);
         sb.maxscroll = st.total_lines - st.body_rows;
-        sb.thumb_y = sb.top + (st.body_rows - sb.thumb_h) * st.scroll / sb.maxscroll;
+        sb.thumb_y = sb.top + ((st.body_rows - sb.thumb_h) * st.scroll + sb.maxscroll / 2) / sb.maxscroll;
         return sb;
     }
     inline auto tbl_hsb(table_state const& st) -> q_sb
@@ -386,20 +386,20 @@ namespace netxs::app::parvion
         sb.x = 0; sb.top = st.hsb_y; sb.track_h = st.disp_w;
         sb.thumb_h = std::max(1, st.disp_w * st.disp_w / st.content_w);
         sb.maxscroll = st.content_w - st.disp_w;
-        sb.thumb_y = (st.disp_w - sb.thumb_h) * st.hscroll / sb.maxscroll;
+        sb.thumb_y = ((st.disp_w - sb.thumb_h) * st.hscroll + sb.maxscroll / 2) / sb.maxscroll;
         return sb;
     }
     inline void tbl_vsb_to(table_state& st, si32 local_y, q_sb const& sb)
     {
         auto travel = sb.track_h - sb.thumb_h;
         if (travel <= 0) return;
-        st.scroll = std::clamp((local_y - st.sb_grab - sb.top) * sb.maxscroll / travel, 0, sb.maxscroll);
+        st.scroll = std::clamp(((local_y - st.sb_grab - sb.top) * sb.maxscroll + travel / 2) / travel, 0, sb.maxscroll);
     }
     inline void tbl_hsb_to(table_state& st, si32 local_x, q_sb const& sb)
     {
         auto travel = sb.track_h - sb.thumb_h;
         if (travel <= 0) return;
-        st.hscroll = std::clamp((local_x - st.hsb_grab - sb.x) * sb.maxscroll / travel, 0, sb.maxscroll);
+        st.hscroll = std::clamp(((local_x - st.hsb_grab - sb.x) * sb.maxscroll + travel / 2) / travel, 0, sb.maxscroll);
     }
     inline void tbl_paint_scrollbars(table_state const& st, auto& canvas, table_palette const& pal)
     {

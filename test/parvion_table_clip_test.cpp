@@ -476,6 +476,142 @@ namespace
             && !pane_validate_name("a/b", faux, reason);
     }
 
+    // ---- Scrollbar thumb rounding (vsb) ----
+    auto test_vsb_thumb_rounding_up() -> bool
+    {
+        auto st = table_state{};
+        st.body_top = 1; st.body_rows = 5; st.total_lines = 9;
+        st.scroll = 1; st.has_vsb = true;
+        auto sb = tbl_vsb(st);
+        if (!sb.ok) return faux;
+        return sb.thumb_y == 2
+            && sb.thumb_h == 2 && sb.maxscroll == 4;
+    }
+    auto test_vsb_thumb_rounding_down() -> bool
+    {
+        auto st = table_state{};
+        st.body_top = 1; st.body_rows = 5; st.total_lines = 9;
+        st.scroll = 0; st.has_vsb = true;
+        auto sb = tbl_vsb(st);
+        if (!sb.ok) return faux;
+        return sb.thumb_y == st.body_top
+            && sb.thumb_h == 2 && sb.maxscroll == 4;
+    }
+    auto test_vsb_to_rounding() -> bool
+    {
+        auto st = table_state{};
+        st.body_top = 1; st.body_rows = 5; st.total_lines = 9;
+        st.has_vsb = true; st.sb_grab = 0;
+        auto sb = tbl_vsb(st);
+        if (!sb.ok) return faux;
+        tbl_vsb_to(st, 3, sb); // local_y - sb_grab - top = 3 - 0 - 1 = 2; travel=3,max=4; old=2,new=3
+        return st.scroll == 3;
+    }
+    auto test_vsb_roundtrip_stable() -> bool
+    {
+        auto st = table_state{};
+        st.body_top = 1; st.body_rows = 5; st.total_lines = 9;
+        st.has_vsb = true; st.scroll = 1;
+        auto sb = tbl_vsb(st);
+        if (!sb.ok) return faux;
+        auto thumb_y = sb.thumb_y;
+        st.sb_grab = 0;
+        tbl_vsb_to(st, thumb_y, sb);
+        return st.scroll == 1; // roundtrip: scroll→thumb→scroll must be stable
+    }
+    auto test_vsb_drag_monotonic() -> bool
+    {
+        auto st = table_state{};
+        st.body_top = 0; st.body_rows = 10; st.total_lines = 100;
+        st.has_vsb = true; st.sb_grab = 0;
+        auto sb = tbl_vsb(st);
+        if (!sb.ok) return faux;
+        auto prev_thumb = sb.thumb_y;
+        auto prev_scroll = st.scroll;
+        for (auto y = sb.top; y <= sb.top + sb.track_h; ++y)
+        {
+            tbl_vsb_to(st, y, sb);
+            sb = tbl_vsb(st);
+            if (sb.thumb_y < prev_thumb) return faux;
+            if (st.scroll < prev_scroll) return faux;
+            prev_thumb = sb.thumb_y;
+            prev_scroll = st.scroll;
+        }
+        return st.scroll == sb.maxscroll;
+    }
+    auto test_vsb_endpoints_exact() -> bool
+    {
+        auto st = table_state{};
+        st.body_top = 2; st.body_rows = 10; st.total_lines = 100;
+        st.has_vsb = true;
+        st.scroll = 0;
+        auto sb0 = tbl_vsb(st);
+        st.scroll = sb0.maxscroll;
+        auto sb1 = tbl_vsb(st);
+        return sb0.ok && sb1.ok
+            && sb0.thumb_y == st.body_top
+            && sb1.thumb_y == st.body_top + sb0.track_h - sb0.thumb_h;
+    }
+    // ---- Scrollbar thumb rounding (hsb) ----
+    auto test_hsb_to_rounding() -> bool
+    {
+        auto st = table_state{};
+        st.disp_w = 6; st.content_w = 11; st.has_hsb = true; st.hsb_grab = 0;
+        auto sb = tbl_hsb(st);
+        if (!sb.ok) return faux;
+        tbl_hsb_to(st, 3, sb); // diff = 3 - 0 - 0 = 3; thumb_h=3, travel=3, maxscroll=5; old=5, new→
+        auto ok = st.hscroll >= 0 && st.hscroll <= sb.maxscroll;
+        return ok;
+    }
+    auto test_hsb_thumb_rounding() -> bool
+    {
+        auto st = table_state{};
+        st.disp_w = 6; st.content_w = 10; st.has_hsb = true; st.hscroll = 3;
+        auto sb = tbl_hsb(st);
+        // disp_w=6, content=10: thumb_h=max(1,6*6/10)=3, maxscroll=4
+        // travel=6-3=3; thumb_y=(3*3+2)/4=11/4=2
+        return sb.ok && sb.thumb_h == 3 && sb.maxscroll == 4 && sb.thumb_y == 2;
+    }
+    // ---- Textbox scrollbar thumb rounding ----
+    auto test_tb_vsb_thumb_rounding() -> bool
+    {
+        auto st = textbox_state{};
+        st.body_top = 1; st.body_rows = 5; st.total = 9;
+        st.has_vsb = true; st.scroll = 1;
+        auto sb = tb_vsb(st);
+        if (!sb.ok) return faux;
+        return sb.thumb_y == 2 && sb.thumb_h == 2;
+    }
+    auto test_tb_vsb_to_rounding() -> bool
+    {
+        auto st = textbox_state{};
+        st.body_top = 1; st.body_rows = 5; st.total = 9;
+        st.has_vsb = true; st.sb_grab = 0;
+        auto sb = tb_vsb(st);
+        if (!sb.ok) return faux;
+        tb_vsb_to(st, 3, sb);
+        return st.scroll == 3;
+    }
+    auto test_tb_vsb_roundtrip_stable() -> bool
+    {
+        auto st = textbox_state{};
+        st.body_top = 1; st.body_rows = 5; st.total = 9;
+        st.has_vsb = true; st.scroll = 1;
+        auto sb = tb_vsb(st);
+        if (!sb.ok) return faux;
+        auto thumb_y = sb.thumb_y;
+        st.sb_grab = 0;
+        tb_vsb_to(st, thumb_y, sb);
+        return st.scroll == 1;
+    }
+    auto test_tb_hsb_thumb_rounding() -> bool
+    {
+        auto st = textbox_state{};
+        st.disp_w = 6; st.content_w = 10; st.has_hsb = true; st.hscroll = 3;
+        auto sb = tb_hsb(st);
+        return sb.ok && sb.thumb_h == 3 && sb.maxscroll == 4 && sb.thumb_y == 2;
+    }
+
     auto test_windows_name_validation() -> bool
     {
         auto reason = text{};
@@ -542,6 +678,18 @@ int main()
         { "posix_name_validation", test_posix_name_validation },
         { "windows_name_validation", test_windows_name_validation },
         { "default_directory_numbering", test_default_directory_numbering },
+        { "vsb_thumb_rounding_up", test_vsb_thumb_rounding_up },
+        { "vsb_thumb_rounding_down", test_vsb_thumb_rounding_down },
+        { "vsb_to_rounding", test_vsb_to_rounding },
+        { "vsb_roundtrip_stable", test_vsb_roundtrip_stable },
+        { "vsb_drag_monotonic", test_vsb_drag_monotonic },
+        { "vsb_endpoints_exact", test_vsb_endpoints_exact },
+        { "hsb_to_rounding", test_hsb_to_rounding },
+        { "hsb_thumb_rounding", test_hsb_thumb_rounding },
+        { "tb_vsb_thumb_rounding", test_tb_vsb_thumb_rounding },
+        { "tb_vsb_to_rounding", test_tb_vsb_to_rounding },
+        { "tb_vsb_roundtrip_stable", test_tb_vsb_roundtrip_stable },
+        { "tb_hsb_thumb_rounding", test_tb_hsb_thumb_rounding },
     };
 
     auto failed = 0;

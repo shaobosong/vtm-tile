@@ -217,7 +217,7 @@ namespace netxs::app::parvion
         sb.x = st.vsb_x; sb.top = st.body_top; sb.track_h = st.body_rows;
         sb.thumb_h = std::max(1, st.body_rows * st.body_rows / st.total);
         sb.maxscroll = st.total - st.body_rows;
-        sb.thumb_y = sb.top + (st.body_rows - sb.thumb_h) * st.scroll / sb.maxscroll;
+        sb.thumb_y = sb.top + ((st.body_rows - sb.thumb_h) * st.scroll + sb.maxscroll / 2) / sb.maxscroll;
         return sb;
     }
     inline auto tb_hsb(textbox_state const& st) -> tb_sb
@@ -228,11 +228,11 @@ namespace netxs::app::parvion
         sb.x = 0; sb.top = st.hsb_y; sb.track_h = st.disp_w;
         sb.thumb_h = std::max(1, st.disp_w * st.disp_w / st.content_w);
         sb.maxscroll = st.content_w - st.disp_w;
-        sb.thumb_y = (st.disp_w - sb.thumb_h) * st.hscroll / sb.maxscroll;
+        sb.thumb_y = ((st.disp_w - sb.thumb_h) * st.hscroll + sb.maxscroll / 2) / sb.maxscroll;
         return sb;
     }
-    inline void tb_vsb_to(textbox_state& st, si32 y, tb_sb const& sb) { auto t = sb.track_h - sb.thumb_h; if (t <= 0) return; st.scroll  = std::clamp((y - st.sb_grab  - sb.top) * sb.maxscroll / t, 0, sb.maxscroll); }
-    inline void tb_hsb_to(textbox_state& st, si32 x, tb_sb const& sb) { auto t = sb.track_h - sb.thumb_h; if (t <= 0) return; st.hscroll = std::clamp((x - st.hsb_grab - sb.x)   * sb.maxscroll / t, 0, sb.maxscroll); }
+    inline void tb_vsb_to(textbox_state& st, si32 y, tb_sb const& sb) { auto t = sb.track_h - sb.thumb_h; if (t <= 0) return; st.scroll  = std::clamp(((y - st.sb_grab  - sb.top) * sb.maxscroll + t / 2) / t, 0, sb.maxscroll); }
+    inline void tb_hsb_to(textbox_state& st, si32 x, tb_sb const& sb) { auto t = sb.track_h - sb.thumb_h; if (t <= 0) return; st.hscroll = std::clamp(((x - st.hsb_grab - sb.x)   * sb.maxscroll + t / 2) / t, 0, sb.maxscroll); }
     inline void tb_paint_scrollbars(textbox_state const& st, auto& canvas)
     {
         if (auto sb = tb_vsb(st); sb.ok)
