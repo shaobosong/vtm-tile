@@ -1438,8 +1438,8 @@ def test_keyboard_delete_removes_selected_only():
             print("FAIL - Transferring tab count did not decrease after Delete")
             return False
 
-        # Escape is not a table action and must leave the current selection intact. Clear it with a
-        # blank-area click, then verify Delete and Backspace do not run the old clear-finished action.
+        # Escape clears table selection. Delete and Backspace with no selection must not run the old
+        # clear-finished action.
         pos = find_text(s.screen()[0], "bigfile.iso")
         if pos is None:
             print("FAIL - remaining queue row not found")
@@ -1447,11 +1447,10 @@ def test_keyboard_delete_removes_selected_only():
         unselected_bg = s.screen()[1][pos[0]][pos[1]]
         s.click(pos[1] + 1, pos[0] + 1, button=0)
         selected_bg = s.screen()[1][pos[0]][pos[1]]
-        s.write("\x1b")                            # Esc must not alter table selection.
-        if s.screen()[1][pos[0]][pos[1]] != selected_bg or selected_bg == unselected_bg:
-            print("FAIL - Esc changed the table selection")
+        s.write("\x1b")                            # Esc clears table selection.
+        if s.screen()[1][pos[0]][pos[1]] != unselected_bg or selected_bg == unselected_bg:
+            print("FAIL - Esc did not clear the table selection")
             return False
-        s.click(100, pos[0] + 1, button=0)          # Blank table space clears selection.
         s.write("\x1b[3~")                         # Delete with no selection: no-op.
         s.write("\x7f")                            # Backspace with no selection: no-op.
         chars = s.screen()[0]

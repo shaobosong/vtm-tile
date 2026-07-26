@@ -599,9 +599,10 @@ def test_esc_closes_dialog_on_open():
 
 
 def test_esc_closes_key_picker():
-    # The "Add key file..." picker grabs focus on open, and Esc closes it (returning to
-    # the SFTP tab) without dismissing the whole settings dialog.
-    print("TEST: Esc closes the key-file picker ... ", end="", flush=True)
+    # The "Add key file..." picker grabs focus on open with its synthetic ".." row selected. The
+    # first Esc clears that initial selection; the second closes the picker without dismissing the
+    # whole settings dialog.
+    print("TEST: second Esc closes the initially-selected key-file picker ... ", end="", flush=True)
     cfg = tempfile.mkdtemp(prefix="pvset_")
     with _session(cfg) as s:
         _open_dialog(s)
@@ -613,14 +614,60 @@ def test_esc_closes_key_picker():
         blob = "\n".join(T.row_text(chars, r) for r in range(len(chars)))
         if "Open" not in blob or "Cancel" not in blob:
             print("FAIL - picker did not open"); return False
-        s.write("\x1b"); s.feed(0.9)  # Esc, no click first.
+        s.write("\x1b"); s.feed(0.7)  # First Esc clears the initial ".." selection.
+        chars = s.screen()[0]
+        blob = "\n".join(T.row_text(chars, r) for r in range(len(chars)))
+        if "Add key file" not in blob or "Open" not in blob or "Cancel" not in blob:
+            print("FAIL - first Esc closed the picker instead of clearing selection"); return False
+        s.write("\x1b"); s.feed(0.9)  # With no selection left, Esc closes the picker.
         chars = s.screen()[0]
         blob = "\n".join(T.row_text(chars, r) for r in range(len(chars)))
         # Back on the SFTP tab; the picker's Open/Cancel row is gone.
         if "Public Key Authentication" not in blob:
             print("FAIL - did not return to the settings dialog"); return False
         if "Open" in blob and "Cancel" in blob:
-            print("FAIL - picker still open after Esc"); return False
+            print("FAIL - picker still open after the second Esc"); return False
+    print("PASS"); return True
+
+
+def test_esc_deselects_key_picker_before_closing():
+    # When the picker table owns focus, Esc clears an existing selection and is consumed. With no
+    # selection left, the next Esc bubbles to the picker frame and closes it.
+    print("TEST: Esc deselects key-file picker before closing it ... ", end="", flush=True)
+    cfg = tempfile.mkdtemp(prefix="pvset_")
+    keydir = tempfile.mkdtemp(prefix="pvkey_")
+    with open(os.path.join(keydir, "escape_selection.pem"), "w") as f:
+        f.write("test key\n")
+    with _session_home(cfg, keydir) as s:
+        _open_dialog(s)
+        _goto_sftp(s)
+        add = T.find_text(s.screen()[0], "Add key file")
+        s.click(add[1] + 1, add[0] + 1); s.feed(1.0)
+        key = T.find_text(s.screen()[0], "escape_selection.pem")
+        if not key:
+            print("FAIL - picker file not listed"); return False
+
+        unselected_bg = s.screen()[1][key[0]][key[1]]
+        s.click(key[1] + 1, key[0] + 1)
+        selected_bg = s.screen()[1][key[0]][key[1]]
+        if selected_bg == unselected_bg:
+            print("FAIL - picker row was not selected"); return False
+
+        s.write("\x1b"); s.feed(0.7)
+        chars, bg = s.screen()
+        blob = "\n".join(T.row_text(chars, r) for r in range(len(chars)))
+        if "Add key file" not in blob or "Open" not in blob or "Cancel" not in blob:
+            print("FAIL - first Esc closed the picker instead of clearing selection"); return False
+        if bg[key[0]][key[1]] != unselected_bg:
+            print("FAIL - first Esc did not clear the picker selection"); return False
+
+        s.write("\x1b"); s.feed(0.9)
+        chars = s.screen()[0]
+        blob = "\n".join(T.row_text(chars, r) for r in range(len(chars)))
+        if "Public Key Authentication" not in blob:
+            print("FAIL - did not return to the settings dialog"); return False
+        if "Add key file" in blob and "Open" in blob and "Cancel" in blob:
+            print("FAIL - picker still open after the second Esc"); return False
     print("PASS"); return True
 
 
@@ -665,9 +712,9 @@ def test_esc_closes_key_picker_after_address_cancel():
 
 
 def test_esc_closes_key_picker_after_rename_cancel():
-    # An inline filename editor owns its first Esc. Once the rename is cancelled, the next Esc
-    # bubbles beyond the table and is owned by the picker frame.
-    print("TEST: second Esc closes key-file picker after rename cancel ... ", end="", flush=True)
+    # An inline filename editor owns its first Esc. Cancelling leaves the renamed row selected and
+    # returns focus to the table, so the second Esc clears that selection and the third closes.
+    print("TEST: third Esc closes key-file picker after rename cancel + deselect ... ", end="", flush=True)
     cfg = tempfile.mkdtemp(prefix="pvset_")
     keydir = tempfile.mkdtemp(prefix="pvkey_")
     original = os.path.join(keydir, "rename_me.pem")
@@ -694,12 +741,17 @@ def test_esc_closes_key_picker_after_rename_cancel():
         if not os.path.isfile(original) or os.path.exists(original + "-discard"):
             print("FAIL - first Esc committed the cancelled Rename"); return False
 
+        s.write("\x1b"); s.feed(0.7)
+        blob = "\n".join(T.row_text(s.screen()[0], r) for r in range(T.ROWS))
+        if "Add key file" not in blob or "Open" not in blob or "Cancel" not in blob:
+            print("FAIL - second Esc closed the picker instead of clearing selection"); return False
+
         s.write("\x1b"); s.feed(0.9)
         blob = "\n".join(T.row_text(s.screen()[0], r) for r in range(T.ROWS))
         if "Public Key Authentication" not in blob:
             print("FAIL - did not return to the settings dialog"); return False
         if "Add key file" in blob and "Open" in blob and "Cancel" in blob:
-            print("FAIL - picker still open after the second Esc"); return False
+            print("FAIL - picker still open after the third Esc"); return False
     print("PASS"); return True
 
 
@@ -1032,6 +1084,7 @@ TESTS = [
     test_picker_buttons_right_aligned,
     test_esc_closes_dialog_on_open,
     test_esc_closes_key_picker,
+    test_esc_deselects_key_picker_before_closing,
     test_esc_closes_key_picker_after_address_cancel,
     test_esc_closes_key_picker_after_rename_cancel,
     test_add_key_picker_context_menu_omits_transfer_actions,

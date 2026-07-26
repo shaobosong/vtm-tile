@@ -1448,6 +1448,18 @@ namespace netxs::app::parvion
                 if (gear.keystat == input::key::released || gear.keystat == input::key::interrupted) return;
                 if (gear.keybd::handled) return;
                 auto k = gear.keybd::generic();
+                if (k == input::key::Esc && cfg.selection)
+                {
+                    auto s = cfg.selection();
+                    if (s.has_selection())
+                    {
+                        s.on_clear();
+                        q_reset_selection_state(st);
+                        gear.set_handled();
+                        boss.base::deface();
+                        return;
+                    }
+                }
                 if (k == input::key::KeyDelete
                  && cfg.deletion.enabled
                  && cfg.selection)
