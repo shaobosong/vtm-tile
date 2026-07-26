@@ -412,7 +412,9 @@ def header_border_count(s, header_word):
 
 SORT_GLYPHS = ("↕", "↑", "↓")
 SORT_ACTIVE_FG = (250, 179, 135)  # 0xFFFAB387, emitted as an RGB SGR foreground.
-SCROLL_DRAG_FG = (137, 180, 250)  # theme::sb_drag (0xFF89B4FA).
+SCROLL_THUMB_FG = (59, 66, 97)    # theme::sb_thumb (0xFF3B4261).
+# Drag uses theme::sb_drag (currently the thumb color) plus the retained xlight(2) overlay.
+SCROLL_DRAG_FG = (155, 162, 193)
 
 
 def header_field(chars, title, row=None):
@@ -488,7 +490,7 @@ def test_table_scrollbar_press_and_drag_feedback():
     """A held scrollbar uses button-like pushed feedback, then switches to the drag palette."""
     print("TEST: parvion - table scrollbar hold promotes to drag feedback ... ", end="", flush=True)
     with ParvionSession({"PARVION_DEMO_QUEUE": "1", "PARVION_DEMO_QUEUE_N": "40"}) as s:
-        chars = s.screen()[0]
+        chars, _, _ = s.screen_with_fg()
         tracks = {}
         for r, row in enumerate(chars):
             for c, ch in enumerate(row):
@@ -498,11 +500,17 @@ def test_table_scrollbar_press_and_drag_feedback():
             print("FAIL - vertical scrollbar not found")
             return False
         col, rows = max(tracks.items(), key=lambda item: len(item[1]))
-        target = rows[len(rows) // 2]
 
         s._write(f"\x1b[<35;1;1M".encode())  # Seed pointer tracking away from the scrollbar.
         s.feed(0.2)
-        resting = s.screen()[1][target][col]
+        chars, bg, fg = s.screen_with_fg()
+        rows = [r for r in range(ROWS) if chars[r][col] in ("▐", "█")]
+        thumb = [r for r in rows if fg[r][col] == SCROLL_THUMB_FG]
+        if not thumb:
+            print(f"FAIL - vertical scrollbar thumb not found at col {col}")
+            return False
+        target = thumb[len(thumb) // 2]
+        resting = bg[target][col]
         s._write(f"\x1b[<35;{col + 1};{target + 1}M".encode())
         s.feed(0.4)
         hover = s.screen()[1][target][col]
@@ -513,6 +521,7 @@ def test_table_scrollbar_press_and_drag_feedback():
             print(f"FAIL - held scrollbar is not distinct (rest={resting}, hover={hover}, held={held})")
             return False
 
+        # Move far enough to promote the held thumb into a drag while keeping the pointer on track.
         drag_row = rows[-1]
         s._write(f"\x1b[<32;{col + 1};{drag_row + 1}M".encode())
         s.feed(0.5)
@@ -1707,7 +1716,11 @@ def test_pane_resize_handle_no_offset_drift_after_clamp():
             print("FAIL - file pane header not found")
             return False
         hr = hdr[0]
-        b0 = 24       # Name border: p_name_x 1 + width 24 - 1.
+        name = header_field(s.screen()[0], "Name", hr)
+        if name is None:
+            print("FAIL - file pane Name header geometry missing")
+            return False
+        b0 = name[3]
         target = 12
         # Overshoot to the far-left edge (mouse col 1) so the width clamps below the 2-cell minimum,
         # then drag right to `target`.
