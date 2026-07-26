@@ -1081,10 +1081,6 @@ namespace netxs::app::parvion
         using logline = parvion::logline;
         message_logger          logger;
         bool                  show_stamps   = true; // OPTION_MESSAGELOG_TIMESTAMP.
-        // Transfer-table column visibility (Server, Local Name, Remote Name, Size, Progress, Speed,
-        // Reason), toggled from the table-header right-click menu; all shown by default.
-        // Size == parvion q_ncol+1.
-        std::array<bool, 7>   col_shown{ true, true, true, true, true, true, true };
         // Checksums-table column visibility (Source, Path, Algorithm, Size, Progress, Result), toggled
         // from that tab's header right-click menu; all shown by default. Size == parvion hash_headers.
         std::array<bool, 6>   hash_col_shown{ true, true, true, true, true, true };

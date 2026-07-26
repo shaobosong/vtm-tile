@@ -9,8 +9,8 @@
 // (columns + per-cell data + selection/menu adapters + follow/expand hooks), calls make_table(), and
 // wraps the component in tab-page metadata.
 //
-// Each status tab is an INDEPENDENT make_transfer_view() instance with its own column widths and
-// scroll — the three tabs share nothing but the controller's data.
+// Each status tab is an INDEPENDENT make_transfer_view() instance with its own table presentation
+// state — the three tabs share nothing but the controller's data.
 
 #include "queue_actions.hpp"
 #include "progressbar.hpp"
@@ -20,8 +20,8 @@
 namespace netxs::app::parvion
 {
     // Resizable transfer columns: Server, Local Name, Remote Name, Size, Progress, Speed (+ a
-    // "Reason" column, logical index q_ncol, on the Failed tab). Index order is shared by the width
-    // array, column builder, cell accessor, and ctrl->col_shown.
+    // "Reason" column, logical index q_ncol, on the Failed tab). Index order is shared by the
+    // per-view width/visibility arrays, column builder, and cell accessor.
     enum xfer_col_key : si32 { q_server, q_local, q_remote, q_size, q_progress, q_speed };
     static constexpr auto q_ncol      = si32{ 6 };
     static constexpr auto q_headers   = std::array<view, q_ncol + 1>{ "Server", "Local Name", "Remote Name", "Size", "Progress", "Speed", "Reason" };
@@ -32,11 +32,12 @@ namespace netxs::app::parvion
     // A flattened display row: a parent task (child == -1) or one of its expanded parallel subtasks.
     struct disp_row { si32 qi; si32 child; };
 
-    // This view's session-only, per-instance column widths (0 override = auto / initial).
+    // This view's session-only, per-instance column presentation (0 width = auto / initial).
     struct xfer_cols
     {
         // Server starts in auto mode so it fits the same user@host:port caption used by Checksums.
         std::array<si32, q_ncol> col_w{ 0, 25, 25, 9, 11, 11 };
+        std::array<bool, q_ncol + 1> col_shown{ true, true, true, true, true, true, true };
         si32 reason_w_override = 0;
     };
 
@@ -69,6 +70,33 @@ namespace netxs::app::parvion
             || (status == 1 && it.status == queue_item::failed)
             || (status == 2 && it.status == queue_item::succeeded);
     }
+    inline auto xfer_status_valid(si32 status) -> bool
+    {
+        return status >= 0 && status < (si32)queue_item::table_count;
+    }
+    inline auto xfer_selected(queue_item const& it, si32 status) -> bool
+    {
+        return xfer_status_valid(status) && it.table_ui[(size_t)status].selected;
+    }
+    inline void xfer_select(queue_item& it, si32 status, bool selected)
+    {
+        if (xfer_status_valid(status)) it.table_ui[(size_t)status].selected = selected;
+    }
+    inline auto xfer_expanded(queue_item const& it, si32 status) -> bool
+    {
+        return xfer_status_valid(status) && it.table_ui[(size_t)status].expanded;
+    }
+    inline void xfer_expand(queue_item& it, si32 status, bool expanded)
+    {
+        if (xfer_status_valid(status)) it.table_ui[(size_t)status].expanded = expanded;
+    }
+    inline auto xfer_selection_pred(si32 status)
+    {
+        return [status](queue_item const& it)
+        {
+            return tab_status_match(status, it) && xfer_selected(it, status);
+        };
+    }
     inline auto xfer_copy_payload(sftp_remote* ctrl, si32 status, text queue_item::* field) -> text
     {
         auto out = text{};
@@ -76,7 +104,7 @@ namespace netxs::app::parvion
         for (auto& it : ctrl->queue)
         {
             auto& value = it.*field;
-            if (!it.selected || !tab_status_match(status, it) || value.empty()) continue;
+            if (!tab_status_match(status, it) || !xfer_selected(it, status) || value.empty()) continue;
             if (!out.empty()) out += '\n';
             out += value;
         }
@@ -101,16 +129,17 @@ namespace netxs::app::parvion
             auto& it = ctrl->queue[(size_t)qi];
             if (!tab_status_match(status, it)) continue;
             out.push_back({ qi, -1 });
-            if (it.expanded && it.chunk_count > 1)
+            if (xfer_expanded(it, status) && it.chunk_count > 1)
                 for (auto c = si32{}, nr = (si32)chunk_ranges(it.size, it.chunk_count).size(); c < nr; ++c) out.push_back({ qi, c });
         }
         return out;
     }
     inline auto xfer_reason_w(xfer_cols const& cols, si32 status) -> si32 { return status != 1 ? 0 : (cols.reason_w_override > 0 ? cols.reason_w_override : q_reason_w0); }
-    inline auto xfer_col_visible(sftp_remote* ctrl, si32 status, si32 i) -> bool
+    inline auto xfer_col_visible(xfer_cols const& cols, si32 status, si32 i) -> bool
     {
-        if (!ctrl || i < 0 || i > q_ncol) return faux;
-        return i == q_ncol ? (status == 1 && ctrl->col_shown[(size_t)q_ncol]) : ctrl->col_shown[(size_t)i];
+        if (i < 0 || i > q_ncol) return faux;
+        return i == q_ncol ? (status == 1 && cols.col_shown[(size_t)q_ncol])
+                           : cols.col_shown[(size_t)i];
     }
     // Widest content in transfer column `col` (for double-click auto-fit).
     inline auto xfer_content_w(sftp_remote* ctrl, si32 status, si32 col) -> si32
@@ -132,7 +161,7 @@ namespace netxs::app::parvion
                 default: s = it.error; break;
             }
             w = std::max(w, (si32)cell_width(s));
-            if (col == q_local && it.expanded && it.chunk_count > 1)
+            if (col == q_local && xfer_expanded(it, status) && it.chunk_count > 1)
             {
                 auto ranges = chunk_ranges(it.size, it.chunk_count);
                 for (auto c = si32{}; c < (si32)ranges.size(); ++c)
@@ -196,9 +225,9 @@ namespace netxs::app::parvion
             if (i == q_server && width <= 0)
                 width = q_col_fit_w(q_headers[(size_t)i], cell_width(xfer_server(ctrl)), true);
             t.add_column({ text{ q_headers[(size_t)i] }, width, i >= q_size && i <= q_speed, true, i },
-                         ctrl->col_shown[(size_t)i], text{ q_menu_headers[(size_t)i] });
+                         xfer_col_visible(*cols, status, i), text{ q_menu_headers[(size_t)i] });
         }
-        t.on_show_column   = [ctrl](si32 key, bool on){ if (key >= 0 && key < (si32)ctrl->col_shown.size()) ctrl->col_shown[(size_t)key] = on; };
+        t.on_show_column   = [cols](si32 key, bool on){ if (key >= 0 && key < (si32)cols->col_shown.size()) cols->col_shown[(size_t)key] = on; };
         t.on_resize_column = [cols](si32 key, si32 w){ if (key >= 0 && key < q_ncol) cols->col_w[(size_t)key] = w; else if (key == q_ncol) cols->reason_w_override = w; };
         t.autofit   = [ctrl, status](si32 key){ return xfer_content_w(ctrl, status, key); };
         return t;
@@ -210,10 +239,10 @@ namespace netxs::app::parvion
         auto rows = std::make_shared<std::vector<disp_row>>(xfer_rows(ctrl, status));
         auto cfg = qsel_cfg{};
         cfg.key_count  = [ctrl]{ return (si32)ctrl->queue.size(); };
-        cfg.is_selected   = [ctrl](si32 k){ return k >= 0 && k < (si32)ctrl->queue.size() && ctrl->queue[(size_t)k].selected; };
-        cfg.on_select     = [ctrl](si32 k, bool v){ if (k >= 0 && k < (si32)ctrl->queue.size()) ctrl->queue[(size_t)k].selected = v; };
-        cfg.on_clear      = [ctrl]{ for (auto& it : ctrl->queue) it.selected = faux; };
-        cfg.has_selection = [ctrl]{ for (auto& it : ctrl->queue) if (it.selected) return true; return faux; };
+        cfg.is_selected   = [ctrl, status](si32 k){ return k >= 0 && k < (si32)ctrl->queue.size() && xfer_selected(ctrl->queue[(size_t)k], status); };
+        cfg.on_select     = [ctrl, status](si32 k, bool v){ if (k >= 0 && k < (si32)ctrl->queue.size()) xfer_select(ctrl->queue[(size_t)k], status, v); };
+        cfg.on_clear      = [ctrl, status]{ for (auto& it : ctrl->queue) xfer_select(it, status, faux); };
+        cfg.has_selection = [ctrl, status]{ for (auto& it : ctrl->queue) if (tab_status_match(status, it) && xfer_selected(it, status)) return true; return faux; };
         cfg.in_scope   = [ctrl, status](si32 k){ return k >= 0 && k < (si32)ctrl->queue.size() && tab_status_match(status, ctrl->queue[(size_t)k]); };
         cfg.row_count  = [rows]{ return (si32)rows->size(); };
         cfg.key_of_row = [rows](si32 i){ return i >= 0 && i < (si32)rows->size() && (*rows)[(size_t)i].child == -1 ? (*rows)[(size_t)i].qi : -1; };
@@ -224,14 +253,14 @@ namespace netxs::app::parvion
     {
         namespace m = app::shared::menu;
         auto deface = [panel_wp]{ if (auto p = panel_wp.lock()) p->base::deface(); };
-        auto sel    = [](queue_item const& it){ return it.selected; };
+        auto sel    = xfer_selection_pred(status);
         auto scope  = [status](queue_item const& it){ return tab_status_match(status, it); };
         auto items  = std::vector<m::item>{};
         auto any_selected = std::ranges::any_of(ctrl->queue, sel);
         auto any_in_scope = std::ranges::any_of(ctrl->queue, scope);
-        auto pinnable = status == 0 && std::ranges::any_of(ctrl->queue, [](queue_item const& it)
+        auto pinnable = status == 0 && std::ranges::any_of(ctrl->queue, [sel](queue_item const& it)
         {
-            return it.selected && it.status == queue_item::queued;
+            return sel(it) && it.status == queue_item::queued;
         });
         auto add = [&](text label, bool disabled, auto fn)
         {
@@ -243,7 +272,7 @@ namespace netxs::app::parvion
         if (status == 0) add("&Pause", !any_selected, [ctrl, sel]{ ctrl->queue_pause(sel); });
         add("&Remove", !any_selected, [ctrl, sel, panel_wp, window_wp]
         {
-            auto count = si32{}; for (auto& it : ctrl->queue) if (it.selected) ++count;
+            auto count = si32{}; for (auto& it : ctrl->queue) if (sel(it)) ++count;
             if (!count) return;
             auto run = [ctrl, sel, panel_wp]{ if (auto p = panel_wp.lock()) { ctrl->queue_remove(sel); p->base::deface(); } };
             auto window = window_wp.lock(); if (!window) { run(); return; }
@@ -273,15 +302,16 @@ namespace netxs::app::parvion
         }
 
         items.push_back(m::item{ .alive = true, .type = m::kind::separator });
-        add("Select &All", !any_in_scope, [ctrl, scope]
+        add("Select &All", !any_in_scope, [ctrl, status, scope]
         {
-            for (auto& it : ctrl->queue) it.selected = scope(it);
+            for (auto& it : ctrl->queue) xfer_select(it, status, scope(it));
         });
         return items;
     }
-    inline auto xfer_remove_confirmation(sftp_remote* ctrl) -> app::shared::confirm_dialog_text
+    inline auto xfer_remove_confirmation(sftp_remote* ctrl, si32 status) -> app::shared::confirm_dialog_text
     {
-        auto count = si32{}; for (auto& it : ctrl->queue) if (it.selected) ++count;
+        auto selected = xfer_selection_pred(status);
+        auto count = si32{}; for (auto& it : ctrl->queue) if (selected(it)) ++count;
         return { count == 1 ? text{ "Remove this transfer from the queue?" }
                             : "Remove " + std::to_string(count) + " transfers from the queue?",
                  "Remove", "Cancel" };
@@ -350,7 +380,7 @@ namespace netxs::app::parvion
         auto qi = rows[(size_t)row].qi;
         auto& it = ctrl->queue[(size_t)qi];
         auto arrow_fg = it.download ? ui32{ theme::dir_fg } : ui32{ theme::link_fg };
-        auto expand = it.chunk_count > 1 ? (it.expanded ? xp_expanded : xp_collapsed) : xp_muted;
+        auto expand = it.chunk_count > 1 ? (xfer_expanded(it, status) ? xp_expanded : xp_collapsed) : xp_muted;
         return { it.download ? text{ "↓" } : text{ "↑" }, arrow_fg, qi, expand };
     }
 
@@ -380,15 +410,33 @@ namespace netxs::app::parvion
             return xfer_compare(ctrl, *row_snapshot, row_a, row_b, key);
         };
         cfg.gutter    = [ctrl, status](si32 row){ return xfer_gutter(ctrl, status, row); };
-        cfg.on_toggle = [ctrl](si32 qi){ if (qi >= 0 && qi < (si32)ctrl->queue.size()) ctrl->queue[(size_t)qi].expanded = !ctrl->queue[(size_t)qi].expanded; };
+        cfg.on_toggle = [ctrl, status](si32 qi)
+        {
+            if (qi >= 0 && qi < (si32)ctrl->queue.size())
+            {
+                auto& it = ctrl->queue[(size_t)qi];
+                xfer_expand(it, status, !xfer_expanded(it, status));
+            }
+        };
         cfg.selection = [ctrl, status]{ return xfer_sel(ctrl, status); };
         cfg.menu      = [ctrl, status, window_wp](netxs::wptr<ui::base> panel_wp)
         {
             auto deface = [panel_wp]{ if (auto p = panel_wp.lock()) p->base::deface(); };
             auto mc = qmenu_cfg{};
             mc.items = [ctrl, status, panel_wp, window_wp]{ return xfer_menu(ctrl, status, panel_wp, window_wp); };
-            mc.on_item_rclick = [ctrl, deface](si32 hit){ if (hit >= 0 && hit < (si32)ctrl->queue.size() && !ctrl->queue[(size_t)hit].selected) { for (auto& it : ctrl->queue) it.selected = faux; ctrl->queue[(size_t)hit].selected = true; deface(); } };
-            mc.on_blank_rclick = [ctrl, deface]{ auto any = faux; for (auto& it : ctrl->queue) { any |= it.selected; it.selected = faux; } if (any) deface(); };
+            mc.on_item_rclick = [ctrl, status, deface](si32 hit)
+            {
+                if (hit < 0 || hit >= (si32)ctrl->queue.size() || xfer_selected(ctrl->queue[(size_t)hit], status)) return;
+                for (auto& it : ctrl->queue) xfer_select(it, status, faux);
+                xfer_select(ctrl->queue[(size_t)hit], status, true);
+                deface();
+            };
+            mc.on_blank_rclick = [ctrl, status, deface]
+            {
+                auto any = faux;
+                for (auto& it : ctrl->queue) { any |= xfer_selected(it, status); xfer_select(it, status, faux); }
+                if (any) deface();
+            };
             return mc;
         };
         cfg.follow      = [ctrl, status]
@@ -402,11 +450,11 @@ namespace netxs::app::parvion
         cfg.on_col_grab = [status, cols](si32 key){ if (key == q_ncol && cols->reason_w_override == 0) cols->reason_w_override = xfer_reason_w(*cols, status); };
         cfg.empty_text  = []{ return text{ "(no transfers — press Enter on a file to queue one)" }; };
         cfg.deletion.enabled = true;
-        cfg.deletion.on_remove_selected = [ctrl](netxs::wptr<ui::base>)
+        cfg.deletion.on_remove_selected = [ctrl, status](netxs::wptr<ui::base>)
         {
-            if (ctrl) ctrl->queue_remove([](queue_item const& it){ return it.selected; });
+            if (ctrl) ctrl->queue_remove(xfer_selection_pred(status));
         };
-        cfg.deletion.confirm = [ctrl]{ return xfer_remove_confirmation(ctrl); };
+        cfg.deletion.confirm = [ctrl, status]{ return xfer_remove_confirmation(ctrl, status); };
         return make_tab_page(make_table(std::move(cfg)), std::move(title), tab_abbreviate_count);
     }
 }

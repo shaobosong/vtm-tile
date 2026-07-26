@@ -42,6 +42,12 @@ namespace netxs::app::parvion
     struct queue_item
     {
         enum status_t { queued, transferring, succeeded, failed };
+        struct table_ui_state
+        {
+            bool selected = faux;
+            bool expanded = faux;
+        };
+        static constexpr auto table_count = size_t{ 3 }; // Transferring, Failed, Succeeded.
 
         bool     download = true;   // true: remote->local; false: local->remote.
         text     local_path;        // Absolute local path.
@@ -60,8 +66,10 @@ namespace netxs::app::parvion
         // Parallel-transfer metadata (Phase 4): chunk index/count + state path.
         ui32     chunk_index = 0;
         ui32     chunk_count = 1;
-        bool     expanded = faux;   // UI: parallel subtasks shown as child rows in the queue panel.
-        bool     selected = faux;   // UI: row is part of the queue panel's selection set.
+        // Session-only presentation state is independent for the three transfer tables. An item can
+        // move between statuses without carrying selection/expansion into the destination table,
+        // while its previous state is remembered if it later returns.
+        std::array<table_ui_state, table_count> table_ui{};
     };
 
     // One remembered Quick Connect target (the most-recent-first history persisted by

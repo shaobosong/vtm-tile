@@ -45,7 +45,7 @@ namespace netxs::app::parvion
         assembly->attach(slot::_1, handle)->limits({ -1, 1 }, { -1, 1 });
 
         // The five tab views. Each transfer view is an independent make_transfer_view() instance with
-        // its own column widths + scroll; they share only the controller's queue data.
+        // its own complete table presentation state; they share only the controller's queue data.
         auto pages = std::vector<tab_page_cfg>{
             make_transfer_view(ctrl, /*status*/ 0, window_wp), // Transferring
             make_transfer_view(ctrl, /*status*/ 1, window_wp), // Failed

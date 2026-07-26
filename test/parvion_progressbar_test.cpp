@@ -150,6 +150,50 @@ namespace
             && q_col_fit_w(hash_headers[3], hash_size_body_w, true) == 9
             && xfer_reason_w(xfer_cols{}, 1) == 31;
     }
+
+    auto test_transfer_table_state_is_isolated_by_status() -> bool
+    {
+        auto item = queue_item{};
+        item.status = queue_item::failed;
+        item.chunk_count = 2;
+
+        auto transferring_selection = xfer_selection_pred(0);
+        auto failed_selection = xfer_selection_pred(1);
+        xfer_select(item, 1, true);
+        xfer_expand(item, 1, true);
+        if (transferring_selection(item) || !failed_selection(item)
+         || xfer_selected(item, 0) || xfer_expanded(item, 0)) return faux;
+
+        // Moving to Transferring does not copy the Failed table's state into its destination.
+        item.status = queue_item::queued;
+        if (transferring_selection(item) || failed_selection(item)
+         || !xfer_selected(item, 1) || !xfer_expanded(item, 1)) return faux;
+
+        // A state created in Transferring remains independent and is remembered after returning.
+        xfer_select(item, 0, true);
+        xfer_expand(item, 0, true);
+        item.status = queue_item::failed;
+        if (transferring_selection(item) || !failed_selection(item)) return faux;
+
+        xfer_select(item, 1, false);
+        xfer_expand(item, 1, false);
+        return xfer_selected(item, 0) && xfer_expanded(item, 0)
+            && !xfer_selected(item, 1) && !xfer_expanded(item, 1)
+            && !xfer_selected(item, 2) && !xfer_expanded(item, 2);
+    }
+
+    auto test_transfer_column_visibility_is_per_view() -> bool
+    {
+        auto transferring = xfer_cols{};
+        auto failed = xfer_cols{};
+        transferring.col_shown[(size_t)q_speed] = faux;
+        failed.col_shown[(size_t)q_ncol] = faux;
+
+        return !xfer_col_visible(transferring, 0, q_speed)
+            &&  xfer_col_visible(failed, 1, q_speed)
+            && !xfer_col_visible(failed, 1, q_ncol)
+            && !xfer_col_visible(transferring, 0, q_ncol);
+    }
 }
 
 int main()
@@ -160,7 +204,9 @@ int main()
            && test_embedded_clip_stays_inside_viewport()
            && test_transfer_cell_uses_progressbar_contract()
            && test_checksum_cell_uses_stable_progressbar()
-           && test_server_caption_and_hash_size_width();
+           && test_server_caption_and_hash_size_width()
+           && test_transfer_table_state_is_isolated_by_status()
+           && test_transfer_column_visibility_is_per_view();
     if (!ok) std::fprintf(stderr, "parvion progressbar tests failed\n");
     return ok ? 0 : 1;
 }

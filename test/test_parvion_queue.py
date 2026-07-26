@@ -19,6 +19,7 @@ tables — the behaviors added on top of parvion/queue.hpp:
   6. Transfer context menus copy the selected local/remote names and failed reasons.
   7. Progress cells embed proportional bars on the Transferring, Failed, and Succeeded tabs.
   8. Selected rows visibly tint embedded progress cells, including after live component repaints.
+  9. Transfer tabs retain independent selections and column visibility while switching.
 
 Driven via a pty using the SGR mouse protocol, mirroring the harness used by
 the existing test_dropdown_menu / test_tile_ctrl_click_focus suites. The app
@@ -1242,6 +1243,107 @@ def test_header_menu_toggles_column_visibility():
         return True
 
 
+def test_transfer_tabs_keep_independent_table_state():
+    """Selections and column visibility remain local to each transfer-status table."""
+    print("TEST: parvion - transfer tabs keep independent table state ... ", end="", flush=True)
+    with ParvionSession(DEMO_ENV) as s:
+        def select_row(name):
+            chars, bg = s.screen()
+            pos = find_text(chars, name)
+            if pos is None:
+                return None
+            row, col = pos
+            native = bg[row][col]
+            s.click(col + 1, row + 1)
+            selected = s.screen()[1][row][col]
+            return row, col, native, selected
+
+        transferring = select_row("notes.txt")
+        if transferring is None or transferring[2] == transferring[3]:
+            print(f"FAIL - Transferring selection did not appear: {transferring!r}")
+            return False
+
+        # Hide Speed only in Transferring.
+        hdr = find_text(s.screen()[0], "Local Name")
+        if hdr is None:
+            print("FAIL - Transferring header not found")
+            return False
+        s.click(95, hdr[0] + 1, button=2)
+        speed = find_menu_item(s.screen()[0], "Speed")
+        if speed is None:
+            print("FAIL - Transferring Speed toggle not found")
+            return False
+        s.click(speed[1] + 1, speed[0] + 1)
+        if "Speed" in row_text(s.screen()[0], find_text(s.screen()[0], "Local Name")[0]):
+            print("FAIL - Transferring Speed column did not hide")
+            return False
+
+        if not click_label(s, "Failed ("):
+            print("FAIL - Failed tab not found")
+            return False
+        failed_header = find_text(s.screen()[0], "Local Name")
+        if failed_header is None or "Speed" not in row_text(s.screen()[0], failed_header[0]):
+            print("FAIL - Transferring column visibility leaked into Failed")
+            return False
+        failed = select_row("upload.bin")
+        if failed is None or failed[2] == failed[3]:
+            print(f"FAIL - Failed selection did not appear: {failed!r}")
+            return False
+
+        if not click_label(s, "Succeeded ("):
+            print("FAIL - Succeeded tab not found")
+            return False
+        succeeded_header = find_text(s.screen()[0], "Local Name")
+        if succeeded_header is None or "Speed" not in row_text(s.screen()[0], succeeded_header[0]):
+            print("FAIL - Transferring column visibility leaked into Succeeded")
+            return False
+        succeeded = select_row("archive.tar")
+        if succeeded is None or succeeded[2] == succeeded[3]:
+            print(f"FAIL - Succeeded selection did not appear: {succeeded!r}")
+            return False
+
+        # Every tab must restore its own selection after the other two have changed theirs.
+        if not click_label(s, "Transferring ("):
+            print("FAIL - could not return to Transferring")
+            return False
+        note = find_text(s.screen()[0], "notes.txt")
+        active_header = find_text(s.screen()[0], "Local Name")
+        if (note is None or s.screen()[1][note[0]][note[1]] != transferring[3]
+                or active_header is None
+                or "Speed" in row_text(s.screen()[0], active_header[0])):
+            print("FAIL - Transferring state was not restored")
+            return False
+
+        if not click_label(s, "Failed ("):
+            print("FAIL - could not return to Failed")
+            return False
+        upload = find_text(s.screen()[0], "upload.bin")
+        if upload is None or s.screen()[1][upload[0]][upload[1]] != failed[3]:
+            print("FAIL - Failed selection was not restored")
+            return False
+        s.click(10, upload[0] + 4)  # Blank body row clears only Failed.
+        if s.screen()[1][upload[0]][upload[1]] == failed[3]:
+            print("FAIL - blank click did not clear Failed selection")
+            return False
+
+        if not click_label(s, "Succeeded ("):
+            print("FAIL - could not return to Succeeded")
+            return False
+        archive = find_text(s.screen()[0], "archive.tar")
+        if archive is None or s.screen()[1][archive[0]][archive[1]] != succeeded[3]:
+            print("FAIL - clearing Failed changed Succeeded selection")
+            return False
+        if not click_label(s, "Transferring ("):
+            print("FAIL - could not return to Transferring again")
+            return False
+        note = find_text(s.screen()[0], "notes.txt")
+        if note is None or s.screen()[1][note[0]][note[1]] != transferring[3]:
+            print("FAIL - clearing Failed changed Transferring selection")
+            return False
+        print("PASS")
+        return True
+
+
 def test_remove_item_via_menu():
     """Right-click an item -> Remove drops it and decrements the tab count."""
     print("TEST: parvion - Remove deletes the item ... ", end="", flush=True)
@@ -2009,6 +2111,7 @@ TESTS = [
     test_copy_fields_by_transfer_tab,
     test_header_menu_lists_column_toggles,
     test_header_menu_toggles_column_visibility,
+    test_transfer_tabs_keep_independent_table_state,
     test_remove_item_via_menu,
     test_multiselect_remove_all_selected,
     test_keyboard_delete_removes_selected_only,
