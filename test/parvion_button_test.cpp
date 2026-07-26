@@ -83,22 +83,54 @@ namespace
     auto test_counted_tab_abbreviation_preserves_suffix() -> bool
     {
         return tab_abbreviate_count("Transferring (0)", 15) == "Transferri… (0)"
-            && tab_abbreviate_count("Transferring (0)", 6) == "T… (0)";
+            && tab_abbreviate_count("Transferring (0)", 6) == "T… (0)"
+            && tab_abbreviate_count("Transferring (1000)", 6) == "T… (1000)";
     }
 
-    auto test_tab_abbreviation_is_balanced() -> bool
+    auto test_tab_abbreviation_prioritizes_longer_titles() -> bool
     {
         auto pages = std::vector<tab_page_cfg>{
             { {}, []{ return text{ "Transferring (0)" }; }, tab_abbreviate_count },
             { {}, []{ return text{ "Failed (0)" }; },       tab_abbreviate_count },
         };
-        // Full buttons occupy 30 cells. With two cells removed, round-robin compression shortens
-        // each title once rather than exhausting the first title.
+        // Full buttons occupy 30 cells. The longer title absorbs both reductions.
         auto labels = resolve_tab_titles(pages, 28);
         return labels.size() == 2
-            && labels[0] == "Transferri… (0)"
-            && labels[1] == "Fail… (0)"
+            && labels[0] == "Transferr… (0)"
+            && labels[1] == "Failed (0)"
             && cell_width(labels[0]) + cell_width(labels[1]) + 4 == 28;
+    }
+
+    auto test_tab_abbreviation_balances_tied_titles() -> bool
+    {
+        auto pages = std::vector<tab_page_cfg>{
+            { {}, []{ return text{ "Succeeded (0)" }; }, tab_abbreviate_count },
+            { {}, []{ return text{ "Checksums (0)" }; },  tab_abbreviate_count },
+            { {}, []{ return text{ "Completed (0)" }; },  tab_abbreviate_count },
+        };
+        // Full buttons occupy 45 cells. Two reductions rotate through the first two tied titles and
+        // stop at the exact requested width.
+        auto labels = resolve_tab_titles(pages, 43);
+        return labels.size() == 3
+            && labels[0] == "Succeed… (0)"
+            && labels[1] == "Checksu… (0)"
+            && labels[2] == "Completed (0)"
+            && cell_width(labels[0]) + cell_width(labels[1]) + cell_width(labels[2]) + 6 == 43;
+    }
+
+    auto test_tab_abbreviation_balances_visible_width() -> bool
+    {
+        auto pages = std::vector<tab_page_cfg>{
+            { {}, []{ return text{ "Short (1000)" }; }, tab_abbreviate_count },
+            { {}, []{ return text{ "Longer (0)" }; },   tab_abbreviate_count },
+        };
+        // The longer protected count makes the first rendered label wider, so its title contracts
+        // first while both count suffixes remain unchanged.
+        auto labels = resolve_tab_titles(pages, 25);
+        return labels.size() == 2
+            && labels[0] == "Sho… (1000)"
+            && labels[1] == "Longer (0)"
+            && cell_width(labels[0]) + cell_width(labels[1]) + 4 == 25;
     }
 }
 
@@ -109,7 +141,9 @@ int main()
            && test_hit_bounds()
            && test_connect_caption_remains_responsive()
            && test_counted_tab_abbreviation_preserves_suffix()
-           && test_tab_abbreviation_is_balanced();
+           && test_tab_abbreviation_prioritizes_longer_titles()
+           && test_tab_abbreviation_balances_tied_titles()
+           && test_tab_abbreviation_balances_visible_width();
     if (!ok) std::fprintf(stderr, "parvion button tests failed\n");
     return ok ? 0 : 1;
 }

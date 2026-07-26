@@ -14,9 +14,10 @@
 
 namespace netxs::app::parvion
 {
-    // Resolve current labels against the strip width. Like the connect bar, compression advances
-    // one title at a time in rounds, so several tabs lose width progressively and evenly. Each page
-    // callback sees its full title plus the next target width and can preserve any important suffix.
+    // Resolve current labels against the strip width. Compression reduces the widest title first;
+    // ties advance one title at a time in stable rounds, so equally wide tabs lose width evenly.
+    // Each page callback sees its full title plus the next target width and can preserve any
+    // important suffix.
     inline auto resolve_tab_titles(std::vector<tab_page_cfg> const& pages, si32 strip_w)
         -> std::vector<text>
     {
@@ -41,7 +42,10 @@ namespace netxs::app::parvion
         auto n = (si32)pages.size();
         while (n > 0 && total > std::max(0, strip_w))
         {
-            auto moved = faux;
+            auto target = si32{ -1 };
+            auto target_w = si32{ -1 };
+            auto target_next = text{};
+            auto target_next_w = si32{};
             for (auto step = si32{}; step < n; ++step)
             {
                 auto i = (cursor + step) % n;
@@ -50,14 +54,17 @@ namespace netxs::app::parvion
                           : tab_abbreviate_tail(full[(size_t)i], widths[(size_t)i] - 1);
                 auto next_w = cell_width(next);
                 if (next_w >= widths[(size_t)i]) continue; // This title reached its callback's floor.
-                total -= widths[(size_t)i] - next_w;
-                widths[(size_t)i] = next_w;
-                labels[(size_t)i] = std::move(next);
-                cursor = (i + 1) % n;
-                moved = true;
-                break;
+                if (widths[(size_t)i] <= target_w) continue; // Keep the first tied title after cursor.
+                target = i;
+                target_w = widths[(size_t)i];
+                target_next = std::move(next);
+                target_next_w = next_w;
             }
-            if (!moved) break;
+            if (target < 0) break;
+            total -= widths[(size_t)target] - target_next_w;
+            widths[(size_t)target] = target_next_w;
+            labels[(size_t)target] = std::move(target_next);
+            cursor = (target + 1) % n;
         }
         return labels;
     }
