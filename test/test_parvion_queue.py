@@ -18,6 +18,7 @@ tables — the behaviors added on top of parvion/queue.hpp:
   5. Right-click with several rows selected applies the action to all of them.
   6. Transfer context menus copy the selected local/remote names and failed reasons.
   7. Progress cells embed proportional bars on the Transferring, Failed, and Succeeded tabs.
+  8. Selected rows visibly tint embedded progress cells, including after live component repaints.
 
 Driven via a pty using the SGR mouse protocol, mirroring the harness used by
 the existing test_dropdown_menu / test_tile_ctrl_click_focus suites. The app
@@ -1428,6 +1429,65 @@ def test_transfer_tabs_use_progress_bars():
         return True
 
 
+def test_selected_progress_bar_keeps_row_effect():
+    """Selection tints a live progress component and deselection restores its native palette."""
+    print("TEST: parvion - selected progress bar keeps row effect ... ", end="", flush=True)
+    with ParvionSession(DEMO_ENV) as s:
+        def snapshot():
+            chars, bg = s.screen()
+            pos = find_text(chars, "bigfile.iso")
+            span = column_span(chars, "Progress")
+            if pos is None or span is None:
+                return None
+            row, col = pos
+            return row, col, progress_text(chars, row), tuple(bg[row][span[0]:span[1]])
+
+        before = snapshot()
+        if before is None:
+            print("FAIL - transferring progress row/column not found")
+            return False
+        row, col, label, native = before
+        if label != "45.00%" or len(set(native)) != 2:
+            print(f"FAIL - progress precondition is {label!r}/{native!r}")
+            return False
+
+        s.click(col + 1, row + 1, button=0)
+        selected = snapshot()
+        if selected is None:
+            print("FAIL - selected progress row disappeared")
+            return False
+        _, _, selected_label, tinted = selected
+        if (selected_label != label
+                or len(tinted) != len(native)
+                or len(set(tinted)) != 2
+                or any(selected_bg == native_bg
+                       for selected_bg, native_bg in zip(tinted, native))):
+            print(f"FAIL - selected progress bar is {selected_label!r}/{tinted!r} (native={native!r})")
+            return False
+
+        # The progress component is timer-driven; its next repaint must retain the row effect.
+        s.feed(0.8)
+        refreshed = snapshot()
+        if refreshed is None:
+            print("FAIL - progress row disappeared after live repaint")
+            return False
+        _, _, refreshed_label, refreshed_tint = refreshed
+        if (refreshed_label != label
+                or len(set(refreshed_tint)) != 2
+                or any(selected_bg == native_bg
+                       for selected_bg, native_bg in zip(refreshed_tint, native))):
+            print(f"FAIL - live repaint removed selection tint: {refreshed_tint!r}")
+            return False
+
+        s.click(100, row + 1, button=0)  # Blank table space clears selection.
+        restored = snapshot()
+        if restored is None or restored[2] != label or restored[3] != native:
+            print(f"FAIL - deselection did not restore native progress palette: {restored!r}")
+            return False
+        print("PASS")
+        return True
+
+
 def test_pause_then_start_progress_label():
     """Pause marks a queued item 'paused'; Start returns it to 'queued'."""
     print("TEST: parvion - Pause/Start toggles the progress label ... ", end="", flush=True)
@@ -1941,6 +2001,7 @@ TESTS = [
     test_keyboard_delete_removes_selected_only,
     test_pin_to_top_reorders_pending,
     test_transfer_tabs_use_progress_bars,
+    test_selected_progress_bar_keeps_row_effect,
     test_pause_then_start_progress_label,
     test_local_and_remote_name_columns,
     test_column_dividers_extend_to_item_rows,

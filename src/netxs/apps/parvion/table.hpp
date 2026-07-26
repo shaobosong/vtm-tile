@@ -216,6 +216,8 @@ namespace netxs::app::parvion
         std::vector<std::pair<rect, si32>> expand_hit{}; // Expand-button box -> expand id.
         std::vector<si32> row_order{};                   // Visual row -> caller/source row.
         std::vector<si32> row_offsets{};                 // Visual row -> content-line offset; includes end sentinel.
+        std::vector<rect> selected_component_areas{};    // Selected component cells in body-host coordinates.
+        std::vector<rect> selected_row_areas{};          // Selected visible row spans in body-host coordinates.
         std::unordered_map<id_t, component> attached{};  // Components currently attached to the clipped body host.
         netxs::wptr<ui::base> cell_host_wp{};
         si32 hover_expand = -1, press_expand = -1;
@@ -875,17 +877,32 @@ namespace netxs::app::parvion
         return faux;
     }
 
+    inline void q_paint_component_selection(table_state const& st, table_palette const& pal, ui::face& viewport)
+    {
+        // Components paint after the table's row background. Tint only their backgrounds so their
+        // own fill/track contrast, text, glyphs, and mouse-link metadata remain intact.
+        for (auto const& area : st.selected_component_areas)
+            viewport.fill(area, [](cell& c){ c.bgc().xlight(); });
+
+        // A horizontally scrolled component can cross x=0 and overwrite the focused-row marker.
+        // Restore that marker after all component tinting.
+        if (st.focused)
+            for (auto const& area : st.selected_row_areas)
+                viewport.fill(rect{{ 0, area.coor.y }, { 1, area.size.y }},
+                              [&](cell& c){ c.bgc(pal.sel_bg_act); });
+    }
+
     // Render retained cell components into a canvas whose physical extent is exactly the table body
     // viewport.  A normal cake narrows only face::clip(); primitives such as face::fill(rect, ...)
     // can still address the larger parent backing canvas and leak through either horizontal edge.
     // The bounded intermediate face makes such writes impossible while preserving every child's
     // logical (possibly negative/oversized) cell rectangle and its painted mouse-link metadata.
-    inline auto make_table_cell_host() -> ui::sptr
+    inline auto make_table_cell_host(std::function<void(ui::face&)> postrender = {}) -> ui::sptr
     {
         auto host = ui::mock::ctor();
-        host->invoke([](auto& boss)
+        host->invoke([postrender = std::move(postrender)](auto& boss)
         {
-            boss.LISTEN(tier::release, e2::render::any, parent_canvas)
+            boss.LISTEN(tier::release, e2::render::any, parent_canvas, -, (postrender))
             {
                 auto size = boss.base::size();
                 if (size.x <= 0 || size.y <= 0) return;
@@ -895,6 +912,7 @@ namespace netxs::app::parvion
                 viewport.fill(parent_canvas, cell::shaders::full);
                 for (auto& object : boss.base::subset)
                     object->render(viewport);
+                if (postrender) postrender(viewport);
                 // Honor any additional clipping imposed by an ancestor of the table when copying
                 // the physically bounded body back into the real canvas.
                 netxs::onclip(parent_canvas, viewport, cell::shaders::full);
@@ -908,6 +926,8 @@ namespace netxs::app::parvion
     {
         auto w = size.x, h = size.y;
         auto visible_components = std::unordered_map<id_t, rect>{};
+        st.selected_component_areas.clear();
+        st.selected_row_areas.clear();
         if (w <= 0 || h <= 0) { q_reconcile_components(st, visible_components); return; }
         auto& pal = cfg.palette;
         canvas.fill(rect{{ 0, 0 }, { w, h }}, [&](cell& c){ c.bgc(pal.bg).fgc(pal.text_fg); });
@@ -990,6 +1010,8 @@ namespace netxs::app::parvion
                 {
                     canvas.fill(rect{{ 0, y0 }, { q_row_w(st), visible_h }}, [&](cell& c){ c.bgc(pal.sel_bg); });
                     if (st.focused) canvas.fill(rect{{ 0, y0 }, { 1, visible_h }}, [&](cell& c){ c.bgc(pal.sel_bg_act); });
+                    st.selected_row_areas.push_back(rect{{ 0, y0 - st.body_top },
+                                                         { q_row_w(st), visible_h }});
                 }
                 if (cfg.gutter && y >= st.body_top && y < st.body_top + st.body_rows)
                 {
@@ -1025,7 +1047,10 @@ namespace netxs::app::parvion
                         auto area = rect{{ t.col_x(vc) - hs, row_top - st.scroll },
                                          { width, row_bottom - row_top }};
                         if (area.coor.x < clipw && area.coor.x + area.size.x > 0)
+                        {
                             q_place_component(st, component_value->content, area, visible_components);
+                            if (selected) st.selected_component_areas.push_back(area);
+                        }
                     }
                 }
                 if (key >= 0) st.row_hit.emplace_back(rect{{ 0, y0 },
@@ -1057,7 +1082,10 @@ namespace netxs::app::parvion
             ->plugin<pro::focus>(config->focus_on_start ? pro::focus::mode::focused : pro::focus::mode::focusable)
             ->plugin<pro::keybd>()->plugin<pro::timer>();
         auto painter = form->attach(ui::mock::ctor());
-        auto cell_host = form->attach(make_table_cell_host());
+        auto cell_host = form->attach(make_table_cell_host([state, config](ui::face& viewport)
+        {
+            q_paint_component_selection(*state, config->palette, viewport);
+        }));
         state->cell_host_wp = ptr::shadow(cell_host);
         painter->invoke([state, config](auto& boss)
         {

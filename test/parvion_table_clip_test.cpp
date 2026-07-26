@@ -526,6 +526,120 @@ namespace
             && render_at(100, { 5, 3 });    // Clamped to max scroll; component extends past the left edge.
     }
 
+    auto test_selected_component_cell_keeps_selection_effect() -> bool
+    {
+        struct paint_state
+        {
+            ui32 track = 0xFF102030;
+            ui32 fill  = 0xFFC08020;
+        };
+        auto paint = std::make_shared<paint_state>();
+        auto selected = std::make_shared<bool>(faux);
+        auto raw = ui::mock::ctor();
+        raw->invoke([paint, id = raw->id](auto& boss)
+        {
+            boss.LISTEN(tier::release, app::e2::render::any, canvas, -, (paint, id))
+            {
+                auto size = boss.base::size();
+                auto split = size.x / 2;
+                canvas.fill(rect{{}, { split, size.y }}, [&](cell& c)
+                {
+                    c.bgc(paint->track).fgc(theme::text_fg).txt("T").link(id);
+                });
+                canvas.fill(rect{{ split, 0 }, { size.x - split, size.y }}, [&](cell& c)
+                {
+                    c.bgc(paint->fill).fgc(theme::text_fg).txt("F").link(id);
+                });
+            };
+        });
+
+        auto cfg = table_cfg{};
+        cfg.columns = []
+        {
+            auto table = qtable{};
+            table.add_column({ .title = "Progress", .width = 7, .key = 0 }, true);
+            return table;
+        };
+        cfg.row_count = []{ return 1; };
+        cfg.cell = [content = component{ raw }](si32, si32){ return table_cell{ content }; };
+        cfg.selection = [selected]
+        {
+            auto selection = qsel_cfg{};
+            selection.key_count = []{ return 1; };
+            selection.is_selected = [selected](si32 key){ return key == 0 && *selected; };
+            selection.on_select = [selected](si32 key, bool on){ if (key == 0) *selected = on; };
+            selection.on_clear = [selected]{ *selected = faux; };
+            selection.has_selection = [selected]{ return *selected; };
+            selection.in_scope = [](si32 key){ return key == 0; };
+            selection.row_count = []{ return 1; };
+            selection.key_of_row = [](si32 row){ return row == 0 ? 0 : -1; };
+            return selection;
+        };
+        auto table = make_table(std::move(cfg));
+        table.widget->base::extend(rect{{}, { 9, 3 }});
+
+        auto render_matches = [&](ui32 track, ui32 fill, bool tinted)
+        {
+            auto canvas = ui::face{};
+            canvas.size({ 9, 3 });
+            table.widget->render(canvas);
+            auto track_bg = argb{ track };
+            auto fill_bg = argb{ fill };
+            if (tinted)
+            {
+                track_bg.xlight();
+                fill_bg.xlight();
+            }
+            return canvas[{ 1, 1 }].bgc() == track_bg
+                && canvas[{ 4, 1 }].bgc() == fill_bg
+                && canvas[{ 1, 1 }].bgc() != canvas[{ 4, 1 }].bgc()
+                && canvas[{ 1, 1 }].txt() == "T"
+                && canvas[{ 4, 1 }].txt() == "F"
+                && canvas[{ 1, 1 }].link() == raw->id
+                && canvas[{ 4, 1 }].link() == raw->id;
+        };
+
+        if (!render_matches(paint->track, paint->fill, faux)) return faux;
+        *selected = true;
+        if (!render_matches(paint->track, paint->fill, true)) return faux;
+
+        // Live child updates must receive the same selection treatment on every render.
+        paint->track = 0xFF204060;
+        paint->fill  = 0xFF308050;
+        raw->base::deface();
+        if (!render_matches(paint->track, paint->fill, true)) return faux;
+
+        // Deselecting restores the component's own current palette without retained tint.
+        *selected = faux;
+        return render_matches(paint->track, paint->fill, faux);
+    }
+
+    auto test_selected_component_preserves_focused_row_marker() -> bool
+    {
+        auto st = table_state{};
+        auto pal = table_palette{};
+        st.focused = true;
+        st.selected_component_areas.push_back(rect{{ -2, 0 }, { 5, 1 }});
+        st.selected_row_areas.push_back(rect{{ 0, 0 }, { 6, 1 }});
+
+        auto canvas = ui::face{};
+        canvas.size({ 6, 1 });
+        auto const link = id_t{ 42 };
+        auto const component_bg = ui32{ 0xFF203040 };
+        canvas.fill(rect{{}, canvas.size()}, [&](cell& c)
+        {
+            c.bgc(component_bg).fgc(theme::text_fg).txt("X").link(link);
+        });
+        q_paint_component_selection(st, pal, canvas);
+
+        auto tinted = argb{ component_bg };
+        tinted.xlight();
+        return canvas[{ 0, 0 }].bgc() == argb{ pal.sel_bg_act }
+            && canvas[{ 1, 0 }].bgc() == tinted
+            && canvas[{ 0, 0 }].txt() == "X"
+            && canvas[{ 0, 0 }].link() == link;
+    }
+
     auto test_table_scrollbar_press_promotes_to_drag_paint() -> bool
     {
         auto st = table_state{};
@@ -781,6 +895,8 @@ int main()
         { "table_can_be_nested_as_component_content", test_table_can_be_nested_as_component_content },
         { "component_host_clips_every_edge", test_component_host_clips_every_edge },
         { "component_cells_clip_during_horizontal_scroll", test_component_cells_clip_during_horizontal_scroll },
+        { "selected_component_cell_keeps_selection_effect", test_selected_component_cell_keeps_selection_effect },
+        { "selected_component_preserves_focused_row_marker", test_selected_component_preserves_focused_row_marker },
         { "table_scrollbar_press_promotes_to_drag_paint", test_table_scrollbar_press_promotes_to_drag_paint },
         { "textbox_scrollbar_press_promotes_to_drag_paint", test_textbox_scrollbar_press_promotes_to_drag_paint },
         { "posix_name_validation", test_posix_name_validation },
