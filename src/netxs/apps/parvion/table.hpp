@@ -875,6 +875,34 @@ namespace netxs::app::parvion
         return faux;
     }
 
+    // Render retained cell components into a canvas whose physical extent is exactly the table body
+    // viewport.  A normal cake narrows only face::clip(); primitives such as face::fill(rect, ...)
+    // can still address the larger parent backing canvas and leak through either horizontal edge.
+    // The bounded intermediate face makes such writes impossible while preserving every child's
+    // logical (possibly negative/oversized) cell rectangle and its painted mouse-link metadata.
+    inline auto make_table_cell_host() -> ui::sptr
+    {
+        auto host = ui::mock::ctor();
+        host->invoke([](auto& boss)
+        {
+            boss.LISTEN(tier::release, e2::render::any, parent_canvas)
+            {
+                auto size = boss.base::size();
+                if (size.x <= 0 || size.y <= 0) return;
+
+                auto& viewport = boss.base::field(ui::face{});
+                viewport.area(rect{{}, size});
+                viewport.fill(parent_canvas, cell::shaders::full);
+                for (auto& object : boss.base::subset)
+                    object->render(viewport);
+                // Honor any additional clipping imposed by an ancestor of the table when copying
+                // the physically bounded body back into the real canvas.
+                netxs::onclip(parent_canvas, viewport, cell::shaders::full);
+            };
+        });
+        return host;
+    }
+
     // ---- Render ------------------------------------------------------------------------------------
     inline void table_render(table_state& st, table_cfg const& cfg, auto& canvas, twod size)
     {
@@ -1022,14 +1050,14 @@ namespace netxs::app::parvion
         auto config = std::make_shared<table_cfg>(std::move(cfg));
         state->live_follow = !!config->follow;
 
-        // Paint the frame first, then render arbitrary retained cell widgets through a clipped body
-        // host.  The painter reconciles the host before the cake renders that second layer.
+        // Paint the frame first, then composite arbitrary retained cell widgets through a
+        // physically bounded body host.
         auto form = ui::cake::ctor()->active()
             ->plugin<pro::mouse>()
             ->plugin<pro::focus>(config->focus_on_start ? pro::focus::mode::focused : pro::focus::mode::focusable)
             ->plugin<pro::keybd>()->plugin<pro::timer>();
         auto painter = form->attach(ui::mock::ctor());
-        auto cell_host = form->attach(ui::cake::ctor());
+        auto cell_host = form->attach(make_table_cell_host());
         state->cell_host_wp = ptr::shadow(cell_host);
         painter->invoke([state, config](auto& boss)
         {

@@ -420,6 +420,112 @@ namespace
         return embedded && embedded->content.widget == nested.widget;
     }
 
+    auto make_unclipped_test_component() -> ui::sptr
+    {
+        auto raw = ui::mock::ctor();
+        raw->invoke([id = raw->id](auto& boss)
+        {
+            boss.LISTEN(tier::release, app::e2::render::any, canvas, -, (id))
+            {
+                canvas.fill(rect{{}, boss.base::size()}, [id](cell& c)
+                {
+                    c.bgc(theme::sel_bg).fgc(theme::text_fg).txt("X").link(id);
+                });
+            };
+        });
+        return raw;
+    }
+
+    auto test_component_host_clips_every_edge() -> bool
+    {
+        auto raw = make_unclipped_test_component();
+        auto host = make_table_cell_host();
+        host->base::attach(raw);
+        host->base::extend(rect{{ 5, 2 }, { 4, 2 }});
+
+        auto const sentinel = id_t{ 0x7FFFFFFFu };
+        auto render_case = [&](rect child_area, twod visible, twod outside)
+        {
+            auto canvas = ui::face{};
+            canvas.size({ 14, 7 });
+            canvas.fill(rect{{}, canvas.size()}, [&](cell& c){ c.txt("Z").link(sentinel); });
+            raw->base::extend(child_area);
+            host->render(canvas);
+            return canvas[visible].txt() == "X"
+                && canvas[visible].link() == raw->id
+                && canvas[outside].txt() == "Z"
+                && canvas[outside].link() == sentinel;
+        };
+        auto honors_ancestor_clip = [&]
+        {
+            auto canvas = ui::face{};
+            canvas.size({ 14, 7 });
+            canvas.fill(rect{{}, canvas.size()}, [&](cell& c){ c.txt("Z").link(sentinel); });
+            canvas.clip(rect{{ 6, 2 }, { 2, 2 }});
+            raw->base::extend(rect{{}, { 4, 2 }});
+            host->render(canvas);
+            return canvas[{ 6, 2 }].txt() == "X"
+                && canvas[{ 6, 2 }].link() == raw->id
+                && canvas[{ 5, 2 }].txt() == "Z"
+                && canvas[{ 5, 2 }].link() == sentinel
+                && canvas[{ 8, 2 }].txt() == "Z"
+                && canvas[{ 8, 2 }].link() == sentinel;
+        };
+
+        return render_case(rect{{  3,  0 }, { 4, 1 }}, { 8, 2 }, { 9, 2 }) // Right.
+            && render_case(rect{{ -3,  0 }, { 4, 1 }}, { 5, 2 }, { 4, 2 }) // Left.
+            && render_case(rect{{  0, -2 }, { 1, 3 }}, { 5, 2 }, { 5, 1 }) // Top.
+            && render_case(rect{{  0,  1 }, { 1, 3 }}, { 5, 3 }, { 5, 4 }) // Bottom.
+            && honors_ancestor_clip();
+    }
+
+    auto test_component_cells_clip_during_horizontal_scroll() -> bool
+    {
+        // Deliberately ignore canvas.clip() to model an arbitrary retained component. Render the
+        // table away from the parent origin so both its left overflow and its scrollbar-side
+        // overflow are observable in the backing canvas.
+        auto raw = make_unclipped_test_component();
+        auto embedded = component{ raw };
+        auto cfg = table_cfg{};
+        cfg.columns = []
+        {
+            auto table = qtable{};
+            table.add_column({ .title = "Progress", .width = 14, .key = 0 }, true);
+            return table;
+        };
+        cfg.row_count = []{ return 5; };
+        cfg.cell = [embedded](si32 row, si32)
+        {
+            return row == 0 ? table_cell{ embedded } : table_cell{};
+        };
+
+        auto st = table_state{};
+        auto host = make_table_cell_host();
+        st.cell_host_wp = ptr::shadow(host);
+        auto const sentinel = id_t{ 0x7FFFFFFFu };
+        auto render_at = [&](si32 hscroll, twod visible)
+        {
+            auto canvas = ui::face{};
+            canvas.size({ 20, 8 });
+            canvas.fill(rect{{}, canvas.size()}, [&](cell& c){ c.txt("Z").link(sentinel); });
+            {
+                auto context = canvas.change_basis(rect{{ 5, 2 }, { 10, 4 }});
+                if (!context) return faux;
+                st.hscroll = hscroll;
+                table_render(st, cfg, canvas, { 10, 4 });
+                host->render(canvas);
+            }
+            return canvas[visible].txt() == "X"
+                && canvas[visible].link() == raw->id
+                && canvas[{ 4, 3 }].txt() == "Z"       // Immediately left of the table.
+                && canvas[{ 4, 3 }].link() == sentinel
+                && canvas[{ 14, 3 }].txt() == "\xe2\x96\x90"; // Vertical scrollbar.
+        };
+
+        return render_at(0, { 6, 3 })       // Component extends through the right viewport edge.
+            && render_at(100, { 5, 3 });    // Clamped to max scroll; component extends past the left edge.
+    }
+
     auto test_table_scrollbar_press_promotes_to_drag_paint() -> bool
     {
         auto st = table_state{};
@@ -673,6 +779,8 @@ int main()
         { "rubber_overshoot_keeps_last_cursor", test_rubber_overshoot_keeps_last_row_as_keyboard_cursor },
         { "component_cells_retain_and_reconcile_widgets", test_component_cells_retain_and_reconcile_widgets },
         { "table_can_be_nested_as_component_content", test_table_can_be_nested_as_component_content },
+        { "component_host_clips_every_edge", test_component_host_clips_every_edge },
+        { "component_cells_clip_during_horizontal_scroll", test_component_cells_clip_during_horizontal_scroll },
         { "table_scrollbar_press_promotes_to_drag_paint", test_table_scrollbar_press_promotes_to_drag_paint },
         { "textbox_scrollbar_press_promotes_to_drag_paint", test_textbox_scrollbar_press_promotes_to_drag_paint },
         { "posix_name_validation", test_posix_name_validation },
