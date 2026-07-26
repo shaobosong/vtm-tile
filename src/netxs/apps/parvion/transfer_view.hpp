@@ -248,8 +248,11 @@ namespace netxs::app::parvion
         cfg.key_of_row = [rows](si32 i){ return i >= 0 && i < (si32)rows->size() && (*rows)[(size_t)i].child == -1 ? (*rows)[(size_t)i].qi : -1; };
         return cfg;
     }
-    // Unified right-click menu: selected-transfer actions, then tab-scoped selection.
-    inline auto xfer_menu(sftp_remote* ctrl, si32 status, netxs::wptr<ui::base> panel_wp, netxs::wptr<ui::base> window_wp) -> std::vector<app::shared::menu::item>
+    // Unified right-click menu: selected-transfer actions when a selection exists, otherwise
+    // tab-wide "All" actions for blank-area and header invocations, then tab-scoped selection.
+    inline auto xfer_menu(sftp_remote* ctrl, si32 status, bool blank,
+                          netxs::wptr<ui::base> panel_wp,
+                          netxs::wptr<ui::base> window_wp) -> std::vector<app::shared::menu::item>
     {
         namespace m = app::shared::menu;
         auto deface = [panel_wp]{ if (auto p = panel_wp.lock()) p->base::deface(); };
@@ -258,6 +261,9 @@ namespace netxs::app::parvion
         auto items  = std::vector<m::item>{};
         auto any_selected = std::ranges::any_of(ctrl->queue, sel);
         auto any_in_scope = std::ranges::any_of(ctrl->queue, scope);
+        auto bulk = blank || !any_selected;
+        auto target = [bulk, sel, scope](queue_item const& it){ return bulk ? scope(it) : sel(it); };
+        auto any_target = bulk ? any_in_scope : any_selected;
         auto pinnable = status == 0 && std::ranges::any_of(ctrl->queue, [sel](queue_item const& it)
         {
             return sel(it) && it.status == queue_item::queued;
@@ -268,16 +274,20 @@ namespace netxs::app::parvion
             row.action = [deface, fn](hids&){ fn(); deface(); };
             items.push_back(std::move(row));
         };
-        add("&Start", !any_selected, [ctrl, sel]{ ctrl->queue_start(sel); });
-        if (status == 0) add("&Pause", !any_selected, [ctrl, sel]{ ctrl->queue_pause(sel); });
-        add("&Remove", !any_selected, [ctrl, sel, panel_wp, window_wp]
+        add(bulk ? "&Start All" : "&Start", !any_target, [ctrl, target]{ ctrl->queue_start(target); });
+        if (status == 0)
+            add(bulk ? "&Pause All" : "&Pause", !any_target, [ctrl, target]{ ctrl->queue_pause(target); });
+        add(bulk ? "&Remove All" : "&Remove", !any_target, [ctrl, target, bulk, panel_wp, window_wp]
         {
-            auto count = si32{}; for (auto& it : ctrl->queue) if (sel(it)) ++count;
+            auto count = si32{}; for (auto& it : ctrl->queue) if (target(it)) ++count;
             if (!count) return;
-            auto run = [ctrl, sel, panel_wp]{ if (auto p = panel_wp.lock()) { ctrl->queue_remove(sel); p->base::deface(); } };
+            auto run = [ctrl, target, panel_wp]{ if (auto p = panel_wp.lock()) { ctrl->queue_remove(target); p->base::deface(); } };
             auto window = window_wp.lock(); if (!window) { run(); return; }
             app::shared::show_close_confirmation(*window, run, {}, app::shared::confirm_dialog_text{
-                count == 1 ? text{ "Remove this transfer from the queue?" } : "Remove " + std::to_string(count) + " transfers from the queue?", "Remove", "Cancel" });
+                bulk ? text{ "Remove all transfers on this tab?" }
+                     : count == 1 ? text{ "Remove this transfer from the queue?" }
+                                  : "Remove " + std::to_string(count) + " transfers from the queue?",
+                "Remove", "Cancel" });
         });
         if (status == 0) add("Pin to &Top", !pinnable, [ctrl, sel]{ ctrl->queue_pin_top(sel); });
 
@@ -422,17 +432,23 @@ namespace netxs::app::parvion
         cfg.menu      = [ctrl, status, window_wp](netxs::wptr<ui::base> panel_wp)
         {
             auto deface = [panel_wp]{ if (auto p = panel_wp.lock()) p->base::deface(); };
+            auto blank = ptr::shared(faux);
             auto mc = qmenu_cfg{};
-            mc.items = [ctrl, status, panel_wp, window_wp]{ return xfer_menu(ctrl, status, panel_wp, window_wp); };
-            mc.on_item_rclick = [ctrl, status, deface](si32 hit)
+            mc.items = [ctrl, status, blank, panel_wp, window_wp]
             {
+                return xfer_menu(ctrl, status, *blank, panel_wp, window_wp);
+            };
+            mc.on_item_rclick = [ctrl, status, blank, deface](si32 hit)
+            {
+                *blank = faux;
                 if (hit < 0 || hit >= (si32)ctrl->queue.size() || xfer_selected(ctrl->queue[(size_t)hit], status)) return;
                 for (auto& it : ctrl->queue) xfer_select(it, status, faux);
                 xfer_select(ctrl->queue[(size_t)hit], status, true);
                 deface();
             };
-            mc.on_blank_rclick = [ctrl, status, deface]
+            mc.on_blank_rclick = [ctrl, status, blank, deface]
             {
+                *blank = true;
                 auto any = faux;
                 for (auto& it : ctrl->queue) { any |= xfer_selected(it, status); xfer_select(it, status, faux); }
                 if (any) deface();

@@ -10,9 +10,8 @@ tables — the behaviors added on top of parvion/queue.hpp:
      right edge (one more column border than the other transfer tabs).
   2. A selected row's highlight ends at the last column; the area to its
      right stays blank (and no longer hit-tests as part of the row).
-  3. Right-clicking an item or blank area opens the same categorized context
-     menu, with selected-item actions disabled when the selection is empty and
-     Select All targeting every transfer on the active tab.
+  3. Right-clicking an item opens selected-transfer actions, while blank-area
+     clicks expose Start All / Pause All / Remove All scoped to the active tab.
   4. Pin to Top moves a pending item to the front of the pending group and is
      visible but disabled when the current selection cannot be pinned.
   5. Right-click with several rows selected applies the action to all of them.
@@ -582,12 +581,12 @@ def test_table_header_menu_button():
         s.feed(0.6)
 
         chars = s.screen()[0]
-        missing = [name for name in ("Start", "Pause", "Remove", "Copy", "Select All")
+        missing = [name for name in ("Start All", "Pause All", "Remove All", "Copy", "Select All")
                    if not grid_contains(chars, name)]
         if missing:
             print(f"FAIL - left-click did not open the table menu: missing {missing}")
             return False
-        menu_start = find_text(chars, "Start")
+        menu_start = find_text(chars, "Start All")
         if menu_start is None or menu_start[0] != hr + 2:
             print(f"FAIL - table-button menu opened on row "
                   f"{None if menu_start is None else menu_start[0]}, expected {hr + 2}")
@@ -596,14 +595,13 @@ def test_table_header_menu_button():
             print("FAIL - button opened the column menu instead of the table menu")
             return False
 
-        # With no selection, a selected-item command is present but disabled.
-        remove = find_text(chars, "Remove")
+        # With no selection, the header menu matches the blank-area tab-wide context.
+        remove = find_text(chars, "Remove All")
         s.click(remove[1] + 1, remove[0] + 1)
-        if not grid_contains(s.screen()[0], "Select All"):
-            print("FAIL - no-selection Remove command was interactive")
+        if not grid_contains(s.screen()[0], "Remove all transfers on this tab?"):
+            print("FAIL - no-selection header menu did not run Remove All")
             return False
-        s._write(b"\x1b")
-        s.feed(0.4)
+        s.write("\x1b", settle=0.4)  # Cancel without mutating the queue.
         chars = s.screen()[0]
         local = header_field(chars, "Local Name", hr)
         after = named_row_order(chars, names)
@@ -615,7 +613,11 @@ def test_table_header_menu_button():
         note = find_text(chars, "notes.txt")
         s.click(note[1] + 1, note[0] + 1)
         s.click(1, hr + 1)
-        copy = find_text(s.screen()[0], "Copy")
+        chars = s.screen()[0]
+        if any(grid_contains(chars, name) for name in ("Start All", "Pause All", "Remove All")):
+            print("FAIL - selected header menu still shows tab-wide actions")
+            return False
+        copy = find_text(chars, "Copy")
         if copy is None:
             print("FAIL - single-selection menu missing Copy")
             return False
@@ -954,11 +956,11 @@ def test_expand_button_press_and_hold_feedback():
         return True
 
 
-def test_blank_area_menu_is_unified():
-    """Blank clicks show the unified menu with inert selected-transfer actions."""
-    print("TEST: parvion - blank-area menu is unified + disables selection actions ... ", end="", flush=True)
+def test_blank_area_menu_uses_all_actions():
+    """Transferring blank clicks expose tab-wide actions; Pause/Start affect every row."""
+    print("TEST: parvion - Transferring blank menu runs Start/Pause All ... ", end="", flush=True)
     with ParvionSession(DEMO_ENV) as s:
-        chars, bg_before = s.screen()
+        chars = s.screen()[0]
         pos = find_text(chars, "notes.txt")
         queued = find_text(chars, "queued_00")
         if pos is None:
@@ -970,28 +972,64 @@ def test_blank_area_menu_is_unified():
         r, _ = pos
         s.click(100, r + 1, button=2)  # Right-click blank area to the right of the columns.
         chars = s.screen()[0]
-        missing = [w for w in ("Start", "Pause", "Remove", "Pin to Top", "Copy", "Select All")
+        missing = [w for w in ("Start All", "Pause All", "Remove All", "Pin to Top", "Copy", "Select All")
                    if not grid_contains(chars, w)]
         if missing:
             print(f"FAIL - menu missing {missing}")
             return False
-        old = [w for w in ("Start All", "Pause All", "Remove All") if grid_contains(chars, w)]
-        if old:
-            print(f"FAIL - old bulk actions still present: {old}")
-            return False
         if not menu_has_separator_between(chars, "Pin to Top", "Select All"):
             print("FAIL - item actions and Select All are not separated")
             return False
-        start = find_text(chars, "Start")
-        s.click(start[1] + 1, start[0] + 1)
-        if not grid_contains(s.screen()[0], "Select All"):
-            print("FAIL - disabled Start action dismissed the blank-area menu")
+
+        if not click_label(s, "Pause All"):
+            print("FAIL - Pause All entry not found")
             return False
-        s.write("a")  # Select &All.
-        bg_after = s.screen()[1]
-        if (bg_after[pos[0]][pos[1]] == bg_before[pos[0]][pos[1]]
-            or bg_after[queued[0]][queued[1]] == bg_before[queued[0]][queued[1]]):
-            print("FAIL - Select All did not select every transfer on the active tab")
+        names = ("notes.txt", "bigfile.iso", "queued_00", "queued_01", "queued_02")
+        for name in names:
+            row = find_text(s.screen()[0], name)
+            if row is None or progress_text(s.screen()[0], row[0]) != "paused":
+                print(f"FAIL - Pause All did not pause {name}")
+                return False
+
+        pos = find_text(s.screen()[0], "notes.txt")
+        s.click(100, pos[0] + 1, button=2)
+        if not click_label(s, "Start All"):
+            print("FAIL - Start All entry not found")
+            return False
+        for name in names:
+            row = find_text(s.screen()[0], name)
+            if row is None or progress_text(s.screen()[0], row[0]) != "queued":
+                print(f"FAIL - Start All did not restart {name}")
+                return False
+        print("PASS")
+        return True
+
+
+def test_blank_remove_all_is_tab_scoped():
+    """Remove All confirms once and removes every transfer on only the active tab."""
+    print("TEST: parvion - Transferring blank Remove All is tab-scoped ... ", end="", flush=True)
+    with ParvionSession(DEMO_ENV) as s:
+        chars = s.screen()[0]
+        pos = find_text(chars, "notes.txt")
+        if pos is None:
+            print("FAIL - item row not found")
+            return False
+        failed_before = tab_count(chars, "Failed")
+        succeeded_before = tab_count(chars, "Succeeded")
+        s.click(100, pos[0] + 1, button=2)
+        if not click_label(s, "Remove All"):
+            print("FAIL - Remove All entry not found")
+            return False
+        if not grid_contains(s.screen()[0], "Remove all transfers on this tab?"):
+            print("FAIL - tab-wide removal confirmation not shown")
+            return False
+        s.write("\r")
+        chars = s.screen()[0]
+        if tab_count(chars, "Transferring") != 0:
+            print("FAIL - Remove All left transfers on the active tab")
+            return False
+        if tab_count(chars, "Failed") != failed_before or tab_count(chars, "Succeeded") != succeeded_before:
+            print("FAIL - Remove All changed a different transfer tab")
             return False
         print("PASS")
         return True
@@ -1111,31 +1149,64 @@ def test_failed_succeeded_item_menu_omits_pause_and_pin():
         return True
 
 
-def test_failed_succeeded_blank_menu_uses_select_all():
-    """Failed/Succeeded blank menus offer Select All without the old bulk actions."""
-    print("TEST: parvion - Failed/Succeeded blank menus use Select All ... ", end="", flush=True)
+def test_failed_succeeded_blank_menu_uses_all_actions():
+    """Failed/Succeeded blank menus offer Start/Remove All, but not Pause All."""
+    print("TEST: parvion - Failed/Succeeded blank menus run tab-wide actions ... ", end="", flush=True)
     with ParvionSession(DEMO_ENV) as s:
-        for tab_label, item_name in (("Failed (", "upload.bin"), ("Succeeded (", "archive.tar")):
-            if not click_label(s, tab_label):
-                print(f"FAIL - {tab_label} tab not found")
-                return False
-            pos = find_text(s.screen()[0], item_name)
-            if pos is None:
-                print(f"FAIL - item {item_name} not found")
-                return False
-            # Right-click the last grid cell, beyond the Failed table's content.
-            s.click(COLS, pos[0] + 1, button=2)
-            chars = s.screen()[0]
-            missing = [w for w in ("Start", "Remove", "Copy", "Select All") if not grid_contains(chars, w)]
-            if missing:
-                print(f"FAIL - {tab_label} blank-area menu missing {missing}")
-                return False
-            old = [w for w in ("Start All", "Pause All", "Remove All") if grid_contains(chars, w)]
-            if old:
-                print(f"FAIL - {tab_label} blank-area menu still shows {old}")
-                return False
-            s._write(b"\x1b")  # Dismiss the menu before the next tab.
-            s.feed(0.3)
+        if not click_label(s, "Failed ("):
+            print("FAIL - Failed tab not found")
+            return False
+        pos = find_text(s.screen()[0], "upload.bin")
+        if pos is None:
+            print("FAIL - failed item not found")
+            return False
+        succeeded_before = tab_count(s.screen()[0], "Succeeded")
+        s.click(pos[1] + 1, pos[0] + 2, button=2)  # Empty body row immediately below the item.
+        chars = s.screen()[0]
+        missing = [w for w in ("Start All", "Remove All", "Copy", "Select All") if not grid_contains(chars, w)]
+        if missing:
+            print(f"FAIL - Failed blank-area menu missing {missing}")
+            return False
+        if grid_contains(chars, "Pause All"):
+            print("FAIL - Failed blank-area menu shows Pause All")
+            return False
+        if not click_label(s, "Remove All"):
+            print("FAIL - Failed Remove All entry not found")
+            return False
+        if not grid_contains(s.screen()[0], "Remove all transfers on this tab?"):
+            print("FAIL - Failed Remove All confirmation not shown")
+            return False
+        s.write("\r")
+        chars = s.screen()[0]
+        if tab_count(chars, "Failed") != 0 or tab_count(chars, "Succeeded") != succeeded_before:
+            print("FAIL - Failed Remove All was not scoped to the Failed tab")
+            return False
+
+        if not click_label(s, "Succeeded ("):
+            print("FAIL - Succeeded tab not found")
+            return False
+        pos = find_text(s.screen()[0], "archive.tar")
+        if pos is None:
+            print("FAIL - succeeded item not found")
+            return False
+        s.click(pos[1] + 1, pos[0] + 2, button=2)  # Empty body row immediately below the item.
+        chars = s.screen()[0]
+        missing = [w for w in ("Start All", "Remove All", "Copy", "Select All") if not grid_contains(chars, w)]
+        if missing:
+            print(f"FAIL - Succeeded blank-area menu missing {missing}")
+            return False
+        if grid_contains(chars, "Pause All"):
+            print("FAIL - Succeeded blank-area menu shows Pause All")
+            return False
+        if not click_label(s, "Start All"):
+            print("FAIL - Succeeded Start All entry not found")
+            return False
+        if tab_count(s.screen()[0], "Succeeded") != 0:
+            print("FAIL - Start All left the transfer on the Succeeded tab")
+            return False
+        if not click_label(s, "Transferring (") or not grid_contains(s.screen()[0], "archive.tar"):
+            print("FAIL - Succeeded Start All did not requeue the transfer")
+            return False
         print("PASS")
         return True
 
@@ -2101,12 +2172,13 @@ TESTS = [
     test_right_click_activates_queue,
     test_selection_highlight_ends_at_last_column,
     test_expand_button_press_and_hold_feedback,
-    test_blank_area_menu_is_unified,
+    test_blank_area_menu_uses_all_actions,
+    test_blank_remove_all_is_tab_scoped,
     test_right_click_blank_clears_selection,
     test_item_menu_is_unified,
     test_transferring_item_menu_disables_pin,
     test_failed_succeeded_item_menu_omits_pause_and_pin,
-    test_failed_succeeded_blank_menu_uses_select_all,
+    test_failed_succeeded_blank_menu_uses_all_actions,
     test_copy_fields_by_transfer_tab,
     test_header_menu_lists_column_toggles,
     test_header_menu_toggles_column_visibility,
