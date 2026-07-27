@@ -220,6 +220,8 @@ namespace netxs::app::parvion
             seed_demo_log(*ctrl);
             seed_demo_hash(*ctrl);
             auto window = ui::cake::ctor();
+            auto& window_clr = window->base::field(skin::color(tone::window_clr));
+            auto& is_focused = window->base::field(faux);
             window->plugin<pro::focus>(pro::focus::mode::hub)
                   ->plugin<pro::keybd>()
                   ->plugin<pro::cache>()
@@ -235,6 +237,15 @@ namespace netxs::app::parvion
                           auto title = ansi::jet(bias::left).add("Parvion — Parallel SFTP");
                           boss.base::riseup(tier::preview, e2::form::prop::ui::header, title);
                       };
+                      boss.LISTEN(tier::release, e2::form::state::focus::count, count)
+                      {
+                          if (std::exchange(is_focused, !!count) != is_focused)
+                          {
+                              boss.base::deface();
+                              window_clr = is_focused ? skin::color(tone::winfocus)
+                                                      : skin::color(tone::window_clr);
+                          }
+                      };
                   });
             auto root = window->attach(ui::fork::ctor(axis::Y))
                 ->colors(col_text, col_bg);
@@ -244,6 +255,17 @@ namespace netxs::app::parvion
                     auto parvion_context = config.settings::push_context("/config/parvion/");
                     auto [menu_block, cover, menu_data] = app::shared::menu::load(config);
                     root->attach(slot::_1, menu_block);
+                    menu_block->shader(window_clr);
+                    auto menu_id = menu_block->id;
+                    cover->invoke([&](auto& boss)
+                    {
+                        auto bar = cell{ "▀"sv }.link(menu_id);
+                        boss.LISTEN(tier::release, e2::render::any, parent_canvas, -, (bar))
+                        {
+                            auto fgc = window_clr.bgc();
+                            parent_canvas.fill([&](cell& c){ c.fgc(fgc).txt(bar).link(bar); });
+                        };
+                    });
                 }
                 auto body = root->attach(slot::_2, ui::fork::ctor(axis::Y));
                     // Quick-connect bar: interactive Host/User/Pass/Port + Connect.
