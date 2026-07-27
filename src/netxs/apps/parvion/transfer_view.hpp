@@ -36,7 +36,7 @@ namespace netxs::app::parvion
     struct xfer_cols
     {
         // Server starts in auto mode so it fits the same user@host:port caption used by Checksums.
-        std::array<si32, q_ncol> col_w{ 0, 25, 25, 9, 11, 11 };
+        std::array<si32, q_ncol> col_w{ 22, 25, 25, 9, 11, 11 };
         std::array<bool, q_ncol + 1> col_shown{ true, true, true, true, true, true, true };
         si32 reason_w_override = 0;
     };
@@ -222,8 +222,6 @@ namespace netxs::app::parvion
         for (auto i = si32{}; i < n; ++i)
         {
             auto width = i < q_ncol ? cols->col_w[(size_t)i] : xfer_reason_w(*cols, status);
-            if (i == q_server && width <= 0)
-                width = q_col_fit_w(q_headers[(size_t)i], cell_width(xfer_server(ctrl)), true);
             t.add_column({ text{ q_headers[(size_t)i] }, width, i >= q_size && i <= q_speed, true, i },
                          xfer_col_visible(*cols, status, i), text{ q_menu_headers[(size_t)i] });
         }
