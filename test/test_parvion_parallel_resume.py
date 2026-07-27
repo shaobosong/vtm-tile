@@ -2,7 +2,7 @@
 # Copyright (c) Shaobo Song
 # Licensed under the MIT license.
 
-"""Regression coverage for resumed chunks parked by the SSH connect-burst limiter."""
+"""Regression coverage for shared transfer channels and parked-chunk resume."""
 
 import glob
 import hashlib
@@ -105,7 +105,10 @@ def queue_action_bounded(s, label):
     header = R.T.find_text(s.screen()[0], "Local Name")
     if header is None:
         return "queue header not found"
-    click_bounded(s, 100, header[0] + 2, button=2)
+    # One row below the active parent: open the blank-area menu (Pause/Start All), not
+    # the item menu. The queue now spans the full width, so column 100 is still part of
+    # the parent row itself.
+    click_bounded(s, 100, header[0] + 3, button=2)
     action = R.T.find_text(s.screen()[0], label)
     if action is None:
         return f"'{label}' not in the queue menu"
@@ -240,7 +243,85 @@ def test_ten_channel_pause_resume():
     return True
 
 
-TESTS = [test_ten_channel_pause_resume]
+def test_shared_budget_runs_distinct_files_concurrently():
+    print("TEST: parvion shared two-channel budget runs distinct files concurrently ... ",
+          end="", flush=True)
+    sroot = tempfile.mkdtemp(prefix="parvionmulti_srv_")
+    local = tempfile.mkdtemp(prefix="parvionmulti_local_")
+    batch = os.path.join(sroot, "batch")
+    os.mkdir(batch)
+    names = ["a.bin", "b.bin", "c.bin"]
+    payload = bytes((i * 29 + 7) & 0xff for i in range(1 << 20))
+    for n in names:
+        with open(os.path.join(batch, n), "wb") as f:
+            for _ in range(4):
+                f.write(payload)
+    srv = R.LocalSftpServer(sroot, delay=0.03)
+    try:
+        env = {
+            # Each file is itself eligible for two chunks. New-file-first must spend the
+            # two shared slots on two different parents before widening either file.
+            "PARVION_THRESHOLD_BYTES": "1",
+            "PARVION_MAX_CONN": "2",
+            "PARVION_QUEUE_ALLOCATION": "new-file-first",
+        }
+        with R.T.ParvionSession(local, env=env) as s:
+            if not R.connect(s, srv.port):
+                print("FAIL - could not connect to the local SFTP server")
+                return False
+            err = start_transfer_bounded(s, "batch", upload=False)
+            if err:
+                print(f"FAIL - {err}")
+                return False
+
+            # Recursive listing enqueues all three children together. With the old scalar `active`
+            # only one row could show a percentage; the shared two-channel scheduler must expose
+            # two distinct live parents while the third remains queued.
+            observed = set()
+            deadline = time.time() + 20.0
+            while time.time() < deadline and len(observed) < 2:
+                pump_bounded(s, 0.15)
+                chars = s.screen()[0]
+                live = set()
+                for row in range(R.T.ROWS):
+                    line = R.T.row_text(chars, row)
+                    for name in names:
+                        if name in line and "%" in line and "queued" not in line:
+                            live.add(name)
+                if len(live) > len(observed):
+                    observed = live
+            if len(observed) < 2:
+                print(f"FAIL - only observed live progress for {sorted(observed)}")
+                return False
+
+            if not R.wait_tab_label(s, "Succeeded (3)", timeout=90.0):
+                queue_text = " | ".join(
+                    R.T.row_text(s.screen()[0], row).strip()
+                    for row in range(R.T.ROWS)
+                    if any(word in R.T.row_text(s.screen()[0], row)
+                           for word in ("a.bin", "b.bin", "c.bin", "Transferring", "Failed", "Succeeded")))
+                landed = sorted(os.listdir(os.path.join(local, "batch"))) \
+                    if os.path.isdir(os.path.join(local, "batch")) else []
+                print(f"FAIL - the three-file batch did not complete; queue={queue_text!r}, landed={landed}")
+                return False
+            for name in names:
+                src = os.path.join(batch, name)
+                dst = os.path.join(local, "batch", name)
+                if not os.path.isfile(dst) or file_hash(dst) != file_hash(src):
+                    print(f"FAIL - {name} was not downloaded byte-identically")
+                    return False
+        print("PASS")
+        return True
+    finally:
+        srv.close()
+        shutil.rmtree(local, ignore_errors=True)
+        shutil.rmtree(sroot, ignore_errors=True)
+
+
+TESTS = [
+    test_shared_budget_runs_distinct_files_concurrently,
+    test_ten_channel_pause_resume,
+]
 
 
 def main():
@@ -252,14 +333,18 @@ def main():
         print(f"ERROR: vtm-tile binary not found at {R.T.VTM_TILE_BINARY}")
         return 1
     kill_all_vtm()
-    try:
-        ok = test_ten_channel_pause_resume()
-    finally:
-        kill_all_vtm()
+    passed = failed = 0
+    for test in TESTS:
+        try:
+            ok = test()
+        finally:
+            kill_all_vtm()
+        passed += 1 if ok else 0
+        failed += 0 if ok else 1
     print("\n" + "=" * 60)
-    print(f"Results: {1 if ok else 0}/1 passed, {0 if ok else 1} failed")
+    print(f"Results: {passed}/{passed + failed} passed, {failed} failed")
     print("=" * 60)
-    return 0 if ok else 1
+    return 0 if failed == 0 else 1
 
 
 if __name__ == "__main__":

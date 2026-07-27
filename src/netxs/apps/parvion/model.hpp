@@ -49,6 +49,7 @@ namespace netxs::app::parvion
         };
         static constexpr auto table_count = size_t{ 3 }; // Transferring, Failed, Succeeded.
 
+        ui64     id = 0;            // Stable session-only identity used by concurrent transfer jobs.
         bool     download = true;   // true: remote->local; false: local->remote.
         text     local_path;        // Absolute local path.
         text     remote_path;       // Absolute remote path.

@@ -365,10 +365,11 @@ namespace netxs::app::parvion
         if (key == q_local) return { "Part " + std::to_string(child + 1) + "/" + std::to_string(it.chunk_count) + "  (" + human_size(start) + "–" + human_size(end) + ")", theme::subtext };
         if (key == q_progress)
         {
-            auto live = qi == ctrl->active && ctrl->workers.size() == ranges.size();
+            auto job = ctrl->find_transfer_job(it.id);
+            auto live = job && job->workers.size() == ranges.size();
             if (live)
             {
-                auto& wkr = *ctrl->workers[(size_t)child];
+                auto& wkr = *job->workers[(size_t)child];
                 auto full = (double)(end - start);
                 if (wkr.state == xfer_worker::s_ok) return xfer_progress_cell(progress, row, 1.0, "100.00%", theme::dir_fg);
                 auto fraction = full > 0.0 ? progressbar_fraction((double)wkr.done / full) : 0.0;
@@ -459,7 +460,8 @@ namespace netxs::app::parvion
         {
             auto rows = xfer_rows(ctrl, status);
             for (auto i = si32{}; i < (si32)rows.size(); ++i)
-                if (rows[(size_t)i].child == -1 && rows[(size_t)i].qi == ctrl->active)
+                if (rows[(size_t)i].child == -1
+                 && ctrl->find_transfer_job(ctrl->queue[(size_t)rows[(size_t)i].qi].id))
                     return table_follow_target{ table_follow_target::source_row, i };
             return table_follow_target{ table_follow_target::tail };
         };

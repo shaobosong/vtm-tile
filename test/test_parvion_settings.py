@@ -157,7 +157,8 @@ def test_sftp_tab():
         for needle in ("Public Key Authentication", "Private keys:", "Filename",
                        "Comment", "Data", "Add key file", "Remove key",
                        "Enable compression", "Parallel transfers",
-                       "Maximum parallel connections"):
+                       "Maximum parallel transfer connections",
+                       "Channel allocation", "Strict queue order"):
             if needle not in blob:
                 print(f"FAIL - '{needle}' missing"); return False
     print("PASS"); return True
@@ -204,6 +205,33 @@ def test_unit_dropdown_selects_and_persists():
     vals = _settings_file(cfg)
     if vals.get("SFTP parallel transfer threshold unit") != ["3"]:
         print(f"FAIL - unit not persisted as GiB(3): {vals.get('SFTP parallel transfer threshold unit')}"); return False
+    print("PASS"); return True
+
+
+def test_allocation_dropdown_selects_and_persists():
+    print("TEST: transfer allocation dropdown selects + persists ... ", end="", flush=True)
+    cfg = tempfile.mkdtemp(prefix="pvset_")
+    with _session(cfg) as s:
+        _open_dialog(s)
+        _goto_sftp(s)
+        chars = s.screen()[0]
+        strict = T.find_text(chars, "Strict queue order")
+        if not strict:
+            print("FAIL - default strict allocation dropdown not found"); return False
+        s.click(strict[1] + 1, strict[0] + 1); s.feed(0.7)
+        chars = s.screen()[0]
+        new_file = T.find_text(chars, "New file first")
+        if not new_file:
+            print("FAIL - allocation dropdown did not open"); return False
+        s.click(new_file[1] + 1, new_file[0] + 1); s.feed(0.7)
+        chars = s.screen()[0]
+        if not T.find_text(chars, "New file first"):
+            print("FAIL - allocation did not change"); return False
+        ok = T.find_text(chars, " OK ")
+        s.click(ok[1] + 2, ok[0] + 1); s.feed(1.0)
+    vals = _settings_file(cfg)
+    if vals.get("SFTP transfer queue allocation") != ["1"]:
+        print(f"FAIL - allocation not persisted: {vals.get('SFTP transfer queue allocation')}"); return False
     print("PASS"); return True
 
 
@@ -1090,6 +1118,7 @@ TESTS = [
     test_add_key_picker_context_menu_omits_transfer_actions,
     test_compression_persists,
     test_unit_dropdown_selects_and_persists,
+    test_allocation_dropdown_selects_and_persists,
     test_add_key_pubkey_parse_and_persist,
     test_reopen_repopulates_key_metadata,
 ]
