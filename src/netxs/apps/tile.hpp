@@ -2826,6 +2826,13 @@ namespace netxs::app::tile
                     auto hover_sb_ptr     = ptr::shared(faux);                  // Mouse hovering over scrollbar row.
                     auto dragging_sb_ptr  = ptr::shared(faux);                  // Currently dragging scrollbar thumb.
                     auto drag_sb_grab_ptr = ptr::shared(si32{ 0 });             // Grab offset: mouse x - thumb left edge at drag start.
+                    // Pane thumbnail viewport panning (left-mouse drag in the top section).
+                    // Offsets are keyed by (workspace index, pane index) and live only while
+                    // the popup is open (this scope), so they reset when the popup closes.
+                    auto pane_view_off_ptr   = ptr::shared(std::map<std::pair<size_t, si32>, twod>{}); // Per-pane viewport offset (snapshot cell shown at the card's top-left).
+                    auto dragging_pane_ptr   = ptr::shared(si32{ -1 });         // Pane index being left-dragged (-1 = none).
+                    auto drag_pane_ws_ptr    = ptr::shared(size_t{ 0 });        // Workspace index captured at pane drag start.
+                    auto drag_pane_start_ptr = ptr::shared(twod{});             // Pane viewport offset at drag start.
                     // Keyboard navigation state.
                     // focus_section: 0 = top section (pane thumbnails), 1 = bottom section (workspace switcher).
                     // Tab toggles between sections; arrow keys then navigate within the focused section.
@@ -2868,7 +2875,7 @@ namespace netxs::app::tile
                         ovl.LISTEN(tier::release, e2::render::any, parent_canvas, -,
                             (workspaces_ptr, current_ws_index_ptr, preview_idx_ptr, scroll_off_ptr,
                              hover_ws_ptr, hover_pane_ptr, hover_sb_ptr, dragging_sb_ptr,
-                             focus_section_ptr, kbd_pane_idx_ptr,
+                             focus_section_ptr, kbd_pane_idx_ptr, pane_view_off_ptr,
                              ovl_id, collect_ws_panes_fn, find_content_fn, draw_popup_box))
                         {
                             auto canvas_area = parent_canvas.area();
@@ -3147,11 +3154,21 @@ namespace netxs::app::tile
                                                     {
                                                         snap.template crop<true>(twod{ content_area.size.x, content_area.size.y - top_skip });
                                                     }
-                                                    auto crop_w = std::min(snap.size().x, pin.size.x);
-                                                    auto crop_h = std::min(snap.size().y, pin.size.y);
-                                                    snap.crop(twod{ crop_w, crop_h });
-                                                    snap.move_basis(pin.coor);
-                                                    parent_canvas.fill(snap, [ovl_id](cell& dst, cell const& src) { dst = src; dst.link(ovl_id); });
+                                                    // Per-pane viewport panning: clamp the stored offset to the
+                                                    // snapshot bounds and blit the sub-rectangle starting at that
+                                                    // offset instead of always showing the top-left corner.
+                                                    auto& off = (*pane_view_off_ptr)[{ prev_idx, pidx }];
+                                                    off.x = std::clamp(off.x, 0, std::max(0, snap.size().x - pin.size.x));
+                                                    off.y = std::clamp(off.y, 0, std::max(0, snap.size().y - pin.size.y));
+                                                    auto crop_w = std::min(snap.size().x - off.x, pin.size.x);
+                                                    auto crop_h = std::min(snap.size().y - off.y, pin.size.y);
+                                                    auto view = ui::face{};
+                                                    view.size(twod{ crop_w, crop_h });
+                                                    view.move_basis(snap.core::coor() + off);
+                                                    view.wipe(cell{}.bgc(pbg).fgc(pfg).txt(whitespace));
+                                                    view.core::fill(snap, [](cell& dst, cell const& src){ dst = src; });
+                                                    view.move_basis(pin.coor);
+                                                    parent_canvas.fill(view, [ovl_id](cell& dst, cell const& src) { dst = src; dst.link(ovl_id); });
                                                     rendered = true;
                                                 }
                                             }
@@ -3187,9 +3204,13 @@ namespace netxs::app::tile
                         ovl.on(tier::mouserelease, input::key::MouseMove,
                             [workspaces_ptr, current_ws_index_ptr, preview_idx_ptr, scroll_off_ptr,
                              hover_ws_ptr, hover_pane_ptr, hover_sb_ptr,
-                             kbd_pane_idx_ptr, kbd_lock_coord_ptr, focus_section_ptr,
+                             kbd_pane_idx_ptr, kbd_lock_coord_ptr, focus_section_ptr, dragging_pane_ptr,
                              collect_ws_panes_fn, overlay_shadow, popup_ready_ptr](hids& gear)
                         {
+                            // While a pane viewport drag (left-mouse pan) is active, suppress all
+                            // hover-derived updates so the previewed workspace and the keyboard
+                            // pane cursor stay stable under the moving cursor.
+                            if (*dragging_pane_ptr >= 0) return;
                             // Initialization gate: discard the very first MouseMove (which reflects
                             // the cursor position before the popup opened) so that a pre-resting
                             // cursor never highlights a tab on popup entry. Lock kbd_lock_coord_ptr
@@ -3337,15 +3358,51 @@ namespace netxs::app::tile
                             }
                         });
 
-                        // Mouse wheel: scroll the bottom workspace switcher.
+                        // Mouse wheel: pan the hovered pane thumbnail viewport (top section,
+                        // vertical wheel = Up/Down, horizontal wheel = Left/Right), or scroll
+                        // the bottom workspace switcher otherwise.
                         ovl.on(tier::mouserelease, input::key::MouseWheel,
-                            [workspaces_ptr, scroll_off_ptr, overlay_shadow](hids& gear)
+                            [workspaces_ptr, preview_idx_ptr, scroll_off_ptr, pane_view_off_ptr,
+                             dragging_pane_ptr, collect_ws_panes_fn, overlay_shadow](hids& gear)
                         {
                             auto ovl_ptr = overlay_shadow.lock();
                             if (!ovl_ptr) return;
                             auto full_w = ovl_ptr->base::area().size.x;
                             auto full_h = ovl_ptr->base::area().size.y;
                             auto bot_h = std::max(4, full_h / 4) | 1; // Ensure odd so thumb_h (bot_h - 2) is also odd.
+                            auto top_h = full_h - bot_h;
+                            auto mx = (si32)gear.coord.x;
+                            auto my = (si32)gear.coord.y;
+                            // Wheel over a top-section pane card: pan its viewport (unless a
+                            // left-drag pan is in progress, which owns the offset).
+                            if (my >= 0 && my < top_h && *dragging_pane_ptr < 0)
+                            {
+                                auto prev_idx = *preview_idx_ptr;
+                                if (prev_idx < workspaces_ptr->size())
+                                {
+                                    auto ws_veer = (*workspaces_ptr)[prev_idx];
+                                    auto top_area = rect{{ 0, 0 }, { full_w, top_h }};
+                                    auto panes = std::vector<ws_thumb_pane_t>{};
+                                    collect_ws_panes_fn(collect_ws_panes_fn, std::static_pointer_cast<ui::base>(ws_veer), top_area, panes);
+                                    auto pidx = si32{};
+                                    for (auto& pane : panes)
+                                    {
+                                        auto pr = pane.area;
+                                        if (mx >= pr.coor.x && mx < pr.coor.x + pr.size.x &&
+                                            my >= pr.coor.y && my < pr.coor.y + pr.size.y)
+                                        {
+                                            auto& off = (*pane_view_off_ptr)[{ prev_idx, pidx }];
+                                            if (gear.hzwhl) off.x += -gear.whlsi; // Left/Right pan.
+                                            else            off.y += -gear.whlsi; // Up/Down pan.
+                                            // Clamped to the snapshot bounds at render time.
+                                            ovl_ptr->base::deface();
+                                            gear.dismiss();
+                                            return;
+                                        }
+                                        pidx++;
+                                    }
+                                }
+                            }
                             auto thumb_h = bot_h - popup_bottom_pad_y - popup_scrollbar_h;
                             if (thumb_h < 3) thumb_h = 3;
                             auto thumb_w = std::max(5, thumb_h * popup_ws_thumb_ratio_w / popup_ws_thumb_ratio_h) | 1; // Ensure odd width for centered cross.
@@ -3622,6 +3679,83 @@ namespace netxs::app::tile
                             if (!*dragging_sb_ptr) return;
                             *dragging_sb_ptr = faux;
                             *hover_sb_ptr = faux;
+                            if (auto p = overlay_shadow.lock()) p->base::deface();
+                            gear.dismiss();
+                        });
+
+                        // Left drag start (pane panning): begin panning a pane thumbnail viewport
+                        // when the press lands inside a top-section pane card. This coexists with
+                        // the scrollbar drag handler above: the two hit regions are disjoint
+                        // (top section vs bottom scrollbar row).
+                        ovl.on(tier::mouserelease, input::key::LeftDragStart,
+                            [workspaces_ptr, preview_idx_ptr, pane_view_off_ptr,
+                             dragging_pane_ptr, drag_pane_ws_ptr, drag_pane_start_ptr,
+                             collect_ws_panes_fn, overlay_shadow](hids& gear)
+                        {
+                            auto ovl_ptr = overlay_shadow.lock();
+                            if (!ovl_ptr) return;
+                            auto full_area = ovl_ptr->base::area();
+                            auto full_w = full_area.size.x;
+                            auto full_h = full_area.size.y;
+                            auto mx = (si32)gear.pressxy.x;
+                            auto my = (si32)gear.pressxy.y;
+                            auto bot_h = std::max(4, full_h / 4) | 1; // Ensure odd so thumb_h (bot_h - 2) is also odd.
+                            auto top_h = full_h - bot_h;
+                            if (my < 0 || my >= top_h) return; // Only pan inside the top section.
+                            auto prev_idx = *preview_idx_ptr;
+                            if (prev_idx >= workspaces_ptr->size()) return;
+                            auto ws_veer = (*workspaces_ptr)[prev_idx];
+                            auto top_area = rect{{ 0, 0 }, { full_w, top_h }};
+                            auto panes = std::vector<ws_thumb_pane_t>{};
+                            collect_ws_panes_fn(collect_ws_panes_fn, std::static_pointer_cast<ui::base>(ws_veer), top_area, panes);
+                            auto pidx = si32{};
+                            for (auto& pane : panes)
+                            {
+                                auto pr = pane.area;
+                                if (mx >= pr.coor.x && mx < pr.coor.x + pr.size.x &&
+                                    my >= pr.coor.y && my < pr.coor.y + pr.size.y)
+                                {
+                                    *dragging_pane_ptr = pidx;
+                                    *drag_pane_ws_ptr = prev_idx;
+                                    *drag_pane_start_ptr = (*pane_view_off_ptr)[{ prev_idx, pidx }];
+                                    gear.dismiss();
+                                    return;
+                                }
+                                pidx++;
+                            }
+                        });
+
+                        // Left drag pull (pane panning): pan the pane viewport. The content follows
+                        // the mouse (touch-style panning), so the viewport offset moves opposite the drag.
+                        ovl.on(tier::mouserelease, input::key::LeftDragPull,
+                            [pane_view_off_ptr, dragging_pane_ptr, drag_pane_ws_ptr,
+                             drag_pane_start_ptr, overlay_shadow](hids& gear)
+                        {
+                            if (*dragging_pane_ptr < 0) return;
+                            auto ovl_ptr = overlay_shadow.lock();
+                            if (!ovl_ptr) return;
+                            auto delta = twod{ (si32)gear.coord.x - (si32)gear.pressxy.x, (si32)gear.coord.y - (si32)gear.pressxy.y };
+                            (*pane_view_off_ptr)[{ *drag_pane_ws_ptr, *dragging_pane_ptr }] = *drag_pane_start_ptr - delta; // Clamped at render time.
+                            ovl_ptr->base::deface();
+                            gear.dismiss();
+                        });
+
+                        // Left drag stop (pane panning): end pane viewport panning.
+                        ovl.on(tier::mouserelease, input::key::LeftDragStop,
+                            [dragging_pane_ptr, overlay_shadow](hids& gear)
+                        {
+                            if (*dragging_pane_ptr < 0) return;
+                            *dragging_pane_ptr = -1;
+                            if (auto p = overlay_shadow.lock()) p->base::deface();
+                            gear.dismiss();
+                        });
+
+                        // Left drag cancel (pane panning): clear pane panning drag state.
+                        ovl.on(tier::mouserelease, input::key::LeftDragCancel,
+                            [dragging_pane_ptr, overlay_shadow](hids& gear)
+                        {
+                            if (*dragging_pane_ptr < 0) return;
+                            *dragging_pane_ptr = -1;
                             if (auto p = overlay_shadow.lock()) p->base::deface();
                             gear.dismiss();
                         });
