@@ -268,6 +268,31 @@ namespace netxs::app::parvion
                     });
                 }
                 auto body = root->attach(slot::_2, ui::fork::ctor(axis::Y));
+                    body->invoke([&](auto& boss)
+                    {
+                        boss.on(tier::mouserelease, input::key::MouseDoubleClick, [](hids& gear)
+                        {
+                            gear.dismiss(true);
+                        });
+                        boss.on(tier::mouserelease, input::key::MouseMultiClick, [](hids& gear)
+                        {
+                            gear.dismiss(true);
+                        });
+                        boss.on(tier::mouserelease, input::key::LeftClick, [](hids& gear)
+                        {
+                            if (gear.meta(hids::anyCtrl | hids::anyAlt | hids::anyShift))
+                            {
+                                gear.dismiss(true);
+                            }
+                        });
+                        boss.on(tier::mouserelease, input::key::MouseWheel, [](hids& gear)
+                        {
+                            if (gear.meta(hids::anyCtrl | hids::anyAlt | hids::anyShift))
+                            {
+                                gear.dismiss(true);
+                            }
+                        });
+                    });
                     // Quick-connect bar: interactive Host/User/Pass/Port + Connect.
                     body->attach(slot::_1, make_connect_bar(ctrl.get()))
                         ->limits({ 1, 1 }, { -1, 1 });
