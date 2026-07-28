@@ -1762,17 +1762,15 @@ namespace netxs::app::shared
                     auto rect_h          = popup_h + (has_top_edge ? 1 : 0)
                                                    + (has_bottom_edge ? 1 : 0);
                     *painted_rect_ptr = rect{ { px, rect_y }, { popup_w, rect_h } };
-                    // Per-level palette. Each submenu level subtracts a
-                    // fixed amount from every RGB channel of the root
-                    // popup's background, so deeper levels are visibly
-                    // darker than their parent. Hover brightens the
-                    // level's bg by a small amount; the foreground stays
-                    // constant so labels remain equally legible whether
-                    // a row is hovered or not.
-                    auto darken = std::min(depth * 8, 40);
-                    auto level_r = std::max(0, 0x31 - darken);
-                    auto level_g = std::max(0, 0x32 - darken);
-                    auto level_b = std::max(0, 0x44 - darken);
+                    // Alternate between two preset background colors based
+                    // on menu nesting depth: even levels use
+                    // #3D3E50, odd levels use the slightly darker
+                    // #393A4C. Hover brightens by +24 per channel;
+                    // the foreground stays constant so labels remain
+                    // equally legible whether a row is hovered or not.
+                    auto level_r = (depth & 1) ? 0x39 : 0x3D;
+                    auto level_g = (depth & 1) ? 0x3A : 0x3E;
+                    auto level_b = (depth & 1) ? 0x4C : 0x50;
                     auto level_bg = 0xFF000000u
                                   | ((ui32)level_r << 16)
                                   | ((ui32)level_g << 8)
