@@ -3,7 +3,7 @@
 
 #pragma once
 
-// parvion/input.hpp: the reusable single-line INPUT component.
+// parvion/components/input.hpp: the reusable single-line INPUT component.
 //
 // The widget owns every transient editor detail: focus, caret, horizontal
 // scrolling, click/drag caret placement, filtering, paste, and keyboard input.

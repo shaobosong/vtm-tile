@@ -3,7 +3,7 @@
 
 #pragma once
 
-// parvion/textbox.hpp: the reusable read-only TEXT-VIEW core component.
+// parvion/components/textbox.hpp: the reusable read-only TEXT-VIEW core component.
 //
 // A scrolling, colour-coded, mouse-selectable (char / word / line) text view — a read-only text box
 // (no editing). It owns ALL of its behavior: vertical/horizontal scrolling, tail-follow, text
@@ -14,7 +14,7 @@
 //
 // make_textbox() returns the common retained component handle. Containers can wrap it as needed.
 
-#include "panes.hpp" // ui::sptr, theme, shared menu utilities.
+#include "../panes.hpp" // ui::sptr, theme, shared menu utilities.
 
 namespace netxs::app::parvion
 {

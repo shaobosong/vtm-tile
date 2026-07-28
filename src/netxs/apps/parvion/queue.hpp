@@ -11,7 +11,7 @@
 #include "transfer_view.hpp"  // make_transfer_view (table_cfg).
 #include "hash_view.hpp"      // make_hash_view (table_cfg).
 #include "log_view.hpp"       // make_log_view (textbox_cfg).
-#include "tabs.hpp"           // generic tabs container.
+#include "components/tabs.hpp" // generic tabs container.
 
 namespace netxs::app::parvion
 {

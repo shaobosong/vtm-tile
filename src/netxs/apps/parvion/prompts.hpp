@@ -17,7 +17,7 @@
 // make_button() widgets layered over the card.
 
 #include "panes.hpp" // theme, put_str, sd_hit, and shared dialog helpers
-#include "button.hpp"
+#include "components/button.hpp"
 
 #include <thread>
 #include <atomic>

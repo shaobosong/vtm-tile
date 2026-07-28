@@ -9,7 +9,7 @@
 // later phases (for now it reports the target into the status area).
 
 #include "panes.hpp" // theme, shared menus, and SFTP/controller types
-#include "button.hpp"
+#include "components/button.hpp"
 
 namespace netxs::app::parvion
 {

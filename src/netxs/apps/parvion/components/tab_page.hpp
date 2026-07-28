@@ -3,7 +3,7 @@
 
 #pragma once
 
-// parvion/tab_page.hpp: Metadata that adapts any retained component to a tabs container.
+// parvion/components/tab_page.hpp: Metadata that adapts any retained component to a tabs container.
 
 #include "ui.hpp" // component, text.
 

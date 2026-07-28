@@ -3,9 +3,9 @@
 
 #include "netxs/apps.hpp"
 #include "vtm-common.hpp"
-#include "netxs/apps/parvion/button.hpp"
+#include "netxs/apps/parvion/components/button.hpp"
 #include "netxs/apps/parvion/connectbar.hpp"
-#include "netxs/apps/parvion/tabs.hpp"
+#include "netxs/apps/parvion/components/tabs.hpp"
 
 #include <cstdio>
 #include <vector>

@@ -3,9 +3,9 @@
 
 #include "netxs/apps.hpp"
 #include "vtm-common.hpp"
-#include "netxs/apps/parvion/progressbar.hpp"
+#include "netxs/apps/parvion/components/progressbar.hpp"
 #include "netxs/apps/parvion/hash_view.hpp"
-#include "netxs/apps/parvion/table.hpp"
+#include "netxs/apps/parvion/components/table.hpp"
 #include "netxs/apps/parvion/transfer_view.hpp"
 
 #include <cstdio>

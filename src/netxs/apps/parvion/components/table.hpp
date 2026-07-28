@@ -3,7 +3,7 @@
 
 #pragma once
 
-// parvion/table.hpp: the reusable TABLE core component.
+// parvion/components/table.hpp: the reusable TABLE core component.
 //
 // This is the single place that owns ALL table behavior: the render frame (background, column
 // header, text/arbitrary component cells, dividers, selection highlight, scrollbars), vertical/

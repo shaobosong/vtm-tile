@@ -3,7 +3,8 @@
 
 #pragma once
 
-// parvion/tabs.hpp: a generic, reusable multi-container — a bottom tab strip over a ui::veer that
+// parvion/components/tabs.hpp: a generic, reusable multi-container — a bottom tab strip over a
+// ui::veer that
 // shows one component page at a time. Page-specific lifecycle is carried by the common component
 // handle, so tabs can be nested without a separate inheritance hierarchy.
 //

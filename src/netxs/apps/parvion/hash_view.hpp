@@ -3,14 +3,15 @@
 
 #pragma once
 
-// parvion/hash_view.hpp: a THIN configuration over the reusable table core (table.hpp) that presents
-// the controller's checksum queue (Source | Path | Algorithm | Size | Progress | Result). This is a
-// tab adapter over the independent table widget.
+// parvion/hash_view.hpp: a THIN configuration over the reusable table core
+// (components/table.hpp) that presents the controller's checksum queue
+// (Source | Path | Algorithm | Size | Progress | Result). This is a tab adapter over the
+// independent table widget.
 
 #include "queue_actions.hpp"
-#include "progressbar.hpp"
-#include "tab_page.hpp"
-#include "table.hpp"
+#include "components/progressbar.hpp"
+#include "components/tab_page.hpp"
+#include "components/table.hpp"
 
 namespace netxs::app::parvion
 {

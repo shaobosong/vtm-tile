@@ -3,9 +3,9 @@
 
 #pragma once
 
-// parvion/ui.hpp: Small, dependency-light UI primitives shared by the pane and
-// reusable table widgets. Keeping these definitions outside panes.hpp lets the
-// pane compose make_table() without creating an include cycle.
+// parvion/components/ui.hpp: Small, dependency-light UI primitives shared by the pane and
+// reusable widgets. Keeping these definitions outside panes.hpp lets the pane compose
+// make_table() without creating an include cycle.
 
 #include <algorithm>
 #include <functional>

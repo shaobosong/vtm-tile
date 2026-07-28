@@ -13,10 +13,10 @@
 // references via the LISTEN/on macros' `[&]` capture).
 
 #include "session.hpp" // brings model.hpp + proto.hpp + sftp_remote
-#include "ui.hpp"
-#include "input.hpp"
-#include "button.hpp"
-#include "table.hpp"
+#include "components/ui.hpp"
+#include "components/input.hpp"
+#include "components/button.hpp"
+#include "components/table.hpp"
 
 #include <cerrno>
 #include <cstdio>

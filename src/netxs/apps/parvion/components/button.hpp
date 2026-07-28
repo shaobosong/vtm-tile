@@ -3,7 +3,7 @@
 
 #pragma once
 
-// parvion/button.hpp: the reusable button core component.
+// parvion/components/button.hpp: the reusable button core component.
 //
 // The widget owns its mouse interaction and transient hover/press state. Callers provide live
 // label data and an activation adapter, then position the returned widget in their layout.

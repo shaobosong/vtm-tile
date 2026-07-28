@@ -12,11 +12,11 @@
 // Reuse: numeric fields use shared make_input children and buttons are independent
 // make_button() widgets, matching the Quick Connect bar; the private-key
 // file picker instantiates the Local Site browser (make_file_pane); the private-key list
-// is the shared table component (table.hpp).
+// is the shared table component (components/table.hpp).
 
 #include "panes.hpp"     // theme, put_str, make_file_pane, sd_hit
-#include "button.hpp"    // button_cfg, make_button
-#include "table.hpp"     // table_cfg, make_table (Public Key Authentication list).
+#include "components/button.hpp" // button_cfg, make_button
+#include "components/table.hpp"  // table_cfg, make_table (Public Key Authentication list).
 #include "connectbar.hpp" // connect-bar field/secret editor conventions
 #include "prompts.hpp"   // make_secret_dialog (passphrase / save-path modal for key conversion)
 

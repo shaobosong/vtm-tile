@@ -3,7 +3,7 @@
 
 #pragma once
 
-// parvion/progressbar.hpp: the reusable progress-bar core component.
+// parvion/components/progressbar.hpp: the reusable progress-bar core component.
 //
 // The retained widget uses the same geometry renderer as the unit-testable paint primitive.
 

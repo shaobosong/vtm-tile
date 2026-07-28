@@ -5,7 +5,8 @@
 
 // parvion/queue_actions.hpp: shared queue-panel actions wired by the concrete views.
 //
-// Kept outside tab_page.hpp so reusable widgets can stay independent from the tabs container.
+// Kept outside components/tab_page.hpp so reusable widgets can stay independent from the tabs
+// container.
 
 #include "panes.hpp" // sftp_remote, ui::base, app::shared::show_close_confirmation.
 

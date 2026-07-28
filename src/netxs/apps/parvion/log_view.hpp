@@ -3,13 +3,13 @@
 
 #pragma once
 
-// parvion/log_view.hpp: a THIN configuration over the reusable text-view core (textbox.hpp) that
-// presents the controller's message log (typed, colour-coded, FileZilla-style). This is a tab adapter
-// over the independent textbox widget.
+// parvion/log_view.hpp: a THIN configuration over the reusable text-view core
+// (components/textbox.hpp) that presents the controller's message log (typed, colour-coded,
+// FileZilla-style). This is a tab adapter over the independent textbox widget.
 
 #include "queue_actions.hpp"
-#include "tab_page.hpp"
-#include "textbox.hpp"
+#include "components/tab_page.hpp"
+#include "components/textbox.hpp"
 
 namespace netxs::app::parvion
 {

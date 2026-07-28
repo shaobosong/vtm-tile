@@ -3,19 +3,19 @@
 
 #pragma once
 
-// parvion/transfer_view.hpp: a THIN configuration over the reusable table core (table.hpp) that
-// presents the controller's transfer queue, filtered to one status (Transferring / Failed /
-// Succeeded). This is a tab adapter over the independent table widget: it builds a table_cfg
-// (columns + per-cell data + selection/menu adapters + follow/expand hooks), calls make_table(), and
-// wraps the component in tab-page metadata.
+// parvion/transfer_view.hpp: a THIN configuration over the reusable table core
+// (components/table.hpp) that presents the controller's transfer queue, filtered to one status
+// (Transferring / Failed / Succeeded). This is a tab adapter over the independent table widget: it
+// builds a table_cfg (columns + per-cell data + selection/menu adapters + follow/expand hooks),
+// calls make_table(), and wraps the component in tab-page metadata.
 //
 // Each status tab is an INDEPENDENT make_transfer_view() instance with its own table presentation
 // state — the three tabs share nothing but the controller's data.
 
 #include "queue_actions.hpp"
-#include "progressbar.hpp"
-#include "tab_page.hpp"
-#include "table.hpp"
+#include "components/progressbar.hpp"
+#include "components/tab_page.hpp"
+#include "components/table.hpp"
 
 namespace netxs::app::parvion
 {

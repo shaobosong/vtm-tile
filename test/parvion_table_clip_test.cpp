@@ -7,8 +7,8 @@
 
 #include "netxs/apps.hpp"
 #include "vtm-common.hpp"
-#include "netxs/apps/parvion/table.hpp"
-#include "netxs/apps/parvion/textbox.hpp"
+#include "netxs/apps/parvion/components/table.hpp"
+#include "netxs/apps/parvion/components/textbox.hpp"
 
 #include <cstdio>
 #include <vector>
