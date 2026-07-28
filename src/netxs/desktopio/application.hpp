@@ -1110,7 +1110,7 @@ namespace netxs::app::shared
             auto has_submenus = false;
             for (auto& c : items) if (!c.children.empty()) { has_submenus = true; break; }
             auto has_checks = has_check_rows(items);
-            auto popup_w = si32{ 12 };
+            auto popup_w = si32{ 2 }; // left and right padding
             for (auto& c : items)
             {
                 if (!is_selectable(c)) continue; // Separators don't drive width.
