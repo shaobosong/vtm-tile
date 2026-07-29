@@ -61,6 +61,44 @@ def _goto_debug(s):
     return s.screen()[0]
 
 
+def _goto_site(s):
+    chars = s.screen()[0]
+    site = T.find_text(chars, "Site")
+    s.click(site[1] + 1, site[0] + 1); s.feed(0.7)
+    return s.screen()[0]
+
+
+def _find_lowest(chars, needle):
+    matches = []
+    for row in range(len(chars)):
+        col = T.row_text(chars, row).find(needle)
+        if col >= 0:
+            matches.append((row, col))
+    return max(matches) if matches else None
+
+
+def _site_field(s, label, value, clear=False):
+    chars = s.screen()[0]
+    name = T.find_text(chars, "Site Name:")
+    if not name:
+        return False
+    row = None
+    for r in range(name[0], min(len(chars), name[0] + 6)):
+        col = T.row_text(chars, r).find(label + ":")
+        if col >= 0:
+            row = (r, col)
+            break
+    if not row:
+        return False
+    field_col = name[1] + len("Site Name:") + 1
+    s.click(field_col + 1, row[0] + 1)
+    if clear:
+        s.write("\x1b[F" + "\x7f" * 96)
+    if value:
+        s.write(value)
+    return True
+
+
 def _click_label(s, needle, dx=1):
     chars = s.screen()[0]
     pos = T.find_text(chars, needle)
@@ -161,6 +199,143 @@ def test_sftp_tab():
                        "Channel allocation", "Strict queue order"):
             if needle not in blob:
                 print(f"FAIL - '{needle}' missing"); return False
+    print("PASS"); return True
+
+
+def test_site_tab_add_edit_and_persist():
+    print("TEST: settings Site tab adds, edits, and persists a saved site ... ", end="", flush=True)
+    cfg = tempfile.mkdtemp(prefix="pvset_")
+    with _session(cfg) as s:
+        _open_dialog(s)
+        chars = _goto_site(s)
+        blob = "\n".join(T.row_text(chars, r) for r in range(len(chars)))
+        for needle in ("Site Manager", "Saved SFTP sites:", "Site Name", "Host",
+                       "Port", "User", "No sites configured.", " Add ", " Edit ", " Remove "):
+            if needle not in blob:
+                print(f"FAIL - '{needle}' missing from Site tab"); return False
+
+        add = _find_lowest(chars, " Add ")
+        s.click(add[1] + 2, add[0] + 1); s.feed(0.7)
+        blob = "\n".join(T.row_text(s.screen()[0], r) for r in range(len(s.screen()[0])))
+        for needle in ("Add SFTP Site", "Site Name:", "Host:", "Port:", "User:",
+                       "Password:", "Password is optional."):
+            if needle not in blob:
+                print(f"FAIL - '{needle}' missing from Add Site dialog"); return False
+        if not _site_field(s, "Site Name", "Production"): return False
+        if not _site_field(s, "Host", "sftp.example.test"): return False
+        if not _site_field(s, "Port", "", clear=True): return False  # Empty means 22.
+        if not _site_field(s, "User", "alice"): return False
+        if not _site_field(s, "Password", "secretpw"): return False
+        chars = s.screen()[0]
+        if "secretpw" in "\n".join(T.row_text(chars, r) for r in range(len(chars))):
+            print("FAIL - password was rendered as plaintext"); return False
+        ok = T.find_text(chars, " OK ")
+        s.click(ok[1] + 2, ok[0] + 1); s.feed(0.8)
+
+        # The new row remains selected, so Edit can open it directly.
+        chars = s.screen()[0]
+        edit = _find_lowest(chars, " Edit ")
+        s.click(edit[1] + 2, edit[0] + 1); s.feed(0.7)
+        if not T.grid_contains(s.screen()[0], "Edit SFTP Site"):
+            print("FAIL - Edit Site dialog did not open"); return False
+        if not _site_field(s, "Host", "edited.example.test", clear=True): return False
+        chars = s.screen()[0]
+        ok = T.find_text(chars, " OK ")
+        s.click(ok[1] + 2, ok[0] + 1); s.feed(0.8)
+
+        chars = s.screen()[0]
+        blob = "\n".join(T.row_text(chars, r) for r in range(len(chars)))
+        for needle in ("Production", "edited.example.test", "22", "alice"):
+            if needle not in blob:
+                print(f"FAIL - saved-site table missing '{needle}'"); return False
+        if "secretpw" in blob:
+            print("FAIL - site table exposed the password"); return False
+        ok = T.find_text(chars, " OK ")
+        s.click(ok[1] + 2, ok[0] + 1); s.feed(0.9)
+
+    vals = _settings_file(cfg)
+    expected = "Production\tedited.example.test\t22\talice\tsecretpw"
+    if vals.get("Site") != [expected]:
+        print(f"FAIL - Site persisted as {vals.get('Site')}, want {[expected]}"); return False
+
+    # Reopening restores the row; Remove followed by the outer Cancel must not commit.
+    with _session(cfg) as s:
+        _open_dialog(s)
+        chars = _goto_site(s)
+        site = T.find_text(chars, "Production")
+        if not site:
+            print("FAIL - persisted site did not reload"); return False
+        s.click(site[1] + 1, site[0] + 1); s.feed(0.4)
+        chars = s.screen()[0]
+        remove = _find_lowest(chars, " Remove ")
+        s.click(remove[1] + 2, remove[0] + 1); s.feed(0.6)
+        cancel = _find_lowest(s.screen()[0], " Cancel ")
+        s.click(cancel[1] + 2, cancel[0] + 1); s.feed(0.7)
+    if _settings_file(cfg).get("Site") != [expected]:
+        print("FAIL - outer Cancel committed site removal"); return False
+    print("PASS"); return True
+
+
+def test_site_validation_and_remove():
+    print("TEST: Site editor validates required fields/port and Remove persists ... ", end="", flush=True)
+    cfg = tempfile.mkdtemp(prefix="pvset_")
+    os.makedirs(os.path.join(cfg, "parvion"), exist_ok=True)
+    with open(os.path.join(cfg, "parvion", "settings"), "w") as f:
+        f.write("Site\tExisting\thost.example\t22\t\t\n")
+    with _session(cfg) as s:
+        _open_dialog(s)
+        chars = _goto_site(s)
+        add = _find_lowest(chars, " Add ")
+        s.click(add[1] + 2, add[0] + 1); s.feed(0.6)
+        ok = T.find_text(s.screen()[0], " OK ")
+        s.click(ok[1] + 2, ok[0] + 1); s.feed(0.5)
+        if not T.grid_contains(s.screen()[0], "Site Name is required."):
+            print("FAIL - blank Site Name was accepted"); return False
+        _site_field(s, "Site Name", "Second")
+        ok = T.find_text(s.screen()[0], " OK ")
+        s.click(ok[1] + 2, ok[0] + 1); s.feed(0.5)
+        if not T.grid_contains(s.screen()[0], "Host is required."):
+            print("FAIL - blank Host was accepted"); return False
+        for malformed in ("abc", "123", "bad host"):
+            _site_field(s, "Host", malformed, clear=True)
+            ok = T.find_text(s.screen()[0], " OK ")
+            s.click(ok[1] + 2, ok[0] + 1); s.feed(0.5)
+            if not T.grid_contains(s.screen()[0], "Host must be a valid"):
+                print(f"FAIL - malformed Host {malformed!r} was accepted"); return False
+        _site_field(s, "Host", "999.1.1.1", clear=True)
+        ok = T.find_text(s.screen()[0], " OK ")
+        s.click(ok[1] + 2, ok[0] + 1); s.feed(0.5)
+        if not T.grid_contains(s.screen()[0], "Host must be a valid"):
+            print("FAIL - out-of-range IPv4 Host was accepted"); return False
+        _site_field(s, "Host", "127.1", clear=True)
+        _site_field(s, "Site Name", "Existing", clear=True)
+        ok = T.find_text(s.screen()[0], " OK ")
+        s.click(ok[1] + 2, ok[0] + 1); s.feed(0.5)
+        if not T.grid_contains(s.screen()[0], "Site Name must be unique."):
+            print("FAIL - abbreviated IPv4 Host was rejected or duplicate Site Name was accepted"); return False
+        _site_field(s, "Host", "2001:db8::1", clear=True)
+        ok = T.find_text(s.screen()[0], " OK ")
+        s.click(ok[1] + 2, ok[0] + 1); s.feed(0.5)
+        if not T.grid_contains(s.screen()[0], "Site Name must be unique."):
+            print("FAIL - valid IPv6 Host was rejected or duplicate Site Name was accepted"); return False
+        _site_field(s, "Site Name", "Second", clear=True)
+        _site_field(s, "Host", "second.example", clear=True)
+        _site_field(s, "Port", "invalid", clear=True)
+        ok = T.find_text(s.screen()[0], " OK ")
+        s.click(ok[1] + 2, ok[0] + 1); s.feed(0.5)
+        if not T.grid_contains(s.screen()[0], "Port must be a number from 1 to 65535."):
+            print("FAIL - invalid Port was accepted"); return False
+        s.write("\x1b"); s.feed(0.6)
+
+        chars = s.screen()[0]
+        existing = T.find_text(chars, "Existing")
+        s.click(existing[1] + 1, existing[0] + 1); s.feed(0.4)
+        remove = _find_lowest(s.screen()[0], " Remove ")
+        s.click(remove[1] + 2, remove[0] + 1); s.feed(0.5)
+        ok = T.find_text(s.screen()[0], " OK ")
+        s.click(ok[1] + 2, ok[0] + 1); s.feed(0.8)
+    if _settings_file(cfg).get("Site"):
+        print(f"FAIL - removed site still persisted: {_settings_file(cfg).get('Site')}"); return False
     print("PASS"); return True
 
 
@@ -1094,6 +1269,8 @@ TESTS = [
     test_dialog_opens,
     test_numeric_input_tab_is_noop,
     test_sftp_tab,
+    test_site_tab_add_edit_and_persist,
+    test_site_validation_and_remove,
     test_debug_tab_persists,
     test_add_encrypted_key_converts_to_ppk,
     test_save_picker_double_click_overwrite,

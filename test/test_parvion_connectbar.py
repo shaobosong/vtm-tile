@@ -28,6 +28,16 @@ import test_parvion_panes as T  # ParvionSession, row_text, find_text, drag_path
 kill_all_vtm = T.kill_all_vtm  # Let run_all_tests.py reuse our between-test cleanup.
 
 
+def _open_history(s):
+    chars = s.screen()[0]
+    connect = T.find_text(chars, " Connect ")
+    history = T.find_text_on_row(chars, "▾", connect[0]) if connect else None
+    if history is None:
+        return None
+    s.click(history[1] + 1, history[0] + 1)
+    return s.screen()[0]
+
+
 def _host_field(s):
     """(row, x0): the connect bar row and the Host field's 0-based start column
     (the field box begins one cell after the 'Host:' label)."""
@@ -269,6 +279,73 @@ def test_history_dropdown_does_not_arm_menubar_hover_switch():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_site_connection_empty_submenu_is_first_and_separated():
+    print("TEST: parvion connect history - empty Site Connection submenu ... ", end="", flush=True)
+    d = tempfile.mkdtemp(prefix="parvioncb_")
+    try:
+        with T.ParvionSession(d, env={"XDG_CONFIG_HOME": d, "PARVION_DEMO_QUEUE": "0"}) as s:
+            chars = _open_history(s)
+            if chars is None:
+                print("FAIL - Quick Connect history button not found")
+                return False
+            if not T.menu_items_are_ordered(chars, ["Site Connection", "Clear Quickconnect bar", "Clear history"]):
+                print("FAIL - Site Connection is not the first history-menu item")
+                return False
+            if not T.menu_has_separator_between(chars, "Site Connection", "Clear Quickconnect bar"):
+                print("FAIL - Site Connection is not separated from the existing actions")
+                return False
+            site = T.find_text(chars, "Site Connection")
+            s.click(site[1] + 1, site[0] + 1)
+            if not T.grid_contains(s.screen()[0], "Empty"):
+                print("FAIL - empty Site Connection submenu has no Empty row")
+                return False
+            print("PASS")
+            return True
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_site_connection_fills_bar_and_connects():
+    print("TEST: parvion connect history - saved site fills bar and connects ... ", end="", flush=True)
+    d = tempfile.mkdtemp(prefix="parvioncb_")
+    try:
+        cfg = os.path.join(d, "parvion")
+        os.makedirs(cfg, exist_ok=True)
+        with open(os.path.join(cfg, "settings"), "w") as f:
+            f.write("Site\tMy Site\tsite.test\t2222\talice\tsecret\n")
+        with T.ParvionSession(d, env={"XDG_CONFIG_HOME": d, "PARVION_DEMO_QUEUE": "0"}) as s:
+            chars = _open_history(s)
+            site_menu = T.find_text(chars, "Site Connection")
+            if not site_menu:
+                print("FAIL - Site Connection menu missing")
+                return False
+            s.click(site_menu[1] + 1, site_menu[0] + 1)
+            chars = s.screen()[0]
+            saved = T.find_text(chars, "My Site")
+            if not saved:
+                print("FAIL - saved site missing from submenu")
+                return False
+            s.click(saved[1] + 1, saved[0] + 1); s.feed(0.8)
+            row = T.row_text(s.screen()[0], _host_field(s)[0])
+            for value in ("site.test", "alice", "2222", "******"):
+                if value not in row:
+                    print(f"FAIL - Quick Connect row missing {value!r}: {row!r}")
+                    return False
+            recent = os.path.join(cfg, "recent_servers")
+            if not os.path.isfile(recent):
+                print("FAIL - selecting the saved site did not invoke Connect")
+                return False
+            with open(recent) as f:
+                remembered = f.read()
+            if "site.test\talice\t2222\tsecret" not in remembered:
+                print(f"FAIL - Connect did not remember the selected site: {remembered!r}")
+                return False
+            print("PASS")
+            return True
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 TESTS = [
     test_field_press_focuses,
     test_field_drag_scrubs_caret,
@@ -277,6 +354,8 @@ TESTS = [
     test_connect_fires_on_click,
     test_connect_button_visual_states,
     test_connect_drag_off_cancels_click,
+    test_site_connection_empty_submenu_is_first_and_separated,
+    test_site_connection_fills_bar_and_connects,
     test_history_dropdown_does_not_arm_menubar_hover_switch,
 ]
 

@@ -165,14 +165,39 @@ namespace netxs::app::parvion
         // The status hint is painted by a separate strip to the right of the ▾ button.
     }
 
-    // Build the ▾ button's dropdown: Clear-bar / Clear-history / a separator / the recent
-    // servers (newest first). Rebuilt per open so it reflects the live fields and history.
+    // Build the ▾ button's dropdown: saved Site Connection submenu / separator / Clear-bar /
+    // Clear-history / a separator / recent servers (newest first). Rebuilt per open so it
+    // reflects the live settings, fields, and history.
     // Each row carries a native action (menu::item::action), run by the popup's activate_leaf.
     inline auto build_history_menu(std::shared_ptr<connect_state> sp) -> std::vector<app::shared::menu::item>
     {
         namespace m = app::shared::menu;
         auto deface_form = [sp]{ if (auto f = sp->form_wptr.lock()) f->base::deface(); };
         auto items = std::vector<m::item>{};
+        auto sites = m::item{ .alive = true, .label = "Site Connection", .type = m::kind::dropdown };
+        if (!sp->ctrl || sp->ctrl->cfg.sites.empty())
+        {
+            sites.children.push_back(m::item{ .alive = true, .label = "Empty", .disabled = true });
+        }
+        else
+        {
+            for (auto const& site : sp->ctrl->cfg.sites)
+            {
+                auto row = m::item{ .alive = true, .label = site.name };
+                row.action = [sp, deface_form, entry = site](hids&)
+                {
+                    sp->fld[cf_host] = entry.host;
+                    sp->fld[cf_user] = entry.user;
+                    sp->fld[cf_pass] = entry.pass;
+                    sp->fld[cf_port] = std::to_string(entry.port);
+                    cb_connect(*sp);
+                    deface_form();
+                };
+                sites.children.push_back(std::move(row));
+            }
+        }
+        items.push_back(std::move(sites));
+        items.push_back(m::item{ .alive = true, .type = m::kind::separator });
         auto clear_bar = m::item{ .alive = true, .label = "Clear Quickconnect bar" };
         clear_bar.action = [sp, deface_form](hids&)
         {

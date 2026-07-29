@@ -8,13 +8,14 @@
 //   Connection : Timeout, Reconnect count, Reconnect delay.
 //   SFTP       : private key files, compression, parallel-transfer threshold + unit,
 //                shared transfer-channel budget and queue allocation policy.
+//   Site       : saved SFTP connection profiles.
 //   Debug      : debug information level and raw directory listing.
 // Stored as a flat `key<TAB>value` file next to the Quick Connect history
 // (recent_servers), mirroring sftp_remote::load_recent / save_recent. The engine
 // applies these onto its live fields (see sftp_remote::apply_settings).
 
-#include "model.hpp"
 #include "logging.hpp"
+#include "model.hpp"
 
 #include <cstdio>
 #include <cstdlib>
@@ -89,6 +90,157 @@ namespace netxs::app::parvion
     }
     inline auto parvion_settings_path() -> fs::path { return parvion_config_dir() / "settings"; }
 
+    // Syntactic Host validation for saved sites. Keep this independent of DNS so accepting the
+    // dialog never blocks or depends on network availability. Supported forms are qualified
+    // RFC-style ASCII hostnames (including a final root dot), dotted-decimal IPv4, and raw IPv6
+    // literals (including an optional RFC 4007 zone id such as fe80::1%eth0).
+    inline auto valid_site_ipv4(view host) -> bool
+    {
+        auto values = std::array<ui32, 4>{};
+        auto count = si32{};
+        auto pos = size_t{};
+        while (pos < host.size())
+        {
+            if (count == (si32)values.size()) return faux;
+            auto end = host.find('.', pos);
+            if (end == view::npos) end = host.size();
+            if (end == pos || end - pos > 8) return faux;
+            // Keep decimal components unambiguous: multi-digit parts cannot have a leading zero.
+            if (end - pos > 1 && host[pos] == '0') return faux;
+            auto value = ui64{};
+            for (auto i = pos; i < end; ++i)
+            {
+                auto c = host[i];
+                if (c < '0' || c > '9') return faux;
+                value = value * 10 + (c - '0');
+                if (value > 0xFFFFFFu) return faux; // Largest legal part is the 24-bit tail of a.b.
+            }
+            values[(size_t)count++] = (ui32)value;
+            if (end == host.size()) break;
+            pos = end + 1;
+            if (pos == host.size()) return faux;
+        }
+        // Do not accept the historical one-component form: it would make bare values such as
+        // "123" valid again. For abbreviated dotted forms, every leading component is 8 bits and
+        // the final component consumes the remaining address bits.
+        if (count < 2 || count > 4) return faux;
+        for (auto i = si32{}; i + 1 < count; ++i)
+            if (values[(size_t)i] > 0xFFu) return faux;
+        auto last_max = count == 2 ? 0xFFFFFFu
+                      : count == 3 ? 0xFFFFu
+                                   : 0xFFu;
+        return values[(size_t)(count - 1)] <= last_max;
+    }
+
+    inline auto valid_site_ipv6_part(view part, bool ipv4_allowed, si32& groups) -> bool
+    {
+        if (part.empty()) return true;
+        for (auto pos = size_t{}; pos < part.size();)
+        {
+            auto end = part.find(':', pos);
+            if (end == view::npos) end = part.size();
+            auto token = part.substr(pos, end - pos);
+            if (token.empty()) return faux;
+            if (token.find('.') != view::npos)
+            {
+                if (!ipv4_allowed || end != part.size() || !valid_site_ipv4(token)) return faux;
+                groups += 2;
+            }
+            else
+            {
+                if (token.size() > 4) return faux;
+                for (auto c : token)
+                    if (!((c >= '0' && c <= '9')
+                       || (c >= 'a' && c <= 'f')
+                       || (c >= 'A' && c <= 'F'))) return faux;
+                ++groups;
+            }
+            if (end == part.size()) break;
+            pos = end + 1;
+            if (pos == part.size()) return faux;
+        }
+        return true;
+    }
+
+    inline auto valid_site_ipv6(view host) -> bool
+    {
+        auto zone = host.find('%');
+        if (zone != view::npos)
+        {
+            if (zone == 0 || zone + 1 == host.size() || host.find('%', zone + 1) != view::npos) return faux;
+            for (auto c : host.substr(zone + 1))
+                if (!((c >= '0' && c <= '9')
+                   || (c >= 'a' && c <= 'z')
+                   || (c >= 'A' && c <= 'Z')
+                   || c == '_' || c == '-' || c == '.')) return faux;
+            host = host.substr(0, zone);
+        }
+        auto compressed = host.find("::");
+        auto groups = si32{};
+        if (compressed == view::npos)
+            return valid_site_ipv6_part(host, true, groups) && groups == 8;
+        if (host.find("::", compressed + 2) != view::npos) return faux;
+        auto left = host.substr(0, compressed);
+        auto right = host.substr(compressed + 2);
+        return valid_site_ipv6_part(left, false, groups)
+            && valid_site_ipv6_part(right, true, groups)
+            && groups < 8;
+    }
+
+    inline auto valid_site_hostname(view host) -> bool
+    {
+        if (host.empty() || host.size() > 254) return faux;
+        auto root_dot = faux;
+        if (host.back() == '.')
+        {
+            root_dot = true;
+            host.remove_suffix(1);
+            if (host.empty() || host.back() == '.') return faux;
+        }
+        if (host.size() > 253) return faux;
+        // Saved-site DNS hosts must be qualified names. A bare word or number ("abc", "123")
+        // is ambiguous and is rejected; IPv4/IPv6 literals remain supported separately.
+        if (host.find('.') == view::npos) return faux;
+        auto numeric = true;
+        for (auto c : host) numeric = numeric && ((c >= '0' && c <= '9') || c == '.');
+        if (numeric) return !root_dot && valid_site_ipv4(host);
+        for (auto pos = size_t{}; pos < host.size();)
+        {
+            auto end = host.find('.', pos);
+            if (end == view::npos) end = host.size();
+            auto label = host.substr(pos, end - pos);
+            if (label.empty() || label.size() > 63 || label.front() == '-' || label.back() == '-') return faux;
+            for (auto c : label)
+                if (!((c >= '0' && c <= '9')
+                   || (c >= 'a' && c <= 'z')
+                   || (c >= 'A' && c <= 'Z')
+                   || c == '-')) return faux;
+            if (end == host.size()) break;
+            pos = end + 1;
+        }
+        return true;
+    }
+
+    inline auto valid_site_host(view host) -> bool
+    {
+        if (host.empty()) return faux;
+        return host.find(':') != view::npos ? valid_site_ipv6(host)
+                                            : valid_site_hostname(host);
+    }
+
+    // One user-named SFTP connection profile. Passwords are optional: an empty password lets the
+    // backend's normal interactive authentication prompt take over. Values originate in shared
+    // single-line inputs, which reject tabs/newlines, so a Site settings record can safely use tabs
+    // to delimit these five fields inside the existing flat settings format.
+    struct saved_site
+    {
+        text name;
+        text host;
+        si32 port = 22;
+        text user;
+        text pass;
+    };
+
     struct parvion_settings
     {
         // Connection page.
@@ -105,6 +257,8 @@ namespace netxs::app::parvion
         // Hash verification page (Edit -> Settings -> SFTP -> "Hash verification").
         bool hash_on_transfer = faux; // Auto-hash the target of every completed transfer.
         si32 hash_algo        = 2;    // Algorithm index 0..4; SHA-256 default.
+        // Site page.
+        std::vector<saved_site> sites;
         // Debug page.
         si32 log_debug_level  = log_debug_none; // 0=None .. 4=Debug.
         bool log_raw_listing  = faux; // Show raw directory listing lines in the message log.
@@ -137,6 +291,7 @@ namespace netxs::app::parvion
             for (auto n = size_t{}; (n = std::fread(tmp.data(), 1, tmp.size(), f)) > 0; ) buf.append(tmp.data(), n);
             std::fclose(f);
             keyfiles.clear();
+            sites.clear();
             for (auto pos = size_t{}; pos < buf.size(); )
             {
                 auto eol  = buf.find('\n', pos);
@@ -159,6 +314,24 @@ namespace netxs::app::parvion
                 else if (key == "Logging Debug Level")                    log_debug_level  = std::atoi(val.c_str());
                 else if (key == "Logging Raw Listing")                    log_raw_listing  = std::atoi(val.c_str()) != 0;
                 else if (key == "SFTP keyfile")                           { if (!val.empty()) keyfiles.push_back(val); }
+                else if (key == "Site")
+                {
+                    auto t1 = val.find('\t'); if (t1 == text::npos) continue;
+                    auto t2 = val.find('\t', t1 + 1); if (t2 == text::npos) continue;
+                    auto t3 = val.find('\t', t2 + 1); if (t3 == text::npos) continue;
+                    auto t4 = val.find('\t', t3 + 1); if (t4 == text::npos) continue;
+                    auto site = saved_site{};
+                    site.name = val.substr(0, t1);
+                    site.host = val.substr(t1 + 1, t2 - t1 - 1);
+                    auto port = val.substr(t2 + 1, t3 - t2 - 1);
+                    site.port = port.empty() ? 22 : std::atoi(port.c_str());
+                    site.user = val.substr(t3 + 1, t4 - t3 - 1);
+                    site.pass = val.substr(t4 + 1);
+                    auto duplicate = std::ranges::any_of(sites, [&](auto const& s){ return s.name == site.name; });
+                    if (!site.name.empty() && !site.host.empty()
+                     && site.port > 0 && site.port <= 65535 && !duplicate)
+                        sites.push_back(std::move(site));
+                }
             }
             clamp();
         }
@@ -183,6 +356,9 @@ namespace netxs::app::parvion
             put("Logging Debug Level", std::to_string(log_debug_level));
             put("Logging Raw Listing", std::to_string(log_raw_listing ? 1 : 0));
             for (auto& k : keyfiles) put("SFTP keyfile", k);
+            for (auto& site : sites)
+                put("Site", site.name + '\t' + site.host + '\t' + std::to_string(site.port)
+                          + '\t' + site.user + '\t' + site.pass);
             std::fclose(f);
             #if !defined(_WIN32)
             auto ec = std::error_code{};

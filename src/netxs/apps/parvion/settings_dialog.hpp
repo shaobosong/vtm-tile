@@ -4,7 +4,7 @@
 #pragma once
 
 // parvion/settings_dialog.hpp: the Edit -> Settings dialog — a FileZilla-style,
-// top-tabbed settings form (Connection | SFTP) ported from FileZilla's Connection
+// top-tabbed settings form (Connection | SFTP | Site | Debug) ported from FileZilla's Connection
 // and Connection/SFTP option pages (TLS excluded). Rendered in the command_bar
 // style as a centered modal
 // card inside a dimming full-window overlay, mirroring show_close_confirmation.
@@ -28,7 +28,7 @@ namespace netxs::app::parvion
 {
     namespace sd
     {
-        enum tab_t { tab_connection, tab_sftp, tab_debug, tab_count };
+        enum tab_t { tab_connection, tab_sftp, tab_site, tab_debug, tab_count };
         // Editable numeric fields (both tabs). make_input owns all transient editor state.
         enum field_t { f_timeout, f_retries, f_delay, f_threshold, f_maxconn, f_count };
 
@@ -52,6 +52,7 @@ namespace netxs::app::parvion
             rect log_level{};                         // Debug information level dropdown.
             rect raw_listing{};                       // "Show raw directory listing" checkbox row.
             rect addkey{}, removekey{};               // Key management buttons.
+            rect addsite{}, editsite{}, removesite{}; // Saved-site management buttons.
             rect ok{}, cancel{};                      // Dialog buttons.
         };
 
@@ -62,6 +63,11 @@ namespace netxs::app::parvion
         inline constexpr auto kt_ncol    = si32{ 3 };
         inline const     auto kt_headers = std::array<view, kt_ncol>{ "Filename", "Comment", "Data" };
         inline const     auto kt_menu_headers = std::array<view, kt_ncol>{ "&Filename", "&Comment", "&Data" };
+
+        // --- Saved-site shared-table model -----------------------------------------------------
+        inline constexpr auto site_ncol = si32{ 4 };
+        inline const auto site_headers = std::array<view, site_ncol>{ "Site Name", "Host", "Port", "User" };
+        inline const auto site_menu_headers = std::array<view, site_ncol>{ "Site &Name", "&Host", "&Port", "&User" };
     }
 
     struct settings_state
@@ -87,10 +93,17 @@ namespace netxs::app::parvion
         // Parsed key metadata, parallel to draft.keyfiles (filled by pvputtygen).
         std::vector<text>  key_comment;
         std::vector<text>  key_data;
+        std::array<si32, sd::site_ncol> site_col_w{ 20, 26, 8, 20 };
+        std::array<bool, sd::site_ncol> site_col_shown{ true, true, true, true };
+        si32               site_selected = -1; // Saved sites use single-row selection.
+        ui64               site_table_revision = 0;
+        rect               site_table_area{};
+        netxs::wptr<ui::base> site_table_wp;
         rect               card{};            // Cached card rect within the overlay (render -> mouse).
         sd::hitboxes       hit{};
         netxs::wptr<ui::base> button_ok_wp, button_cancel_wp;
         netxs::wptr<ui::base> button_add_wp, button_remove_wp;
+        netxs::wptr<ui::base> button_addsite_wp, button_editsite_wp, button_removesite_wp;
         netxs::wptr<ui::base> button_unit_wp, button_allocation_wp, button_hash_wp, button_log_wp;
         netxs::wptr<ui::base> overlay_wp;     // The overlay cake (to close on OK/Cancel).
         netxs::wptr<ui::base> window_wp;      // App window (anchor for the file picker overlay).
@@ -312,6 +325,11 @@ namespace netxs::app::parvion
         inline constexpr auto btn_addkey    = view{ " Add key file... " };
         inline constexpr auto btn_removekey = view{ " Remove key " };
         inline constexpr auto chk_compress  = view{ "\xE2\x96\xA1 Enable compression" };
+        inline constexpr auto help_sites    = view{ "Save SFTP connection details for quick access from the connect bar." };
+        inline constexpr auto lbl_sites     = view{ "Saved SFTP sites:" };
+        inline constexpr auto btn_addsite   = view{ " Add " };
+        inline constexpr auto btn_editsite  = view{ " Edit " };
+        inline constexpr auto btn_removesite = view{ " Remove " };
 
         inline constexpr auto lbl_threshold = view{ "Enable parallel transfers for files larger than:" };
         inline constexpr auto lbl_maxconn   = view{ "Maximum parallel transfer connections:" };
@@ -362,11 +380,18 @@ namespace netxs::app::parvion
         w = std::max(w, sd_box_dialog_w((si32)cell_width(sd::chk_compress)));
         w = std::max(w, sd_box_dialog_w((si32)cell_width(sd::lbl_hash_xfer) + 1 + 12)); // label + algorithm dropdown.
         w = std::max(w, sd_box_dialog_w(sd::kt_min_w));
+        // Site tab.
+        w = std::max(w, sd_box_dialog_w(sd::kt_min_w));
+        w = std::max(w, sd_box_dialog_w((si32)cell_width(sd::btn_addsite) + 1
+                                     + (si32)cell_width(sd::btn_editsite) + 1
+                                     + (si32)cell_width(sd::btn_removesite)));
         // Debug tab group boxes.
         w = std::max(w, sd_box_dialog_w((si32)cell_width(sd::lbl_log_level) + 1 + 14));
         w = std::max(w, sd_box_dialog_w((si32)cell_width(sd::chk_rawlist)));
         // Tab strip and the right-aligned OK/Cancel block.
-        w = std::max(w, (si32)cell_width("Connection") + 2 + (si32)cell_width("SFTP") + 2 + (si32)cell_width("Debug") + 2 + 2 * sd::pad_x);
+        w = std::max(w, (si32)cell_width("Connection") + 2 + (si32)cell_width("SFTP") + 2
+                      + (si32)cell_width("Site") + 2 + (si32)cell_width("Debug") + 2
+                      + 2 * sd::pad_x);
         w = std::max(w, 4 + 1 + 8 + 2 + 2 * sd::pad_x);
         return w;
     }
@@ -428,6 +453,7 @@ namespace netxs::app::parvion
     {
         auto W = sz.x, H = sz.y;
         st.key_table_area = {};
+        st.site_table_area = {};
         if (W <= 4 || H <= 6) return;
         canvas.fill(rect{{ 0, 0 }, { W, H }}, [&](cell& c){ c.bgc(theme::bg).fgc(theme::text_fg); });
         // Title strip.
@@ -437,7 +463,7 @@ namespace netxs::app::parvion
         // between them (matching the queue panel's bottom tab strip: x starts at 0, each
         // tab is label+2 wide with one padding cell per side, and x advances by exactly bw).
         canvas.fill(rect{{ 0, 1 }, { W, 1 }}, [&](cell& c){ c.bgc(theme::header); });
-        auto labels = std::array<view, sd::tab_count>{ "Connection", "SFTP", "Debug" };
+        auto labels = std::array<view, sd::tab_count>{ "Connection", "SFTP", "Site", "Debug" };
         auto tx = si32{ 0 };
         for (auto i = si32{}; i < sd::tab_count; ++i)
         {
@@ -538,6 +564,24 @@ namespace netxs::app::parvion
                     std::max(0, std::min(fx - 1, cr) - (ix + 2)));
             auto alabel = text{ " " } + text{ transfer_allocation_label(st.transfer_allocation) } + " \xE2\x96\xBE ";
             st.hit.allocation = rect{{ fx, par_y + 3 }, { std::max(0, std::min((si32)cell_width(alabel), cr - fx)), 1 }};
+        }
+        // --- Site tab ----------------------------------------------------------------
+        else if (st.tab == sd::tab_site)
+        {
+            auto box_y = si32{ 3 };
+            auto box_h = std::max(6, H - box_y - 2); // Leave one blank row before main OK/Cancel.
+            sd_box(canvas, rect{{ ix, box_y }, { iw, box_h }}, "Site Manager");
+            auto py = sd_help(canvas, ix + 2, box_y + 1, inner, sd::help_sites);
+            put_str(canvas, ix + 2, py, sd::lbl_sites, theme::text_fg, theme::bg, inner);
+            auto btn_y = box_y + box_h - 2;
+            auto tbl_top = py + 1;
+            auto tbl_h = std::max(2, btn_y - 1 - tbl_top);
+            st.site_table_area = rect{{ ix + 2, tbl_top }, { inner, tbl_h }};
+            st.hit.addsite = rect{{ ix + 2, btn_y }, { (si32)cell_width(sd::btn_addsite), 1 }};
+            st.hit.editsite = rect{{ st.hit.addsite.coor.x + st.hit.addsite.size.x + 1, btn_y },
+                                   { (si32)cell_width(sd::btn_editsite), 1 }};
+            st.hit.removesite = rect{{ st.hit.editsite.coor.x + st.hit.editsite.size.x + 1, btn_y },
+                                     { (si32)cell_width(sd::btn_removesite), 1 }};
         }
         // --- Debug tab ---------------------------------------------------------------
         else
@@ -791,6 +835,395 @@ namespace netxs::app::parvion
         return cfg;
     }
 
+    // --- Saved-site table + editor ---------------------------------------------------
+    inline auto sd_site_cell(settings_state const& st, si32 col, si32 row) -> text
+    {
+        if (row < 0 || row >= (si32)st.draft.sites.size()) return {};
+        auto const& site = st.draft.sites[(size_t)row];
+        if (col == 0) return site.name;
+        if (col == 1) return site.host;
+        if (col == 2) return std::to_string(site.port);
+        if (col == 3) return site.user;
+        return {};
+    }
+
+    inline auto sd_site_col_content_w(settings_state const& st, si32 col) -> si32
+    {
+        auto width = si32{};
+        for (auto row = si32{}; row < (si32)st.draft.sites.size(); ++row)
+            width = std::max(width, cell_width(sd_site_cell(st, col, row)));
+        return width;
+    }
+
+    inline void sd_remove_site(settings_state& st)
+    {
+        if (st.site_selected < 0 || st.site_selected >= (si32)st.draft.sites.size()) return;
+        st.draft.sites.erase(st.draft.sites.begin() + st.site_selected);
+        st.site_selected = -1;
+        ++st.site_table_revision;
+        if (auto table = st.site_table_wp.lock()) table->base::deface();
+        if (auto card = st.card_wp.lock()) card->base::deface();
+    }
+
+    namespace sd
+    {
+        enum site_field_t { sf_name, sf_host, sf_port, sf_user, sf_pass, sf_count };
+        inline constexpr auto site_field_labels = std::array<view, sf_count>{
+            "Site Name:", "Host:", "Port:", "User:", "Password:"
+        };
+    }
+
+    struct site_editor_state
+    {
+        settings_state* parent = nullptr;
+        si32 edit_index = -1;
+        std::array<text, sd::sf_count> value{};
+        std::array<netxs::wptr<ui::base>, sd::sf_count> input_wp{};
+        netxs::wptr<ui::base> ok_wp, cancel_wp;
+        text error;
+        bool done = faux;
+    };
+
+    inline void sd_site_editor_render(site_editor_state& st, auto& canvas, twod sz)
+    {
+        canvas.fill(rect{ {}, sz }, [](cell& c){ c.bgc(theme::bg).fgc(theme::text_fg); });
+        canvas.fill(rect{ {}, { sz.x, 1 } }, [](cell& c){ c.bgc(theme::header); });
+        put_str(canvas, 2, 0, st.edit_index < 0 ? "Add SFTP Site" : "Edit SFTP Site",
+                theme::title_fg_act, theme::header, std::max(0, sz.x - 4));
+
+        auto label_w = si32{};
+        for (auto label : sd::site_field_labels) label_w = std::max(label_w, cell_width(label));
+        auto fx = 3 + label_w + 1;
+        auto fw = std::max(1, sz.x - fx - 3);
+        auto y = si32{ 3 };
+        for (auto i = si32{}; i < sd::sf_count; ++i, ++y)
+        {
+            put_str(canvas, 3, y, sd::site_field_labels[(size_t)i],
+                    theme::text_fg, theme::bg, label_w);
+            if (auto input = st.input_wp[(size_t)i].lock())
+                input->base::extend(rect{{ fx, y }, { fw, 1 }});
+        }
+        put_str(canvas, 3, y + 1, "Password is optional.", theme::subtext, theme::bg,
+                std::max(0, sz.x - 6));
+        if (!st.error.empty())
+            put_str(canvas, 3, y + 3, st.error, theme::err_fg, theme::bg,
+                    std::max(0, sz.x - 6));
+
+        auto by = sz.y - 2;
+        auto cnw = si32{ 10 }, okw = si32{ 6 };
+        auto cancel = rect{{ sz.x - 2 - cnw, by }, { cnw, 1 }};
+        auto ok = rect{{ cancel.coor.x - 2 - okw, by }, { okw, 1 }};
+        if (auto button = st.ok_wp.lock()) button->base::extend(ok);
+        if (auto button = st.cancel_wp.lock()) button->base::extend(cancel);
+    }
+
+    // Add/Edit share one five-field modal. The parent settings state is edited in place, but remains
+    // only a draft until the outer Settings dialog is accepted.
+    inline auto make_site_editor(settings_state& parent, si32 edit_index) -> ui::sptr
+    {
+        auto overlay = ui::cake::ctor()->alignment({ snap::both, snap::both });
+        auto overlay_wp = ptr::shadow(overlay);
+        auto finish = [window_wp = parent.window_wp, focus_wp = parent.card_wp, overlay_wp]
+        {
+            if (auto window = window_wp.lock())
+            {
+                window->base::enqueue([focus_wp, overlay_wp](auto& win)
+                {
+                    if (auto popup = overlay_wp.lock()) popup->base::detach();
+                    if (auto card = focus_wp.lock())
+                    {
+                        pro::focus::set(card, win.bell::indexer.luafx.get_gear().id, solo::on);
+                        card->base::deface();
+                    }
+                });
+            }
+        };
+        overlay->attach(ui::mock::ctor())->invoke([finish](auto& boss)
+        {
+            auto myid = boss.bell::id;
+            boss.LISTEN(tier::release, e2::render::background::any, parent_canvas, -, (myid))
+            {
+                parent_canvas.fill([myid](cell& c){ c.bgc().faint(); c.fgc().faint(); c.link(myid); });
+            };
+            boss.on(tier::mouserelease, input::key::LeftClick, [finish](hids& gear)
+            {
+                finish();
+                gear.dismiss();
+            });
+        });
+
+        auto card_layer = overlay->attach(ui::cake::ctor())
+            ->alignment({ snap::center, snap::center })
+            ->limits({ 52, 16 }, { 72, 16 });
+        auto card_layer_wp = ptr::shadow(card_layer);
+        auto first_input = std::make_shared<netxs::wptr<ui::base>>();
+        auto card = card_layer->attach(ui::mock::ctor())
+            ->active()
+            ->plugin<pro::mouse>()
+            ->plugin<pro::focus>(pro::focus::mode::focusable)
+            ->plugin<pro::keybd>();
+        card->invoke([&parent, edit_index, finish, card_layer_wp, first_input](auto& boss)
+        {
+            auto& st = boss.base::field(site_editor_state{});
+            st.parent = &parent;
+            st.edit_index = edit_index;
+            if (edit_index >= 0 && edit_index < (si32)parent.draft.sites.size())
+            {
+                auto const& site = parent.draft.sites[(size_t)edit_index];
+                st.value = { site.name, site.host, std::to_string(site.port), site.user, site.pass };
+            }
+            else st.value[sd::sf_port] = "22";
+
+            auto submit = [&st, &boss, finish]
+            {
+                if (st.done || !st.parent) return;
+                auto& parent = *st.parent;
+                auto name = st.value[sd::sf_name];
+                auto host = st.value[sd::sf_host];
+                if (name.empty()) { st.error = "Site Name is required."; boss.base::deface(); return; }
+                if (host.empty()) { st.error = "Host is required."; boss.base::deface(); return; }
+                if (!valid_site_host(host))
+                {
+                    st.error = "Host must be a valid hostname, IPv4, or IPv6 address.";
+                    boss.base::deface();
+                    return;
+                }
+                for (auto i = si32{}; i < (si32)parent.draft.sites.size(); ++i)
+                    if (i != st.edit_index && parent.draft.sites[(size_t)i].name == name)
+                    {
+                        st.error = "Site Name must be unique.";
+                        boss.base::deface();
+                        return;
+                    }
+                auto port = si32{ 22 };
+                auto const& port_text = st.value[sd::sf_port];
+                if (!port_text.empty())
+                {
+                    auto parsed = si64{};
+                    for (auto c : port_text)
+                    {
+                        if (c < '0' || c > '9')
+                        {
+                            st.error = "Port must be a number from 1 to 65535.";
+                            boss.base::deface();
+                            return;
+                        }
+                        parsed = parsed * 10 + (c - '0');
+                        if (parsed > 65535) break;
+                    }
+                    if (parsed < 1 || parsed > 65535)
+                    {
+                        st.error = "Port must be a number from 1 to 65535.";
+                        boss.base::deface();
+                        return;
+                    }
+                    port = (si32)parsed;
+                }
+                auto site = saved_site{
+                    std::move(name),
+                    std::move(host),
+                    port,
+                    st.value[sd::sf_user],
+                    st.value[sd::sf_pass],
+                };
+                if (st.edit_index >= 0 && st.edit_index < (si32)parent.draft.sites.size())
+                {
+                    parent.draft.sites[(size_t)st.edit_index] = std::move(site);
+                    parent.site_selected = st.edit_index;
+                }
+                else
+                {
+                    parent.draft.sites.push_back(std::move(site));
+                    parent.site_selected = (si32)parent.draft.sites.size() - 1;
+                }
+                ++parent.site_table_revision;
+                if (auto table = parent.site_table_wp.lock()) table->base::deface();
+                if (auto parent_card = parent.card_wp.lock()) parent_card->base::deface();
+                st.done = true;
+                finish();
+            };
+            auto cancel = [&st, finish]
+            {
+                if (st.done) return;
+                st.done = true;
+                finish();
+            };
+
+            if (auto layer = card_layer_wp.lock())
+            {
+                for (auto i = si32{}; i < sd::sf_count; ++i)
+                {
+                    auto input = make_input({
+                        .value = [&st, i]{ return st.value[(size_t)i]; },
+                        .on_change = [&st, i, &boss](text value)
+                        {
+                            st.value[(size_t)i] = std::move(value);
+                            if (!st.error.empty()) { st.error.clear(); boss.base::deface(); }
+                        },
+                        .on_submit = [submit](text){ submit(); },
+                        .on_cancel = [cancel]{ cancel(); },
+                        .secret = i == sd::sf_pass,
+                        // Keep Port unfiltered so submit can distinguish an omitted value (default
+                        // 22) from invalid text and report the validation error explicitly.
+                        .digits_only = false,
+                        .focus_on_start = i == sd::sf_name,
+                        .palette = { .bg = theme::bg, .text_fg = theme::text_fg,
+                                     .muted_fg = theme::subtext, .active = theme::sel_bg_act },
+                    });
+                    st.input_wp[(size_t)i] = ptr::shadow(input.widget);
+                    if (i == sd::sf_name) *first_input = st.input_wp[(size_t)i];
+                    layer->base::attach(input.widget);
+                }
+                auto ok = make_button({
+                    .label = []{ return text{ " OK " }; },
+                    .on_activate = [submit](hids&, ui::base&){ submit(); },
+                });
+                st.ok_wp = ptr::shadow(ok.widget);
+                layer->base::attach(ok.widget);
+                auto cancel_button = make_button({
+                    .label = []{ return text{ " Cancel " }; },
+                    .on_activate = [cancel](hids&, ui::base&){ cancel(); },
+                });
+                st.cancel_wp = ptr::shadow(cancel_button.widget);
+                layer->base::attach(cancel_button.widget);
+            }
+            boss.LISTEN(tier::release, e2::render::any, parent_canvas)
+            {
+                sd_site_editor_render(st, parent_canvas, boss.base::size());
+            };
+            boss.LISTEN(tier::preview, input::events::keybd::any, gear, -, (submit, cancel))
+            {
+                if (gear.payload != input::keybd::type::keypress) return;
+                if (gear.keystat == input::key::released || gear.keystat == input::key::interrupted) return;
+                if (gear.keybd::handled) return;
+                auto key = gear.keybd::generic();
+                if      (key == input::key::Esc)      { gear.set_handled(); cancel(); }
+                else if (key == input::key::KeyEnter) { gear.set_handled(); submit(); }
+            };
+        });
+        if (auto window = parent.window_wp.lock())
+        {
+            auto gear_id = window->bell::indexer.luafx.get_gear().id;
+            window->base::enqueue([card_wp = ptr::shadow(card), first_input, gear_id](auto&)
+            {
+                if (auto input = first_input->lock()) pro::focus::set(input, gear_id, solo::on);
+                else if (auto editor = card_wp.lock()) pro::focus::set(editor, gear_id, solo::on);
+            });
+        }
+        return overlay;
+    }
+
+    inline void sd_open_site_editor(settings_state& st, si32 edit_index)
+    {
+        auto window = st.window_wp.lock();
+        if (!window) return;
+        if (edit_index >= (si32)st.draft.sites.size()) return;
+        window->base::attach(make_site_editor(st, edit_index));
+    }
+
+    inline auto sd_site_table_cfg(settings_state& st) -> table_cfg
+    {
+        auto stp = &st;
+        auto cfg = table_cfg{};
+        cfg.window_wp = st.window_wp;
+        cfg.palette = table_palette{
+            .bg         = theme::bg,
+            .header     = theme::surface,
+            .text_fg    = theme::text_fg,
+            .subtext    = theme::subtext,
+            .sel_bg     = theme::sel_bg,
+            .sel_bg_act = theme::sel_bg_act,
+            .sort_fg    = theme::sort_fg,
+            .sb_track   = theme::sb_track,
+            .sb_thumb   = theme::sb_thumb,
+            .sb_hover   = theme::sb_hover,
+            .sb_drag    = theme::sb_drag,
+        };
+        cfg.columns = [stp]
+        {
+            auto table = qtable{};
+            for (auto i = si32{}; i < sd::site_ncol; ++i)
+            {
+                table.add_column(qtable::column{
+                    .title = text{ sd::site_headers[(size_t)i] },
+                    .width = stp->site_col_w[(size_t)i],
+                    .right = i == 2,
+                    .resizable = true,
+                    .key = i,
+                }, stp->site_col_shown[(size_t)i], text{ sd::site_menu_headers[(size_t)i] });
+            }
+            table.on_show_column = [stp](si32 key, bool shown)
+            {
+                if (key >= 0 && key < sd::site_ncol) stp->site_col_shown[(size_t)key] = shown;
+            };
+            table.on_resize_column = [stp](si32 key, si32 width)
+            {
+                if (key >= 0 && key < sd::site_ncol) stp->site_col_w[(size_t)key] = width;
+            };
+            table.autofit = [stp](si32 key)
+            {
+                return key >= 0 && key < sd::site_ncol ? sd_site_col_content_w(*stp, key) : si32{};
+            };
+            return table;
+        };
+        cfg.row_count = [stp]{ return (si32)stp->draft.sites.size(); };
+        cfg.revision = [stp]{ return stp->site_table_revision; };
+        cfg.cell = [stp](si32 row, si32 key)
+        {
+            return table_cell{ sd_site_cell(*stp, key, row), theme::text_fg };
+        };
+        cfg.compare = [stp](si32 a, si32 b, si32 key)
+        {
+            if (key < 0 || key >= sd::site_ncol) return si32{};
+            if (key == 2)
+            {
+                auto lhs = stp->draft.sites[(size_t)a].port;
+                auto rhs = stp->draft.sites[(size_t)b].port;
+                return lhs < rhs ? -1 : lhs > rhs ? 1 : 0;
+            }
+            auto lhs = sd_site_cell(*stp, key, a); utf::to_lower(lhs);
+            auto rhs = sd_site_cell(*stp, key, b); utf::to_lower(rhs);
+            return lhs < rhs ? -1 : lhs > rhs ? 1 : 0;
+        };
+        cfg.selection = [stp]
+        {
+            auto sel = qsel_cfg{};
+            sel.key_count = [stp]{ return (si32)stp->draft.sites.size(); };
+            sel.is_selected = [stp](si32 key){ return stp->site_selected == key; };
+            sel.on_select = [stp](si32 key, bool on)
+            {
+                if (on && key >= 0 && key < (si32)stp->draft.sites.size()) stp->site_selected = key;
+                else if (!on && stp->site_selected == key) stp->site_selected = -1;
+            };
+            sel.on_clear = [stp]{ stp->site_selected = -1; };
+            sel.has_selection = [stp]{ return stp->site_selected >= 0; };
+            sel.in_scope = [stp](si32 key){ return key >= 0 && key < (si32)stp->draft.sites.size(); };
+            sel.row_count = [stp]{ return (si32)stp->draft.sites.size(); };
+            sel.key_of_row = [stp](si32 row)
+            {
+                return row >= 0 && row < (si32)stp->draft.sites.size() ? row : -1;
+            };
+            return sel;
+        };
+        cfg.on_activate = [stp](si32 row){ sd_open_site_editor(*stp, row); };
+        cfg.on_key = [stp](hids& gear, netxs::wptr<ui::base>)
+        {
+            auto key = gear.keybd::generic();
+            if (key == input::key::Esc)
+            {
+                gear.set_handled();
+                sd_close(*stp);
+                return table_viewport_action{ table_viewport_action::handled };
+            }
+            return table_viewport_action{};
+        };
+        cfg.deletion.enabled = true;
+        cfg.deletion.on_remove_selected = [stp](netxs::wptr<ui::base>){ sd_remove_site(*stp); };
+        cfg.empty_text = []{ return text{ "No sites configured." }; };
+        cfg.wide_hit = true;
+        return cfg;
+    }
+
     // Build the threshold-unit dropdown menu (item 3): one radio row per unit (Byte..TiB). The
     // selected row is published via radio_checked; each row's action sets st.threshold_unit.
     inline auto sd_build_unit_menu(settings_state& st, netxs::wptr<ui::base> card_wp) -> std::vector<app::shared::menu::item>
@@ -937,9 +1370,13 @@ namespace netxs::app::parvion
             auto key_table = make_table(sd_key_table_cfg(st));
             st.key_table_wp = ptr::shadow(key_table.widget);
             key_table.widget->base::hidden = true; // Only the SFTP tab exposes this card layer.
+            auto site_table = make_table(sd_site_table_cfg(st));
+            st.site_table_wp = ptr::shadow(site_table.widget);
+            site_table.widget->base::hidden = true; // Only the Site tab exposes this card layer.
             if (auto layer = card_layer_wp.lock())
             {
                 layer->base::attach(key_table.widget);
+                layer->base::attach(site_table.widget);
                 for (auto i = si32{}; i < sd::f_count; ++i)
                 {
                     auto input = make_input({
@@ -976,6 +1413,21 @@ namespace netxs::app::parvion
                 st.button_remove_wp = attach_button({
                     .label = []{ return text{ sd::btn_removekey }; },
                     .on_activate = [&st](hids&, ui::base&){ sd_remove_keys(st); },
+                });
+                st.button_addsite_wp = attach_button({
+                    .label = []{ return text{ sd::btn_addsite }; },
+                    .on_activate = [&st](hids&, ui::base&){ sd_open_site_editor(st, -1); },
+                });
+                st.button_editsite_wp = attach_button({
+                    .label = []{ return text{ sd::btn_editsite }; },
+                    .on_activate = [&st](hids&, ui::base&)
+                    {
+                        if (st.site_selected >= 0) sd_open_site_editor(st, st.site_selected);
+                    },
+                });
+                st.button_removesite_wp = attach_button({
+                    .label = []{ return text{ sd::btn_removesite }; },
+                    .on_activate = [&st](hids&, ui::base&){ sd_remove_site(st); },
                 });
                 st.button_unit_wp = attach_button({
                     .label = [&st]{ return text{ " " } + text{ sftp_unit_label(st.threshold_unit) } + " ▾ "; },
@@ -1038,6 +1490,12 @@ namespace netxs::app::parvion
                     table->base::hidden = !show;
                     if (show) table->base::extend(st.key_table_area);
                 }
+                if (auto table = st.site_table_wp.lock())
+                {
+                    auto show = st.tab == sd::tab_site && st.site_table_area.size.x > 0 && st.site_table_area.size.y > 0;
+                    table->base::hidden = !show;
+                    if (show) table->base::extend(st.site_table_area);
+                }
                 auto place = [](netxs::wptr<ui::base> const& weak, rect area, bool show)
                 {
                     if (auto button = weak.lock())
@@ -1051,6 +1509,9 @@ namespace netxs::app::parvion
                 place(st.button_cancel_wp, st.hit.cancel,    true);
                 place(st.button_add_wp,    st.hit.addkey,    st.tab == sd::tab_sftp);
                 place(st.button_remove_wp, st.hit.removekey, st.tab == sd::tab_sftp);
+                place(st.button_addsite_wp, st.hit.addsite, st.tab == sd::tab_site);
+                place(st.button_editsite_wp, st.hit.editsite, st.tab == sd::tab_site);
+                place(st.button_removesite_wp, st.hit.removesite, st.tab == sd::tab_site);
                 place(st.button_unit_wp,   st.hit.unit,      st.tab == sd::tab_sftp);
                 place(st.button_allocation_wp, st.hit.allocation, st.tab == sd::tab_sftp);
                 place(st.button_hash_wp,   st.hit.hash_algo, st.tab == sd::tab_sftp);
