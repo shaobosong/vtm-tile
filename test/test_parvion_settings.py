@@ -339,6 +339,113 @@ def test_site_validation_and_remove():
     print("PASS"); return True
 
 
+def test_site_multiselect_edit_gate_and_batch_remove():
+    """Site rows stay multi-select, while Edit requires exactly one selected row."""
+    print("TEST: Site multi-select gates Edit and batch-removes selected sites ... ",
+          end="", flush=True)
+    cfg = tempfile.mkdtemp(prefix="pvset_")
+    os.makedirs(os.path.join(cfg, "parvion"), exist_ok=True)
+    sites = [
+        ("Alpha", "alpha.example", "alice"),
+        ("Beta", "beta.example", "bob"),
+        ("Gamma", "gamma.example", "grace"),
+        ("Delta", "delta.example", "dana"),
+        ("Epsilon", "epsilon.example", "erin"),
+    ]
+    with open(os.path.join(cfg, "parvion", "settings"), "w") as f:
+        for name, host, user in sites:
+            f.write(f"Site\t{name}\t{host}\t22\t{user}\t\n")
+
+    with _session(cfg) as s:
+        _open_dialog(s)
+        chars = _goto_site(s)
+        edit = _find_lowest(chars, " Edit ")
+        if not edit:
+            print("FAIL - Edit button not found"); return False
+
+        # No selection: the disabled button must ignore activation.
+        s.click(edit[1] + 2, edit[0] + 1); s.feed(0.4)
+        if T.grid_contains(s.screen()[0], "Edit SFTP Site"):
+            print("FAIL - Edit opened with no selected site"); return False
+
+        chars, bg = s.screen()
+        alpha = T.find_text(chars, "Alpha")
+        beta = T.find_text(chars, "Beta")
+        gamma = T.find_text(chars, "Gamma")
+        if not alpha or not beta or not gamma:
+            print("FAIL - seeded site rows not found"); return False
+        unselected = bg[beta[0]][beta[1]]
+        s.click(alpha[1] + 1, alpha[0] + 1)
+        selected = s.screen()[1][alpha[0]][alpha[1]]
+        s.click(gamma[1] + 1, gamma[0] + 1, button=16)
+        bg = s.screen()[1]
+        if (bg[alpha[0]][alpha[1]] != selected
+         or bg[gamma[0]][gamma[1]] != selected
+         or bg[beta[0]][beta[1]] != unselected):
+            print("FAIL - Ctrl-click did not retain a non-contiguous site selection"); return False
+
+        # Enter and the disabled Edit button are both no-ops for a multi-selection.
+        s.write("\r")
+        if T.grid_contains(s.screen()[0], "Edit SFTP Site"):
+            print("FAIL - Enter edited one row from a multi-selection"); return False
+        edit = _find_lowest(s.screen()[0], " Edit ")
+        s.click(edit[1] + 2, edit[0] + 1); s.feed(0.4)
+        if T.grid_contains(s.screen()[0], "Edit SFTP Site"):
+            print("FAIL - Edit opened with multiple selected sites"); return False
+
+        # Returning to one selected row enables Edit.
+        beta = T.find_text(s.screen()[0], "Beta")
+        s.click(beta[1] + 1, beta[0] + 1)
+        edit = _find_lowest(s.screen()[0], " Edit ")
+        s.click(edit[1] + 2, edit[0] + 1); s.feed(0.5)
+        if not T.grid_contains(s.screen()[0], "Edit SFTP Site"):
+            print("FAIL - Edit stayed disabled for one selected site"); return False
+        s.write("\x1b"); s.feed(0.5)
+
+        # Shift-click selects the complete Alpha..Gamma range.
+        chars = s.screen()[0]
+        alpha = T.find_text(chars, "Alpha")
+        gamma = T.find_text(chars, "Gamma")
+        s.click(alpha[1] + 1, alpha[0] + 1)
+        s.click(gamma[1] + 1, gamma[0] + 1, button=4)
+        chars, bg = s.screen()
+        positions = [T.find_text(chars, name) for name in ("Alpha", "Beta", "Gamma")]
+        if any(pos is None or bg[pos[0]][pos[1]] != selected for pos in positions):
+            print("FAIL - Shift-click did not select the complete site range"); return False
+
+        # Delete drops the selected outer rows and preserves every unselected site.
+        alpha, beta, gamma = positions
+        s.click(alpha[1] + 1, alpha[0] + 1)
+        s.click(gamma[1] + 1, gamma[0] + 1, button=16)
+        s.write("\x1b[3~")
+        chars = s.screen()[0]
+        if T.grid_contains(chars, "Alpha") or T.grid_contains(chars, "Gamma"):
+            print("FAIL - a selected site survived batch Delete"); return False
+        for name in ("Beta", "Delta", "Epsilon"):
+            if not T.grid_contains(chars, name):
+                print(f"FAIL - batch Delete dropped unselected site {name}"); return False
+
+        # The Remove button applies the same batch semantics to another selection.
+        delta = T.find_text(chars, "Delta")
+        epsilon = T.find_text(chars, "Epsilon")
+        s.click(delta[1] + 1, delta[0] + 1)
+        s.click(epsilon[1] + 1, epsilon[0] + 1, button=16)
+        remove = _find_lowest(s.screen()[0], " Remove ")
+        s.click(remove[1] + 2, remove[0] + 1); s.feed(0.5)
+        chars = s.screen()[0]
+        if T.grid_contains(chars, "Delta") or T.grid_contains(chars, "Epsilon"):
+            print("FAIL - a selected site survived batch Remove"); return False
+        if not T.grid_contains(chars, "Beta"):
+            print("FAIL - batch Remove dropped the unselected site"); return False
+        ok = T.find_text(chars, " OK ")
+        s.click(ok[1] + 2, ok[0] + 1); s.feed(0.8)
+
+    expected = "Beta\tbeta.example\t22\tbob\t"
+    if _settings_file(cfg).get("Site") != [expected]:
+        print(f"FAIL - wrong sites persisted: {_settings_file(cfg).get('Site')}"); return False
+    print("PASS"); return True
+
+
 def test_compression_persists():
     print("TEST: toggle compression + OK persists ... ", end="", flush=True)
     cfg = tempfile.mkdtemp(prefix="pvset_")
@@ -1271,6 +1378,7 @@ TESTS = [
     test_sftp_tab,
     test_site_tab_add_edit_and_persist,
     test_site_validation_and_remove,
+    test_site_multiselect_edit_gate_and_batch_remove,
     test_debug_tab_persists,
     test_add_encrypted_key_converts_to_ppk,
     test_save_picker_double_click_overwrite,

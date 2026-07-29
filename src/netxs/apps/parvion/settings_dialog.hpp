@@ -95,7 +95,7 @@ namespace netxs::app::parvion
         std::vector<text>  key_data;
         std::array<si32, sd::site_ncol> site_col_w{ 20, 26, 8, 20 };
         std::array<bool, sd::site_ncol> site_col_shown{ true, true, true, true };
-        si32               site_selected = -1; // Saved sites use single-row selection.
+        std::set<si32>     site_marked{};      // Shared-table selection (draft.sites indices).
         ui64               site_table_revision = 0;
         rect               site_table_area{};
         netxs::wptr<ui::base> site_table_wp;
@@ -855,13 +855,30 @@ namespace netxs::app::parvion
         return width;
     }
 
-    inline void sd_remove_site(settings_state& st)
+    inline auto sd_single_site(settings_state const& st) -> si32
     {
-        if (st.site_selected < 0 || st.site_selected >= (si32)st.draft.sites.size()) return;
-        st.draft.sites.erase(st.draft.sites.begin() + st.site_selected);
-        st.site_selected = -1;
+        if (st.site_marked.size() != 1) return -1;
+        auto selected = *st.site_marked.begin();
+        return selected >= 0 && selected < (si32)st.draft.sites.size() ? selected : -1;
+    }
+
+    inline void sd_site_selection_changed(settings_state& st)
+    {
+        if (auto button = st.button_editsite_wp.lock()) button->base::deface();
+    }
+
+    inline void sd_remove_sites(settings_state& st)
+    {
+        if (st.site_marked.empty()) return;
+        auto kept = std::vector<saved_site>{};
+        kept.reserve(st.draft.sites.size());
+        for (auto i = si32{}; i < (si32)st.draft.sites.size(); ++i)
+            if (!st.site_marked.contains(i)) kept.push_back(std::move(st.draft.sites[(size_t)i]));
+        st.draft.sites = std::move(kept);
+        st.site_marked.clear();
         ++st.site_table_revision;
         if (auto table = st.site_table_wp.lock()) table->base::deface();
+        sd_site_selection_changed(st);
         if (auto card = st.card_wp.lock()) card->base::deface();
     }
 
@@ -1029,15 +1046,16 @@ namespace netxs::app::parvion
                 if (st.edit_index >= 0 && st.edit_index < (si32)parent.draft.sites.size())
                 {
                     parent.draft.sites[(size_t)st.edit_index] = std::move(site);
-                    parent.site_selected = st.edit_index;
+                    parent.site_marked = { st.edit_index };
                 }
                 else
                 {
                     parent.draft.sites.push_back(std::move(site));
-                    parent.site_selected = (si32)parent.draft.sites.size() - 1;
+                    parent.site_marked = { (si32)parent.draft.sites.size() - 1 };
                 }
                 ++parent.site_table_revision;
                 if (auto table = parent.site_table_wp.lock()) table->base::deface();
+                sd_site_selection_changed(parent);
                 if (auto parent_card = parent.card_wp.lock()) parent_card->base::deface();
                 st.done = true;
                 finish();
@@ -1189,14 +1207,20 @@ namespace netxs::app::parvion
         {
             auto sel = qsel_cfg{};
             sel.key_count = [stp]{ return (si32)stp->draft.sites.size(); };
-            sel.is_selected = [stp](si32 key){ return stp->site_selected == key; };
+            sel.is_selected = [stp](si32 key){ return stp->site_marked.contains(key); };
             sel.on_select = [stp](si32 key, bool on)
             {
-                if (on && key >= 0 && key < (si32)stp->draft.sites.size()) stp->site_selected = key;
-                else if (!on && stp->site_selected == key) stp->site_selected = -1;
+                if (key < 0 || key >= (si32)stp->draft.sites.size()) return;
+                if (on) stp->site_marked.insert(key);
+                else    stp->site_marked.erase(key);
+                sd_site_selection_changed(*stp);
             };
-            sel.on_clear = [stp]{ stp->site_selected = -1; };
-            sel.has_selection = [stp]{ return stp->site_selected >= 0; };
+            sel.on_clear = [stp]
+            {
+                stp->site_marked.clear();
+                sd_site_selection_changed(*stp);
+            };
+            sel.has_selection = [stp]{ return !stp->site_marked.empty(); };
             sel.in_scope = [stp](si32 key){ return key >= 0 && key < (si32)stp->draft.sites.size(); };
             sel.row_count = [stp]{ return (si32)stp->draft.sites.size(); };
             sel.key_of_row = [stp](si32 row)
@@ -1205,7 +1229,10 @@ namespace netxs::app::parvion
             };
             return sel;
         };
-        cfg.on_activate = [stp](si32 row){ sd_open_site_editor(*stp, row); };
+        cfg.on_activate = [stp](si32 row)
+        {
+            if (sd_single_site(*stp) == row) sd_open_site_editor(*stp, row);
+        };
         cfg.on_key = [stp](hids& gear, netxs::wptr<ui::base>)
         {
             auto key = gear.keybd::generic();
@@ -1218,7 +1245,7 @@ namespace netxs::app::parvion
             return table_viewport_action{};
         };
         cfg.deletion.enabled = true;
-        cfg.deletion.on_remove_selected = [stp](netxs::wptr<ui::base>){ sd_remove_site(*stp); };
+        cfg.deletion.on_remove_selected = [stp](netxs::wptr<ui::base>){ sd_remove_sites(*stp); };
         cfg.empty_text = []{ return text{ "No sites configured." }; };
         cfg.wide_hit = true;
         return cfg;
@@ -1422,12 +1449,14 @@ namespace netxs::app::parvion
                     .label = []{ return text{ sd::btn_editsite }; },
                     .on_activate = [&st](hids&, ui::base&)
                     {
-                        if (st.site_selected >= 0) sd_open_site_editor(st, st.site_selected);
+                        if (auto selected = sd_single_site(st); selected >= 0)
+                            sd_open_site_editor(st, selected);
                     },
+                    .enabled = [&st]{ return sd_single_site(st) >= 0; },
                 });
                 st.button_removesite_wp = attach_button({
                     .label = []{ return text{ sd::btn_removesite }; },
-                    .on_activate = [&st](hids&, ui::base&){ sd_remove_site(st); },
+                    .on_activate = [&st](hids&, ui::base&){ sd_remove_sites(st); },
                 });
                 st.button_unit_wp = attach_button({
                     .label = [&st]{ return text{ " " } + text{ sftp_unit_label(st.threshold_unit) } + " ▾ "; },

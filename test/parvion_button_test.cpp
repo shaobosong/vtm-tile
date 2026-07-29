@@ -29,10 +29,14 @@ namespace
         }
     };
 
-    auto render(button_state state, button_palette palette = {}) -> mock_canvas
+    auto render(button_state state, button_palette palette = {}, bool enabled = true) -> mock_canvas
     {
         auto canvas = mock_canvas{};
-        auto cfg = button_cfg{ .label = []{ return text{ "Go" }; }, .palette = palette };
+        auto cfg = button_cfg{
+            .label = []{ return text{ "Go" }; },
+            .enabled = [enabled]{ return enabled; },
+            .palette = palette,
+        };
         button_render(state, cfg, canvas, { 6, 1 });
         return canvas;
     }
@@ -63,6 +67,26 @@ namespace
             && press.writes.size() == rest.writes.size() + 1
             && hover.writes.back().area == rect{ {}, { 6, 1 } }
             && press.writes.back().area == rect{ {}, { 6, 1 } };
+    }
+
+    auto test_disabled_palette_and_overlays() -> bool
+    {
+        auto palette = button_palette{
+            .background = 0xFF010203u,
+            .foreground = 0xFF040506u,
+            .disabled_foreground = 0xFF070809u,
+        };
+        auto canvas = render({ .hover = true, .press = true }, palette, faux);
+        if (canvas.writes.size() != 3) return faux;
+        auto const& g = canvas.writes[1];
+        auto const& o = canvas.writes[2];
+        return g.value.fgc() == argb{ palette.disabled_foreground }
+            && o.value.fgc() == argb{ palette.disabled_foreground };
+    }
+
+    auto test_enabled_defaults_true() -> bool
+    {
+        return button_enabled(button_cfg{});
     }
 
     auto test_hit_bounds() -> bool
@@ -138,6 +162,8 @@ int main()
 {
     auto ok = test_palette_and_centering()
            && test_hover_and_press_overlays()
+           && test_disabled_palette_and_overlays()
+           && test_enabled_defaults_true()
            && test_hit_bounds()
            && test_connect_caption_remains_responsive()
            && test_counted_tab_abbreviation_preserves_suffix()
