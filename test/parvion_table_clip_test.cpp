@@ -479,6 +479,17 @@ namespace
             && honors_ancestor_clip();
     }
 
+    auto test_component_host_reuses_viewport() -> bool
+    {
+        auto host = make_table_cell_host();
+        host->base::extend(rect{{}, { 80, 24 }});
+        auto canvas = ui::face{};
+        canvas.size({ 80, 24 });
+        auto const fields = host->base::fields.size();
+        for (auto i = 0; i < 100; ++i) host->render(canvas);
+        return fields == 1 && host->base::fields.size() == fields;
+    }
+
     auto test_component_cells_clip_during_horizontal_scroll() -> bool
     {
         // Deliberately ignore canvas.clip() to model an arbitrary retained component. Render the
@@ -894,6 +905,7 @@ int main()
         { "component_cells_retain_and_reconcile_widgets", test_component_cells_retain_and_reconcile_widgets },
         { "table_can_be_nested_as_component_content", test_table_can_be_nested_as_component_content },
         { "component_host_clips_every_edge", test_component_host_clips_every_edge },
+        { "component_host_reuses_viewport", test_component_host_reuses_viewport },
         { "component_cells_clip_during_horizontal_scroll", test_component_cells_clip_during_horizontal_scroll },
         { "selected_component_cell_keeps_selection_effect", test_selected_component_cell_keeps_selection_effect },
         { "selected_component_preserves_focused_row_marker", test_selected_component_preserves_focused_row_marker },

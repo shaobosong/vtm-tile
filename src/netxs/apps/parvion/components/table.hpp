@@ -902,12 +902,16 @@ namespace netxs::app::parvion
         auto host = ui::mock::ctor();
         host->invoke([postrender = std::move(postrender)](auto& boss)
         {
+            // field() creates a new anonymous property on every call.  Keep the bounded
+            // intermediate canvas as one host-lifetime field instead of allocating it
+            // from the render callback, where every frame would remain retained until
+            // the host was destroyed.
+            auto& viewport = boss.base::field(ui::face{});
             boss.LISTEN(tier::release, e2::render::any, parent_canvas, -, (postrender))
             {
                 auto size = boss.base::size();
                 if (size.x <= 0 || size.y <= 0) return;
 
-                auto& viewport = boss.base::field(ui::face{});
                 viewport.area(rect{{}, size});
                 viewport.fill(parent_canvas, cell::shaders::full);
                 for (auto& object : boss.base::subset)
