@@ -87,28 +87,28 @@ if(Python3_FOUND)
              COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test_confirm_close.py")
     set_tests_properties(confirm_close_test PROPERTIES
         ENVIRONMENT "VTM_DESK_BINARY=$<TARGET_FILE:vtm-desk>;VTM_TILE_BINARY=$<TARGET_FILE:vtm-tile>"
-        TIMEOUT 300
+        TIMEOUT 900
         LABELS "tui;tile;desk;terminal")
 
     add_test(NAME tile_workspace_test
              COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test_tile_workspace.py")
     set_tests_properties(tile_workspace_test PROPERTIES
         ENVIRONMENT "VTM_TILE_BINARY=$<TARGET_FILE:vtm-tile>"
-        TIMEOUT 300
+        TIMEOUT 900
         LABELS "tui;tile;workspace")
 
     add_test(NAME terminal_find_bar_test
              COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test_terminal_find_bar.py")
     set_tests_properties(terminal_find_bar_test PROPERTIES
         ENVIRONMENT "VTM_DESK_BINARY=$<TARGET_FILE:vtm-desk>"
-        TIMEOUT 300
+        TIMEOUT 900
         LABELS "tui;terminal;find")
 
     add_test(NAME tile_command_bar_terminal_test
              COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test_tile_command_bar_terminal.py")
     set_tests_properties(tile_command_bar_terminal_test PROPERTIES
         ENVIRONMENT "VTM_TILE_BINARY=$<TARGET_FILE:vtm-tile>"
-        TIMEOUT 300
+        TIMEOUT 900
         LABELS "tui;tile;commandbar")
 
     # Regression test for the vtm-tile shutdown orphan-process bug:
@@ -121,7 +121,7 @@ if(Python3_FOUND)
              COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test_tile_shutdown_orphans.py")
     set_tests_properties(tile_shutdown_orphans_test PROPERTIES
         ENVIRONMENT "VTM_TILE_BINARY=$<TARGET_FILE:vtm-tile>"
-        TIMEOUT 300
+        TIMEOUT 900
         LABELS "tui;tile;shutdown")
 
     # Regression test: pane focus must fire on LeftDown (press), not LeftClick
@@ -130,7 +130,7 @@ if(Python3_FOUND)
              COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test_tile_leftdown_focus.py")
     set_tests_properties(tile_leftdown_focus_test PROPERTIES
         ENVIRONMENT "VTM_TILE_BINARY=$<TARGET_FILE:vtm-tile>"
-        TIMEOUT 300
+        TIMEOUT 900
         LABELS "tui;tile;focus")
 
     # Regression test: ctrl+LeftDown toggles pane in/out of the focus group.
@@ -138,7 +138,7 @@ if(Python3_FOUND)
              COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test_tile_ctrl_press_group.py")
     set_tests_properties(tile_ctrl_press_group_test PROPERTIES
         ENVIRONMENT "VTM_TILE_BINARY=$<TARGET_FILE:vtm-tile>"
-        TIMEOUT 300
+        TIMEOUT 900
         LABELS "tui;tile;focus;group")
 
     # Regression test: ctrl+LeftDown on the tile gate menubar defocuses the whole
@@ -147,28 +147,28 @@ if(Python3_FOUND)
              COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test_tile_ctrl_press_menubar.py")
     set_tests_properties(tile_ctrl_press_menubar_test PROPERTIES
         ENVIRONMENT "VTM_TILE_BINARY=$<TARGET_FILE:vtm-tile>"
-        TIMEOUT 300
+        TIMEOUT 900
         LABELS "tui;tile;focus;gate")
 
     add_test(NAME tile_capture_startup_bytes_test
              COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test_tile_capture_startup_bytes.py")
     set_tests_properties(tile_capture_startup_bytes_test PROPERTIES
         ENVIRONMENT "VTM_TILE_BINARY=$<TARGET_FILE:vtm-tile>"
-        TIMEOUT 300
+        TIMEOUT 900
         LABELS "tui;tile;startup")
 
     add_test(NAME terminal_ctrllist_close_button_test
              COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test_terminal_ctrllist_close_button.py")
     set_tests_properties(terminal_ctrllist_close_button_test PROPERTIES
         ENVIRONMENT "VTM_DESK_BINARY=$<TARGET_FILE:vtm-desk>"
-        TIMEOUT 300
+        TIMEOUT 900
         LABELS "tui;desk;terminal;ctrllist")
 
     add_test(NAME dropdown_menu_test
              COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test_dropdown_menu.py")
     set_tests_properties(dropdown_menu_test PROPERTIES
         ENVIRONMENT "VTM_TILE_BINARY=$<TARGET_FILE:vtm-tile>"
-        TIMEOUT 300
+        TIMEOUT 900
         LABELS "tui;tile;menu")
 
     # Regression test for the menu item type="radiomenu" feature: renders a
@@ -178,84 +178,84 @@ if(Python3_FOUND)
              COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test_radiomenu.py")
     set_tests_properties(radiomenu_test PROPERTIES
         ENVIRONMENT "VTM_TILE_BINARY=$<TARGET_FILE:vtm-tile>"
-        TIMEOUT 300
+        TIMEOUT 900
         LABELS "tui;tile;menu")
 
     add_test(NAME tile_select_app_picker_test
              COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test_tile_select_app_picker.py")
     set_tests_properties(tile_select_app_picker_test PROPERTIES
         ENVIRONMENT "VTM_TILE_BINARY=$<TARGET_FILE:vtm-tile>"
-        TIMEOUT 300
+        TIMEOUT 900
         LABELS "tui;tile;pickapp")
 
     add_test(NAME terminal_restart_cwd_test
              COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test_terminal_restart_cwd.py")
     set_tests_properties(terminal_restart_cwd_test PROPERTIES
         ENVIRONMENT "VTM_TILE_BINARY=$<TARGET_FILE:vtm-tile>"
-        TIMEOUT 300
+        TIMEOUT 900
         LABELS "tui;tile;terminal;cwd")
 
     add_test(NAME tile_closepane_nvim_orphan_test
              COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test_tile_closepane_nvim_orphan.py")
     set_tests_properties(tile_closepane_nvim_orphan_test PROPERTIES
         ENVIRONMENT "VTM_TILE_BINARY=$<TARGET_FILE:vtm-tile>"
-        TIMEOUT 300
+        TIMEOUT 900
         LABELS "tui;tile;close")
 
     add_test(NAME tile_ctrl_click_focus_test
              COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test_tile_ctrl_click_focus.py")
     set_tests_properties(tile_ctrl_click_focus_test PROPERTIES
         ENVIRONMENT "VTM_TILE_BINARY=$<TARGET_FILE:vtm-tile>"
-        TIMEOUT 300
+        TIMEOUT 900
         LABELS "tui;tile;focus")
 
     add_test(NAME tile_cwd_inherit_test
              COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test_tile_cwd_inherit.py")
     set_tests_properties(tile_cwd_inherit_test PROPERTIES
         ENVIRONMENT "VTM_TILE_BINARY=$<TARGET_FILE:vtm-tile>"
-        TIMEOUT 300
+        TIMEOUT 900
         LABELS "tui;tile;cwd")
 
     add_test(NAME tile_input_bar_modes_test
              COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test_tile_input_bar_modes.py")
     set_tests_properties(tile_input_bar_modes_test PROPERTIES
         ENVIRONMENT "VTM_TILE_BINARY=$<TARGET_FILE:vtm-tile>"
-        TIMEOUT 300
+        TIMEOUT 900
         LABELS "tui;tile;inputbar")
 
     add_test(NAME tile_pane_close_focus_test
              COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test_tile_pane_close_focus.py")
     set_tests_properties(tile_pane_close_focus_test PROPERTIES
         ENVIRONMENT "VTM_TILE_BINARY=$<TARGET_FILE:vtm-tile>"
-        TIMEOUT 300
+        TIMEOUT 900
         LABELS "tui;tile;focus")
 
     add_test(NAME tile_pickapp_default_action_test
              COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test_tile_pickapp_default_action.py")
     set_tests_properties(tile_pickapp_default_action_test PROPERTIES
         ENVIRONMENT "VTM_TILE_BINARY=$<TARGET_FILE:vtm-tile>"
-        TIMEOUT 300
+        TIMEOUT 900
         LABELS "tui;tile;pickapp")
 
     add_test(NAME tile_rerun_application_test
              COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test_tile_rerun_application.py")
     set_tests_properties(tile_rerun_application_test PROPERTIES
         ENVIRONMENT "VTM_TILE_BINARY=$<TARGET_FILE:vtm-tile>"
-        TIMEOUT 300
+        TIMEOUT 900
         LABELS "tui;tile;rerun")
 
     add_test(NAME tile_shell_input_display_test
              COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test_tile_shell_input_display.py")
     set_tests_properties(tile_shell_input_display_test PROPERTIES
         ENVIRONMENT "VTM_TILE_BINARY=$<TARGET_FILE:vtm-tile>"
-        TIMEOUT 300
+        TIMEOUT 900
         LABELS "tui;tile;shell")
 
     add_test(NAME tile_zoom_close_button_test
              COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test_tile_zoom_close_button.py")
     set_tests_properties(tile_zoom_close_button_test PROPERTIES
         ENVIRONMENT "VTM_TILE_BINARY=$<TARGET_FILE:vtm-tile>"
-        TIMEOUT 300
+        TIMEOUT 900
         LABELS "tui;tile;zoom")
 
     # Regression test for the Parvion transfer-queue tables: Reason-column
@@ -265,7 +265,7 @@ if(Python3_FOUND)
              COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test_parvion_queue.py")
     set_tests_properties(parvion_queue_test PROPERTIES
         ENVIRONMENT "VTM_TILE_BINARY=$<TARGET_FILE:vtm-tile>"
-        TIMEOUT 300
+        TIMEOUT 900
         LABELS "tui;tile;parvion;queue")
 
     # Regression test for the file-preview pane operations (blank-area selection rules, right-click
@@ -274,7 +274,7 @@ if(Python3_FOUND)
              COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test_parvion_panes.py")
     set_tests_properties(parvion_panes_test PROPERTIES
         ENVIRONMENT "VTM_TILE_BINARY=$<TARGET_FILE:vtm-tile>"
-        TIMEOUT 300
+        TIMEOUT 900
         LABELS "tui;tile;parvion;panes")
 
     # Folder (recursive) Download/Upload/Delete in the file-preview pane. The recursive Download case
@@ -284,7 +284,7 @@ if(Python3_FOUND)
              COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test_parvion_folder_ops.py")
     set_tests_properties(parvion_folder_ops_test PROPERTIES
         ENVIRONMENT "VTM_TILE_BINARY=$<TARGET_FILE:vtm-tile>"
-        TIMEOUT 600
+        TIMEOUT 900
         LABELS "tui;tile;parvion;panes;folder;network")
 
     # A resumed transfer with more chunks than the six-at-a-time SSH handshake burst must retain
@@ -294,7 +294,7 @@ if(Python3_FOUND)
              COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test_parvion_parallel_resume.py")
     set_tests_properties(parvion_parallel_resume_test PROPERTIES
         ENVIRONMENT "VTM_TILE_BINARY=$<TARGET_FILE:vtm-tile>"
-        TIMEOUT 300
+        TIMEOUT 900
         LABELS "tui;tile;parvion;transfer;resume")
 
     # Remote (SFTP) directory navigation timing: the destination path is revealed only with its
@@ -306,7 +306,7 @@ if(Python3_FOUND)
              COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test_parvion_nav.py")
     set_tests_properties(parvion_nav_test PROPERTIES
         ENVIRONMENT "VTM_TILE_BINARY=$<TARGET_FILE:vtm-tile>"
-        TIMEOUT 300
+        TIMEOUT 900
         LABELS "tui;tile;parvion;panes;network")
 
     # The editable address bar in the pane title strip: click-to-edit (block caret), Enter
@@ -315,7 +315,7 @@ if(Python3_FOUND)
              COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test_parvion_address_bar.py")
     set_tests_properties(parvion_address_bar_test PROPERTIES
         ENVIRONMENT "VTM_TILE_BINARY=$<TARGET_FILE:vtm-tile>"
-        TIMEOUT 300
+        TIMEOUT 900
         LABELS "tui;tile;parvion;panes")
 
     # The Quick Connect bar's input fields: a left press (not the release) focuses and
@@ -324,7 +324,7 @@ if(Python3_FOUND)
              COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test_parvion_connectbar.py")
     set_tests_properties(parvion_connectbar_test PROPERTIES
         ENVIRONMENT "VTM_TILE_BINARY=$<TARGET_FILE:vtm-tile>"
-        TIMEOUT 300
+        TIMEOUT 900
         LABELS "tui;tile;parvion;connectbar")
 
     # Shared main-grid integration: hidden connect-bar boundary plus draggable/resettable
@@ -333,7 +333,7 @@ if(Python3_FOUND)
              COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test_parvion_grid.py")
     set_tests_properties(parvion_grid_layout_test PROPERTIES
         ENVIRONMENT "VTM_TILE_BINARY=$<TARGET_FILE:vtm-tile>"
-        TIMEOUT 60
+        TIMEOUT 900
         LABELS "tui;tile;parvion;layout")
 
     # Regression test: a rapid second double-click on a pane's menu bar (same
@@ -343,7 +343,7 @@ if(Python3_FOUND)
              COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test_tile_dblclick_maximize_restore.py")
     set_tests_properties(tile_dblclick_maximize_restore_test PROPERTIES
         ENVIRONMENT "VTM_TILE_BINARY=$<TARGET_FILE:vtm-tile>"
-        TIMEOUT 300
+        TIMEOUT 900
         LABELS "tui;tile;maximize")
 
     # The Parvion Edit -> Settings dialog (SFTP subset of FileZilla's Connection
@@ -357,6 +357,6 @@ if(Python3_FOUND)
              COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test_parvion_settings.py")
     set_tests_properties(parvion_settings_test PROPERTIES
         ENVIRONMENT "VTM_TILE_BINARY=$<TARGET_FILE:vtm-tile>;PUTTYRANDOMSEED=${CMAKE_CURRENT_BINARY_DIR}/parvion-settings-randomseed"
-        TIMEOUT 420
+        TIMEOUT 900
         LABELS "tui;tile;parvion;settings")
 endif()

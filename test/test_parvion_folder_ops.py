@@ -299,7 +299,7 @@ def test_download_pooling_reuses_connection():
             if ml:
                 s.click(ml[1] + 1, ml[0] + 1, button=0)
                 s.feed(1.5)
-            if not T.grid_contains(s.screen()[0], "Reusing connection"):
+            if not _log_contains(s, "Reusing connection"):
                 print("FAIL - no 'Reusing connection' in the message log (per-file respawn?)")
                 return False
             print("PASS")
@@ -371,13 +371,27 @@ def test_download_parallel_pooling():
             if ml:
                 s.click(ml[1] + 1, ml[0] + 1, button=0)
                 s.feed(1.5)
-            if not T.grid_contains(s.screen()[0], "Reusing connection"):
+            if not _log_contains(s, "Reusing connection"):
                 print("FAIL - no 'Reusing connection' in the message log (chunks respawned per file?)")
                 return False
             print("PASS")
             return True
     finally:
         shutil.rmtree(d, ignore_errors=True)
+
+
+def _log_contains(s, needle, max_scrolls=80):
+    """True if `needle` is visible in the message log, scrolling up if it slipped off the tail
+    (on slow machines every transfer can finish between two polls, burying early log lines)."""
+    if T.grid_contains(s.screen()[0], needle):
+        return True
+    for _ in range(max_scrolls):
+        for _ in range(2):  # Wheel-up inside the log area.
+            os.write(s.master_fd, f"\x1b[<64;60;{T.ROWS - 9}M".encode()); time.sleep(0.05)
+        s.feed(0.3)
+        if T.grid_contains(s.screen()[0], needle):
+            return True
+    return False
 
 
 def _pgrep_parvionsftp():
@@ -430,7 +444,7 @@ def test_pause_terminates_connections():
             if hdr is None:
                 print("FAIL - queue header not found")
                 return False
-            s.click(100, hdr[0] + 2, button=2)            # right-click an item's blank area
+            s.click(T.COLS - 2, hdr[0] + 2, button=2)     # right-click the table's blank area
             pa = T.find_text(s.screen()[0], "Pause All")
             if pa is None:
                 print("FAIL - 'Pause All' not in menu")
@@ -447,7 +461,7 @@ def test_pause_terminates_connections():
                 print(f"FAIL - pause left transfer backends running (pids {before} -> {after}; expected them terminated)")
                 return False
             # Resume and confirm fresh connections finish the job correctly.
-            s.click(100, hdr[0] + 2, button=2)
+            s.click(T.COLS - 2, hdr[0] + 2, button=2)
             sa = T.find_text(s.screen()[0], "Start All")
             if sa is None:
                 print("FAIL - 'Start All' not in menu")
@@ -518,7 +532,7 @@ def test_remove_terminates_connections():
             if hdr is None:
                 print("FAIL - queue header not found")
                 return False
-            s.click(100, hdr[0] + 2, button=2)
+            s.click(T.COLS - 2, hdr[0] + 2, button=2)
             ra = T.find_text(s.screen()[0], "Remove All")
             if ra is None:
                 print("FAIL - 'Remove All' not in menu")
