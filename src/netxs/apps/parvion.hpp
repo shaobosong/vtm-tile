@@ -29,6 +29,7 @@
 #include "parvion/panes.hpp"
 #include "parvion/connectbar.hpp"
 #include "parvion/queue.hpp"
+#include "parvion/components/grid.hpp"
 #include "parvion/settings_dialog.hpp"
 #include "parvion/prompts.hpp" // make_secret_dialog (live passphrase / password login modal)
 
@@ -227,101 +228,111 @@ namespace netxs::app::parvion
                   ->plugin<pro::cache>()
                   ->plugin<pro::timer>()
                   ->invoke([&](auto& boss)
-                  {
-                      boss.LISTEN(tier::anycast, e2::form::proceed::quit::any, fast)
-                      {
-                          boss.base::riseup(tier::release, e2::form::proceed::quit::one, fast);
-                      };
-                      boss.LISTEN(tier::release, e2::form::upon::vtree::attached, parent)
-                      {
-                          auto title = ansi::jet(bias::left).add("Parvion — Parallel SFTP");
-                          boss.base::riseup(tier::preview, e2::form::prop::ui::header, title);
-                      };
-                      boss.LISTEN(tier::release, e2::form::state::focus::count, count)
-                      {
-                          if (std::exchange(is_focused, !!count) != is_focused)
-                          {
-                              boss.base::deface();
-                              window_clr = is_focused ? skin::color(tone::winfocus)
-                                                      : skin::color(tone::window_clr);
-                          }
-                      };
-                  });
+            {
+                boss.LISTEN(tier::anycast, e2::form::proceed::quit::any, fast)
+                {
+                    boss.base::riseup(tier::release, e2::form::proceed::quit::one, fast);
+                };
+                boss.LISTEN(tier::release, e2::form::upon::vtree::attached, parent)
+                {
+                    auto title = ansi::jet(bias::left).add("Parvion — Parallel SFTP");
+                    boss.base::riseup(tier::preview, e2::form::prop::ui::header, title);
+                };
+                boss.LISTEN(tier::release, e2::form::state::focus::count, count)
+                {
+                    if (std::exchange(is_focused, !!count) != is_focused)
+                    {
+                        boss.base::deface();
+                        window_clr = is_focused ? skin::color(tone::winfocus)
+                                                : skin::color(tone::window_clr);
+                    }
+                };
+            });
             auto root = window->attach(ui::fork::ctor(axis::Y))
                 ->colors(col_text, col_bg);
-                // Menu bar. Scope to /config/parvion/ so menu::create reads /config/parvion/menu/*
-                // (padding, slim, autohide) just like the other applets do.
+            // Menu bar. Scope to /config/parvion/ so menu::create reads /config/parvion/menu/*
+            // (padding, slim, autohide) just like the other applets do.
+            auto parvion_context = config.settings::push_context("/config/parvion/");
+            auto [menu_block, cover, menu_data] = app::shared::menu::load(config);
+            root->attach(slot::_1, menu_block);
+            menu_block->shader(window_clr);
+            auto menu_id = menu_block->id;
+            cover->invoke([&](auto& boss)
+            {
+                auto bar = cell{ "▀"sv }.link(menu_id);
+                boss.LISTEN(tier::release, e2::render::any, parent_canvas, -, (bar))
                 {
-                    auto parvion_context = config.settings::push_context("/config/parvion/");
-                    auto [menu_block, cover, menu_data] = app::shared::menu::load(config);
-                    root->attach(slot::_1, menu_block);
-                    menu_block->shader(window_clr);
-                    auto menu_id = menu_block->id;
-                    cover->invoke([&](auto& boss)
+                    auto fgc = window_clr.bgc();
+                    parent_canvas.fill([&](cell& c){ c.fgc(fgc).txt(bar).link(bar); });
+                };
+            });
+            // The connect bar is fixed above the workspace with no visible or interactive
+            // boundary between them. Hidden handles create no objects and reserve no cells.
+            auto body = root->attach(slot::_2, grid::ctor({
+                .columns = { { .weight = 1 } },
+                .rows = {
+                    { .weight = 0, .minimum = 1, .maximum = 1 },
+                    { .weight = 1, .minimum = min_panes_h + min_queue_h },
+                },
+                .handle_mode = grid_handle_mode::hidden,
+            }));
+            body->invoke([&](auto& boss)
+            {
+                boss.on(tier::mouserelease, input::key::MouseDoubleClick, [](hids& gear)
+                {
+                    gear.dismiss(true);
+                });
+                boss.on(tier::mouserelease, input::key::MouseMultiClick, [](hids& gear)
+                {
+                    gear.dismiss(true);
+                });
+                boss.on(tier::mouserelease, input::key::LeftClick, [](hids& gear)
+                {
+                    if (gear.meta(hids::anyCtrl | hids::anyAlt | hids::anyShift))
                     {
-                        auto bar = cell{ "▀"sv }.link(menu_id);
-                        boss.LISTEN(tier::release, e2::render::any, parent_canvas, -, (bar))
-                        {
-                            auto fgc = window_clr.bgc();
-                            parent_canvas.fill([&](cell& c){ c.fgc(fgc).txt(bar).link(bar); });
-                        };
-                    });
-                }
-                auto body = root->attach(slot::_2, ui::fork::ctor(axis::Y));
-                    body->invoke([&](auto& boss)
+                        gear.dismiss(true);
+                    }
+                });
+                boss.on(tier::mouserelease, input::key::MouseWheel, [](hids& gear)
+                {
+                    if (gear.meta(hids::anyCtrl | hids::anyAlt | hids::anyShift))
                     {
-                        boss.on(tier::mouserelease, input::key::MouseDoubleClick, [](hids& gear)
-                        {
-                            gear.dismiss(true);
-                        });
-                        boss.on(tier::mouserelease, input::key::MouseMultiClick, [](hids& gear)
-                        {
-                            gear.dismiss(true);
-                        });
-                        boss.on(tier::mouserelease, input::key::LeftClick, [](hids& gear)
-                        {
-                            if (gear.meta(hids::anyCtrl | hids::anyAlt | hids::anyShift))
-                            {
-                                gear.dismiss(true);
-                            }
-                        });
-                        boss.on(tier::mouserelease, input::key::MouseWheel, [](hids& gear)
-                        {
-                            if (gear.meta(hids::anyCtrl | hids::anyAlt | hids::anyShift))
-                            {
-                                gear.dismiss(true);
-                            }
-                        });
-                    });
-                    // Quick-connect bar: interactive Host/User/Pass/Port + Connect.
-                    body->attach(slot::_1, make_connect_bar(ctrl.get()))
-                        ->limits({ 1, 1 }, { -1, 1 });
-                    auto workspace = body->attach(slot::_2, ui::fork::ctor(axis::Y, 0, 3, 2));
-                        // Local | Remote file-browser panes with a draggable divider.
-                        auto panes = workspace->attach(slot::_1, ui::fork::ctor(axis::X, 2, 1, 1));
-                            panes->limits({ -1, min_panes_h }); // Panes (and the divider) can't collapse under the queue bar.
-                            pane_state* local_st = nullptr; // Stable handle to the local pane's state so the timer can re-list it after a download.
-                            auto local_pane = panes->attach(slot::_1, make_file_pane("Local site", true, local_lister(), cwd(), true, nullptr, ctrl.get(), &local_st, window));
-                            auto remote_pane = panes->attach(slot::_2, make_file_pane("Remote site", faux, lister_t{}, "/", faux, ctrl.get(), ctrl.get(), nullptr, window));
-                            // Draggable Local|Remote divider: pro::mover feeds the fork's split ratio; pro::shade lightens on hover.
-                            panes->attach(slot::_I, ui::mock::ctor()
-                                ->active()
-                                ->plugin<pro::mouse>()
-                                ->plugin<pro::mover>()
-                                ->plugin<pro::shade<cell::shaders::xlight>>()
-                                ->invoke([&](auto& boss)
-                                {
-                                    boss.LISTEN(tier::release, e2::render::any, parent_canvas)
-                                    {
-                                        parent_canvas.fill([](cell& c){ c.bgc(col_surface); });
-                                    };
-                                    // Double-click the divider to restore the default 1:1 Local|Remote split.
-                                    attach_dblclick_reset(boss, ptr::shadow(panes), 1, 1);
-                                }));
-                        // Transfer queue + message log, merged into one bottom-pinned tabbed panel.
-                        // Its empty top handle bar drags the panes/queue split.
-                        auto queue_panel = workspace->attach(slot::_2, make_queue_panel(ctrl.get(), ptr::shadow(workspace), window));
-                            queue_panel->limits({ -1, min_queue_h });
+                        gear.dismiss(true);
+                    }
+                });
+            });
+            // Quick-connect bar: interactive Host/User/Pass/Port + Connect.
+            body->attach(make_connect_bar(ctrl.get()), { .column = 0, .row = 0 })
+                ->limits({ 1, 1 }, { -1, 1 });
+            // The resizable workspace is a true two-dimensional grid: Local and Remote
+            // occupy the top row, while the bottom tabs span both columns. Its handles
+            // preserve the old 1:1 pane and 3:2 panes:tabs defaults.
+            auto workspace = body->attach(grid::ctor({
+                .columns = {
+                    { .weight = 1 },
+                    { .weight = 1 },
+                },
+                .rows = {
+                    { .weight = 3, .minimum = min_panes_h },
+                    { .weight = 2, .minimum = min_queue_h - 1 },
+                },
+                .handle_mode = grid_handle_mode::enabled,
+                .column_handle_width = 2,
+                .row_handle_height = 1,
+                .handle_color = col_surface,
+            }), { .column = 0, .row = 1 });
+            workspace->limits({ -1, min_panes_h + min_queue_h });
+            pane_state* local_st = nullptr; // Stable handle to the local pane's state so the timer can re-list it after a download.
+            auto local_pane = workspace->attach(
+                make_file_pane("Local site", true, local_lister(), cwd(), true, nullptr, ctrl.get(), &local_st, window),
+                { .column = 0, .row = 0 });
+            auto remote_pane = workspace->attach(
+                make_file_pane("Remote site", faux, lister_t{}, "/", faux, ctrl.get(), ctrl.get(), nullptr, window),
+                { .column = 1, .row = 0 });
+            auto queue_panel = workspace->attach(
+                make_queue_tabs(ctrl.get(), window),
+                { .column = 0, .row = 1, .column_span = 2 });
+            queue_panel->limits({ -1, min_queue_h - 1 });
             // Edit -> Settings: register the OpenSettingsDialog lua method on the window so the
             // menu's ParvionOpenSettings script (vtm.xml) opens the settings overlay. ctrl is
             // captured by value (a shared_ptr copy) so it outlives this build() call.

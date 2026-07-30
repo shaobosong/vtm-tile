@@ -55,6 +55,13 @@ target_include_directories(parvion_button_test PRIVATE "${CMAKE_SOURCE_DIR}/src"
 target_link_libraries(parvion_button_test PRIVATE Lua::Lua)
 add_test(NAME parvion_button_test COMMAND parvion_button_test)
 
+# Unit test for the shared Parvion fixed/resizable grid layout.
+add_executable(parvion_grid_test "parvion_grid_test.cpp")
+target_include_directories(parvion_grid_test PRIVATE "${CMAKE_SOURCE_DIR}/src"
+                                                      ${LUA_INCLUDE_DIR})
+target_link_libraries(parvion_grid_test PRIVATE Lua::Lua)
+add_test(NAME parvion_grid_test COMMAND parvion_grid_test)
+
 # Unit test for the shared Parvion progress-bar renderer and table-cell embedding contract.
 add_executable(parvion_progressbar_test "parvion_progressbar_test.cpp")
 target_include_directories(parvion_progressbar_test PRIVATE "${CMAKE_SOURCE_DIR}/src"
@@ -319,6 +326,15 @@ if(Python3_FOUND)
         ENVIRONMENT "VTM_TILE_BINARY=$<TARGET_FILE:vtm-tile>"
         TIMEOUT 300
         LABELS "tui;tile;parvion;connectbar")
+
+    # Shared main-grid integration: hidden connect-bar boundary plus draggable/resettable
+    # Local|Remote and panes|tabs handles.
+    add_test(NAME parvion_grid_layout_test
+             COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test_parvion_grid.py")
+    set_tests_properties(parvion_grid_layout_test PROPERTIES
+        ENVIRONMENT "VTM_TILE_BINARY=$<TARGET_FILE:vtm-tile>"
+        TIMEOUT 60
+        LABELS "tui;tile;parvion;layout")
 
     # Regression test: a rapid second double-click on a pane's menu bar (same
     # cell, within the double-click timeout) must restore the pane instead of

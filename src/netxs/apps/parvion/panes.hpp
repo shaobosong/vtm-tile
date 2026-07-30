@@ -121,59 +121,6 @@ namespace netxs::app::parvion
         return mx >= b.coor.x && mx < b.coor.x + b.size.x && my >= b.coor.y && my < b.coor.y + b.size.y;
     }
 
-    // Make `boss` a vertical drag-resize handle for `target` fork's split: dragging the
-    // widget up/down moves the boundary (drag down → the region above grows). When
-    // `row_gate >= 0`, only a press landing on that local row begins a resize, so the rest
-    // of the widget keeps its own click behavior (e.g. the queue tab strip). Reuses the
-    // fork's public ratio API; the offset of the cursor within the handle (gear.coord.y) is
-    // exactly the desired change in split position (grip width cancels), re-read each pull
-    // so it self-corrects as the handle moves with the split.
-    template<class Boss>
-    void attach_vsplit_resize(Boss& boss, netxs::wptr<ui::fork> target, si32 row_gate = -1)
-    {
-        // Enable dragging. Once draggable is on, pro::mouse captures the pointer and
-        // re-emits high-level e2::form::drag::* events while consuming the low-level
-        // input::key::*Drag* ones, so we must subscribe to the high-level events here
-        // (same extension point pro::mover uses). Capture keeps pulls coming even when the
-        // cursor leaves the handle as the split moves under it.
-        boss.base::signal(tier::release, e2::form::draggable::_<hids::buttons::left>, true);
-        auto dragging = ptr::shared(faux);
-        boss.LISTEN(tier::release, e2::form::drag::start::_<hids::buttons::left>, gear, -, (dragging, row_gate))
-        {
-            // gear.click is the press position localized to this widget (gear.pressxy
-            // stays in global coords - it is not offset per widget in hids::pass()).
-            *dragging = row_gate < 0 || (si32)gear.click.y == row_gate;
-        };
-        boss.LISTEN(tier::release, e2::form::drag::pull::_<hids::buttons::left>, gear, -, (dragging, target))
-        {
-            if (!*dragging) return;
-            if (auto fork_ptr = target.lock())
-            {
-                auto [orientation, griparea, ratio] = fork_ptr->get_config();
-                auto limit = std::max(1, fork_ptr->base::size().y - griparea.size.y);
-                auto split = std::clamp(griparea.coor.y + (si32)gear.coord.y, 0, limit);
-                fork_ptr->set_ratio(netxs::divround(ui::fork::max_ratio * split, limit));
-                fork_ptr->base::reflow();
-            }
-        };
-        boss.LISTEN(tier::release, e2::form::drag::stop::_<hids::buttons::left>,   gear, -, (dragging)) { *dragging = faux; };
-        boss.LISTEN(tier::release, e2::form::drag::cancel::_<hids::buttons::left>, gear, -, (dragging)) { *dragging = faux; };
-    }
-
-    // Double-click a divider handle to restore the fork's default split ratio.
-    // row_gate >= 0 limits the reset to a press landing on that local row (so the
-    // queue tab strip keeps its own behavior); -1 means the whole widget is a handle.
-    template<class Boss>
-    void attach_dblclick_reset(Boss& boss, netxs::wptr<ui::fork> target, si32 def_s1, si32 def_s2, si32 row_gate = -1)
-    {
-        boss.on(tier::mouserelease, input::key::LeftDoubleClick, [target, def_s1, def_s2, row_gate](hids& gear)
-        {
-            if (row_gate >= 0 && (si32)gear.coord.y != row_gate) return;
-            if (auto fork_ptr = target.lock()) fork_ptr->config(def_s1, def_s2);
-            gear.dismiss();
-        });
-    }
-
     // --- pane logic (free functions; safe to call from deferred handlers) --------
     inline void pane_name_cancel(pane_state& st)
     {
