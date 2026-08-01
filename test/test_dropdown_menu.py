@@ -1367,15 +1367,16 @@ def test_nested_dropdown_leaf_click_dismisses_chain():
 
 
 def test_submenu_background_progressively_darker():
-    """Each submenu level renders with a darker background than its
+    """Each submenu level renders with a background distinct from its
     parent.
 
-    Verifies the contract added to menu::_attach_popup_overlay: the
-    overlay's depth (= chain->overlays.size() at attach time) is
-    subtracted from every RGB channel of the root popup background,
-    so a submenu (depth=1) is strictly darker than its parent
-    (depth=0) on R, G, and B. This gives the user clear visual
-    feedback for how deep they have descended in a cascading menu.
+    Verifies the contract in menu::_attach_popup_overlay: the overlay's
+    depth (= chain->overlays.size() at attach time) selects between two
+    alternating preset backgrounds — even levels use #3D3E50, odd levels
+    the slightly darker #393A4C — so a submenu (depth=1) is strictly
+    darker than its parent (depth=0) on R, G, and B. This gives the user
+    clear visual feedback for how deep they have descended in a
+    cascading menu.
 
     We open the parent popup, hover NestSub1 to open its submenu,
     and compare:
@@ -1968,11 +1969,11 @@ def test_keyboard_down_up_arrows_select_rows():
         first_bg = find_bg_rgb_before_marker(s._screen_buf, KB_LEAF_FIND_TAIL)
         if first_bg is None:
             return fail("could not read bg for first popup row")
-        # Hover bg at depth 0 is (73, 74, 92).
-        if first_bg != (73, 74, 92):
+        # Hover bg at depth 0 is (85, 86, 104).
+        if first_bg != (85, 86, 104):
             return fail(
                 f"after one Down arrow, first row bg is {first_bg} "
-                f"— expected (73, 74, 92) (hover at depth 0)"
+                f"— expected (85, 86, 104) (hover at depth 0)"
             )
 
         # Press Down again: second row (Replace item) selected.
@@ -1980,10 +1981,10 @@ def test_keyboard_down_up_arrows_select_rows():
         time.sleep(0.3)
         s.snapshot(timeout=1.5)
         second_bg = find_bg_rgb_before_marker(s._screen_buf, KB_LEAF_REPL_TAIL)
-        if second_bg != (73, 74, 92):
+        if second_bg != (85, 86, 104):
             return fail(
                 f"after two Downs, second row bg is {second_bg} "
-                f"— expected (73, 74, 92) (selection didn't advance)"
+                f"— expected (85, 86, 104) (selection didn't advance)"
             )
 
         # Press Up: back to first row.
@@ -1991,10 +1992,10 @@ def test_keyboard_down_up_arrows_select_rows():
         time.sleep(0.3)
         s.snapshot(timeout=1.5)
         first_bg2 = find_bg_rgb_before_marker(s._screen_buf, KB_LEAF_FIND_TAIL)
-        if first_bg2 != (73, 74, 92):
+        if first_bg2 != (85, 86, 104):
             return fail(
                 f"after Down/Down/Up, first row bg is {first_bg2} "
-                f"— expected the selection to step back to (73, 74, 92)"
+                f"— expected the selection to step back to (85, 86, 104)"
             )
 
         if not s.is_alive():
@@ -2033,12 +2034,12 @@ def test_keyboard_right_arrow_opens_submenu_and_focuses_first_row():
                 f"Right arrow — submenu did not open via keyboard"
             )
         # The submenu's first row should be pre-selected; depth-1
-        # hover bg is (65, 66, 84) = level1 base (41,42,60) + 24 each.
+        # hover bg is (81, 82, 100) = level-1 base #393A4C (57,58,76) + 24 each.
         grand_bg = find_bg_rgb_before_marker(s._screen_buf, KB_GRAND_TAIL)
-        if grand_bg != (65, 66, 84):
+        if grand_bg != (81, 82, 100):
             return fail(
                 f"submenu's first row bg is {grand_bg} — expected "
-                f"(65, 66, 84) (depth-1 hover, first row auto-selected)"
+                f"(81, 82, 100) (depth-1 hover, first row auto-selected)"
             )
 
         if not s.is_alive():
@@ -2089,10 +2090,10 @@ def test_keyboard_left_arrow_closes_submenu_returns_to_parent():
         # the parent rows we can match.
         candidates = [KB_LEAF_FIND_TAIL, KB_LEAF_REPL_TAIL, KB_SUB_TAIL]
         bgs = [find_bg_rgb_before_marker(s._screen_buf, m) for m in candidates]
-        if not any(bg == (73, 74, 92) for bg in bgs):
+        if not any(bg == (85, 86, 104) for bg in bgs):
             return fail(
                 f"after Left+Down, no parent row carries depth-0 "
-                f"hover bg (73,74,92); saw bgs={bgs} — Left arrow "
+                f"hover bg (85,86,104); saw bgs={bgs} — Left arrow "
                 f"may not have returned focus to the parent popup"
             )
 
@@ -2207,10 +2208,10 @@ def test_keyboard_nav_is_independent_of_mouse_hover():
 
     Sequence:
       1. Hover the mouse over the first popup row. Confirm bg
-         shifts to the depth-0 hover color (73, 74, 92).
+         shifts to the depth-0 hover color (85, 86, 104).
       2. Press Down. Confirm the SECOND row now carries the
          hover color and the first row reverted to the base bg
-         (49, 50, 68). Without the lock, the stationary cursor
+         (61, 62, 80). Without the lock, the stationary cursor
          would echo a MouseMove that pulls selection back to
          the first row.
       3. Move the mouse to the first row again (different coord
@@ -2236,10 +2237,10 @@ def test_keyboard_nav_is_independent_of_mouse_hover():
         time.sleep(0.3)
         s.snapshot(timeout=1.0)
         first_bg = find_bg_rgb_before_marker(s._screen_buf, KB_LEAF_FIND_TAIL)
-        if first_bg != (73, 74, 92):
+        if first_bg != (85, 86, 104):
             return fail(
                 f"mouse hover failed to highlight first row "
-                f"(bg={first_bg}, expected (73,74,92))"
+                f"(bg={first_bg}, expected (85,86,104))"
             )
 
         # 2) Press Down. Keyboard must override the stationary
@@ -2249,14 +2250,14 @@ def test_keyboard_nav_is_independent_of_mouse_hover():
         s.snapshot(timeout=1.0)
         first_bg2 = find_bg_rgb_before_marker(s._screen_buf, KB_LEAF_FIND_TAIL)
         second_bg = find_bg_rgb_before_marker(s._screen_buf, KB_LEAF_REPL_TAIL)
-        if second_bg != (73, 74, 92):
+        if second_bg != (85, 86, 104):
             return fail(
                 f"after Down with mouse stationary, second row bg "
-                f"is {second_bg} — expected (73,74,92). The keyboard "
+                f"is {second_bg} — expected (85,86,104). The keyboard "
                 f"selection was pulled back by the stationary mouse "
                 f"hover (kbd_lock_coord lock is not working)"
             )
-        if first_bg2 == (73, 74, 92):
+        if first_bg2 == (85, 86, 104):
             return fail(
                 f"after Down, the mouse-hovered first row still "
                 f"carries the hover bg — selection did not advance "
@@ -2274,10 +2275,10 @@ def test_keyboard_nav_is_independent_of_mouse_hover():
         time.sleep(0.3)
         s.snapshot(timeout=1.0)
         first_bg3 = find_bg_rgb_before_marker(s._screen_buf, KB_LEAF_FIND_TAIL)
-        if first_bg3 != (73, 74, 92):
+        if first_bg3 != (85, 86, 104):
             return fail(
                 f"after a real mouse move, first row bg is {first_bg3} "
-                f"— expected (73,74,92). The kbd_lock_coord did not "
+                f"— expected (85,86,104). The kbd_lock_coord did not "
                 f"release on a genuine cursor move"
             )
 
@@ -2445,12 +2446,12 @@ def test_dropdown_top_edge_uses_lower_half_block_with_menu_bg_fg():
         first_row, _ = leaf_pos
 
         # Depth-0 level_bg from application.hpp = (0x31, 0x32, 0x44).
-        level_bg = (49, 50, 68)
+        level_bg = (61, 62, 80)
         top_positions = find_marker_with_fg_positions(
             s._screen_buf, "▄", level_bg)
         if not top_positions:
             return fail(
-                "no '▄' (U+2584) glyph emitted with fg=(49,50,68) — "
+                "no '▄' (U+2584) glyph emitted with fg=(61,62,80) — "
                 "the dropdown's top decoration is missing"
             )
 
@@ -2460,7 +2461,7 @@ def test_dropdown_top_edge_uses_lower_half_block_with_menu_bg_fg():
         edge_hits = [p for p in top_positions if p[0] == expected_edge_row]
         if not edge_hits:
             return fail(
-                f"'▄' with fg=(49,50,68) was emitted but not on the "
+                f"'▄' with fg=(61,62,80) was emitted but not on the "
                 f"expected edge row {expected_edge_row} (one above the "
                 f"first popup item at row {first_row}); rows seen: "
                 f"{sorted({p[0] for p in top_positions})}"
@@ -2514,12 +2515,12 @@ def test_dropdown_bottom_edge_uses_upper_half_block_with_menu_bg_fg():
             return fail("could not locate last popup row")
         last_row, _ = last_pos
 
-        level_bg = (49, 50, 68)
+        level_bg = (61, 62, 80)
         bot_positions = find_marker_with_fg_positions(
             s._screen_buf, "▀", level_bg)
         if not bot_positions:
             return fail(
-                "no '▀' (U+2580) glyph emitted with fg=(49,50,68) — "
+                "no '▀' (U+2580) glyph emitted with fg=(61,62,80) — "
                 "the dropdown's bottom decoration is missing"
             )
 
@@ -2527,7 +2528,7 @@ def test_dropdown_bottom_edge_uses_upper_half_block_with_menu_bg_fg():
         edge_hits = [p for p in bot_positions if p[0] == expected_edge_row]
         if not edge_hits:
             return fail(
-                f"'▀' with fg=(49,50,68) was emitted but not on the "
+                f"'▀' with fg=(61,62,80) was emitted but not on the "
                 f"expected edge row {expected_edge_row} (one below the "
                 f"last popup item at row {last_row}); rows seen: "
                 f"{sorted({p[0] for p in bot_positions})}"
@@ -2572,7 +2573,7 @@ def test_dropdown_edge_background_is_transparent():
         s.click(trigger_col + 2, trigger_row)
         s.snapshot(timeout=1.5)
 
-        level_bg = (49, 50, 68)
+        level_bg = (61, 62, 80)
         # Scan the raw stream for ANY ▀-or-▄ painted with fg=level_bg.
         # Walk forward tracking the most recent bg SGR (48;2;R;G;B) and
         # most recent fg SGR; for every edge glyph we encounter, record

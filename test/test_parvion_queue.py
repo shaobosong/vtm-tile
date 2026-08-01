@@ -417,6 +417,19 @@ SCROLL_THUMB_FG = (59, 66, 97)    # theme::sb_thumb (0xFF3B4261).
 SCROLL_DRAG_FG = (155, 162, 193)
 
 
+def blank_col(chars, r):
+    """A 0-based x inside the blank area right of the table's last column.
+
+    The transfer table's content width tracks the column set (currently
+    Server..Speed, ending near col 109 in a 120-wide screen), so a blank-area
+    click cannot use a fixed x. Derive it from the last column divider on the
+    given item row instead; falls back to the right screen edge when the row
+    carries no dividers.
+    """
+    last_div = row_text(chars, r).rfind("│")
+    return min(COLS - 2, last_div + 3) if last_div >= 0 else COLS - 2
+
+
 def header_field(chars, title, row=None):
     """Locate a table header field and its sort glyph.
 
@@ -892,7 +905,7 @@ def test_selection_highlight_ends_at_last_column():
             print("FAIL - item row not found")
             return False
         r, c = pos
-        blank_c = 100  # Well past the last column (content ends near col 62).
+        blank_c = blank_col(s.screen()[0], r)  # Just past the last column divider.
         bg_before = s.screen()[1]
         name_before = bg_before[r][c]
         blank_before = bg_before[r][blank_c]
@@ -970,7 +983,7 @@ def test_blank_area_menu_uses_all_actions():
             print("FAIL - queued row not found")
             return False
         r, _ = pos
-        s.click(100, r + 1, button=2)  # Right-click blank area to the right of the columns.
+        s.click(blank_col(chars, r) + 1, r + 1, button=2)  # Right-click blank area to the right of the columns.
         chars = s.screen()[0]
         missing = [w for w in ("Start All", "Pause All", "Remove All", "Pin to Top", "Copy", "Select All")
                    if not grid_contains(chars, w)]
@@ -991,8 +1004,9 @@ def test_blank_area_menu_uses_all_actions():
                 print(f"FAIL - Pause All did not pause {name}")
                 return False
 
-        pos = find_text(s.screen()[0], "notes.txt")
-        s.click(100, pos[0] + 1, button=2)
+        chars = s.screen()[0]
+        pos = find_text(chars, "notes.txt")
+        s.click(blank_col(chars, pos[0]) + 1, pos[0] + 1, button=2)
         if not click_label(s, "Start All"):
             print("FAIL - Start All entry not found")
             return False
@@ -1016,7 +1030,7 @@ def test_blank_remove_all_is_tab_scoped():
             return False
         failed_before = tab_count(chars, "Failed")
         succeeded_before = tab_count(chars, "Succeeded")
-        s.click(100, pos[0] + 1, button=2)
+        s.click(blank_col(chars, pos[0]) + 1, pos[0] + 1, button=2)
         if not click_label(s, "Remove All"):
             print("FAIL - Remove All entry not found")
             return False
@@ -1050,7 +1064,7 @@ def test_right_click_blank_clears_selection():
         if sel is None or sel == before:
             print(f"FAIL - left-click did not select the row (bg {before} -> {sel})")
             return False
-        s.click(100, r + 1, button=2)           # Right-click the blank area right of the columns.
+        s.click(blank_col(s.screen()[0], r) + 1, r + 1, button=2)  # Right-click the blank area right of the columns.
         s._write(b"\x1b")                        # Dismiss the All menu.
         s.feed(0.3)
         after = s.screen()[1][r][c]
@@ -1660,7 +1674,7 @@ def test_selected_progress_bar_keeps_row_effect():
             print(f"FAIL - live repaint removed selection tint: {refreshed_tint!r}")
             return False
 
-        s.click(100, row + 1, button=0)  # Blank table space clears selection.
+        s.click(blank_col(s.screen()[0], row) + 1, row + 1, button=0)  # Blank table space clears selection.
         restored = snapshot()
         if restored is None or restored[2] != label or restored[3] != native:
             print(f"FAIL - deselection did not restore native progress palette: {restored!r}")

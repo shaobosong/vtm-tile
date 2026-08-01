@@ -403,6 +403,12 @@ int sftp_get_file(char *fname, char *outfname, bool restart, uint64_t start_offs
             fzprintf(sftpError, "error while writing local file");
             ret = 0;
         }
+    } else {
+        /* Failed mid-transfer: still flush whatever landed in the current
+         * (partial) slot so the on-disk file reflects every byte already
+         * received, instead of silently discarding the trailing buffer.
+         * finalize_wfile's verdict is ignored — the transfer already failed. */
+        finalize_wfile(file);
     }
 
     close_wfile(file);

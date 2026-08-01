@@ -282,18 +282,30 @@ def test_capture_startup_bytes():
             return False
 
         # Drain the initial paint with generous retries (the first pty
-        # delivery can be slow when other tests run back-to-back).
-        for _ in range(4):
+        # delivery can be slow when other tests run back-to-back), then
+        # wait for the pane's shell to draw its prompt: keystrokes typed
+        # before the shell is up are dropped, not echoed later.
+        for _ in range(10):
             s.snapshot(timeout=1.5)
-            if s._screen_buf:
+            if b"/bin/" in strip_ansi(s._screen_buf):
                 break
 
         # ── Type "1234567890abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ" into the focused terminal pane ────────────
+        # The pty harness never delivers a FocusIn report, so vtm treats the
+        # session as unfocused and drops keyboard input; send CSI I first so
+        # the keystrokes reach the pane's shell.
+        s.write(b"\x1b[I")
+        time.sleep(0.3)
         # Do NOT reset the buffer: _screen_buf accumulates every byte
         # from startup through the keystroke echo so print_visible_capture
         # reflects the full rendered state of the screen.
         s.write(b"1234567890abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
-        s.snapshot(timeout=1.5)
+        # Retry the drain: shell echo can lag several seconds under load.
+        for _ in range(8):
+            s.snapshot(timeout=1.5)
+            if b"VWXYZ" in strip_ansi(s._screen_buf):
+                break
+            time.sleep(0.5)
 
         # ── Print the full accumulated visible output ────────────────────
         print_visible_capture(s._screen_buf, label="full output after typing '1234567890abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'")

@@ -457,8 +457,15 @@ def test_log_live_appends_arrive():
 
 
 def test_log_scrollbar_press_and_drag_feedback():
-    """The textbox scrollbar uses pushed feedback while held and the drag palette once moved."""
+    """The textbox scrollbar uses pushed feedback while held and the drag palette once moved.
+
+    Mirrors the palette-aware table version in test_parvion_queue: the thumb is located
+    by its foreground colour (the whole track paints the same glyph while hovered), and
+    the drag promotion is detected by the drag foreground rather than a bg comparison at
+    a fixed cell (the moved thumb can still cover that cell, keeping its bg unchanged).
+    """
     print("TEST: parvion message log - scrollbar hold promotes to drag feedback ... ", end="", flush=True)
+    import test_parvion_queue as Q  # replay(include_fg) + shared scrollbar palette.
     with _session() as s:
         if _enter_log(s) is None:
             print("FAIL: message log / seeded lines not found"); return False
@@ -471,11 +478,16 @@ def test_log_scrollbar_press_and_drag_feedback():
         if not tracks:
             print("FAIL: vertical scrollbar not found"); return False
         col, rows = max(tracks.items(), key=lambda item: len(item[1]))
-        target = rows[len(rows) // 2]
 
-        os.write(s.master_fd, b"\x1b[<35;1;1M")
+        os.write(s.master_fd, b"\x1b[<35;1;1M")  # Seed pointer tracking away from the scrollbar.
         s.feed(0.2)
-        resting = s.screen()[1][target][col]
+        chars, bg, fg = Q.replay(s._buf, include_fg=True)
+        rows = [r for r in range(T.ROWS) if chars[r][col] in ("▐", "█")]
+        thumb = [r for r in rows if fg[r][col] == Q.SCROLL_THUMB_FG]
+        if not thumb:
+            print(f"FAIL: vertical scrollbar thumb not found at col {col}"); return False
+        target = thumb[len(thumb) // 2]
+        resting = bg[target][col]
         os.write(s.master_fd, f"\x1b[<35;{col + 1};{target + 1}M".encode())
         s.feed(0.4)
         hover = s.screen()[1][target][col]
@@ -486,12 +498,13 @@ def test_log_scrollbar_press_and_drag_feedback():
             print(f"FAIL: held scrollbar is not distinct (rest={resting}, hover={hover}, held={held})")
             return False
 
+        # Move far enough to promote the held thumb into a drag while keeping the pointer on track.
         drag_row = rows[-1]
         os.write(s.master_fd, f"\x1b[<32;{col + 1};{drag_row + 1}M".encode())
         s.feed(0.5)
-        dragged = s.screen()[1][target][col]
-        if dragged == held:
-            print("FAIL: scrollbar retained the held overlay after drag started"); return False
+        _, _, fg = Q.replay(s._buf, include_fg=True)
+        if not any(fg[r][col] == Q.SCROLL_DRAG_FG for r in rows):
+            print("FAIL: scrollbar did not switch from held overlay to drag foreground"); return False
         os.write(s.master_fd, f"\x1b[<0;{col + 1};{drag_row + 1}m".encode())
         s.feed(0.3)
     print("PASS"); return True

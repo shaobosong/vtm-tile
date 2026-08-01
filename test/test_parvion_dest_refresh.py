@@ -295,10 +295,16 @@ def start_transfer(s, name, remote, action):
 
 def queue_all_action(s, label):
     """Right-click the queue body's blank area and pick a 'Start/Pause/Remove All' item."""
-    hdr = T.find_text(s.screen()[0], "Local Name")
+    chars = s.screen()[0]
+    hdr = T.find_text(chars, "Local Name")
     if hdr is None:
         return "queue header not found"
-    s.click(100, hdr[0] + 2, button=2)  # Right of the last column: blank-area menu.
+    # The blank area starts right of the last column divider (the column set —
+    # currently Server..Speed — reaches past col 100), so derive the x from the
+    # item row instead of hardcoding it.
+    last_div = T.row_text(chars, hdr[0] + 1).rfind("│")
+    blank_x = min(T.COLS - 2, last_div + 3) if last_div >= 0 else T.COLS - 2
+    s.click(blank_x + 1, hdr[0] + 2, button=2)  # Right of the last column: blank-area menu.
     it = T.find_text(s.screen()[0], label)
     if it is None:
         return f"'{label}' not in the queue menu"
