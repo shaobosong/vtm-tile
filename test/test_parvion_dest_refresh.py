@@ -190,7 +190,12 @@ class _StubSftp(SFTPServerInterface):
 
 
 class _AllowAll(paramiko.ServerInterface):
+    def __init__(self, auth_delay=0.0):
+        self.auth_delay = auth_delay
+
     def check_auth_password(self, username, password):
+        if self.auth_delay:
+            time.sleep(self.auth_delay)
         return AUTH_SUCCESSFUL
 
     def get_allowed_auths(self, username):
@@ -204,7 +209,8 @@ class LocalSftpServer:
     """A loopback SFTP server; each incoming connection (control + transfer workers)
     gets its own Transport with the shared throttle/failure configuration."""
 
-    def __init__(self, root, delay=0.0, fail_read_after=None, fail_write_after=None):
+    def __init__(self, root, delay=0.0, fail_read_after=None, fail_write_after=None,
+                 auth_delay=0.0):
         self.root = root
         self._transports = []
         self._closing = False
@@ -215,6 +221,7 @@ class LocalSftpServer:
         self.port = self._sock.getsockname()[1]
         self._cfg = {"root": root, "delay": delay,
                      "fail_read_after": fail_read_after, "fail_write_after": fail_write_after}
+        self._auth_delay = auth_delay
         threading.Thread(target=self._accept_loop, daemon=True).start()
 
     def _accept_loop(self):
@@ -227,7 +234,7 @@ class LocalSftpServer:
                 t = paramiko.Transport(conn)
                 t.add_server_key(_HOST_KEY)
                 t.set_subsystem_handler("sftp", SFTPServer, _StubSftp, **self._cfg)
-                t.start_server(event=threading.Event(), server=_AllowAll())
+                t.start_server(event=threading.Event(), server=_AllowAll(self._auth_delay))
                 self._transports.append(t)
             except Exception:
                 pass

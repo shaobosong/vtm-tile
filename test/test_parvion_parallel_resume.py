@@ -318,7 +318,83 @@ def test_shared_budget_runs_distinct_files_concurrently():
         shutil.rmtree(sroot, ignore_errors=True)
 
 
+def verify_burst_saturated_rows_stay_queued(policy):
+    sroot = tempfile.mkdtemp(prefix="parvionburst_srv_")
+    local = tempfile.mkdtemp(prefix="parvionburst_local_")
+    batch = os.path.join(sroot, "batch")
+    os.mkdir(batch)
+    names = [f"burst_{i}.bin" for i in range(BURST + 2)]
+    payload = bytes((i * 17 + 3) & 0xff for i in range(256 << 10))
+    for name in names:
+        with open(os.path.join(batch, name), "wb") as f:
+            f.write(payload)
+    # Hold every authentication attempt so the six fresh-worker handshakes stay
+    # saturated while the queue is inspected. The control connection incurs the
+    # same delay before the test starts, but is already authenticated by then.
+    srv = R.LocalSftpServer(sroot, delay=0.01, auth_delay=3.0)
+    try:
+        env = {
+            "PARVION_NO_PARALLEL": "1",
+            "PARVION_MAX_CONN": str(CHANNELS),
+            "PARVION_CONNECT_BURST": str(BURST),
+            "PARVION_QUEUE_ALLOCATION": policy,
+        }
+        with R.T.ParvionSession(local, env=env) as s:
+            if not R.connect(s, srv.port):
+                return "could not connect to the local SFTP server"
+            err = start_transfer_bounded(s, "batch", upload=False)
+            if err:
+                return err
+
+            rows = {}
+            deadline = time.time() + 2.0
+            while time.time() < deadline and len(rows) < len(names):
+                pump_bounded(s, 0.05)
+                chars = s.screen()[0]
+                for row in range(R.T.ROWS):
+                    line = R.T.row_text(chars, row)
+                    for name in names:
+                        if name in line:
+                            rows[name] = line
+            if len(rows) != len(names):
+                return f"only {len(rows)}/{len(names)} queue rows became visible: {sorted(rows)}"
+
+            live = sorted(name for name, line in rows.items() if "%" in line and "queued" not in line)
+            queued = sorted(name for name, line in rows.items() if "queued" in line)
+            if len(live) != BURST or len(queued) != len(names) - BURST:
+                labels = {name: ("queued" if "queued" in line else "percentage" if "%" in line else line.strip())
+                          for name, line in rows.items()}
+                return (f"handshake burst exposed {len(live)} percentage row(s) and "
+                        f"{len(queued)} queued row(s), expected {BURST}/{len(names) - BURST}: {labels}")
+
+            if not R.wait_tab_label(s, f"Succeeded ({len(names)})", timeout=90.0):
+                return "burst-saturated folder download did not complete"
+            for name in names:
+                src = os.path.join(batch, name)
+                dst = os.path.join(local, "batch", name)
+                if not os.path.isfile(dst) or file_hash(dst) != file_hash(src):
+                    return f"{name} was not downloaded byte-identically"
+            return None
+    finally:
+        srv.close()
+        shutil.rmtree(local, ignore_errors=True)
+        shutil.rmtree(sroot, ignore_errors=True)
+
+
+def test_burst_saturated_rows_stay_queued():
+    print("TEST: parvion handshake burst leaves unstarted folder rows queued ... ",
+          end="", flush=True)
+    for policy in ("strict", "new-file-first"):
+        error = verify_burst_saturated_rows_stay_queued(policy)
+        if error:
+            print(f"FAIL - {policy}: {error}")
+            return False
+    print("PASS")
+    return True
+
+
 TESTS = [
+    test_burst_saturated_rows_stay_queued,
     test_shared_budget_runs_distinct_files_concurrently,
     test_ten_channel_pause_resume,
 ]

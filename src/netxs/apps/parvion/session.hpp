@@ -2100,6 +2100,18 @@ namespace netxs::app::parvion
             }
             return nullptr;
         }
+        // Can the dispatcher activate another chunk right now? A reusable authenticated
+        // connection bypasses the fresh-SSH-handshake burst; otherwise that burst is a
+        // second, temporary cap below the overall transfer-channel budget. Drop dead
+        // pooled workers here so they cannot make a queued item look startable.
+        auto worker_activation_available() -> bool
+        {
+            if (busy_worker_count() >= max_connections) return faux;
+            while (!idle_pool.empty() && (!idle_pool.back() || !idle_pool.back()->reusable()))
+                idle_pool.pop_back();
+            auto burst = (size_t)std::min(max_connections, parallel_connect_burst);
+            return !idle_pool.empty() || connecting_worker_count() < burst;
+        }
         // Return a finished worker to the idle pool if the shared channel budget has room.
         void recycle_worker(std::unique_ptr<xfer_worker> w)
         {
@@ -2160,9 +2172,7 @@ namespace netxs::app::parvion
         {
             auto& item = queue[(size_t)i];
             if (!item.id) item.id = ++transfer_id_seq;
-            item.status = queue_item::transferring;
             item.done = 0;
-            item.started = std::time(nullptr);
             auto chunks = part_count(item.size);
             item.chunk_count = chunks;
 
@@ -2203,7 +2213,6 @@ namespace netxs::app::parvion
             auto base = si64{};
             for (auto& w : job.workers) base += w->done;
             item.done = base;
-            item.rate.start(base, std::chrono::steady_clock::now());
             transfer_jobs.push_back(std::move(job));
             dirty = true;
             return transfer_jobs.back();
@@ -2334,11 +2343,20 @@ namespace netxs::app::parvion
             w->done = resumed;
             w->persisted = resumed;
             job.workers[chunk] = std::move(w);
+            // Preparing a parent job only creates parked chunk slots. The row becomes a
+            // percentage-bearing transfer only when one of those slots has actually been
+            // launched or rearmed on a pooled connection.
+            if (item.status == queue_item::queued)
+            {
+                item.started = std::time(nullptr);
+                item.rate.start(item.done, std::chrono::steady_clock::now());
+            }
+            item.status = queue_item::transferring;
             return true;
         }
         void dispatch_strict()
         {
-            while (busy_worker_count() < max_connections)
+            while (worker_activation_available())
             {
                 auto started = faux;
                 for (auto i = si32{}; i < (si32)queue.size(); ++i)
@@ -2346,7 +2364,11 @@ namespace netxs::app::parvion
                     auto& item = queue[(size_t)i];
                     if (item.paused || (item.status != queue_item::queued && item.status != queue_item::transferring)) continue;
                     auto job = find_transfer_job(item.id);
-                    if (!job && item.status == queue_item::queued) job = &start_item(i);
+                    if (!job && item.status == queue_item::queued)
+                    {
+                        if (!worker_activation_available()) return;
+                        job = &start_item(i);
+                    }
                     if (job && activate_next_chunk(*job, item)) { started = true; break; }
                 }
                 if (!started) break;
@@ -2355,15 +2377,16 @@ namespace netxs::app::parvion
         void dispatch_new_file_first()
         {
             // First pass: grant one channel to each waiting parent in queue order.
-            for (auto i = si32{}; i < (si32)queue.size() && busy_worker_count() < max_connections; ++i)
+            for (auto i = si32{}; i < (si32)queue.size() && worker_activation_available(); ++i)
             {
                 auto& item = queue[(size_t)i];
                 if (item.status != queue_item::queued || item.paused) continue;
-                auto& job = start_item(i);
-                if (!activate_next_chunk(job, item)) break;
+                auto job = find_transfer_job(item.id);
+                if (!job) job = &start_item(i);
+                if (!activate_next_chunk(*job, item)) break;
             }
             // Then share spare slots round-robin between the active parents' parked chunks.
-            while (!transfer_jobs.empty() && busy_worker_count() < max_connections)
+            while (!transfer_jobs.empty() && worker_activation_available())
             {
                 auto started = faux;
                 auto count = transfer_jobs.size();
