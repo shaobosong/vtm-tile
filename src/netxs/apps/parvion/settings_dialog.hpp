@@ -732,7 +732,7 @@ namespace netxs::app::parvion
     {
         auto stp = &st;
         auto cfg = table_cfg{};
-        cfg.window_wp = st.window_wp;
+        cfg.deletion.window_wp = st.window_wp;
         cfg.palette = table_palette{
             .bg         = theme::bg,
             .header     = theme::surface,
@@ -775,12 +775,12 @@ namespace netxs::app::parvion
             return table;
         };
         cfg.row_count = [stp]{ return (si32)stp->draft.keyfiles.size(); };
-        cfg.revision = [stp]{ return stp->key_table_revision; };
+        cfg.viewport.revision = [stp]{ return stp->key_table_revision; };
         cfg.cell = [stp](si32 row, si32 key)
         {
             return table_cell{ kt_cell(*stp, key, row), theme::text_fg };
         };
-        cfg.compare = [stp](si32 a, si32 b, si32 key)
+        cfg.sort.compare = [stp](si32 a, si32 b, si32 key)
         {
             if (key < 0 || key >= sd::kt_ncol) return si32{};
             auto lhs = kt_cell(*stp, key, a); utf::to_lower(lhs);
@@ -831,7 +831,7 @@ namespace netxs::app::parvion
             sd_remove_keys(*stp);
             if (auto card = stp->card_wp.lock()) card->base::deface();
         };
-        cfg.wide_hit = true;
+        cfg.behavior.wide_hit = true;
         return cfg;
     }
 
@@ -1143,7 +1143,7 @@ namespace netxs::app::parvion
     {
         auto stp = &st;
         auto cfg = table_cfg{};
-        cfg.window_wp = st.window_wp;
+        cfg.deletion.window_wp = st.window_wp;
         cfg.palette = table_palette{
             .bg         = theme::bg,
             .header     = theme::surface,
@@ -1185,12 +1185,12 @@ namespace netxs::app::parvion
             return table;
         };
         cfg.row_count = [stp]{ return (si32)stp->draft.sites.size(); };
-        cfg.revision = [stp]{ return stp->site_table_revision; };
+        cfg.viewport.revision = [stp]{ return stp->site_table_revision; };
         cfg.cell = [stp](si32 row, si32 key)
         {
             return table_cell{ sd_site_cell(*stp, key, row), theme::text_fg };
         };
-        cfg.compare = [stp](si32 a, si32 b, si32 key)
+        cfg.sort.compare = [stp](si32 a, si32 b, si32 key)
         {
             if (key < 0 || key >= sd::site_ncol) return si32{};
             if (key == 2)
@@ -1247,7 +1247,7 @@ namespace netxs::app::parvion
         cfg.deletion.enabled = true;
         cfg.deletion.on_remove_selected = [stp](netxs::wptr<ui::base>){ sd_remove_sites(*stp); };
         cfg.empty_text = []{ return text{ "No sites configured." }; };
-        cfg.wide_hit = true;
+        cfg.behavior.wide_hit = true;
         return cfg;
     }
 

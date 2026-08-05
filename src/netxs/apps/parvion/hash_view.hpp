@@ -274,14 +274,14 @@ namespace netxs::app::parvion
         auto progress = std::make_shared<progressbar_cache>();
         auto title = [ctrl]{ return "Checksums (" + std::to_string(ctrl ? ctrl->hash_queue.size() : 0) + ")"; };
         auto cfg = table_cfg{};
-        cfg.window_wp = window_wp;
+        cfg.deletion.window_wp = window_wp;
         cfg.columns    = [ctrl, cols]{ return hash_columns(ctrl, cols); };
         cfg.row_count  = [ctrl]{ return (si32)ctrl->hash_queue.size(); };
         cfg.cell       = [ctrl, progress](si32 row, si32 key){ return hash_cell(ctrl, row, key, *progress); };
-        cfg.compare    = [ctrl](si32 row_a, si32 row_b, si32 key){ return hash_compare(ctrl, row_a, row_b, key); };
+        cfg.sort.compare    = [ctrl](si32 row_a, si32 row_b, si32 key){ return hash_compare(ctrl, row_a, row_b, key); };
         cfg.selection  = [ctrl]{ return hash_sel(ctrl); };
         cfg.menu       = [ctrl, window_wp](netxs::wptr<ui::base> panel_wp){ return hash_menu(ctrl, panel_wp, window_wp); };
-        cfg.follow     = []{ return table_follow_target{ table_follow_target::tail }; };
+        cfg.viewport.follow     = []{ return table_follow_target{ table_follow_target::tail }; };
         cfg.empty_text = []{ return text{ "(no checksums)" }; };
         cfg.deletion.enabled = true;
         cfg.deletion.on_remove_selected = [ctrl](netxs::wptr<ui::base>)

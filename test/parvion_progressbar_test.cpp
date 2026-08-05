@@ -148,7 +148,7 @@ namespace
             && q_headers[(size_t)q_server] == "Server"
             && q_headers[(size_t)q_local] == "Local Name"
             && q_col_fit_w(hash_headers[3], hash_size_body_w, true) == 9
-            && xfer_reason_w(xfer_cols{}, 1) == 31;
+            && xfer_cols{}.col_w[(size_t)q_ncol] == 31;
     }
 
     auto test_transfer_table_state_is_isolated_by_status() -> bool

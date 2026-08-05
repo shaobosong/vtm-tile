@@ -305,45 +305,71 @@ namespace netxs::app::parvion
         std::function<void()>                                     on_blank_rclick; // Selection reset on blank (null = none).
     };
 
-    // Opt-in Delete-key behavior. `on_delete` is the upstream override: returning true consumes
-    // the key and suppresses the table's default selected-row removal. A null `confirm` removes
-    // immediately; otherwise the table owns the confirmation flow and dialog lifetime.
+    // Sorting configuration: source-row comparator and optional grouping key.
+    // `compare` returns negative / zero / positive for rows a & b + a column key.
+    // `sort_group` assigns a fixed ascending group rank; sort direction only reverses within a group.
+    struct table_sort_cfg
+    {
+        std::function<si32(si32, si32, si32)> compare;     // Source rows a/b + column key -> negative/equal/positive.
+        std::function<si32(si32)>             sort_group;  // Fixed ascending group rank (null => no grouping).
+    };
+
+    // Tree gutter configuration: left-gutter arrow and expand button.
+    struct table_tree_cfg
+    {
+        std::function<gutterval(si32)> gutter;       // Left-gutter arrow/expand data (null => no gutter).
+        std::function<void(si32)>      on_toggle;    // Toggle a row's expansion (null => none).
+    };
+
+    // Viewport configuration: live-follow target, revision-based reset, and one-shot row reveal.
+    struct table_viewport_cfg
+    {
+        std::function<table_follow_target()> follow;        // Persistent live-update target (null => no live following).
+        std::function<ui64()>                revision;      // Change token: reset vertical/horizontal viewport on change.
+        std::function<si32()>                revision_row;  // One-shot source row to reveal after a revision change (-1 => top).
+    };
+
+    // Behavior flags: small boolean toggles collected in one place.
+    struct table_behavior_cfg
+    {
+        bool wide_hit       = faux;  // Row hit-box spans full body width (else content width).
+        bool arrow_nav      = true;  // Single-select arrow-key navigation.
+        bool focus_on_start = faux;  // Construct with initial focus (modal picker lists).
+    };
+
+    // Opt-in Delete-key behavior. `window_wp` anchors confirmation dialogs.
+    // `on_delete` is the upstream override: returning true consumes the key and suppresses the table's
+    // default selected-row removal. A null `confirm` removes immediately; otherwise the table owns the
+    // confirmation flow and dialog lifetime.
     struct table_delete_cfg
     {
         bool                                             enabled = faux;
+        netxs::wptr<ui::base>                            window_wp; // App window: anchor for confirm dialogs.
         std::function<void(netxs::wptr<ui::base>)>       on_remove_selected;
         std::function<app::shared::confirm_dialog_text()> confirm;
         std::function<bool(hids&, netxs::wptr<ui::base>)> on_delete;
     };
 
     // The complete table configuration a caller supplies. Everything here is DATA / adapters; there
-    // is no event-handling code. `columns` / `rows` / `cell` / `gutter` / `follow` are re-queried from
-    // live state each render or hit-test.
+    // is no event-handling code. `columns` / `row_count` / `cell` are re-queried from live state
+    // each render or hit-test.
     struct table_cfg
     {
-        netxs::wptr<ui::base> window_wp;      // App window: anchor for confirm dialogs.
-        std::function<qtable()>                          columns;     // Column model (rebuilt each render/hit).
-        std::function<si32()>                            row_count;   // Number of display rows.
-        std::function<si32(si32 source_row)>             row_height;  // Explicit content height; defaults to one line.
-        std::function<table_cell(si32 row, si32 key)>    cell;        // Text or retained component for logical column `key`.
-        std::function<gutterval(si32 row)>               gutter;      // Left-gutter arrow/expand (null => no gutter).
-        std::function<void(si32 expand_id)>              on_toggle;   // Toggle a row's expansion.
-        std::function<qsel_cfg()>                        selection;   // null => not selectable.
-        std::function<qmenu_cfg(netxs::wptr<ui::base>)>  menu;        // Unified body menu (null => none; header menu still shows).
-        std::function<table_follow_target()>             follow;      // Persistent live-update target (null => no live following).
-        std::function<ui64()>                            revision;    // Change token: reset vertical/horizontal viewport when it changes.
-        std::function<si32()>                            revision_row;// One-shot source row to reveal after a revision change (-1 => top).
-        std::function<si32(si32 source_row)>             sort_group;  // Fixed ascending group rank; direction only reverses within a group.
-        std::function<si32(si32, si32, si32)>            compare;     // Source rows a/b + column key -> negative/equal/positive.
-        std::function<void(si32 source_row)>             on_activate; // Double-click/Enter activation (null => none).
-        table_delete_cfg                                 deletion;    // Opt-in Delete-key selected-row removal.
-        std::function<void(si32 key)>                    on_col_grab; // A column-border drag begins (null => none).
-        std::function<text()>                            empty_text;  // Message shown when rows()==0 (null => none).
-        std::function<table_viewport_action(hids&, netxs::wptr<ui::base>)> on_key; // App key + optional one-shot viewport action.
-        bool                                             wide_hit = faux;  // Row hit-box spans full body width (else content width).
-        bool                                             arrow_nav = true; // Single-select arrow-key navigation for selectable tables.
-        bool                                             focus_on_start = faux; // Construct with initial focus (modal picker lists).
-        table_palette                                    palette{};         // Complete table paint palette.
+        std::function<qtable()>                                         columns;     // Column model (rebuilt each render/hit).
+        std::function<si32()>                                           row_count;   // Number of display rows.
+        std::function<si32(si32 source_row)>                            row_height;  // Explicit content height; defaults to one line.
+        std::function<table_cell(si32 row, si32 key)>                   cell;        // Text or retained component for logical column `key`.
+        std::function<qsel_cfg()>                                       selection;   // null => not selectable.
+        std::function<qmenu_cfg(netxs::wptr<ui::base>)>                 menu;        // Unified body menu (null => none; header menu still shows).
+        std::function<void(si32 source_row)>                            on_activate; // Double-click/Enter activation (null => none).
+        std::function<text()>                                           empty_text;  // Message shown when rows()==0 (null => none).
+        std::function<table_viewport_action(hids&, netxs::wptr<ui::base>)> on_key;  // App key + optional one-shot viewport action.
+        table_sort_cfg                                                  sort{};
+        table_tree_cfg                                                  tree{};
+        table_viewport_cfg                                              viewport{};
+        table_delete_cfg                                                deletion{};
+        table_behavior_cfg                                              behavior{};
+        table_palette                                                   palette{};
     };
 
     // ---- Scroll layer ------------------------------------------------------------------------------
@@ -557,9 +583,9 @@ namespace netxs::app::parvion
     }
     inline auto q_follow_scroll(table_state const& st, table_cfg const& cfg) -> si32
     {
-        if (!cfg.follow) return -1;
+        if (!cfg.viewport.follow) return -1;
         auto maxscroll = std::max(0, st.total_lines - st.body_rows);
-        auto target = cfg.follow();
+        auto target = cfg.viewport.follow();
         if (target.mode == table_follow_target::tail) return maxscroll;
         auto row = q_visual_row(st, target.row);
         return row >= 0 ? std::clamp(q_row_bottom(st, row) - st.body_rows, 0, maxscroll) : -1;
@@ -574,17 +600,17 @@ namespace netxs::app::parvion
         st.total = std::max(0, nrows);
         st.row_order.resize((size_t)std::max(0, nrows));
         for (auto i = si32{}; i < nrows; ++i) st.row_order[(size_t)i] = i;
-        if (!cfg.compare || st.sort_key < 0 || st.sort_dir == table_state::sort_default) return;
+        if (!cfg.sort.compare || st.sort_key < 0 || st.sort_dir == table_state::sort_default) return;
         auto descending = st.sort_dir == table_state::sort_descending;
         std::stable_sort(st.row_order.begin(), st.row_order.end(), [&](si32 a, si32 b)
         {
-            if (cfg.sort_group)
+            if (cfg.sort.sort_group)
             {
-                auto ga = cfg.sort_group(a);
-                auto gb = cfg.sort_group(b);
+                auto ga = cfg.sort.sort_group(a);
+                auto gb = cfg.sort.sort_group(b);
                 if (ga != gb) return ga < gb;
             }
-            auto cmp = cfg.compare(a, b, st.sort_key);
+            auto cmp = cfg.sort.compare(a, b, st.sort_key);
             return descending ? cmp > 0 : cmp < 0;
         });
     }
@@ -939,14 +965,14 @@ namespace netxs::app::parvion
         st.expand_hit.clear();
 
         auto revision_row = si32{ -1 };
-        if (cfg.revision)
+        if (cfg.viewport.revision)
         {
-            auto revision = cfg.revision();
+            auto revision = cfg.viewport.revision();
             if (revision != st.revision)
             {
                 auto old_scroll = st.scroll;
                 st.revision = revision;
-                if (cfg.revision_row) revision_row = cfg.revision_row();
+                if (cfg.viewport.revision_row) revision_row = cfg.viewport.revision_row();
                 st.scroll = revision_row >= 0 ? old_scroll : 0;
                 st.hscroll = 0;
                 st.live_follow = faux;
@@ -971,7 +997,7 @@ namespace netxs::app::parvion
             auto row = q_visual_row(st, revision_row);
             st.scroll = q_reveal_visual(st, st.scroll, row);
         }
-        if (st.live_follow && cfg.follow)
+        if (st.live_follow && cfg.viewport.follow)
         {
             auto follow_scroll = q_follow_scroll(st, cfg);
             if (follow_scroll >= 0) st.scroll = follow_scroll;
@@ -981,7 +1007,7 @@ namespace netxs::app::parvion
         auto hs = st.hscroll, clipw = st.disp_w;
         t.paint_header(canvas, st.body_top - 1, hs, clipw, w,
                        st.sort_key, st.sort_dir, st.hover_header, st.press_header,
-                       (bool)cfg.compare, pal);
+                       (bool)cfg.sort.compare, pal);
 
         if (nrows == 0)
         {
@@ -1017,9 +1043,9 @@ namespace netxs::app::parvion
                     st.selected_row_areas.push_back(rect{{ 0, y0 - st.body_top },
                                                          { q_row_w(st), visible_h }});
                 }
-                if (cfg.gutter && y >= st.body_top && y < st.body_top + st.body_rows)
+                if (cfg.tree.gutter && y >= st.body_top && y < st.body_top + st.body_rows)
                 {
-                    auto g = cfg.gutter(source_row);
+                    auto g = cfg.tree.gutter(source_row);
                     if (!g.arrow.empty()) qtable::paint_at(canvas, g_arrow_x, g_arrow_w, y, g.arrow, g.arrow_fg, row_bg, hs, clipw);
                     if (g.expand == xp_muted) qtable::paint_at(canvas, g_expand_x, g_expand_w, y, " + ", pal.subtext, row_bg, hs, clipw);
                     else if (g.expand == xp_collapsed || g.expand == xp_expanded)
@@ -1058,7 +1084,7 @@ namespace netxs::app::parvion
                     }
                 }
                 if (key >= 0) st.row_hit.emplace_back(rect{{ 0, y0 },
-                    { cfg.wide_hit ? std::max(0, st.disp_w) : q_row_w(st), visible_h }}, key);
+                    { cfg.behavior.wide_hit ? std::max(0, st.disp_w) : q_row_w(st), visible_h }}, key);
             }
         }
         auto lines_drawn = std::clamp(st.total_lines - st.scroll, 0, st.body_rows);
@@ -1077,13 +1103,13 @@ namespace netxs::app::parvion
     {
         auto state = std::make_shared<table_state>();
         auto config = std::make_shared<table_cfg>(std::move(cfg));
-        state->live_follow = !!config->follow;
+        state->live_follow = !!config->viewport.follow;
 
         // Paint the frame first, then composite arbitrary retained cell widgets through a
         // physically bounded body host.
         auto form = ui::cake::ctor()->active()
             ->plugin<pro::mouse>()
-            ->plugin<pro::focus>(config->focus_on_start ? pro::focus::mode::focused : pro::focus::mode::focusable)
+            ->plugin<pro::focus>(config->behavior.focus_on_start ? pro::focus::mode::focused : pro::focus::mode::focusable)
             ->plugin<pro::keybd>()->plugin<pro::timer>();
         auto painter = form->attach(ui::mock::ctor());
         auto cell_host = form->attach(make_table_cell_host([state, config](ui::face& viewport)
@@ -1158,7 +1184,7 @@ namespace netxs::app::parvion
                     { if (st.press_expand != id) { st.press_expand = id; boss.base::deface(); } return; }
                 if (my >= st.body_top - 1 && my < st.div_bottom)
                     if (q_border_hit(cfg.columns(), mx, st.hscroll) >= 0) return;
-                if (my == st.body_top - 1 && cfg.compare)
+                if (my == st.body_top - 1 && cfg.sort.compare)
                 {
                     auto v = q_header_hit(tbl, mx, st.hscroll);
                     auto key = v >= 0 ? tbl.cols[(size_t)v].key : -1;
@@ -1201,7 +1227,7 @@ namespace netxs::app::parvion
                     gear.dismiss();
                     return;
                 }
-                if (my == st.body_top - 1 && cfg.compare)
+                if (my == st.body_top - 1 && cfg.sort.compare)
                 {
                     if (q_border_hit(tbl, mx, st.hscroll) < 0)
                     {
@@ -1248,7 +1274,7 @@ namespace netxs::app::parvion
                         // restore the logical button hover at the completed click position.
                         st.press_expand = -1;
                         st.hover_expand = id;
-                        if (cfg.on_toggle) cfg.on_toggle(id);
+                        if (cfg.tree.on_toggle) cfg.tree.on_toggle(id);
                         boss.base::deface();
                         gear.dismiss();
                         return;
@@ -1281,7 +1307,7 @@ namespace netxs::app::parvion
                 if (st.hsb_hover != nhsb) { st.hsb_hover = nhsb; boss.base::deface(); }
                 if (st.hsb_press && !nhsb) { st.hsb_press = faux; boss.base::deface(); }
                 auto nhdr = si32{ -1 };
-                if (!nmenu && cfg.compare && my == st.body_top - 1)
+                if (!nmenu && cfg.sort.compare && my == st.body_top - 1)
                 {
                     if (q_border_hit(tbl, mx, st.hscroll) < 0)
                     {
@@ -1356,7 +1382,6 @@ namespace netxs::app::parvion
                     {
                         pro::focus::set(boss.This(), gear.id, solo::on);
                         st.col_drag = v;
-                        if (cfg.on_col_grab) cfg.on_col_grab(tbl.cols[(size_t)v].key);
                         st.drag = table_state::d_col; boss.base::deface(); return;
                     }
                 }
@@ -1413,7 +1438,7 @@ namespace netxs::app::parvion
                 auto v = q_border_hit(tbl, mx, st.hscroll);
                 if (v >= 0)
                 {
-                    q_set_col_w(tbl, v, q_col_autofit(tbl, v, (bool)cfg.compare));
+                    q_set_col_w(tbl, v, q_col_autofit(tbl, v, (bool)cfg.sort.compare));
                     boss.base::deface();
                     gear.dismiss();
                     return;
@@ -1422,7 +1447,7 @@ namespace netxs::app::parvion
                 {
                     auto visual = q_visual_at_line(st, st.scroll + (my - st.body_top));
                     auto source = q_source_row(st, visual);
-                    auto hit_w = cfg.wide_hit ? st.disp_w : q_row_w(st);
+                    auto hit_w = cfg.behavior.wide_hit ? st.disp_w : q_row_w(st);
                     if (source >= 0 && source < st.total && mx >= 0 && mx < hit_w)
                     {
                         boss.base::deface();
@@ -1490,7 +1515,7 @@ namespace netxs::app::parvion
                         };
                         if (cfg.deletion.confirm)
                         {
-                            if (auto window = cfg.window_wp.lock())
+                            if (auto window = cfg.deletion.window_wp.lock())
                                 app::shared::show_close_confirmation(*window, run, {}, cfg.deletion.confirm());
                             else run();
                         }
@@ -1534,7 +1559,7 @@ namespace netxs::app::parvion
                         return;
                     }
                 }
-                if (!cfg.arrow_nav || !cfg.selection) return;
+                if (!cfg.behavior.arrow_nav || !cfg.selection) return;
                 auto s = q_ordered_sel(st, cfg.selection());
                 auto n = cfg.row_count ? cfg.row_count() : 0;
                 auto maxv = std::max(0, st.total_lines - st.body_rows);
