@@ -325,6 +325,32 @@ def test_log_triple_click_line():
     print("PASS"); return True
 
 
+def test_log_quadruple_click_selects_all():
+    print("TEST: parvion message log - quadruple-click selects the whole log ... ", end="", flush=True)
+    with _session() as s:
+        info = _enter_log(s)
+        if info is None:
+            print("FAIL: message log / seeded lines not found"); return False
+        lr, lc, _ = info
+        _multiclick(s, lc + 2, lr + 1, 4)  # quadruple-click.
+        if not any(_selbg_cells(s, r) for r in range(T.ROWS)):
+            print("FAIL: quadruple-click produced no selection"); return False
+        # The select-all must cover the full log, including lines scrolled out of view.
+        clip = _copy_via_menu(s, lr, lc + 2)
+        if clip is None or "log line 00" not in clip or "log line 19" not in clip:
+            print(f"FAIL: quadruple-click copied incomplete log text: {clip!r}"); return False
+        # A plain left-click cancels the quadruple-click selection. Restart the replay
+        # from a clean buffer first, so highlight frames painted by the earlier copy
+        # popup can't leak into the cleared-state measurement no matter the timing.
+        s._buf = b""
+        s.click(lc + 1, lr + 1, settle=1.0)
+        s.feed(0.6)
+        _, bg = s.screen()
+        if any(row.count(SEL_BG) for row in bg):
+            print("FAIL: quadruple-click selection survived the left-click"); return False
+    print("PASS"); return True
+
+
 def test_log_copy_present_disabled_no_selection():
     print("TEST: parvion message log - Copy present but disabled with no selection ... ", end="", flush=True)
     with _session() as s:
@@ -573,6 +599,7 @@ TESTS = [
     test_log_right_click_copies_selection,
     test_log_double_click_word,
     test_log_triple_click_line,
+    test_log_quadruple_click_selects_all,
     test_log_copy_present_disabled_no_selection,
     test_log_select_all_covers_full_log,
     test_log_context_menu_grouping,

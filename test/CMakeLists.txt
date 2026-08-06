@@ -74,6 +74,13 @@ add_executable(parvion_logging_test "parvion_logging_test.cpp")
 target_include_directories(parvion_logging_test PRIVATE "${CMAKE_SOURCE_DIR}/src")
 add_test(NAME parvion_logging_test COMMAND parvion_logging_test)
 
+# Unit test for the Parvion textbox selection modes (quadruple-click select-all and friends).
+add_executable(parvion_textbox_selection_test "parvion_textbox_selection_test.cpp")
+target_include_directories(parvion_textbox_selection_test PRIVATE "${CMAKE_SOURCE_DIR}/src"
+                                                                  ${LUA_INCLUDE_DIR})
+target_link_libraries(parvion_textbox_selection_test PRIVATE Lua::Lua)
+add_test(NAME parvion_textbox_selection_test COMMAND parvion_textbox_selection_test)
+
 # Unit test for saved-site Host syntax and its DNS/IPv4/IPv6 boundaries.
 add_executable(parvion_site_host_test "parvion_site_host_test.cpp")
 target_include_directories(parvion_site_host_test PRIVATE "${CMAKE_SOURCE_DIR}/src")

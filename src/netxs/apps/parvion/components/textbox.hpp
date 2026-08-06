@@ -5,7 +5,7 @@
 
 // parvion/components/textbox.hpp: the reusable read-only TEXT-VIEW core component.
 //
-// A scrolling, colour-coded, mouse-selectable (char / word / line) text view — a read-only text box
+// A scrolling, colour-coded, mouse-selectable (char / word / line / all) text view — a read-only text box
 // (no editing). It owns ALL of its behavior: vertical/horizontal scrolling, tail-follow, text
 // selection + clipboard copy, a right-click menu, and focus, in its OWN textbox_state — it shares
 // nothing with the table core. A caller supplies a `textbox_cfg` (coloured line data + optional
@@ -41,7 +41,7 @@ namespace netxs::app::parvion
     // The text view's mutable state. Body paints from row 0 down; `bottom` is the exclusive body end.
     struct textbox_state
     {
-        enum selmode { sel_none, sel_char, sel_word, sel_line };
+        enum selmode { sel_none, sel_char, sel_word, sel_line, sel_all };
         enum dmode   { d_none, d_vsb, d_hsb };
 
         bool focused = faux;
@@ -122,6 +122,12 @@ namespace netxs::app::parvion
     {
         return { tb_pos{ p.ln, 0 }, tb_pos{ p.ln, cluster_count(tb_line_text(cfg, p.ln)) } };
     }
+    inline auto tb_whole_span(textbox_cfg const& cfg) -> std::pair<tb_pos, tb_pos>
+    {
+        auto n = cfg.line_count ? cfg.line_count() : 0;
+        if (n <= 0) return {};
+        return { tb_pos{ 0, 0 }, tb_pos{ n - 1, cluster_count(tb_line_text(cfg, n - 1)) } };
+    }
     inline auto tb_sel_bounds(textbox_state const& st, si32 n) -> std::pair<tb_pos, tb_pos>
     {
         auto a = tb_pos{ st.anchor_ln, st.anchor_cl }, h = tb_pos{ st.head_ln, st.head_cl };
@@ -160,12 +166,12 @@ namespace netxs::app::parvion
     {
         auto n = cfg.line_count ? cfg.line_count() : 0;
         if (n <= 0) return faux;
-        auto last = n - 1;
-        st.anchor_ln = 0;    st.anchor_cl = 0;
-        st.head_ln   = last; st.head_cl   = cluster_count(tb_line_text(cfg, last));
-        st.anchor_id = cfg.line_id ? cfg.line_id(0)    : nullptr;
-        st.head_id   = cfg.line_id ? cfg.line_id(last) : nullptr;
-        st.selm = textbox_state::sel_char; st.sel = true; st.dragging = faux;
+        auto [lo, hi] = tb_whole_span(cfg);
+        st.anchor_ln = lo.ln; st.anchor_cl = lo.cl; st.head_ln = hi.ln; st.head_cl = hi.cl;
+        st.anchor_id = cfg.line_id ? cfg.line_id(lo.ln) : nullptr;
+        st.head_id   = cfg.line_id ? cfg.line_id(hi.ln) : nullptr;
+        st.base_lo_ln = lo.ln; st.base_lo_cl = lo.cl; st.base_hi_ln = hi.ln; st.base_hi_cl = hi.cl;
+        st.selm = textbox_state::sel_all; st.sel = true; st.dragging = faux;
         st.follow = faux; st.drag = textbox_state::d_none;
         st.seen_epoch = cfg.epoch ? cfg.epoch() : 0;
         return tb_has_selection(st);
@@ -279,7 +285,9 @@ namespace netxs::app::parvion
         }
         else
         {
-            auto [elo, ehi] = st.selm == textbox_state::sel_word ? tb_word_span(cfg, p) : tb_line_span(cfg, p);
+            auto [elo, ehi] = st.selm == textbox_state::sel_word ? tb_word_span(cfg, p)
+                           : st.selm == textbox_state::sel_line ? tb_line_span(cfg, p)
+                           : tb_whole_span(cfg);
             auto blo = tb_pos{ st.base_lo_ln, st.base_lo_cl }, bhi = tb_pos{ st.base_hi_ln, st.base_hi_cl };
             auto lo = elo < blo ? elo : blo, hi = bhi < ehi ? ehi : bhi;
             st.anchor_ln = lo.ln; st.anchor_cl = lo.cl; st.head_ln = hi.ln; st.head_cl = hi.cl;
@@ -618,7 +626,9 @@ namespace netxs::app::parvion
                 if (n == 0) return;
                 pro::focus::set(boss.This(), gear.id, solo::on);
                 auto p = tb_hit(st, cfg, mx, my);
-                auto [lo, hi] = mode == textbox_state::sel_word ? tb_word_span(cfg, p) : tb_line_span(cfg, p);
+                auto [lo, hi] = mode == textbox_state::sel_word ? tb_word_span(cfg, p)
+                              : mode == textbox_state::sel_line ? tb_line_span(cfg, p)
+                              : tb_whole_span(cfg);
                 st.drag_x = mx; st.drag_y = my;
                 st.base_lo_ln = lo.ln; st.base_lo_cl = lo.cl; st.base_hi_ln = hi.ln; st.base_hi_cl = hi.cl;
                 st.anchor_ln = lo.ln; st.anchor_cl = lo.cl; st.head_ln = hi.ln; st.head_cl = hi.cl;
@@ -630,8 +640,8 @@ namespace netxs::app::parvion
             };
             boss.on(tier::mouserelease, input::key::LeftDoubleClick, [&, span_select](hids& gear) { span_select(gear, textbox_state::sel_word, faux); });
             boss.on(tier::mouserelease, input::key::LeftDoublePress, [&, span_select](hids& gear) { span_select(gear, textbox_state::sel_word, true); });
-            boss.on(tier::mouserelease, input::key::LeftMultiPress, [&, span_select](hids& gear) { if (gear.clicked == 3) span_select(gear, textbox_state::sel_line, true); });
-            boss.on(tier::mouserelease, input::key::LeftMultiClick, [&, span_select](hids& gear) { if (gear.clicked == 3) span_select(gear, textbox_state::sel_line, faux); });
+            boss.on(tier::mouserelease, input::key::LeftMultiPress, [&, span_select](hids& gear) { if (gear.clicked == 3) span_select(gear, textbox_state::sel_line, true); else if (gear.clicked == 4) span_select(gear, textbox_state::sel_all, true); });
+            boss.on(tier::mouserelease, input::key::LeftMultiClick, [&, span_select](hids& gear) { if (gear.clicked == 3) span_select(gear, textbox_state::sel_line, faux); else if (gear.clicked == 4) span_select(gear, textbox_state::sel_all, faux); });
 
             boss.LISTEN(tier::preview, input::events::keybd::any, gear)
             {
