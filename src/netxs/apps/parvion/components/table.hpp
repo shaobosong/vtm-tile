@@ -921,9 +921,11 @@ namespace netxs::app::parvion
     inline void q_paint_component_selection(table_state const& st, table_palette const& pal, ui::face& viewport)
     {
         // Components paint after the table's row background. Tint only their backgrounds so their
-        // own fill/track contrast, text, glyphs, and mouse-link metadata remain intact.
+        // own fill/track contrast, text, glyphs, and mouse-link metadata remain intact. Always
+        // brighten: the adaptive xlight darkens bright cells such as an inline editor's caret,
+        // which inverts the intended lighter selection feedback.
         for (auto const& area : st.selected_component_areas)
-            viewport.fill(area, [](cell& c){ c.bgc().xlight(); });
+            viewport.fill(area, [](cell& c){ c.bgc().bright(); });
 
         // A horizontally scrolled component can cross x=0 and overwrite the focused-row marker.
         // Restore that marker after all component tinting.

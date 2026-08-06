@@ -598,8 +598,8 @@ namespace
             auto fill_bg = argb{ fill };
             if (tinted)
             {
-                track_bg.xlight();
-                fill_bg.xlight();
+                track_bg.bright();
+                fill_bg.bright();
             }
             return canvas[{ 1, 1 }].bgc() == track_bg
                 && canvas[{ 4, 1 }].bgc() == fill_bg
@@ -644,11 +644,56 @@ namespace
         q_paint_component_selection(st, pal, canvas);
 
         auto tinted = argb{ component_bg };
-        tinted.xlight();
+        tinted.bright();
         return canvas[{ 0, 0 }].bgc() == argb{ pal.sel_bg_act }
             && canvas[{ 1, 0 }].bgc() == tinted
             && canvas[{ 0, 0 }].txt() == "X"
             && canvas[{ 0, 0 }].link() == link;
+    }
+
+    auto test_selected_component_never_darkens_active_cell() -> bool
+    {
+        // An inline name editor paints an active caret cell (theme::sel_bg_act) over the dark
+        // field surface. The selection tint must lift every cell: the caret must never be pulled
+        // darker than its designed accent, like the adaptive xlight used to.
+        auto st = table_state{};
+        auto pal = table_palette{};
+        st.focused = true;
+        st.selected_component_areas.push_back(rect{{ 1, 0 }, { 4, 1 }});
+        st.selected_row_areas.push_back(rect{{ 0, 0 }, { 6, 1 }});
+
+        auto canvas = ui::face{};
+        canvas.size({ 6, 1 });
+        auto const link = id_t{ 66 };
+        auto pack = [&](si32 x, ui32 bg, char ch)
+        {
+            canvas.fill(rect{{ x, 0 }, { 1, 1 }}, [&](cell& c)
+            {
+                auto t = text{ ch };
+                c.bgc(bg).fgc(theme::text_fg).txt(t).link(link);
+            });
+        };
+        pack(1, theme::surface, 'a');
+        pack(2, theme::surface, 'b');
+        canvas.fill(rect{{ 3, 0 }, { 1, 1 }}, [&](cell& c) // The active caret cell.
+        {
+            c.bgc(theme::sel_bg_act).fgc(theme::surface).link(link);
+        });
+        pack(4, theme::surface, 'c');
+
+        auto native_caret = argb{ theme::sel_bg_act };
+        auto lit_caret    = argb{ theme::sel_bg_act }; lit_caret.bright();
+        auto lit_surface  = argb{ theme::surface };    lit_surface.bright();
+
+        q_paint_component_selection(st, pal, canvas);
+
+        return canvas[{ 3, 0 }].bgc() == lit_caret
+            && canvas[{ 3, 0 }].bgc().luma() >= native_caret.luma()
+            && canvas[{ 1, 0 }].bgc() == lit_surface
+            && canvas[{ 4, 0 }].bgc() == lit_surface
+            && canvas[{ 3, 0 }].bgc() != canvas[{ 1, 0 }].bgc()
+            && canvas[{ 0, 0 }].bgc() == argb{ pal.sel_bg_act } // Focused-row marker restored last.
+            && canvas[{ 3, 0 }].link() == link;
     }
 
     auto test_table_scrollbar_press_promotes_to_drag_paint() -> bool
@@ -909,6 +954,7 @@ int main()
         { "component_cells_clip_during_horizontal_scroll", test_component_cells_clip_during_horizontal_scroll },
         { "selected_component_cell_keeps_selection_effect", test_selected_component_cell_keeps_selection_effect },
         { "selected_component_preserves_focused_row_marker", test_selected_component_preserves_focused_row_marker },
+        { "selected_component_never_darkens_active_cell", test_selected_component_never_darkens_active_cell },
         { "table_scrollbar_press_promotes_to_drag_paint", test_table_scrollbar_press_promotes_to_drag_paint },
         { "textbox_scrollbar_press_promotes_to_drag_paint", test_textbox_scrollbar_press_promotes_to_drag_paint },
         { "posix_name_validation", test_posix_name_validation },
