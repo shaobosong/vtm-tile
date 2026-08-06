@@ -1074,8 +1074,8 @@ namespace netxs::app::parvion
         secret_req_t          sec_req;              // The outstanding prompt (valid when sec != sec_idle).
         std::function<void(secret_req_t const&)> on_prompt_secret; // Raise the UI modal (set by parvion.hpp).
 
-        // Message log (FileZilla-style typed protocol log). The queue panel's
-        // "Message log" tab renders the committed tail; the logger owns the
+        // Message Log (FileZilla-style typed protocol log). The queue panel's
+        // "Message Log" tab renders the committed tail; the logger owns the
         // FileZilla-like detailed queue and generation gates. `status` (above)
         // remains the short connect-bar hint and is mirrored into the log.
         using logline = parvion::logline;

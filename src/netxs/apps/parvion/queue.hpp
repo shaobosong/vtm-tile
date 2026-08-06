@@ -24,7 +24,7 @@ namespace netxs::app::parvion
             make_transfer_view(ctrl, /*status*/ 0, window_wp), // Transferring
             make_transfer_view(ctrl, /*status*/ 1, window_wp), // Failed
             make_transfer_view(ctrl, /*status*/ 2, window_wp), // Succeeded
-            make_log_view(ctrl, window_wp),                    // Message log
+            make_log_view(ctrl, window_wp),                    // Message Log
             make_hash_view(ctrl, window_wp),                   // Checksums
         };
         return make_tabs(std::move(pages), /*active*/ 0);

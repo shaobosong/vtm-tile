@@ -834,9 +834,9 @@ def test_create_directory_invalid_rename_keeps_default():
             if os.path.exists(os.path.join(d, "bad")):
                 print("FAIL - invalid name was interpreted as a path")
                 return False
-            log = find_text(s.screen()[0], "Message log")
+            log = find_text(s.screen()[0], "Message Log")
             if log is None:
-                print("FAIL - Message log tab not found")
+                print("FAIL - Message Log tab not found")
                 return False
             s.click(log[1] + 1, log[0] + 1)
             if not grid_contains(s.screen()[0], "Error: Rename failed"):
@@ -1151,7 +1151,7 @@ def test_rename_rejects_duplicate_and_empty():
             if not os.path.exists(os.path.join(d, "beta.txt")):
                 print("FAIL - duplicate target was overwritten")
                 return False
-            log = find_text(s.screen()[0], "Message log")
+            log = find_text(s.screen()[0], "Message Log")
             s.click(log[1] + 1, log[0] + 1)
             if not grid_contains(s.screen()[0], "Error: Rename failed"):
                 print("FAIL - rejected rename was not logged")

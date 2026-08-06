@@ -7,18 +7,18 @@
 //      Launch standalone with: vtm-tile -r parvion
 //
 //      Phase 1 lays out the faithful FileZilla-style frame:
-//        ┌───────────────────────────────────────────────┐
-//        │ menu bar                                       │
-//        ├───────────────────────────────────────────────┤
-//        │ quick-connect: Host/User/Pass/Port [Connect]   │
-//        ├──────────────────────┬────────────────────────┤
-//        │ Local site           │ Remote site            │
-//        │ (real local FS)      │ (filled once connected) │
-//        ├──────────────────────┴────────────────────────┤
-//        │ ····· (empty handle bar: drag to resize) ····· │
-//        │ queue / message-log body                       │
-//        │ [Transferring][Failed][Succeeded][Message log] │
-//        └───────────────────────────────────────────────┘
+//        ┌───────────────────────────────────────────────────────────┐
+//        │ menu bar                                                  │
+//        ├───────────────────────────────────────────────────────────┤
+//        │ quick-connect: Host/User/Pass/Port [Connect]              │
+//        ├────────────────────────────┬──────────────────────────────┤
+//        │ Local site                 │ Remote site                  │
+//        │ (real local FS)            │ (filled once connected)      │
+//        ├────────────────────────────┴──────────────────────────────┤
+//        │ ··········· (empty handle bar: drag to resize) ·········· │
+//        │ queue / message-log body                                  │
+//        │ [Transferring][Failed][Succeeded][Message Log][Checksums] │
+//        └───────────────────────────────────────────────────────────┘
 //      Later phases wire the real parvionsftp helper + fzprintf protocol + the
 //      parallel chunked-transfer engine behind this frame.
 

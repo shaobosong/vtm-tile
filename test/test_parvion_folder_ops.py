@@ -295,7 +295,7 @@ def test_download_pooling_reuses_connection():
             if got < 4:
                 print(f"FAIL - too few files transferred to observe reuse ({got})")
                 return False
-            ml = T.find_text(s.screen()[0], "Message log")
+            ml = T.find_text(s.screen()[0], "Message Log")
             if ml:
                 s.click(ml[1] + 1, ml[0] + 1, button=0)
                 s.feed(1.5)
@@ -367,7 +367,7 @@ def test_download_parallel_pooling():
             if len(files) < REBEX_EXAMPLE_MIN_FILES:
                 print(f"FAIL - too few files transferred ({len(files)})")
                 return False
-            ml = T.find_text(s.screen()[0], "Message log")
+            ml = T.find_text(s.screen()[0], "Message Log")
             if ml:
                 s.click(ml[1] + 1, ml[0] + 1, button=0)
                 s.feed(1.5)

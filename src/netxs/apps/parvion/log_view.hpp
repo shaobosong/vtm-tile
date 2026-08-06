@@ -58,7 +58,7 @@ namespace netxs::app::parvion
         }
     };
 
-    // The Message-log right-click menu: Copy / separator / Select all / Clear all.
+    // The Message-log right-click menu: Copy / Clear all / separator / Select all.
     inline auto build_log_menu(sftp_remote* ctrl,
                                netxs::wptr<ui::base> panel_wp,
                                app::shared::menu::item copy,
@@ -69,20 +69,21 @@ namespace netxs::app::parvion
         auto items = std::vector<m::item>{};
 
         items.push_back(std::move(copy));
+
+        auto clear = m::item{ .alive = true, .label = "C&lear All", .disabled = ctrl->logger.lines.empty() };
+        clear.action = [ctrl, deface](hids&){ ctrl->logger.clear(); ctrl->dirty = true; deface(); };
+        items.push_back(std::move(clear));
+
         items.push_back(m::item{ .alive = true, .type = m::kind::separator });
 
         items.push_back(std::move(select_all));
-
-        auto clear = m::item{ .alive = true, .label = "C&lear All" };
-        clear.action = [ctrl, deface](hids&){ ctrl->logger.clear(); ctrl->dirty = true; deface(); };
-        items.push_back(std::move(clear));
         return items;
     }
 
     inline auto make_log_view(sftp_remote* ctrl, netxs::wptr<ui::base> window_wp) -> tab_page_cfg
     {
         auto cache = std::make_shared<log_vis_cache>();
-        auto title = []{ return text{ "Message log" }; };
+        auto title = []{ return text{ "Message Log" }; };
         auto cfg = textbox_cfg{};
         cfg.line_count = [ctrl, cache]{ return (si32)cache->get(ctrl).size(); };
         cfg.line       = [ctrl, cache](si32 i) -> std::vector<textseg>

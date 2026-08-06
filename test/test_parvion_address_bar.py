@@ -7,7 +7,7 @@ End-to-end TUI tests for the Parvion address bar (the editable path field in eac
 title strip, panes.hpp): clicking the path starts an inline edit (connect-bar field style,
 with a block caret), a left-drag scrubs the caret, Enter navigates to the typed path
 (absolute or resolved relative to the current dir), Esc reverts, and a nonexistent or
-inaccessible path leaves the previous listing visible and logs the error to the Message log.
+inaccessible path leaves the previous listing visible and logs the error to the Message Log.
 
 Local pane only (no network): the app is launched as `vtm-tile -r parvion` with the child's
 cwd set to a fresh temp directory, so the address shown in the Local site header is known.
@@ -327,7 +327,7 @@ def test_address_bad_path_keeps_listing():
                 print("FAIL - error body shown instead of the previous listing")
                 return False
             if T.grid_contains(chars, "Not a directory: /nonexistent_parvion_xyz"):
-                print("FAIL - bad-path error shown in the file pane instead of only the Message log")
+                print("FAIL - bad-path error shown in the file pane instead of only the Message Log")
                 return False
             print("PASS")
             return True
@@ -336,8 +336,8 @@ def test_address_bad_path_keeps_listing():
 
 
 def test_address_bad_path_logs_error():
-    """A nonexistent local path also surfaces an Error line in the Message log tab (not just a
-    silent fallback): switch to the Message log and find the 'Not a directory' error."""
+    """A nonexistent local path also surfaces an Error line in the Message Log tab (not just a
+    silent fallback): switch to the Message Log and find the 'Not a directory' error."""
     print("TEST: parvion address bar - bad path logs an error to the message log ... ", end="", flush=True)
     d = T.make_tree()
     try:
@@ -352,9 +352,9 @@ def test_address_bad_path_logs_error():
             s.write("\r")
             s.feed(0.6)
             # The Message-log tab lives in the bottom queue panel's tab strip; click it.
-            pos = T.find_text(s.screen()[0], "Message log")
+            pos = T.find_text(s.screen()[0], "Message Log")
             if pos is None:
-                print("FAIL - Message log tab not found")
+                print("FAIL - Message Log tab not found")
                 return False
             s.click(pos[1] + 1, pos[0] + 1)  # 1-based SGR coords.
             s.feed(0.6)

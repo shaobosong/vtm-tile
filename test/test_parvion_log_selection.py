@@ -54,9 +54,9 @@ def _pump(s, secs):
 
 
 def _enter_log(s):
-    """Click the Message log tab; return (row, col, text) of a seeded 'log line 1X' row."""
+    """Click the Message Log tab; return (row, col, text) of a seeded 'log line 1X' row."""
     chars, _ = s.screen()
-    pos = T.find_text(chars, "Message log")
+    pos = T.find_text(chars, "Message Log")
     if pos is None:
         return None
     s.click(pos[1] + 1, pos[0] + 1)
@@ -387,12 +387,12 @@ def test_log_context_menu_grouping():
         select_all = T.find_text(chars, "Select All")
         clear = T.find_text(chars, "Clear All")
         if not (copy and select_all and clear
-                and copy[0] < select_all[0] < clear[0]):
+                and copy[0] < clear[0] < select_all[0]):
             print("FAIL: message-log menu groups are out of order"); return False
-        if not T.menu_has_separator_between(chars, "Copy", "Select All"):
-            print("FAIL: Copy is not separated from the remaining log actions"); return False
-        if T.menu_has_separator_between(chars, "Select All", "Clear All"):
-            print("FAIL: unexpected separator within the log-action group"); return False
+        if not T.menu_has_separator_between(chars, "Clear All", "Select All"):
+            print("FAIL: Clear All is not separated from Select All"); return False
+        if T.menu_has_separator_between(chars, "Copy", "Clear All"):
+            print("FAIL: unexpected separator within the Copy/Clear All group"); return False
     print("PASS"); return True
 
 
@@ -453,6 +453,41 @@ def test_log_live_appends_arrive():
         chars, _ = s.screen()
         if not T.grid_contains(chars, "tick "):
             print("FAIL: no live-appended 'tick' line appeared"); return False
+    print("PASS"); return True
+
+
+def test_log_clear_all_disabled_when_empty():
+    print("TEST: parvion message log - Clear All disabled on empty log ... ", end="", flush=True)
+    with _session() as s:
+        info = _enter_log(s)
+        if info is None:
+            print("FAIL: message log / seeded lines not found"); return False
+        lr, lc, _ = info
+
+        # Empty the log (seeded lines), revealing the empty state.
+        s.click(lc + 2, lr + 1, button=2)
+        s.write("l")  # C&lear All.
+        chars, _ = s.screen()
+        if not T.grid_contains(chars, "(no messages)") or T.grid_contains(chars, "Status:"):
+            print("FAIL: Clear-All shortcut did not empty the message log"); return False
+
+        # Reopen the menu on the empty body: Clear All stays visible but inert.
+        empty = T.find_text(chars, "(no messages)")
+        if empty is None:
+            print("FAIL: empty-state text not found"); return False
+        s.click(empty[1] + 2, empty[0] + 1, button=2)
+        chars, _ = s.screen()
+        clear = T.find_text(chars, "Clear All")
+        if clear is None:
+            print("FAIL: Clear All missing from empty-log menu"); return False
+        s.click(clear[1] + 1, clear[0] + 1)
+        chars, _ = s.screen()
+        if T.find_text(chars, "Clear All") is None:
+            print("FAIL: disabled Clear All dismissed the menu"); return False
+        os.write(s.master_fd, b"\x1b"); s.feed(0.4)
+        chars, _ = s.screen()
+        if not T.grid_contains(chars, "(no messages)") or T.grid_contains(chars, "Status:"):
+            print("FAIL: disabled Clear All modified the empty log"); return False
     print("PASS"); return True
 
 
@@ -542,6 +577,7 @@ TESTS = [
     test_log_select_all_covers_full_log,
     test_log_context_menu_grouping,
     test_log_context_menu_shortcuts,
+    test_log_clear_all_disabled_when_empty,
     test_log_scrollbar_press_and_drag_feedback,
     test_log_live_appends_arrive,
     test_log_selection_survives_log_update,
