@@ -195,6 +195,14 @@ namespace netxs::app::parvion
                        : "Remove " + std::to_string(count) + " selected checksums?",
             "Remove", "Cancel" };
     }
+    inline auto hash_remove_all_confirmation(sftp_remote* ctrl) -> app::shared::confirm_dialog_text
+    {
+        auto count = ctrl ? (si32)ctrl->hash_queue.size() : 0;
+        return {
+            count == 1 ? text{ "Remove this checksum?" }
+                       : "Remove " + std::to_string(count) + " checksums?",
+            "Remove", "Cancel" };
+    }
     inline void hash_confirm_remove_selected(sftp_remote* ctrl,
                                              netxs::wptr<ui::base> panel_wp,
                                              netxs::wptr<ui::base> window_wp)
@@ -210,6 +218,23 @@ namespace netxs::app::parvion
         };
         if (auto window = window_wp.lock())
             app::shared::show_close_confirmation(*window, run, {}, hash_remove_confirmation(ctrl));
+        else run();
+    }
+    inline void hash_confirm_remove_all(sftp_remote* ctrl,
+                                        netxs::wptr<ui::base> panel_wp,
+                                        netxs::wptr<ui::base> window_wp)
+    {
+        if (!ctrl || ctrl->hash_queue.empty()) return;
+        auto run = [ctrl, panel_wp]
+        {
+            if (auto panel = panel_wp.lock())
+            {
+                ctrl->hash_remove_all();
+                panel->base::deface();
+            }
+        };
+        if (auto window = window_wp.lock())
+            app::shared::show_close_confirmation(*window, run, {}, hash_remove_all_confirmation(ctrl));
         else run();
     }
     inline auto hash_menu(sftp_remote* ctrl,
@@ -233,9 +258,21 @@ namespace netxs::app::parvion
             copy.children.push_back(std::move(digest));
             items.push_back(std::move(copy));
 
-            auto rm = m::item{ .alive = true, .label = "&Remove", .disabled = !ctrl->hash_selected_count() };
-            rm.action = [ctrl, panel_wp, window_wp](hids&){ hash_confirm_remove_selected(ctrl, panel_wp, window_wp); };
-            items.push_back(std::move(rm));
+            // No selection means a blank-area invocation (blank right-click always clears the
+            // selection, and the header menu button carries no selection over either), so act on
+            // the whole queue; a selection scopes the action to the selected rows.
+            if (ctrl->hash_selected_count())
+            {
+                auto rm = m::item{ .alive = true, .label = "&Remove" };
+                rm.action = [ctrl, panel_wp, window_wp](hids&){ hash_confirm_remove_selected(ctrl, panel_wp, window_wp); };
+                items.push_back(std::move(rm));
+            }
+            else
+            {
+                auto rm = m::item{ .alive = true, .label = "&Remove All", .disabled = ctrl->hash_queue.empty() };
+                rm.action = [ctrl, panel_wp, window_wp](hids&){ hash_confirm_remove_all(ctrl, panel_wp, window_wp); };
+                items.push_back(std::move(rm));
+            }
 
             items.push_back(m::item{ .alive = true, .type = m::kind::separator });
             auto select_all = m::item{ .alive = true, .label = "Select &All", .disabled = ctrl->hash_queue.empty() };

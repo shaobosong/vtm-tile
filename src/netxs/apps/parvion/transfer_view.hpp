@@ -247,7 +247,7 @@ namespace netxs::app::parvion
     }
     // Unified right-click menu: selected-transfer actions when a selection exists, otherwise
     // tab-wide "All" actions for blank-area and header invocations, then tab-scoped selection.
-    inline auto xfer_menu(sftp_remote* ctrl, si32 status, bool blank,
+    inline auto xfer_menu(sftp_remote* ctrl, si32 status,
                           netxs::wptr<ui::base> panel_wp,
                           netxs::wptr<ui::base> window_wp) -> std::vector<app::shared::menu::item>
     {
@@ -258,7 +258,10 @@ namespace netxs::app::parvion
         auto items  = std::vector<m::item>{};
         auto any_selected = std::ranges::any_of(ctrl->queue, sel);
         auto any_in_scope = std::ranges::any_of(ctrl->queue, scope);
-        auto bulk = blank || !any_selected;
+        // Blank-area and header invocations both carry no selection over (blank right-click always
+        // clears it; the header menu button opens with the existing selection untouched), so the
+        // selection state alone discriminates queue-wide actions from selection-scoped ones.
+        auto bulk = !any_selected;
         auto target = [bulk, sel, scope](queue_item const& it){ return bulk ? scope(it) : sel(it); };
         auto any_target = bulk ? any_in_scope : any_selected;
         auto pinnable = status == 0 && std::ranges::any_of(ctrl->queue, [sel](queue_item const& it)
@@ -430,23 +433,20 @@ namespace netxs::app::parvion
         cfg.menu      = [ctrl, status, window_wp](netxs::wptr<ui::base> panel_wp)
         {
             auto deface = [panel_wp]{ if (auto p = panel_wp.lock()) p->base::deface(); };
-            auto blank = ptr::shared(faux);
             auto mc = qmenu_cfg{};
-            mc.items = [ctrl, status, blank, panel_wp, window_wp]
+            mc.items = [ctrl, status, panel_wp, window_wp]
             {
-                return xfer_menu(ctrl, status, *blank, panel_wp, window_wp);
+                return xfer_menu(ctrl, status, panel_wp, window_wp);
             };
-            mc.on_item_rclick = [ctrl, status, blank, deface](si32 hit)
+            mc.on_item_rclick = [ctrl, status, deface](si32 hit)
             {
-                *blank = faux;
                 if (hit < 0 || hit >= (si32)ctrl->queue.size() || xfer_selected(ctrl->queue[(size_t)hit], status)) return;
                 for (auto& it : ctrl->queue) xfer_select(it, status, faux);
                 xfer_select(ctrl->queue[(size_t)hit], status, true);
                 deface();
             };
-            mc.on_blank_rclick = [ctrl, status, blank, deface]
+            mc.on_blank_rclick = [ctrl, status, deface]
             {
-                *blank = true;
                 auto any = faux;
                 for (auto& it : ctrl->queue) { any |= xfer_selected(it, status); xfer_select(it, status, faux); }
                 if (any) deface();

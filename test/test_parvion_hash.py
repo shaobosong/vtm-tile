@@ -31,7 +31,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from test_parvion_queue import (  # noqa: E402
     ParvionSession, kill_all_vtm, find_text, grid_contains, row_text,
     find_menu_item, menu_has_separator_between, header_field, click_header, named_row_order,
-    ROWS, COLS, VTM_TILE_BINARY,
+    click_label, ROWS, COLS, VTM_TILE_BINARY,
 )
 import test_parvion_panes as P  # noqa: E402  (ParvionSession that sets the launch cwd)
 
@@ -171,7 +171,7 @@ def test_checksums_context_menu():
         if missing:
             print(f"FAIL test_checksums_context_menu: missing menu items {missing}")
             return False
-        if grid_contains(chars, "Clear finished") or grid_contains(chars, "Remove all"):
+        if grid_contains(chars, "Clear finished") or grid_contains(chars, "Remove All"):
             print("FAIL test_checksums_context_menu: obsolete bulk action shown")
             return False
         if not menu_has_separator_between(chars, "Remove", "Select All"):
@@ -191,9 +191,20 @@ def test_checksums_context_menu():
         s.click(missing_row[1] + 1, missing_row[0] + 3, button=2)
         chars = s.screen()[0]
         select_all = find_text(chars, "Select All")
-        if not select_all or grid_contains(chars, "Remove all") or not grid_contains(chars, "Copy"):
+        if not select_all or not grid_contains(chars, "Remove All") or not grid_contains(chars, "Copy"):
             print("FAIL test_checksums_context_menu: blank menu is not unified")
             return False
+        rm_all = find_text(chars, "Remove All")
+        s.click(rm_all[1] + 1, rm_all[0] + 1)
+        if not grid_contains(s.screen()[0], "Remove 5 checksums?"):
+            print("FAIL test_checksums_context_menu: blank Remove All confirmation not shown")
+            return False
+        s.write("\x1b")  # Cancel the bulk removal.
+        if not grid_contains(s.screen()[0], "missing.bin"):
+            print("FAIL test_checksums_context_menu: cancelled Remove All deleted the rows")
+            return False
+        s.click(missing_row[1] + 1, missing_row[0] + 3, button=2)  # Reopen the blank menu.
+        chars = s.screen()[0]
         copy = find_text(chars, "Copy")
         s.click(copy[1] + 1, copy[0] + 1)
         if not grid_contains(s.screen()[0], "Select All"):
@@ -209,6 +220,34 @@ def test_checksums_context_menu():
             return False
         s.write("\x1b")
         print("OK test_checksums_context_menu")
+        return True
+
+
+def test_checksums_blank_remove_all():
+    """Blank-area Remove All confirms once and clears the whole checksum queue."""
+    with ParvionSession(DEMO_ENV) as s:
+        chars = _open_checksums_tab(s)
+        missing = find_text(chars, "missing.bin")
+        if not missing:
+            print("FAIL test_checksums_blank_remove_all: rows not found")
+            return False
+        s.click(missing[1] + 1, missing[0] + 3, button=2)  # Blank body row below the last item.
+        if not click_label(s, "Remove All"):
+            print("FAIL test_checksums_blank_remove_all: Remove All entry not found")
+            return False
+        if not grid_contains(s.screen()[0], "Remove 5 checksums?"):
+            print("FAIL test_checksums_blank_remove_all: bulk removal confirmation not shown")
+            return False
+        s.write("\r")  # Confirm the bulk removal.
+        chars = s.screen()[0]
+        for name in ("report.pdf", "notes.txt", "backup.tar.gz", "image.iso", "missing.bin"):
+            if grid_contains(chars, name):
+                print(f"FAIL test_checksums_blank_remove_all: {name} survived Remove All")
+                return False
+        if not grid_contains(chars, "Checksums (0)") or not grid_contains(chars, "(no checksums)"):
+            print("FAIL test_checksums_blank_remove_all: empty queue not reported")
+            return False
+        print("OK test_checksums_blank_remove_all")
         return True
 
 
@@ -458,7 +497,7 @@ def test_checksums_blank_area_matches_transfer_table():
         selected = s.screen()[1][r][c]
         s.click(blank_c + 1, r + 1, button=2)
         chars = s.screen()[0]
-        if not grid_contains(chars, "Select All") or grid_contains(chars, "Remove all") or not grid_contains(chars, "Copy"):
+        if not grid_contains(chars, "Select All") or not grid_contains(chars, "Remove All") or not grid_contains(chars, "Copy"):
             print("FAIL test_checksums_blank_area_matches_transfer_table: row-right blank did not open unified menu")
             return False
         s.write("\x1b")
@@ -670,6 +709,7 @@ TESTS = [
     test_checksums_tab_lists_tasks,
     test_checksums_progress_bars,
     test_checksums_context_menu,
+    test_checksums_blank_remove_all,
     test_checksums_multiselect_copy_fields,
     test_local_file_hash_end_to_end,
     test_backend_hash_non_ascii_path,
