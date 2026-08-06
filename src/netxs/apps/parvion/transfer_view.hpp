@@ -453,14 +453,14 @@ namespace netxs::app::parvion
             };
             return mc;
         };
-        cfg.viewport.follow      = [ctrl, status]
+        cfg.viewport.behavior    = [ctrl, status]
         {
             auto rows = xfer_rows(ctrl, status);
             for (auto i = si32{}; i < (si32)rows.size(); ++i)
                 if (rows[(size_t)i].child == -1
                  && ctrl->find_transfer_job(ctrl->queue[(size_t)rows[(size_t)i].qi].id))
-                    return table_follow_target{ table_follow_target::source_row, i };
-            return table_follow_target{ table_follow_target::tail };
+                    return table_viewport_follow{ table_viewport_follow::source_row, i };
+            return table_viewport_follow{ table_viewport_follow::tail };
         };
         cfg.empty_text  = []{ return text{ "(no transfers — press Enter on a file to queue one)" }; };
         cfg.deletion.enabled = true;

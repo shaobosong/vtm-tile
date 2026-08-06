@@ -279,7 +279,7 @@ namespace
         st.body_rows = 10;
         st.scroll = 40;
         auto cfg = table_cfg{};
-        cfg.viewport.follow = []{ return table_follow_target{ table_follow_target::tail }; };
+        cfg.viewport.behavior = []{ return table_viewport_follow{ table_viewport_follow::tail }; };
         return q_follow_scroll(st, cfg) == 40
             && q_at_follow_target(st, cfg);
     }
@@ -296,7 +296,7 @@ namespace
         for (auto i = si32{}; i < 50; ++i) st.row_order[(size_t)i] = i;
         for (auto i = si32{}; i <= 50; ++i) st.row_offsets[(size_t)i] = i;
         auto cfg = table_cfg{};
-        cfg.viewport.follow = []{ return table_follow_target{ table_follow_target::source_row, 0 }; };
+        cfg.viewport.behavior = []{ return table_viewport_follow{ table_viewport_follow::source_row, 0 }; };
         return q_follow_scroll(st, cfg) == 0
             && !q_at_follow_target(st, cfg);
     }

@@ -1180,8 +1180,11 @@ namespace netxs::app::parvion
             state->marked = { row };
             pane_activate(*state);
         };
-        cfg.viewport.revision = [state]{ pane_sync(*state); return state->revision; };
-        cfg.viewport.revision_row = [state]{ return std::exchange(state->revision_row, -1); };
+        cfg.viewport.behavior = [state]
+        {
+            pane_sync(*state);
+            return table_viewport_refresh{ state->revision, std::exchange(state->revision_row, -1) };
+        };
         cfg.sort.sort_group = [state](si32 row){ return pane_sort_group(*state, row); };
         cfg.sort.compare = [state](si32 a, si32 b, si32 key){ return pane_compare(*state, a, b, key); };
         cfg.behavior.focus_on_start = grab_focus;

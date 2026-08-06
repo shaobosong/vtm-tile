@@ -197,7 +197,8 @@ namespace netxs::app::parvion
         bool focused = faux;
 
         si32 scroll = 0, hscroll = 0;
-        bool live_follow = faux;
+        bool live_follow = faux;  // Following is currently engaged.
+        bool follow_seen = faux;  // One-shot: the follow behavior has been encountered by a render.
         bool sb_hover = faux,  sb_press = faux,  sb_drag = faux;  si32 sb_grab = 0;
         bool hsb_hover = faux, hsb_press = faux, hsb_drag = faux; si32 hsb_grab = 0;
         si32 hover_border = -1, col_drag = -1;
@@ -256,13 +257,19 @@ namespace netxs::app::parvion
             : value{ table_component_cell{ std::move(content) } } { }
     };
 
-    // Persistent live-update target. Unlike a one-shot reveal, this target is reapplied on every
-    // render while live following is enabled.
-    struct table_follow_target
-    {
-        enum kind { tail, source_row } mode = tail;
-        si32 row = -1;
-    };
+    // Disjoint viewport behaviors, polled once per render as the caller's scroll intent.
+    //   `none`    -- no automatic control (manual scrolling only).
+    //   `follow`  -- persistent live-update target, reapplied on every render while following.
+    //   `refresh` -- change-triggered reset: when `token` changes, the viewport resets to
+    //                `reveal_row` (or top) and live-follow is cancelled. `reveal_row` is a one-shot
+    //                source row and must be delivered in the same poll that carries the new token.
+    // Add a future behavior by adding a case to `table_viewport_behavior` and a handler in the
+    // `table_render` dispatcher; the dispatch is exhaustive at compile time.
+    struct table_viewport_none    { };
+    struct table_viewport_follow  { enum kind { tail, source_row } mode = tail; si32 row = -1; };
+    struct table_viewport_refresh { ui64 token = 0; si32 reveal_row = -1; };
+    using table_viewport_behavior = std::variant<table_viewport_none, table_viewport_follow, table_viewport_refresh>;
+    template<class T> inline constexpr bool viewport_unhandled = faux; // static_assert sentinel.
 
     // Result of a caller-owned key handler. A row reveal is a one-shot viewport operation and can
     // independently request that the horizontal viewport return to its origin.
@@ -321,12 +328,13 @@ namespace netxs::app::parvion
         std::function<void(si32)>      on_toggle;    // Toggle a row's expansion (null => none).
     };
 
-    // Viewport configuration: live-follow target, revision-based reset, and one-shot row reveal.
+    // Viewport configuration: a single polled behavior that controls the scroll on each render.
+    // `behavior` is called exactly once per render and defaults to `none` (manual scrolling only);
+    // do not assign null. A one-shot `reveal_row` must be delivered in the same poll that returns
+    // a new `token`.
     struct table_viewport_cfg
     {
-        std::function<table_follow_target()> follow;        // Persistent live-update target (null => no live following).
-        std::function<ui64()>                revision;      // Change token: reset vertical/horizontal viewport on change.
-        std::function<si32()>                revision_row;  // One-shot source row to reveal after a revision change (-1 => top).
+        std::function<table_viewport_behavior()> behavior = []{ return table_viewport_none{}; };
     };
 
     // Behavior flags: small boolean toggles collected in one place.
@@ -581,14 +589,21 @@ namespace netxs::app::parvion
             return std::clamp(bottom - top > st.body_rows ? top : bottom - st.body_rows, 0, maxscroll);
         return offset;
     }
-    inline auto q_follow_scroll(table_state const& st, table_cfg const& cfg) -> si32
+    inline auto q_follow_scroll(table_state const& st, table_viewport_follow const& target) -> si32
     {
-        if (!cfg.viewport.follow) return -1;
         auto maxscroll = std::max(0, st.total_lines - st.body_rows);
-        auto target = cfg.viewport.follow();
-        if (target.mode == table_follow_target::tail) return maxscroll;
+        if (target.mode == table_viewport_follow::tail) return maxscroll;
         auto row = q_visual_row(st, target.row);
         return row >= 0 ? std::clamp(q_row_bottom(st, row) - st.body_rows, 0, maxscroll) : -1;
+    }
+    inline auto q_follow_scroll(table_state const& st, table_cfg const& cfg) -> si32
+    {
+        return std::visit([&](auto const& p) -> si32
+        {
+            using T = std::decay_t<decltype(p)>;
+            if constexpr (std::is_same_v<T, table_viewport_follow>) return q_follow_scroll(st, p);
+            else return -1;
+        }, cfg.viewport.behavior());
     }
     inline auto q_at_follow_target(table_state const& st, table_cfg const& cfg) -> bool
     {
@@ -964,22 +979,6 @@ namespace netxs::app::parvion
         st.row_hit.clear();
         st.expand_hit.clear();
 
-        auto revision_row = si32{ -1 };
-        if (cfg.viewport.revision)
-        {
-            auto revision = cfg.viewport.revision();
-            if (revision != st.revision)
-            {
-                auto old_scroll = st.scroll;
-                st.revision = revision;
-                if (cfg.viewport.revision_row) revision_row = cfg.viewport.revision_row();
-                st.scroll = revision_row >= 0 ? old_scroll : 0;
-                st.hscroll = 0;
-                st.live_follow = faux;
-                q_reset_selection_state(st);
-            }
-        }
-
         auto t     = cfg.columns();
         auto nrows = cfg.row_count ? cfg.row_count() : 0;
         q_build_order(st, cfg, nrows);
@@ -992,16 +991,45 @@ namespace netxs::app::parvion
             host->base::extend(rect{{ 0, st.body_top }, { std::max(0, st.disp_w), st.body_rows }});
         }
 
-        if (revision_row >= 0)
+        // Apply the caller's viewport behavior on each render. `none`: manual scrolling only;
+        // `follow`: keep the persistent live-update target in view; `refresh`: on token change,
+        // reset the viewport to the one-shot `reveal_row` (or top) and cancel live-follow.
+        auto policy = cfg.viewport.behavior();
+        std::visit([&](auto const& p)
         {
-            auto row = q_visual_row(st, revision_row);
-            st.scroll = q_reveal_visual(st, st.scroll, row);
-        }
-        if (st.live_follow && cfg.viewport.follow)
-        {
-            auto follow_scroll = q_follow_scroll(st, cfg);
-            if (follow_scroll >= 0) st.scroll = follow_scroll;
-        }
+            using T = std::decay_t<decltype(p)>;
+            if constexpr (std::is_same_v<T, table_viewport_none>)
+            { /* manual scrolling only */ }
+            else if constexpr (std::is_same_v<T, table_viewport_follow>)
+            {
+                if (!st.follow_seen) { st.follow_seen = true; st.live_follow = true; } // Arm once on first render.
+                if (st.live_follow)
+                {
+                    auto follow_scroll = q_follow_scroll(st, p);
+                    if (follow_scroll >= 0) st.scroll = follow_scroll;
+                }
+            }
+            else if constexpr (std::is_same_v<T, table_viewport_refresh>)
+            {
+                auto reveal_row = si32{ -1 };
+                if (p.token != st.revision)
+                {
+                    auto old_scroll = st.scroll;
+                    st.revision = p.token;
+                    reveal_row = p.reveal_row;
+                    st.scroll = reveal_row >= 0 ? old_scroll : 0;
+                    st.hscroll = 0;
+                    st.live_follow = faux;
+                    q_reset_selection_state(st);
+                }
+                if (reveal_row >= 0)
+                {
+                    auto row = q_visual_row(st, reveal_row);
+                    st.scroll = q_reveal_visual(st, st.scroll, row);
+                }
+            }
+            else static_assert(viewport_unhandled<T>, "unhandled viewport behavior case");
+        }, policy);
         tbl_clamp(st);
 
         auto hs = st.hscroll, clipw = st.disp_w;
@@ -1103,7 +1131,6 @@ namespace netxs::app::parvion
     {
         auto state = std::make_shared<table_state>();
         auto config = std::make_shared<table_cfg>(std::move(cfg));
-        state->live_follow = !!config->viewport.follow;
 
         // Paint the frame first, then composite arbitrary retained cell widgets through a
         // physically bounded body host.

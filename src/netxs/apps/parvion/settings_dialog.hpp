@@ -775,7 +775,7 @@ namespace netxs::app::parvion
             return table;
         };
         cfg.row_count = [stp]{ return (si32)stp->draft.keyfiles.size(); };
-        cfg.viewport.revision = [stp]{ return stp->key_table_revision; };
+        cfg.viewport.behavior = [stp]{ return table_viewport_refresh{ stp->key_table_revision }; };
         cfg.cell = [stp](si32 row, si32 key)
         {
             return table_cell{ kt_cell(*stp, key, row), theme::text_fg };
@@ -1185,7 +1185,7 @@ namespace netxs::app::parvion
             return table;
         };
         cfg.row_count = [stp]{ return (si32)stp->draft.sites.size(); };
-        cfg.viewport.revision = [stp]{ return stp->site_table_revision; };
+        cfg.viewport.behavior = [stp]{ return table_viewport_refresh{ stp->site_table_revision }; };
         cfg.cell = [stp](si32 row, si32 key)
         {
             return table_cell{ sd_site_cell(*stp, key, row), theme::text_fg };
