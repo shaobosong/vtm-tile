@@ -27,6 +27,10 @@ namespace netxs::app::parvion
             make_log_view(ctrl, window_wp),                    // Message Log
             make_hash_view(ctrl, window_wp),                   // Checksums
         };
-        return make_tabs(std::move(pages), /*active*/ 0);
+        return make_tabs({
+            .pages = std::move(pages),
+            .active = 0,
+            .position = tab_position::bottom,
+        });
     }
 }

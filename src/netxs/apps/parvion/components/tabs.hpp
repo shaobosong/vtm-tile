@@ -3,18 +3,31 @@
 
 #pragma once
 
-// parvion/components/tabs.hpp: a generic, reusable multi-container — a bottom tab strip over a
-// ui::veer that
-// shows one component page at a time. Page-specific lifecycle is carried by the common component
-// handle, so tabs can be nested without a separate inheritance hierarchy.
+// parvion/components/tabs.hpp: a generic, reusable multi-container with a configurable top or
+// bottom tab strip and a ui::veer that shows one component page at a time. Page-specific lifecycle
+// is carried by the common component handle, so tabs can be nested without a separate inheritance
+// hierarchy.
 //
-// Structure:  fork(axis::Y) { slot::_1 = veer (pages, z-stacked; back() is visible)
-//                             slot::_2 = strip (1 row: labels + click-to-switch) }
+// Bottom: fork(axis::Y) { slot::_1 = veer;  slot::_2 = strip }
+// Top:    fork(axis::Y) { slot::_1 = strip; slot::_2 = veer  }
 
 #include "tab_page.hpp" // tab_page_cfg.
 
 namespace netxs::app::parvion
 {
+    enum class tab_position
+    {
+        top,
+        bottom,
+    };
+
+    struct tabs_cfg
+    {
+        std::vector<tab_page_cfg> pages;
+        si32 active = 0;
+        tab_position position = tab_position::bottom;
+    };
+
     // Resolve current labels against the strip width. Compression reduces the widest title first;
     // ties advance one title at a time in stable rounds, so equally wide tabs lose width evenly.
     // Each page callback sees its full title plus the next target width and can preserve any
@@ -162,19 +175,28 @@ namespace netxs::app::parvion
         return strip;
     }
 
-    // Assemble a tabs component over `pages`, initially showing `active`.
-    inline auto make_tabs(std::vector<tab_page_cfg> pages, si32 active = 0) -> component
+    // Assemble a tabs component, initially showing cfg.active and placing its strip as requested.
+    inline auto make_tabs(tabs_cfg cfg) -> component
     {
         auto tc = std::make_shared<tabs_ctrl>();
-        tc->pages     = std::move(pages);
+        tc->pages = std::move(cfg.pages);
         auto n = (si32)tc->pages.size();
 
         auto root = ui::fork::ctor(axis::Y);
         auto veer = ui::veer::ctor();
         for (auto& p : tc->pages) veer->attach(p.content.widget); // Attach in tab order.
         auto strip = make_tab_strip(std::weak_ptr<tabs_ctrl>(tc));
-        root->attach(slot::_1, veer);
-        root->attach(slot::_2, strip)->limits({ -1, 1 }, { -1, 1 }); // Strip pinned to 1 row.
+        strip->limits({ -1, 1 }, { -1, 1 }); // Strip pinned to 1 row.
+        if (cfg.position == tab_position::top)
+        {
+            root->attach(slot::_1, strip);
+            root->attach(slot::_2, veer);
+        }
+        else
+        {
+            root->attach(slot::_1, veer);
+            root->attach(slot::_2, strip);
+        }
 
         tc->root     = root;
         tc->veer_wp  = veer;
@@ -184,7 +206,7 @@ namespace netxs::app::parvion
         auto cur = std::max(0, n - 1);
         for (auto i = si32{}; i < n; ++i) if (veer->back() == tc->pages[(size_t)i].content.widget) { cur = i; break; }
         tc->active = cur;
-        tc->select(std::clamp(active, 0, std::max(0, n - 1)), nullptr);
+        tc->select(std::clamp(cfg.active, 0, std::max(0, n - 1)), nullptr);
         return {
             root,
             [tc]{ tc->on_activate(); },

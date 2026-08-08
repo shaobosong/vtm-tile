@@ -156,6 +156,54 @@ namespace
             && labels[1] == "Longer (0)"
             && cell_width(labels[0]) + cell_width(labels[1]) + 4 == 25;
     }
+
+    auto test_tab_position_and_initial_selection() -> bool
+    {
+        auto verify = [](tab_position position, si32 active, bool strip_first)
+        {
+            auto first = ui::mock::ctor();
+            auto second = ui::mock::ctor();
+            auto tabs = make_tabs({
+                .pages = {
+                    make_tab_page({ first, {}, {} }, []{ return text{ "First" }; }),
+                    make_tab_page({ second, {}, {} }, []{ return text{ "Second" }; }),
+                },
+                .active = active,
+                .position = position,
+            });
+            auto root = std::dynamic_pointer_cast<ui::fork>(tabs.widget);
+            if (!root) return faux;
+            root->base::extend({ {}, { 20, 6 } });
+
+            auto strip = root->get(strip_first ? slot::_1 : slot::_2);
+            auto stack = std::dynamic_pointer_cast<ui::veer>(root->get(strip_first ? slot::_2 : slot::_1));
+            auto expected_page = active <= 0 ? first : second;
+            auto strip_area = strip_first ? rect{ { 0, 0 }, { 20, 1 } }
+                                          : rect{ { 0, 5 }, { 20, 1 } };
+            auto stack_area = strip_first ? rect{ { 0, 1 }, { 20, 5 } }
+                                          : rect{ { 0, 0 }, { 20, 5 } };
+            return strip
+                && stack
+                && strip->base::area() == strip_area
+                && stack->base::area() == stack_area
+                && stack->back() == expected_page;
+        };
+
+        auto default_tabs = make_tabs({
+            .pages = {
+                make_tab_page({ ui::mock::ctor(), {}, {} }, []{ return text{ "Only" }; }),
+            },
+        });
+        auto default_root = std::dynamic_pointer_cast<ui::fork>(default_tabs.widget);
+        if (!default_root) return faux;
+        default_root->base::extend({ {}, { 20, 6 } });
+
+        return verify(tab_position::top, 1, true)
+            && verify(tab_position::bottom, 1, faux)
+            && verify(tab_position::top, -1, true)
+            && verify(tab_position::bottom, 99, faux)
+            && default_root->get(slot::_2)->base::area() == rect{ { 0, 5 }, { 20, 1 } };
+    }
 }
 
 int main()
@@ -169,7 +217,8 @@ int main()
            && test_counted_tab_abbreviation_preserves_suffix()
            && test_tab_abbreviation_prioritizes_longer_titles()
            && test_tab_abbreviation_balances_tied_titles()
-           && test_tab_abbreviation_balances_visible_width();
+           && test_tab_abbreviation_balances_visible_width()
+           && test_tab_position_and_initial_selection();
     if (!ok) std::fprintf(stderr, "parvion button tests failed\n");
     return ok ? 0 : 1;
 }
