@@ -127,6 +127,73 @@ namespace
             && canvas[{ 0, 2 }].bgc() == argb{ divider }
             && canvas[{ 0, 2 }].link() == 0;
     }
+
+    auto test_border_geometry_and_paint() -> bool
+    {
+        constexpr auto border_color = 0xFF123456;
+        auto layout = grid::ctor({
+            .columns = { { .weight = 1 }, { .weight = 1 } },
+            .rows = { { .weight = 1 }, { .weight = 1 } },
+            .handle_mode = grid_handle_mode::disabled,
+            .column_handle_width = 2,
+            .row_handle_height = 1,
+            .column_border_width = 3, // Border thickness is independent of the handles.
+            .row_border_height = 2,
+            .handle_color = 0xFF00FFFF, // Must not affect the border paint.
+            .border_color = border_color,
+            .border = true,
+        });
+        auto a = layout->attach(ui::mock::ctor(), { .column = 0, .row = 0 });
+        auto b = layout->attach(ui::mock::ctor(), { .column = 1, .row = 0 });
+        auto c = layout->attach(ui::mock::ctor(), { .column = 0, .row = 1 });
+        auto d = layout->attach(ui::mock::ctor(), { .column = 1, .row = 1 });
+        layout->base::extend({ {}, { 106, 45 } });
+
+        auto canvas = ui::face{};
+        canvas.size({ 106, 45 });
+        layout->render(canvas);
+
+        // slot_x = 3 border cells on each side + one 2-cell gap = 8, so the
+        // columns split 106 - 8 = 98 into 49/49.  slot_y = 2 + 2 + 1 = 5, rows
+        // split 40 into 20/20.  Cells start right after the border.
+        return layout->get_column_sizes() == std::vector<si32>{ 49, 49 }
+            && layout->get_row_sizes() == std::vector<si32>{ 20, 20 }
+            && layout->get_cell_area(a) == rect{ { 3, 2 }, { 49, 20 } }
+            && layout->get_cell_area(b) == rect{ { 54, 2 }, { 49, 20 } }
+            && layout->get_cell_area(c) == rect{ { 3, 23 }, { 49, 20 } }
+            && layout->get_cell_area(d) == rect{ { 54, 23 }, { 49, 20 } }
+            // Vertical sides are column_border_width cells wide, horizontal
+            // sides are row_border_height cells high.
+            && canvas[{ 0, 0 }].bgc() == argb{ border_color }
+            && canvas[{ 2, 0 }].bgc() == argb{ border_color }
+            && canvas[{ 0, 1 }].bgc() == argb{ border_color }
+            && canvas[{ 0, 44 }].bgc() == argb{ border_color }
+            && canvas[{ 105, 44 }].bgc() == argb{ border_color }
+            && canvas[{ 105, 0 }].bgc() == argb{ border_color }
+            && canvas[{ 1, 20 }].bgc() == argb{ border_color }
+            && canvas[{ 3, 2 }].bgc() != argb{ border_color }
+            && canvas[{ 54, 23 }].bgc() != argb{ border_color };
+    }
+
+    auto test_border_optional() -> bool
+    {
+        constexpr auto border_color = 0xFF123456;
+        auto layout = grid::ctor({
+            .columns = { { .weight = 1 } },
+            .rows = { { .weight = 1 } },
+            .handle_mode = grid_handle_mode::disabled,
+            .border_color = border_color,
+        });
+        auto child = layout->attach(ui::mock::ctor());
+        layout->base::extend({ {}, { 10, 5 } });
+
+        auto canvas = ui::face{};
+        canvas.size({ 10, 5 });
+        layout->render(canvas);
+
+        return layout->get_cell_area(child) == rect{ { 0, 0 }, { 10, 5 } }
+            && canvas[{ 0, 0 }].bgc() != argb{ border_color };
+    }
 }
 
 int main()
@@ -134,7 +201,9 @@ int main()
     auto ok = test_track_resolution()
            && test_hidden_handles_have_no_geometry()
            && test_enabled_handles_span_and_reset()
-           && test_disabled_handles_are_solid_and_inert();
+           && test_disabled_handles_are_solid_and_inert()
+           && test_border_geometry_and_paint()
+           && test_border_optional();
     if (!ok) std::fprintf(stderr, "parvion grid tests failed\n");
     return ok ? 0 : 1;
 }

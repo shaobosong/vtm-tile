@@ -13,6 +13,9 @@
 // Cells may span tracks.  A spanning child is painted after the handles, so it
 // naturally covers internal handles crossed by the span (the bottom tabs in the
 // main Parvion layout use this to span both pane columns).
+//
+// An optional outer border is painted with border_color.  Its vertical sides
+// take column_border_width cells and its horizontal sides row_border_height.
 
 #include "ui.hpp"
 
@@ -50,7 +53,12 @@ namespace netxs::app::parvion
         grid_handle_mode handle_mode = grid_handle_mode::enabled;
         si32 column_handle_width = 2;
         si32 row_handle_height   = 1;
+        si32 column_border_width = 2; // Outer border thickness: vertical sides.
+        si32 row_border_height   = 1; // Outer border thickness: horizontal sides.
         ui32 handle_color        = theme::surface;
+        ui32 border_color        = theme::surface;
+        bool border              = faux; // Paint an outer border using border_color
+                                         // with column_border_width/row_border_height.
     };
 
     inline auto grid_track_max(grid_track const& track) -> si32
@@ -172,6 +180,18 @@ namespace netxs::app::parvion
                  : 0;
         }
 
+        // Vertical (left/right) border thickness.
+        auto border_x() const -> si32
+        {
+            return defaults.border ? std::max(0, defaults.column_border_width) : 0;
+        }
+
+        // Horizontal (top/bottom) border thickness.
+        auto border_y() const -> si32
+        {
+            return defaults.border ? std::max(0, defaults.row_border_height) : 0;
+        }
+
         static auto track_minimum(std::vector<grid_track> const& tracks) -> si32
         {
             return std::accumulate(tracks.begin(), tracks.end(), si32{},
@@ -181,11 +201,11 @@ namespace netxs::app::parvion
                 });
         }
 
-        static auto track_offsets(std::vector<si32> const& sizes, si32 gap)
+        static auto track_offsets(std::vector<si32> const& sizes, si32 gap, si32 start = 0)
             -> std::vector<si32>
         {
             auto offsets = std::vector<si32>(sizes.size());
-            auto cursor = si32{};
+            auto cursor = start;
             for (auto i = size_t{}; i < sizes.size(); ++i)
             {
                 offsets[i] = cursor;
@@ -222,28 +242,32 @@ namespace netxs::app::parvion
         {
             auto xgap = column_gap();
             auto ygap = row_gap();
-            auto min_width = track_minimum(columns) + xgap * std::max(0, (si32)columns.size() - 1);
-            auto min_height = track_minimum(rows) + ygap * std::max(0, (si32)rows.size() - 1);
+            auto bordx = border_x();
+            auto bordy = border_y();
+            auto slot_x = bordx * 2 + xgap * std::max(0, (si32)columns.size() - 1);
+            auto slot_y = bordy * 2 + ygap * std::max(0, (si32)rows.size() - 1);
+            auto min_width = track_minimum(columns) + slot_x;
+            auto min_height = track_minimum(rows) + slot_y;
             new_area.size = std::max(new_area.size, twod{ min_width, min_height });
 
-            auto track_width = std::max(0, new_area.size.x - xgap * std::max(0, (si32)columns.size() - 1));
-            auto track_height = std::max(0, new_area.size.y - ygap * std::max(0, (si32)rows.size() - 1));
+            auto track_width = std::max(0, new_area.size.x - slot_x);
+            auto track_height = std::max(0, new_area.size.y - slot_y);
             column_sizes = resolve_grid_tracks(columns, track_width);
             row_sizes = resolve_grid_tracks(rows, track_height);
-            auto x = track_offsets(column_sizes, xgap);
-            auto y = track_offsets(row_sizes, ygap);
+            auto x = track_offsets(column_sizes, xgap, bordx);
+            auto y = track_offsets(row_sizes, ygap, bordy);
 
             for (auto& handle : handles)
             {
                 if (handle.dimension == axis::X)
                 {
                     auto bx = x[(size_t)handle.boundary] - xgap;
-                    handle.area = { { bx, 0 }, { xgap, new_area.size.y } };
+                    handle.area = { { bx, bordy }, { xgap, std::max(0, new_area.size.y - bordy * 2) } };
                 }
                 else
                 {
                     auto by = y[(size_t)handle.boundary] - ygap;
-                    handle.area = { { 0, by }, { new_area.size.x, ygap } };
+                    handle.area = { { bordx, by }, { std::max(0, new_area.size.x - bordx * 2), ygap } };
                 }
                 auto area = handle.area;
                 handle.widget->base::recalc(area);
@@ -296,6 +320,13 @@ namespace netxs::app::parvion
             {
                 if (auto context2D = nested_2D_context(parent_canvas))
                 {
+                    if (defaults.border)
+                    {
+                        auto full = rect{ {}, base::size() };
+                        auto color = defaults.border_color;
+                        parent_canvas.cage(full, dent{ border_x(), border_x(), border_y(), border_y() },
+                                           [color](cell& c){ c.bgc(color); });
+                    }
                     // Handles are behind cells.  A spanning cell therefore hides both
                     // the paint and the hit link of a crossed internal boundary.
                     for (auto& handle : handles) handle.widget->render(parent_canvas);
