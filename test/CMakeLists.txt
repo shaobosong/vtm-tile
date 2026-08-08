@@ -62,6 +62,13 @@ target_include_directories(parvion_grid_test PRIVATE "${CMAKE_SOURCE_DIR}/src"
 target_link_libraries(parvion_grid_test PRIVATE Lua::Lua)
 add_test(NAME parvion_grid_test COMMAND parvion_grid_test)
 
+# Unit test for the shared Parvion flex layout.
+add_executable(parvion_flex_test "parvion_flex_test.cpp")
+target_include_directories(parvion_flex_test PRIVATE "${CMAKE_SOURCE_DIR}/src"
+                                                      ${LUA_INCLUDE_DIR})
+target_link_libraries(parvion_flex_test PRIVATE Lua::Lua)
+add_test(NAME parvion_flex_test COMMAND parvion_flex_test)
+
 # Unit test for the shared Parvion progress-bar renderer and table-cell embedding contract.
 add_executable(parvion_progressbar_test "parvion_progressbar_test.cpp")
 target_include_directories(parvion_progressbar_test PRIVATE "${CMAKE_SOURCE_DIR}/src"

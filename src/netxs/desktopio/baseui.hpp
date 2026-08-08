@@ -17,6 +17,7 @@ namespace netxs
             X(desktop   ) \
             X(dtvt      ) \
             X(edit      ) \
+            X(flex      ) \
             X(fork      ) \
             X(gear      ) \
             X(gate      ) \

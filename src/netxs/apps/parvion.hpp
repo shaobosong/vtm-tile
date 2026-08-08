@@ -29,6 +29,7 @@
 #include "parvion/panes.hpp"
 #include "parvion/connectbar.hpp"
 #include "parvion/queue.hpp"
+#include "parvion/components/flex.hpp"
 #include "parvion/components/grid.hpp"
 #include "parvion/settings_dialog.hpp"
 #include "parvion/prompts.hpp" // make_secret_dialog (live passphrase / password login modal)
