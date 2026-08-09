@@ -244,6 +244,25 @@ namespace
         return layout->get_item_area(child) == rect{ { 2, 1 }, { 6, 3 } }
             && canvas[{ 0, 0 }].bgc() != argb{ border_color };
     }
+
+    auto test_item_padding_uses_outer_slot() -> bool
+    {
+        auto layout = flex::ctor({ .column_gap = 2 });
+        auto a = layout->attach(ui::mock::ctor(), {
+            .basis = 9,
+            .padding = { 1, 2, 1, 2 },
+        });
+        auto b = layout->attach(ui::mock::ctor(), {
+            .basis = 9,
+            .padding = { -3, 20, -4, 20 },
+        });
+        layout->base::extend({ {}, { 20, 8 } });
+
+        // Basis and gap still allocate outer slots [0, 9) and [11, 20).
+        // Padding only changes the final child rectangles inside those slots.
+        return layout->get_item_area(a) == rect{ { 1, 1 }, { 6, 5 } }
+            && layout->get_item_area(b) == rect{ { 11, 0 }, { 0, 0 } };
+    }
 }
 
 int main()
@@ -257,10 +276,12 @@ int main()
     auto lifecycle = test_intrinsic_basis_order_hidden_remove_and_retention();
     auto border = test_border_geometry_and_paint();
     auto padding = test_padding_without_border();
-    auto ok = row && column && wrapping && justification && content && lifecycle && border && padding;
+    auto item_padding = test_item_padding_uses_outer_slot();
+    auto ok = row && column && wrapping && justification && content && lifecycle
+           && border && padding && item_padding;
     if (!ok) std::fprintf(stderr,
-        "row=%d column=%d wrapping=%d justification=%d content=%d lifecycle=%d border=%d padding=%d\n",
-        row, column, wrapping, justification, content, lifecycle, border, padding);
+        "row=%d column=%d wrapping=%d justification=%d content=%d lifecycle=%d border=%d padding=%d item_padding=%d\n",
+        row, column, wrapping, justification, content, lifecycle, border, padding, item_padding);
     if (!ok) std::fprintf(stderr, "parvion flex tests failed\n");
     return ok ? 0 : 1;
 }

@@ -10,9 +10,10 @@
 //   disabled — inert, solid boundary lines.
 //   hidden   — no handle objects, paint, hit targets, or reserved cells.
 //
-// Cells may span tracks.  A spanning child is painted after the handles, so it
-// naturally covers internal handles crossed by the span (the bottom tabs in the
-// main Parvion layout use this to span both pane columns).
+// Cells may have independent four-sided padding and may span tracks. A spanning
+// cell is padded once around the complete span. Its child is painted after the
+// handles, so it naturally covers internal handles crossed by the span (the
+// bottom tabs in the main Parvion layout use this to span both pane columns).
 //
 // Independent inner padding can inset the tracks from the component edges or
 // from an optional outer border.  The border's vertical sides take
@@ -45,6 +46,7 @@ namespace netxs::app::parvion
         si32 row        = 0;
         si32 column_span = 1;
         si32 row_span    = 1;
+        dent padding     = {}; // Inner cell padding: left, right, top, bottom.
     };
 
     struct grid_cfg
@@ -244,6 +246,10 @@ namespace netxs::app::parvion
             cell.row = std::clamp(cell.row, 0, (si32)rows.size() - 1);
             cell.column_span = std::clamp(cell.column_span, 1, (si32)columns.size() - cell.column);
             cell.row_span = std::clamp(cell.row_span, 1, (si32)rows.size() - cell.row);
+            cell.padding.l = std::max(0, cell.padding.l);
+            cell.padding.r = std::max(0, cell.padding.r);
+            cell.padding.t = std::max(0, cell.padding.t);
+            cell.padding.b = std::max(0, cell.padding.b);
             return cell;
         }
 
@@ -299,8 +305,8 @@ namespace netxs::app::parvion
 
             for (auto& cell : cells)
             {
-                cell.area = cell_rect(cell.placement, x, y);
-                auto area = cell.area;
+                // Span first, then inset once around the complete cell rectangle.
+                auto area = cell.placement.padding.area(cell_rect(cell.placement, x, y));
                 cell.widget->base::recalc(area);
                 // Respect the child's growth/crop alignment just as ui::fork does.
                 // Tables use this to keep their natural content width instead of

@@ -203,6 +203,31 @@ namespace
         return layout->get_cell_area(child) == rect{ { 2, 1 }, { 6, 3 } }
             && canvas[{ 0, 0 }].bgc() != argb{ border_color };
     }
+
+    auto test_cell_padding_and_span() -> bool
+    {
+        auto layout = grid::ctor({
+            .columns = { { .weight = 1 }, { .weight = 1 } },
+            .rows = { { .weight = 1 } },
+            .handle_mode = grid_handle_mode::disabled,
+            .column_handle_width = 2,
+        });
+        auto spanning = layout->attach(ui::mock::ctor(), {
+            .column_span = 2,
+            .padding = { 2, 3, 1, 2 },
+        });
+        auto clamped = layout->attach(ui::mock::ctor(), {
+            .padding = { -4, 20, -2, 20 },
+        });
+        layout->base::extend({ {}, { 22, 6 } });
+
+        // The two 10-cell tracks and their 2-cell handle form one 22-cell
+        // spanning slot. Padding is applied once around that complete slot.
+        return layout->get_cell_area(spanning) == rect{ { 2, 1 }, { 17, 3 } }
+            // Negative edges clamp to zero and excessive padding cannot create
+            // negative child geometry.
+            && layout->get_cell_area(clamped) == rect{ { 0, 0 }, { 0, 0 } };
+    }
 }
 
 int main()
@@ -212,7 +237,8 @@ int main()
            && test_enabled_handles_span_and_reset()
            && test_disabled_handles_are_solid_and_inert()
            && test_border_geometry_and_paint()
-           && test_border_optional();
+           && test_border_optional()
+           && test_cell_padding_and_span();
     if (!ok) std::fprintf(stderr, "parvion grid tests failed\n");
     return ok ? 0 : 1;
 }

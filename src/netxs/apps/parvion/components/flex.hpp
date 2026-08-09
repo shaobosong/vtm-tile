@@ -6,9 +6,9 @@
 // parvion/components/flex.hpp: A retained, terminal-cell flex layout.
 //
 // The container supports row/column flow, optional wrapping, main/cross-axis
-// alignment, per-item grow/shrink/basis constraints, stable ordering, gaps,
-// independent inner padding, and an optional outer border.  It deliberately
-// has no draggable handles.
+// alignment, per-item grow/shrink/basis constraints and padding, stable
+// ordering, gaps, independent container padding, and an optional outer border.
+// It deliberately has no draggable handles.
 
 #include "ui.hpp"
 
@@ -76,6 +76,7 @@ namespace netxs::app::parvion
         si32 maximum    = -1; // Negative means unbounded.
         si32 order      = 0;
         flex_align_self align_self = flex_align_self::automatic;
+        dent padding    = {}; // Inner item padding: left, right, top, bottom.
     };
 
     struct flex_cfg
@@ -578,12 +579,21 @@ namespace netxs::app::parvion
                     value(area.coor, cross, line.cross_position);
                     value(area.size, main, line.sizes[i]);
                     value(area.size, cross, requested_cross);
+                    area = entry.config.padding.area(area);
                     entry.widget->base::recalc(area);
                     auto actual_cross = value(area.size, cross);
+                    auto cross_padding = vertical()
+                                       ? entry.config.padding.l + entry.config.padding.r
+                                       : entry.config.padding.t + entry.config.padding.b;
+                    auto leading_padding = vertical()
+                                         ? entry.config.padding.l
+                                         : entry.config.padding.t;
                     auto cross_offset = si32{};
-                    if (alignment == flex_align::end) cross_offset = line.cross_size - actual_cross;
-                    else if (alignment == flex_align::center) cross_offset = (line.cross_size - actual_cross) / 2;
-                    value(area.coor, cross, line.cross_position + std::max(0, cross_offset));
+                    auto actual_outer_cross = actual_cross + cross_padding;
+                    if (alignment == flex_align::end) cross_offset = line.cross_size - actual_outer_cross;
+                    else if (alignment == flex_align::center) cross_offset = (line.cross_size - actual_outer_cross) / 2;
+                    value(area.coor, cross,
+                          line.cross_position + std::max(0, cross_offset) + leading_padding);
                     entry.area = area;
                     main_cursor += line.sizes[i] + main_gap() + spaces[i + 1];
                 }
@@ -638,6 +648,10 @@ namespace netxs::app::parvion
             setup.minimum = std::max(0, setup.minimum);
             if (setup.maximum >= 0) setup.maximum = std::max(setup.minimum, setup.maximum);
             if (setup.basis < 0) setup.basis = -1;
+            setup.padding.l = std::max(0, setup.padding.l);
+            setup.padding.r = std::max(0, setup.padding.r);
+            setup.padding.t = std::max(0, setup.padding.t);
+            setup.padding.b = std::max(0, setup.padding.b);
             items.push_back({ item, setup, {}, {}, next_sequence++ });
             ui::base::attach(item);
             rebuild_visual_order();
