@@ -139,6 +139,8 @@ namespace
             .row_handle_height = 1,
             .column_border_width = 3, // Border thickness is independent of the handles.
             .row_border_height = 2,
+            .column_padding_width = 2,
+            .row_padding_height = 1,
             .handle_color = 0xFF00FFFF, // Must not affect the border paint.
             .border_color = border_color,
             .border = true,
@@ -153,15 +155,15 @@ namespace
         canvas.size({ 106, 45 });
         layout->render(canvas);
 
-        // slot_x = 3 border cells on each side + one 2-cell gap = 8, so the
-        // columns split 106 - 8 = 98 into 49/49.  slot_y = 2 + 2 + 1 = 5, rows
-        // split 40 into 20/20.  Cells start right after the border.
-        return layout->get_column_sizes() == std::vector<si32>{ 49, 49 }
-            && layout->get_row_sizes() == std::vector<si32>{ 20, 20 }
-            && layout->get_cell_area(a) == rect{ { 3, 2 }, { 49, 20 } }
-            && layout->get_cell_area(b) == rect{ { 54, 2 }, { 49, 20 } }
-            && layout->get_cell_area(c) == rect{ { 3, 23 }, { 49, 20 } }
-            && layout->get_cell_area(d) == rect{ { 54, 23 }, { 49, 20 } }
+        // slot_x = (3 border + 2 padding) * 2 + one 2-cell gap = 12, so
+        // the columns split 94 into 47/47.  slot_y = (2 border + 1 padding)
+        // * 2 + one 1-cell gap = 7, so the rows split 38 into 19/19.
+        return layout->get_column_sizes() == std::vector<si32>{ 47, 47 }
+            && layout->get_row_sizes() == std::vector<si32>{ 19, 19 }
+            && layout->get_cell_area(a) == rect{ { 5, 3 }, { 47, 19 } }
+            && layout->get_cell_area(b) == rect{ { 54, 3 }, { 47, 19 } }
+            && layout->get_cell_area(c) == rect{ { 5, 23 }, { 47, 19 } }
+            && layout->get_cell_area(d) == rect{ { 54, 23 }, { 47, 19 } }
             // Vertical sides are column_border_width cells wide, horizontal
             // sides are row_border_height cells high.
             && canvas[{ 0, 0 }].bgc() == argb{ border_color }
@@ -171,8 +173,13 @@ namespace
             && canvas[{ 105, 44 }].bgc() == argb{ border_color }
             && canvas[{ 105, 0 }].bgc() == argb{ border_color }
             && canvas[{ 1, 20 }].bgc() == argb{ border_color }
+            // Padding is unpainted, and handles begin at the content inset.
             && canvas[{ 3, 2 }].bgc() != argb{ border_color }
-            && canvas[{ 54, 23 }].bgc() != argb{ border_color };
+            && canvas[{ 4, 3 }].bgc() != argb{ border_color }
+            && canvas[{ 52, 2 }].bgc() != argb{ 0xFF00FFFF }
+            && canvas[{ 52, 3 }].bgc() == argb{ 0xFF00FFFF }
+            && canvas[{ 4, 22 }].bgc() != argb{ 0xFF00FFFF }
+            && canvas[{ 5, 22 }].bgc() == argb{ 0xFF00FFFF };
     }
 
     auto test_border_optional() -> bool
@@ -182,6 +189,8 @@ namespace
             .columns = { { .weight = 1 } },
             .rows = { { .weight = 1 } },
             .handle_mode = grid_handle_mode::disabled,
+            .column_padding_width = 2,
+            .row_padding_height = 1,
             .border_color = border_color,
         });
         auto child = layout->attach(ui::mock::ctor());
@@ -191,7 +200,7 @@ namespace
         canvas.size({ 10, 5 });
         layout->render(canvas);
 
-        return layout->get_cell_area(child) == rect{ { 0, 0 }, { 10, 5 } }
+        return layout->get_cell_area(child) == rect{ { 2, 1 }, { 6, 3 } }
             && canvas[{ 0, 0 }].bgc() != argb{ border_color };
     }
 }

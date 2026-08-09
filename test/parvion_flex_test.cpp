@@ -203,23 +203,46 @@ namespace
             .column_gap = 2,
             .column_border_width = 2,
             .row_border_height = 1,
+            .column_padding_width = 1,
+            .row_padding_height = 2,
             .border_color = border_color,
             .border = true,
         });
         auto a = layout->attach(ui::mock::ctor(), { .grow = 1, .basis = 0 });
         auto b = layout->attach(ui::mock::ctor(), { .grow = 1, .basis = 0 });
-        layout->base::extend({ {}, { 20, 8 } });
+        layout->base::extend({ {}, { 24, 12 } });
 
         auto canvas = ui::face{};
-        canvas.size({ 20, 8 });
+        canvas.size({ 24, 12 });
         layout->render(canvas);
 
-        return layout->get_item_area(a) == rect{ { 2, 1 }, { 7, 6 } }
-            && layout->get_item_area(b) == rect{ { 11, 1 }, { 7, 6 } }
+        return layout->get_item_area(a) == rect{ { 3, 3 }, { 8, 6 } }
+            && layout->get_item_area(b) == rect{ { 13, 3 }, { 8, 6 } }
             && canvas[{ 0, 0 }].bgc() == argb{ border_color }
-            && canvas[{ 1, 4 }].bgc() == argb{ border_color }
-            && canvas[{ 19, 7 }].bgc() == argb{ border_color }
-            && canvas[{ 2, 1 }].bgc() != argb{ border_color };
+            && canvas[{ 1, 5 }].bgc() == argb{ border_color }
+            && canvas[{ 23, 11 }].bgc() == argb{ border_color }
+            && canvas[{ 2, 1 }].bgc() != argb{ border_color }
+            && canvas[{ 3, 2 }].bgc() != argb{ border_color };
+    }
+
+    auto test_padding_without_border() -> bool
+    {
+        constexpr auto border_color = 0xFF123456;
+        auto layout = flex::ctor({
+            .direction = flex_direction::column,
+            .column_padding_width = 2,
+            .row_padding_height = 1,
+            .border_color = border_color,
+        });
+        auto child = layout->attach(ui::mock::ctor(), { .grow = 1, .basis = 0 });
+        layout->base::extend({ {}, { 10, 5 } });
+
+        auto canvas = ui::face{};
+        canvas.size({ 10, 5 });
+        layout->render(canvas);
+
+        return layout->get_item_area(child) == rect{ { 2, 1 }, { 6, 3 } }
+            && canvas[{ 0, 0 }].bgc() != argb{ border_color };
     }
 }
 
@@ -233,10 +256,11 @@ int main()
     auto content = test_content_alignment();
     auto lifecycle = test_intrinsic_basis_order_hidden_remove_and_retention();
     auto border = test_border_geometry_and_paint();
-    auto ok = row && column && wrapping && justification && content && lifecycle && border;
+    auto padding = test_padding_without_border();
+    auto ok = row && column && wrapping && justification && content && lifecycle && border && padding;
     if (!ok) std::fprintf(stderr,
-        "row=%d column=%d wrapping=%d justification=%d content=%d lifecycle=%d border=%d\n",
-        row, column, wrapping, justification, content, lifecycle, border);
+        "row=%d column=%d wrapping=%d justification=%d content=%d lifecycle=%d border=%d padding=%d\n",
+        row, column, wrapping, justification, content, lifecycle, border, padding);
     if (!ok) std::fprintf(stderr, "parvion flex tests failed\n");
     return ok ? 0 : 1;
 }

@@ -14,8 +14,9 @@
 // naturally covers internal handles crossed by the span (the bottom tabs in the
 // main Parvion layout use this to span both pane columns).
 //
-// An optional outer border is painted with border_color.  Its vertical sides
-// take column_border_width cells and its horizontal sides row_border_height.
+// Independent inner padding can inset the tracks from the component edges or
+// from an optional outer border.  The border's vertical sides take
+// column_border_width cells and its horizontal sides row_border_height.
 
 #include "ui.hpp"
 
@@ -55,6 +56,8 @@ namespace netxs::app::parvion
         si32 row_handle_height   = 1;
         si32 column_border_width = 2; // Outer border thickness: vertical sides.
         si32 row_border_height   = 1; // Outer border thickness: horizontal sides.
+        si32 column_padding_width = 0; // Inner padding: left and right sides.
+        si32 row_padding_height   = 0; // Inner padding: top and bottom sides.
         ui32 handle_color        = theme::surface;
         ui32 border_color        = theme::surface;
         bool border              = faux; // Paint an outer border using border_color
@@ -192,6 +195,26 @@ namespace netxs::app::parvion
             return defaults.border ? std::max(0, defaults.row_border_height) : 0;
         }
 
+        auto padding_x() const -> si32
+        {
+            return std::max(0, defaults.column_padding_width);
+        }
+
+        auto padding_y() const -> si32
+        {
+            return std::max(0, defaults.row_padding_height);
+        }
+
+        auto content_x() const -> si32
+        {
+            return border_x() + padding_x();
+        }
+
+        auto content_y() const -> si32
+        {
+            return border_y() + padding_y();
+        }
+
         static auto track_minimum(std::vector<grid_track> const& tracks) -> si32
         {
             return std::accumulate(tracks.begin(), tracks.end(), si32{},
@@ -242,10 +265,10 @@ namespace netxs::app::parvion
         {
             auto xgap = column_gap();
             auto ygap = row_gap();
-            auto bordx = border_x();
-            auto bordy = border_y();
-            auto slot_x = bordx * 2 + xgap * std::max(0, (si32)columns.size() - 1);
-            auto slot_y = bordy * 2 + ygap * std::max(0, (si32)rows.size() - 1);
+            auto inset_x = content_x();
+            auto inset_y = content_y();
+            auto slot_x = inset_x * 2 + xgap * std::max(0, (si32)columns.size() - 1);
+            auto slot_y = inset_y * 2 + ygap * std::max(0, (si32)rows.size() - 1);
             auto min_width = track_minimum(columns) + slot_x;
             auto min_height = track_minimum(rows) + slot_y;
             new_area.size = std::max(new_area.size, twod{ min_width, min_height });
@@ -254,20 +277,20 @@ namespace netxs::app::parvion
             auto track_height = std::max(0, new_area.size.y - slot_y);
             column_sizes = resolve_grid_tracks(columns, track_width);
             row_sizes = resolve_grid_tracks(rows, track_height);
-            auto x = track_offsets(column_sizes, xgap, bordx);
-            auto y = track_offsets(row_sizes, ygap, bordy);
+            auto x = track_offsets(column_sizes, xgap, inset_x);
+            auto y = track_offsets(row_sizes, ygap, inset_y);
 
             for (auto& handle : handles)
             {
                 if (handle.dimension == axis::X)
                 {
                     auto bx = x[(size_t)handle.boundary] - xgap;
-                    handle.area = { { bx, bordy }, { xgap, std::max(0, new_area.size.y - bordy * 2) } };
+                    handle.area = { { bx, inset_y }, { xgap, std::max(0, new_area.size.y - inset_y * 2) } };
                 }
                 else
                 {
                     auto by = y[(size_t)handle.boundary] - ygap;
-                    handle.area = { { bordx, by }, { std::max(0, new_area.size.x - bordx * 2), ygap } };
+                    handle.area = { { inset_x, by }, { std::max(0, new_area.size.x - inset_x * 2), ygap } };
                 }
                 auto area = handle.area;
                 handle.widget->base::recalc(area);

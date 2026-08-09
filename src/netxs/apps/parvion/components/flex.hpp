@@ -7,7 +7,8 @@
 //
 // The container supports row/column flow, optional wrapping, main/cross-axis
 // alignment, per-item grow/shrink/basis constraints, stable ordering, gaps,
-// and an optional outer border.  It deliberately has no draggable handles.
+// independent inner padding, and an optional outer border.  It deliberately
+// has no draggable handles.
 
 #include "ui.hpp"
 
@@ -88,6 +89,8 @@ namespace netxs::app::parvion
         si32 row_gap = 0;
         si32 column_border_width = 2; // Outer border thickness: vertical sides.
         si32 row_border_height = 1;   // Outer border thickness: horizontal sides.
+        si32 column_padding_width = 0; // Inner padding: left and right sides.
+        si32 row_padding_height = 0;   // Inner padding: top and bottom sides.
         ui32 border_color = theme::surface;
         bool border = faux;
     };
@@ -154,14 +157,26 @@ namespace netxs::app::parvion
             return config.border ? std::max(0, config.row_border_height) : 0;
         }
 
-        auto main_border() const -> si32
+        auto padding_x() const -> si32
         {
-            return vertical() ? border_y() : border_x();
+            return std::max(0, config.column_padding_width);
         }
 
-        auto cross_border() const -> si32
+        auto padding_y() const -> si32
         {
-            return vertical() ? border_x() : border_y();
+            return std::max(0, config.row_padding_height);
+        }
+
+        auto main_inset() const -> si32
+        {
+            return vertical() ? border_y() + padding_y()
+                              : border_x() + padding_x();
+        }
+
+        auto cross_inset() const -> si32
+        {
+            return vertical() ? border_x() + padding_x()
+                              : border_y() + padding_y();
         }
 
         static auto value(twod const& point, axis dimension) -> si32
@@ -450,8 +465,8 @@ namespace netxs::app::parvion
             rebuild_visual_order();
             auto main = main_axis();
             auto cross = cross_axis();
-            auto mborder = main_border();
-            auto cborder = cross_border();
+            auto minset = main_inset();
+            auto cinset = cross_inset();
 
             for (auto& entry : items)
             {
@@ -482,8 +497,8 @@ namespace netxs::app::parvion
                 }
             }
             value(new_area.size, main,
-                  std::max(value(new_area.size, main), main_minimum + mborder * 2));
-            auto inner_main = std::max(0, value(new_area.size, main) - mborder * 2);
+                  std::max(value(new_area.size, main), main_minimum + minset * 2));
+            auto inner_main = std::max(0, value(new_area.size, main) - minset * 2);
 
             auto lines = std::vector<line_entry>{};
             for (auto index : visible)
@@ -513,8 +528,8 @@ namespace netxs::app::parvion
             auto cross_minimum_total = cross_gap() * std::max(0, (si32)lines.size() - 1);
             for (auto& line : lines) cross_minimum_total += line.cross_minimum;
             value(new_area.size, cross,
-                  std::max(value(new_area.size, cross), cross_minimum_total + cborder * 2));
-            auto inner_cross = std::max(0, value(new_area.size, cross) - cborder * 2);
+                  std::max(value(new_area.size, cross), cross_minimum_total + cinset * 2));
+            auto inner_cross = std::max(0, value(new_area.size, cross) - cinset * 2);
 
             for (auto& line : lines) resolve_line(line, inner_main);
 
@@ -536,7 +551,7 @@ namespace netxs::app::parvion
                 line_spaces = content_spaces(config.align_content, lines.size(), cross_free);
             }
 
-            auto cross_cursor = cborder + (line_spaces.empty() ? 0 : line_spaces.front());
+            auto cross_cursor = cinset + (line_spaces.empty() ? 0 : line_spaces.front());
             for (auto line_index = size_t{}; line_index < lines.size(); ++line_index)
             {
                 auto& line = lines[line_index];
@@ -545,7 +560,7 @@ namespace netxs::app::parvion
                               + std::accumulate(line.sizes.begin(), line.sizes.end(), si32{});
                 auto free = std::max(0, inner_main - occupied);
                 auto spaces = justify_spaces(config.justify_content, line.items.size(), free);
-                auto main_cursor = mborder + spaces.front();
+                auto main_cursor = minset + spaces.front();
                 for (auto i = size_t{}; i < line.items.size(); ++i)
                 {
                     auto& entry = items[line.items[i]];
