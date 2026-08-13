@@ -3,183 +3,136 @@
 
 #pragma once
 
-// parvion/settings_dialog.hpp: the Edit -> Settings dialog — a FileZilla-style,
-// top-tabbed settings form (Connection | SFTP | Site | Debug) ported from FileZilla's Connection
-// and Connection/SFTP option pages (TLS excluded). Rendered in the command_bar
-// style as a centered modal
-// card inside a dimming full-window overlay, mirroring show_close_confirmation.
+// parvion/settings_dialog.hpp: component-based Settings port.
 //
-// Reuse: numeric fields use shared make_input children and buttons are independent
-// make_button() widgets, matching the Quick Connect bar; the private-key
-// file picker instantiates the Local Site browser (make_file_pane); the private-key list
-// is the shared table component (components/table.hpp).
+// The previous full hand-painted implementation is retained verbatim as
+// settings_dialog.hpp.old. The Settings pages and their child dialogs are
+// composed from retained components.
 
-#include "panes.hpp"     // theme, put_str, make_file_pane, sd_hit
-#include "components/button.hpp" // button_cfg, make_button
-#include "components/table.hpp"  // table_cfg, make_table (Public Key Authentication list).
-#include "connectbar.hpp" // connect-bar field/secret editor conventions
-#include "prompts.hpp"   // make_secret_dialog (passphrase / save-path modal for key conversion)
+#include "panes.hpp"
+#include "components/button.hpp"
+#include "components/checkbox.hpp"
+#include "components/dialog.hpp"
+#include "components/dropdown.hpp"
+#include "components/flex.hpp"
+#include "components/grid.hpp"
+#include "components/groupbox.hpp"
+#include "components/input.hpp"
+#include "components/label.hpp"
+#include "components/scrollview.hpp"
+#include "components/table.hpp"
+#include "components/tabs.hpp"
+#include "file_picker_dialog.hpp"
+#include "secret_dialog.hpp"
 
 #if !defined(_WIN32)
-    #include <sys/wait.h> // waitpid for the pvputtygen one-shot client.
+    #include <sys/wait.h>
 #endif
 
 namespace netxs::app::parvion
 {
-    namespace sd
+    struct settings_dialog_state
     {
-        enum tab_t { tab_connection, tab_sftp, tab_site, tab_debug, tab_count };
-        // Editable numeric fields (both tabs). make_input owns all transient editor state.
-        enum field_t { f_timeout, f_retries, f_delay, f_threshold, f_maxconn, f_count };
-
-        struct field
-        {
-            text  val;       // The text being edited (digits only).
-            rect  box{};     // Input child geometry, refreshed by the card layout.
-            si32  lo = 0;    // Clamp range (inclusive)...
-            si32  hi = 0;    // ...applied on commit.
-            si32  tab = 0;   // Which tab hosts this field.
-        };
-
-        // Hit-box kinds the mouse layer recognizes, cached each render.
-        struct hitboxes
-        {
-            std::array<rect, tab_count> tab_box{};   // Top tab buttons.
-            rect compression{};                       // "Enable compression" checkbox row.
-            rect unit{};                              // Threshold unit dropdown.
-            rect allocation{};                        // Transfer-channel allocation dropdown.
-            rect hash_algo{};                         // Hash-on-transfer algorithm dropdown ("None" = disabled).
-            rect log_level{};                         // Debug information level dropdown.
-            rect raw_listing{};                       // "Show raw directory listing" checkbox row.
-            rect addkey{}, removekey{};               // Key management buttons.
-            rect addsite{}, editsite{}, removesite{}; // Saved-site management buttons.
-            rect ok{}, cancel{};                      // Dialog buttons.
-        };
-
-        // Default content width inside a group box (matches FileZilla's roomy layout).
-        inline constexpr auto pad_x = si32{ 2 };  // Card left/right inner padding.
-
-        // --- Private-key shared-table model ----------------------------------------------------
-        inline constexpr auto kt_ncol    = si32{ 3 };
-        inline const     auto kt_headers = std::array<view, kt_ncol>{ "Filename", "Comment", "Data" };
-        inline const     auto kt_menu_headers = std::array<view, kt_ncol>{ "&Filename", "&Comment", "&Data" };
-
-        // --- Saved-site shared-table model -----------------------------------------------------
-        inline constexpr auto site_ncol = si32{ 4 };
-        inline const auto site_headers = std::array<view, site_ncol>{ "Site Name", "Host", "Port", "User" };
-        inline const auto site_menu_headers = std::array<view, site_ncol>{ "Site &Name", "&Host", "&Port", "&User" };
-    }
-
-    struct settings_state
-    {
-        sftp_remote*       ctrl = nullptr;
-        parvion_settings   draft;            // Edited copy; committed to ctrl on OK.
-        si32               tab  = sd::tab_connection;
-        std::array<sd::field, sd::f_count> fields{};
-        std::array<netxs::wptr<ui::base>, sd::f_count> input_wp{};
-        bool               compression = faux;
-        si32               threshold_unit = 2;
-        si32               transfer_allocation = allocation_strict;
-        bool               hash_on_transfer = faux; // "Calculate target file hash during transfers".
-        si32               hash_algo = 2;           // Algorithm index; see settings.hpp helpers.
-        si32               log_debug_level = log_debug_none;
-        bool               log_raw_listing = faux;
-        std::array<si32, sd::kt_ncol> key_col_w{ 18, 18, 28 };
-        std::array<bool, sd::kt_ncol> key_col_shown{ true, true, true };
-        std::set<si32>     key_marked{};       // Shared-table row selection (draft.keyfiles indices).
-        ui64               key_table_revision = 0; // Structural changes that reset the shared viewport.
-        rect               key_table_area{};   // Card-local shared-table geometry, refreshed on render.
-        netxs::wptr<ui::base> key_table_wp;    // Independent table widget (second card layer).
-        // Parsed key metadata, parallel to draft.keyfiles (filled by pvputtygen).
-        std::vector<text>  key_comment;
-        std::vector<text>  key_data;
-        std::array<si32, sd::site_ncol> site_col_w{ 20, 26, 8, 20 };
-        std::array<bool, sd::site_ncol> site_col_shown{ true, true, true, true };
-        std::set<si32>     site_marked{};      // Shared-table selection (draft.sites indices).
-        ui64               site_table_revision = 0;
-        rect               site_table_area{};
+        sftp_remote* ctrl = nullptr;
+        parvion_settings draft;
+        text timeout;
+        text reconnect_count;
+        text reconnect_delay;
+        text threshold_value;
+        text max_connections;
+        bool compression = faux;
+        si32 threshold_unit = 2;
+        si32 transfer_allocation = allocation_strict;
+        bool hash_on_transfer = faux;
+        si32 hash_algo = 2;
+        std::array<si32, 3> key_column_widths{ 18, 18, 28 };
+        std::array<bool, 3> key_columns_shown{ true, true, true };
+        std::set<si32> key_selection;
+        ui64 key_table_revision = 0;
+        std::vector<text> key_comments;
+        std::vector<text> key_data;
+        netxs::wptr<ui::base> key_table_wp;
+        netxs::wptr<ui::base> key_remove_button_wp;
+        std::array<si32, 4> site_column_widths{ 20, 26, 8, 20 };
+        std::array<bool, 4> site_columns_shown{ true, true, true, true };
+        std::set<si32> site_selection;
+        ui64 site_table_revision = 0;
         netxs::wptr<ui::base> site_table_wp;
-        rect               card{};            // Cached card rect within the overlay (render -> mouse).
-        sd::hitboxes       hit{};
-        netxs::wptr<ui::base> button_ok_wp, button_cancel_wp;
-        netxs::wptr<ui::base> button_add_wp, button_remove_wp;
-        netxs::wptr<ui::base> button_addsite_wp, button_editsite_wp, button_removesite_wp;
-        netxs::wptr<ui::base> button_unit_wp, button_allocation_wp, button_hash_wp, button_log_wp;
-        netxs::wptr<ui::base> overlay_wp;     // The overlay cake (to close on OK/Cancel).
-        netxs::wptr<ui::base> window_wp;      // App window (anchor for the file picker overlay).
-        netxs::wptr<ui::base> card_wp;        // The card widget (to deface after picker actions).
-
-        // Seed the draft + editable fields from the controller's persisted settings.
-        void seed()
-        {
-            if (ctrl) draft = ctrl->cfg;
-            compression      = draft.compression;
-            threshold_unit   = draft.threshold_unit;
-            transfer_allocation = draft.transfer_allocation;
-            hash_on_transfer = draft.hash_on_transfer;
-            hash_algo        = draft.hash_algo;
-            log_debug_level  = draft.log_debug_level;
-            log_raw_listing  = draft.log_raw_listing;
-            auto setf = [&](sd::field_t i, si32 v, si32 lo, si32 hi, si32 tab)
-            {
-                auto& f = fields[i];
-                f.val = std::to_string(v);
-                f.lo = lo; f.hi = hi; f.tab = tab;
-            };
-            setf(sd::f_timeout,   draft.timeout,         0, 9999, sd::tab_connection);
-            setf(sd::f_retries,   draft.reconnect_count, 0,   99, sd::tab_connection);
-            setf(sd::f_delay,     draft.reconnect_delay, 0,  999, sd::tab_connection);
-            setf(sd::f_threshold, draft.threshold_value, 1, 1024 * 1024, sd::tab_sftp);
-            setf(sd::f_maxconn,   draft.max_connections, 1,   10, sd::tab_sftp);
-            key_comment.assign(draft.keyfiles.size(), text{});
-            key_data.assign(draft.keyfiles.size(), text{});
-        }
-
-        // Read a field's text back as a clamped integer.
-        auto field_int(sd::field_t i) const -> si32
-        {
-            auto& f = fields[i];
-            auto n = f.val.empty() ? 0 : std::atoi(f.val.c_str());
-            return std::clamp(n, f.lo, f.hi);
-        }
-        // Gather the edited fields into the draft and clamp.
-        void harvest()
-        {
-            draft.timeout         = field_int(sd::f_timeout);
-            draft.reconnect_count = field_int(sd::f_retries);
-            draft.reconnect_delay = field_int(sd::f_delay);
-            draft.threshold_value = field_int(sd::f_threshold);
-            draft.max_connections = field_int(sd::f_maxconn);
-            draft.threshold_unit     = threshold_unit;
-            draft.transfer_allocation = transfer_allocation;
-            draft.compression        = compression;
-            draft.hash_on_transfer   = hash_on_transfer;
-            draft.hash_algo          = hash_algo;
-            draft.log_debug_level    = log_debug_level;
-            draft.log_raw_listing    = log_raw_listing;
-            draft.clamp();
-        }
+        netxs::wptr<ui::base> site_edit_button_wp;
+        netxs::wptr<ui::base> site_remove_button_wp;
+        si32 log_debug_level = log_debug_none;
+        bool log_raw_listing = faux;
+        bool done = faux;
+        netxs::wptr<ui::base> popup_wp;
+        netxs::wptr<ui::base> window_wp;
     };
 
-    // --- pvputtygen client: classify / convert a private key, parse its Comment + Data ----------
-    // Speaks cmdgen.c's line protocol (file/encrypted/password/write/fingerprint/comment) over a
-    // `vtm-tile -r pvputtygen` one-shot, mirroring FileZilla's CFZPuttyGenInterface. Each call is a
-    // self-contained batch (the child exits on the trailing blank line). Synchronous — fast enough
-    // on the UI thread for a single key; the convert path also feeds a passphrase + a write target.
-    // Run pvputtygen once over `script`, collecting the fzprintf reply ('0') payload lines in order
-    // into `replies`. Returns faux if the helper couldn't be launched or any command answered
-    // sftpError ('2') (e.g. wrong passphrase). Cross-platform: fork/exec on POSIX, CreateProcessW on
-    // Windows (the multi-call self, `-r pvputtygen`); both speak cmdgen.c's line protocol over pipes
-    // (write the whole script, close stdin -> EOF, read all stdout). Payloads are small, so the
-    // write-then-read order can't deadlock the pipes.
-    inline auto pvputtygen_run(text const& script, std::vector<text>& replies) -> bool
+    namespace settings_connection
+    {
+        inline constexpr auto timeout_label = view{ "Timeout in seconds:" };
+        inline constexpr auto timeout_range = view{ "(10-9999, 0 to disable)" };
+        inline constexpr auto timeout_help = view{ "If no data is sent or received during an operation for longer than the specified time, the connection will be closed and Parvion will try to reconnect." };
+        inline constexpr auto retries_label = view{ "Maximum number of retries:" };
+        inline constexpr auto retries_range = view{ "(0-99, 0 for unlimited)" };
+        inline constexpr auto delay_label = view{ "Delay between failed login attempts:" };
+        inline constexpr auto delay_range = view{ "(0-999 seconds)" };
+        inline constexpr auto reconnect_help = view{ "Please note that some servers might ban you if you try to reconnect too often or in too short intervals." };
+    }
+
+    namespace settings_sftp
+    {
+        inline constexpr auto key_headers = std::array<view, 3>{ "Filename", "Comment", "Data" };
+        inline constexpr auto key_menu_headers = std::array<view, 3>{ "&Filename", "&Comment", "&Data" };
+        inline constexpr auto public_key_help = view{ "To support public key authentication, Parvion needs to know the private keys to use." };
+        inline constexpr auto private_keys_label = view{ "Private keys:" };
+        inline constexpr auto threshold_label = view{ "Enable parallel transfers for files larger than:" };
+        inline constexpr auto max_connections_label = view{ "Maximum parallel transfer connections:" };
+        inline constexpr auto allocation_label = view{ "Channel allocation:" };
+        inline constexpr auto max_connections_hint = view{ "(1-10)" };
+        inline constexpr auto hash_label = view{ "Calculate target file hash during transfers:" };
+        inline constexpr auto hash_none = view{ "None" };
+    }
+
+    namespace settings_site
+    {
+        enum field_t { name, host, port, user, password, field_count };
+        inline constexpr auto headers = std::array<view, 4>{ "Site Name", "Host", "Port", "User" };
+        inline constexpr auto menu_headers = std::array<view, 4>{ "Site &Name", "&Host", "&Port", "&User" };
+        inline constexpr auto help = view{ "Save SFTP connection details for quick access from the connect bar." };
+        inline constexpr auto sites_label = view{ "Saved SFTP sites:" };
+        inline constexpr auto field_labels = std::array<view, 5>{
+            "Site Name", "Host *", "Port", "User", "Password"
+        };
+    }
+
+    namespace settings_debug
+    {
+        inline constexpr auto level_label = view{ "Debug information in message log:" };
+        inline constexpr auto help = view{ "The higher the debug level, the more information will be displayed in the message log. Displaying debug information has a negative impact on performance. If reporting bugs, provide logs with Verbose logging level." };
+    }
+
+    inline auto make_settings_label(view value,
+                                    label_role role = label_role::text,
+                                    bool wrap = faux,
+                                    label_palette palette = {}) -> component
+    {
+        return make_label({
+            .value = [value = text{ value }]{ return value; },
+            .role = role,
+            .wrap = wrap,
+            .palette = palette,
+        });
+    }
+
+    // Run the pvputtygen multicall helper and collect its fzprintf payloads.
+    // The protocol and platform plumbing intentionally remain identical to
+    // settings_dialog.hpp.old while the surrounding page is refactored.
+    inline auto settings_pvputtygen_run(text const& script, std::vector<text>& replies) -> bool
     {
         replies.clear();
         auto out = text{};
     #if !defined(_WIN32)
-        auto exe = os::process::binary(); // Resolved in the PARENT: this call allocates, and pvputtygen_run
-                                          // now runs on a background thread — doing it post-fork in the child
-                                          // could deadlock on the malloc lock. c_str() below is alloc-free.
+        auto exe = os::process::binary();
         auto inpipe = std::array<int, 2>{};
         auto outpipe = std::array<int, 2>{};
         if (::pipe(inpipe.data()) != 0 || ::pipe(outpipe.data()) != 0) return faux;
@@ -189,7 +142,8 @@ namespace netxs::app::parvion
         {
             ::dup2(inpipe[0], 0);
             ::dup2(outpipe[1], 1);
-            ::close(inpipe[0]); ::close(inpipe[1]); ::close(outpipe[0]); ::close(outpipe[1]);
+            ::close(inpipe[0]); ::close(inpipe[1]);
+            ::close(outpipe[0]); ::close(outpipe[1]);
             ::execl(exe.c_str(), exe.c_str(), "-r", "pvputtygen", (char*)nullptr);
             ::_exit(127);
         }
@@ -197,1395 +151,1400 @@ namespace netxs::app::parvion
         auto wr = ::write(inpipe[1], script.data(), script.size()); (void)wr;
         ::close(inpipe[1]);
         auto buf = std::array<char, 4096>{};
-        for (auto n = ssize_t{}; (n = ::read(outpipe[0], buf.data(), buf.size())) > 0; ) out.append(buf.data(), (size_t)n);
+        for (auto n = ssize_t{}; (n = ::read(outpipe[0], buf.data(), buf.size())) > 0; )
+            out.append(buf.data(), (size_t)n);
         ::close(outpipe[0]);
         auto status = 0;
         ::waitpid(pid, &status, 0);
     #else
-        // Inheritable pipes: child stdin = inRd, child stdout = outWr; our ends stay private.
         auto sa = SECURITY_ATTRIBUTES{ sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE };
-        auto inRd = HANDLE{}, inWr = HANDLE{}, outRd = HANDLE{}, outWr = HANDLE{};
-        if (!::CreatePipe(&inRd, &inWr, &sa, 0)) return faux;
-        if (!::CreatePipe(&outRd, &outWr, &sa, 0)) { ::CloseHandle(inRd); ::CloseHandle(inWr); return faux; }
-        ::SetHandleInformation(inWr, HANDLE_FLAG_INHERIT, 0);
-        ::SetHandleInformation(outRd, HANDLE_FLAG_INHERIT, 0);
-        auto nul = ::CreateFileW(L"NUL", GENERIC_WRITE, FILE_SHARE_WRITE | FILE_SHARE_READ, &sa, OPEN_EXISTING, 0, nullptr);
-        auto si = STARTUPINFOEXW{ sizeof(STARTUPINFOEXW) };
-        si.StartupInfo.dwFlags    = STARTF_USESTDHANDLES;
-        si.StartupInfo.hStdInput  = inRd;
-        si.StartupInfo.hStdOutput = outWr;
-        si.StartupInfo.hStdError  = nul;
-        HANDLE inherit[] = { inRd, outWr, nul }; // Inherit ONLY these (Win32 equivalent of closefrom).
-        auto attrbuf  = std::vector<byte>{};
-        auto attrsize = SIZE_T{ 0 };
+        auto in_rd = HANDLE{}, in_wr = HANDLE{}, out_rd = HANDLE{}, out_wr = HANDLE{};
+        if (!::CreatePipe(&in_rd, &in_wr, &sa, 0)) return faux;
+        if (!::CreatePipe(&out_rd, &out_wr, &sa, 0))
+        {
+            ::CloseHandle(in_rd); ::CloseHandle(in_wr);
+            return faux;
+        }
+        ::SetHandleInformation(in_wr, HANDLE_FLAG_INHERIT, 0);
+        ::SetHandleInformation(out_rd, HANDLE_FLAG_INHERIT, 0);
+        auto nul = ::CreateFileW(L"NUL", GENERIC_WRITE, FILE_SHARE_WRITE | FILE_SHARE_READ,
+                                 &sa, OPEN_EXISTING, 0, nullptr);
+        auto startup = STARTUPINFOEXW{ sizeof(STARTUPINFOEXW) };
+        startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+        startup.StartupInfo.hStdInput = in_rd;
+        startup.StartupInfo.hStdOutput = out_wr;
+        startup.StartupInfo.hStdError = nul;
+        HANDLE inherit[] = { in_rd, out_wr, nul };
+        auto attrbuf = std::vector<byte>{};
+        auto attrsize = SIZE_T{};
         ::InitializeProcThreadAttributeList(nullptr, 1, 0, &attrsize);
         attrbuf.resize(attrsize);
-        si.lpAttributeList = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attrbuf.data());
-        auto procsinf = PROCESS_INFORMATION{}; // (not `pi` — that shadows a global on MSVC: C4459).
-        auto cmd  = "\"" + os::process::binary() + "\" -r pvputtygen";
-        auto wcmd = utf::to_utf(cmd);
-        auto ok = ::InitializeProcThreadAttributeList(si.lpAttributeList, 1, 0, &attrsize)
-               && ::UpdateProcThreadAttribute(si.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherit, sizeof(inherit), nullptr, nullptr)
-               && ::CreateProcessW(nullptr, wcmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT, nullptr, nullptr, &si.StartupInfo, &procsinf);
-        if (si.lpAttributeList) ::DeleteProcThreadAttributeList(si.lpAttributeList);
-        ::CloseHandle(inRd); ::CloseHandle(outWr); if (nul) ::CloseHandle(nul);
-        if (!ok) { ::CloseHandle(inWr); ::CloseHandle(outRd); return faux; }
-        ::CloseHandle(procsinf.hThread);
-        for (auto done = DWORD{ 0 }, left = (DWORD)script.size(); left; )
+        startup.lpAttributeList = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attrbuf.data());
+        auto process = PROCESS_INFORMATION{};
+        auto command = "\"" + os::process::binary() + "\" -r pvputtygen";
+        auto wide_command = utf::to_utf(command);
+        auto ok = ::InitializeProcThreadAttributeList(startup.lpAttributeList, 1, 0, &attrsize)
+               && ::UpdateProcThreadAttribute(startup.lpAttributeList, 0,
+                    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherit, sizeof(inherit), nullptr, nullptr)
+               && ::CreateProcessW(nullptr, wide_command.data(), nullptr, nullptr, TRUE,
+                    CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT, nullptr, nullptr,
+                    &startup.StartupInfo, &process);
+        if (startup.lpAttributeList) ::DeleteProcThreadAttributeList(startup.lpAttributeList);
+        ::CloseHandle(in_rd); ::CloseHandle(out_wr); if (nul) ::CloseHandle(nul);
+        if (!ok) { ::CloseHandle(in_wr); ::CloseHandle(out_rd); return faux; }
+        ::CloseHandle(process.hThread);
+        for (auto done = DWORD{}, left = (DWORD)script.size(); left; )
         {
-            auto wrote = DWORD{ 0 };
-            if (!::WriteFile(inWr, script.data() + done, left, &wrote, nullptr) || !wrote) break;
+            auto wrote = DWORD{};
+            if (!::WriteFile(in_wr, script.data() + done, left, &wrote, nullptr) || !wrote) break;
             done += wrote; left -= wrote;
         }
-        ::CloseHandle(inWr); // EOF -> the helper exits its read loop.
+        ::CloseHandle(in_wr);
         auto buf = std::array<char, 4096>{};
-        for (auto n = DWORD{ 0 }; ::ReadFile(outRd, buf.data(), (DWORD)buf.size(), &n, nullptr) && n; ) out.append(buf.data(), n);
-        ::CloseHandle(outRd);
-        ::WaitForSingleObject(procsinf.hProcess, INFINITE);
-        ::CloseHandle(procsinf.hProcess);
+        for (auto n = DWORD{}; ::ReadFile(out_rd, buf.data(), (DWORD)buf.size(), &n, nullptr) && n; )
+            out.append(buf.data(), n);
+        ::CloseHandle(out_rd);
+        ::WaitForSingleObject(process.hProcess, INFINITE);
+        ::CloseHandle(process.hProcess);
     #endif
-        // Banner lines start with a letter and are ignored; '0' = sftpReply payload, '2' = sftpError.
-        auto err = faux;
+        auto error = faux;
         for (auto pos = size_t{}; pos < out.size(); )
         {
-            auto eol  = out.find('\n', pos);
+            auto eol = out.find('\n', pos);
             auto line = out.substr(pos, eol == text::npos ? text::npos : eol - pos);
             pos = eol == text::npos ? out.size() : eol + 1;
-            if (!line.empty() && line.back() == '\r') line.pop_back(); // Windows text-mode stdout adds '\r'.
+            if (!line.empty() && line.back() == '\r') line.pop_back();
             if (line.empty()) continue;
             if      (line[0] == '0') replies.push_back(line.substr(1));
-            else if (line[0] == '2') err = true;
+            else if (line[0] == '2') error = true;
         }
-        return !err;
+        return !error;
     }
-    // Parse a usable (already-ppk or unencrypted) key's Comment + Data (fingerprint). Used by the
-    // reopen-reparse loop; keeps the historical "ok"/"convertible" success semantics intact.
-    inline auto sd_keyinfo(text const& keypath, text& comment, text& data) -> bool
+
+    inline auto settings_keyinfo(text const& path, text& comment, text& data) -> bool
     {
         auto replies = std::vector<text>{};
-        auto ok = pvputtygen_run("file " + keypath + "\nfingerprint\ncomment\n\n", replies);
-        data    = replies.size() > 1 ? replies[1] : text{};
+        auto ok = settings_pvputtygen_run("file " + path + "\nfingerprint\ncomment\n\n", replies);
+        data = replies.size() > 1 ? replies[1] : text{};
         comment = replies.size() > 2 ? replies[2] : text{};
-        auto okresult = !replies.empty() && (replies[0] == "ok" || replies[0] == "convertible");
-        return okresult && ok && replies.size() >= 2;
+        auto recognized = !replies.empty() && (replies[0] == "ok" || replies[0] == "convertible");
+        return recognized && ok && replies.size() >= 2;
     }
 
-    // --- group box + word-wrap helpers ----------------------------------------------
-    // Draw a FileZilla-style titled group box border into `r` (card-local). Title sits in
-    // the top edge: "┌─ Title ───┐". Interior is left for the caller to fill with rows.
-    inline void sd_box(auto& canvas, rect r, view title)
+    inline auto make_connection_page(std::shared_ptr<settings_dialog_state> const& state,
+                                     std::function<void()> accept,
+                                     std::function<void()> close) -> component
     {
-        if (r.size.x < 2 || r.size.y < 2) return;
-        auto x0 = r.coor.x, y0 = r.coor.y, x1 = r.coor.x + r.size.x - 1, y1 = r.coor.y + r.size.y - 1;
-        auto bc = ui32{ theme::subtext };
-        auto putc = [&](si32 x, si32 y, view g){ put_str(canvas, x, y, g, bc, theme::bg, 2); };
-        putc(x0, y0, "┌"); putc(x1, y0, "┐"); putc(x0, y1, "└"); putc(x1, y1, "┘");
-        for (auto x = x0 + 1; x < x1; ++x) { putc(x, y0, "─"); putc(x, y1, "─"); }
-        for (auto y = y0 + 1; y < y1; ++y) { putc(x0, y, "│"); putc(x1, y, "│"); }
-        // Title: "─ Title ─" starting two cells in.
-        auto cap = text{ "─ " } + text{ title } + " ";
-        put_str(canvas, x0 + 1, y0, cap, theme::text_fg, theme::bg, std::max(0, r.size.x - 3));
-    }
-    // Greedy word-wrap into lines of at most `maxw` display cells (auto-wrap help text).
-    inline auto sd_wrap(view s, si32 maxw) -> std::vector<text>
-    {
-        auto lines = std::vector<text>{};
-        if (maxw <= 0) return lines;
-        auto cur = text{};
-        auto flush = [&]{ lines.push_back(cur); cur.clear(); };
-        auto words = std::vector<text>{};
-        auto w = text{};
-        for (auto c : s) { if (c == ' ') { if (!w.empty()) { words.push_back(w); w.clear(); } } else w += c; }
-        if (!w.empty()) words.push_back(w);
-        for (auto& word : words)
+        auto numeric_input = [accept, close](std::function<text()> value,
+                                             std::function<void(text)> change)
         {
-            auto cand = cur.empty() ? word : cur + " " + word;
-            if (cell_width(cand) <= maxw) cur = cand;
-            else { if (!cur.empty()) flush(); cur = word; }
-        }
-        if (!cur.empty() || lines.empty()) flush();
-        return lines;
+            auto field = make_input({
+                .value = std::move(value),
+                .on_change = std::move(change),
+                .on_submit = [accept](text){ accept(); },
+                .on_cancel = [close]{ close(); },
+                .digits_only = true,
+                .palette = {
+                    .bg = theme::surface,
+                    .text_fg = theme::text_fg,
+                    .muted_fg = theme::subtext,
+                    .active = theme::sel_bg_act,
+                },
+            });
+            field.widget->limits({ 6, 1 }, { 6, 1 });
+            return field;
+        };
+
+        auto timeout_fields = grid::ctor({
+            .columns = {
+                { .weight = 0, .minimum = cell_width(settings_connection::timeout_label),
+                  .maximum = cell_width(settings_connection::timeout_label) },
+                { .weight = 0, .minimum = 1, .maximum = 1 },
+                { .weight = 0, .minimum = 6, .maximum = 6 },
+                { .weight = 0, .minimum = 1, .maximum = 1 },
+                { .weight = 1 },
+            },
+            .rows = { { .weight = 0, .minimum = 1, .maximum = 1 } },
+            .handle_mode = grid_handle_mode::hidden,
+        });
+        timeout_fields->attach(make_settings_label(settings_connection::timeout_label), { .column = 0 });
+        timeout_fields->attach(numeric_input(
+            [state]{ return state->timeout; },
+            [state](text value){ state->timeout = std::move(value); }), { .column = 2 });
+        timeout_fields->attach(make_settings_label(settings_connection::timeout_range, label_role::hint),
+                               { .column = 4 });
+
+        auto timeout_content = flex::ctor({ .direction = flex_direction::column });
+        timeout_content->attach(component{ timeout_fields });
+        timeout_content->attach(make_settings_label(settings_connection::timeout_help,
+                                                     label_role::hint, true));
+        auto timeout_box = make_groupbox({
+            .title = "Timeout",
+            .content = { timeout_content },
+        });
+
+        auto reconnect_label_width = std::max(cell_width(settings_connection::retries_label),
+                                              cell_width(settings_connection::delay_label));
+        auto reconnect_fields = grid::ctor({
+            .columns = {
+                { .weight = 0, .minimum = reconnect_label_width, .maximum = reconnect_label_width },
+                { .weight = 0, .minimum = 1, .maximum = 1 },
+                { .weight = 0, .minimum = 6, .maximum = 6 },
+                { .weight = 0, .minimum = 1, .maximum = 1 },
+                { .weight = 1 },
+            },
+            .rows = {
+                { .weight = 0, .minimum = 1, .maximum = 1 },
+                { .weight = 0, .minimum = 1, .maximum = 1 },
+            },
+            .handle_mode = grid_handle_mode::hidden,
+        });
+        reconnect_fields->attach(make_settings_label(settings_connection::retries_label),
+                                 { .column = 0, .row = 0 });
+        reconnect_fields->attach(numeric_input(
+            [state]{ return state->reconnect_count; },
+            [state](text value){ state->reconnect_count = std::move(value); }),
+            { .column = 2, .row = 0 });
+        reconnect_fields->attach(make_settings_label(settings_connection::retries_range, label_role::hint),
+                                 { .column = 4, .row = 0 });
+        reconnect_fields->attach(make_settings_label(settings_connection::delay_label),
+                                 { .column = 0, .row = 1 });
+        reconnect_fields->attach(numeric_input(
+            [state]{ return state->reconnect_delay; },
+            [state](text value){ state->reconnect_delay = std::move(value); }),
+            { .column = 2, .row = 1 });
+        reconnect_fields->attach(make_settings_label(settings_connection::delay_range, label_role::hint),
+                                 { .column = 4, .row = 1 });
+
+        auto reconnect_content = flex::ctor({ .direction = flex_direction::column });
+        reconnect_content->attach(component{ reconnect_fields });
+        reconnect_content->attach(make_settings_label(settings_connection::reconnect_help, label_role::hint, true));
+        auto reconnect_box = make_groupbox({
+            .title = "Reconnection settings",
+            .content = { reconnect_content },
+        });
+
+        auto page = flex::ctor({
+            .direction = flex_direction::column,
+            .row_gap = 1,
+            .column_padding_width = 2,
+            .row_padding_height = 0
+        });
+        page->attach(std::move(timeout_box), {
+            .shrink = 0,
+        });
+        page->attach(std::move(reconnect_box), {
+            .shrink = 0,
+        });
+        return { page };
     }
 
-    namespace sd
+    inline auto settings_key_cell(settings_dialog_state const& state, si32 column, si32 row) -> text
     {
-        inline constexpr auto field_w = std::array<si32, f_count>{ 6, 6, 6, 6, 6 }; // All input fields are 6 cells wide.
-
-        // --- Form text, defined once so the renderer and the width negotiator stay in sync ----
-        inline constexpr auto lbl_timeout   = view{ "Timeout in seconds:" };
-        inline constexpr auto hnt_timeout   = view{ "(10-9999, 0 to disable)" };
-        inline constexpr auto help_timeout  = view{ "If no data is sent or received during an operation for longer than the specified time, the connection will be closed and Parvion will try to reconnect." };
-        inline constexpr auto lbl_retries   = view{ "Maximum number of retries:" };
-        inline constexpr auto hnt_retries   = view{ "(0-99, 0 for unlimited)" };
-        inline constexpr auto lbl_delay     = view{ "Delay between failed login attempts:" };
-        inline constexpr auto hnt_delay     = view{ "(0-999 seconds)" };
-        inline constexpr auto help_reconn   = view{ "Please note that some servers might ban you if you try to reconnect too often or in too short intervals." };
-        inline constexpr auto help_pubkey   = view{ "To support public key authentication, Parvion needs to know the private keys to use." };
-        inline constexpr auto lbl_privkeys  = view{ "Private keys:" };
-        inline constexpr auto btn_addkey    = view{ " Add key file... " };
-        inline constexpr auto btn_removekey = view{ " Remove key " };
-        inline constexpr auto chk_compress  = view{ "\xE2\x96\xA1 Enable compression" };
-        inline constexpr auto help_sites    = view{ "Save SFTP connection details for quick access from the connect bar." };
-        inline constexpr auto lbl_sites     = view{ "Saved SFTP sites:" };
-        inline constexpr auto btn_addsite   = view{ " Add " };
-        inline constexpr auto btn_editsite  = view{ " Edit " };
-        inline constexpr auto btn_removesite = view{ " Remove " };
-
-        inline constexpr auto lbl_threshold = view{ "Enable parallel transfers for files larger than:" };
-        inline constexpr auto lbl_maxconn   = view{ "Maximum parallel transfer connections:" };
-        inline constexpr auto lbl_allocation = view{ "Channel allocation:" };
-        inline constexpr auto hnt_maxconn   = view{ "(1-10)" };
-        // Hash verification group (single dropdown; "None" disables transfer hashing).
-        inline constexpr auto lbl_hash_xfer = view{ "Calculate target file hash during transfers:" };
-        inline constexpr auto hash_none     = view{ "None" };
-        inline constexpr auto unit_widest   = view{ " Byte \xE2\x96\xBE " }; // The widest unit-dropdown caption.
-        inline constexpr auto kt_min_w      = si32{ 24 }; // Key table negotiates a small floor (it scrolls horizontally).
-        // Debug tab.
-        inline constexpr auto lbl_log_level = view{ "Debug information in message log:" };
-        inline constexpr auto chk_rawlist   = view{ "\xE2\x96\xA1 Show raw directory listing" };
-        inline constexpr auto help_debug    = view{ "The higher the debug level, the more information will be displayed in the message log. Displaying debug information has a negative impact on performance. If reporting bugs, provide logs with Verbose logging level." };
+        if (row < 0 || row >= (si32)state.draft.keyfiles.size()) return {};
+        if (column == 0) return fs::path{ state.draft.keyfiles[(size_t)row] }.filename().string();
+        if (column == 1) return row < (si32)state.key_comments.size()
+                             ? state.key_comments[(size_t)row] : text{};
+        return row < (si32)state.key_data.size() ? state.key_data[(size_t)row] : text{};
     }
 
-    // --- Minimum-width negotiation: internal components -> group box -> dialog -------
-    // Each internal component reports the minimum group-box CONTENT width it needs;
-    // sd_box_dialog_w turns that into the card width the box requires (box border + one
-    // pad cell per side, plus the card's left/right margins). The dialog's minimum width
-    // is the max across every box (and the tab strip / button row). New components join the
-    // negotiation simply by adding their own sd_box_dialog_w(...) line in sd_min_width.
-    inline auto sd_box_dialog_w(si32 content_w) -> si32 { return content_w + 4 + 2 * sd::pad_x; }
-    // A vertically-aligned field group's min content width: the longest label, a gap, the
-    // shared 6-cell field, a 2-cell gap, then the longest trailing text (hint or control).
-    inline auto sd_fieldgroup_w(std::initializer_list<std::pair<view, view>> rows) -> si32
+    inline auto settings_key_column_content_width(settings_dialog_state const& state,
+                                                  si32 column) -> si32
     {
-        auto lbl = si32{ 0 }, trail = si32{ 0 };
-        for (auto const& r : rows) { lbl = std::max(lbl, (si32)cell_width(r.first)); trail = std::max(trail, (si32)cell_width(r.second)); }
-        return lbl + 1 + sd::field_w[0] + 2 + trail;
-    }
-    inline auto sd_min_width() -> si32
-    {
-        auto w = si32{ 0 };
-        // Connection tab group boxes (help text wraps, so it doesn't drive the width).
-        w = std::max(w, sd_box_dialog_w(sd_fieldgroup_w({ { sd::lbl_timeout, sd::hnt_timeout } })));
-        w = std::max(w, sd_box_dialog_w(sd_fieldgroup_w({ { sd::lbl_retries, sd::hnt_retries },
-                                                          { sd::lbl_delay,   sd::hnt_delay } })));
-        // SFTP tab group boxes.
-        auto par_label = std::max({ (si32)cell_width(sd::lbl_threshold),
-                                    (si32)cell_width(sd::lbl_maxconn),
-                                    (si32)cell_width(sd::lbl_allocation) });
-        auto par_control = std::max({ sd::field_w[sd::f_threshold] + 2 + (si32)cell_width(sd::unit_widest),
-                                      sd::field_w[sd::f_maxconn]   + 2 + (si32)cell_width(sd::hnt_maxconn),
-                                      (si32)cell_width(" Strict queue order \xE2\x96\xBE ") });
-        w = std::max(w, sd_box_dialog_w(par_label + 1 + par_control));
-        w = std::max(w, sd_box_dialog_w((si32)cell_width(sd::btn_addkey) + 1 + (si32)cell_width(sd::btn_removekey)));
-        w = std::max(w, sd_box_dialog_w((si32)cell_width(sd::chk_compress)));
-        w = std::max(w, sd_box_dialog_w((si32)cell_width(sd::lbl_hash_xfer) + 1 + 12)); // label + algorithm dropdown.
-        w = std::max(w, sd_box_dialog_w(sd::kt_min_w));
-        // Site tab.
-        w = std::max(w, sd_box_dialog_w(sd::kt_min_w));
-        w = std::max(w, sd_box_dialog_w((si32)cell_width(sd::btn_addsite) + 1
-                                     + (si32)cell_width(sd::btn_editsite) + 1
-                                     + (si32)cell_width(sd::btn_removesite)));
-        // Debug tab group boxes.
-        w = std::max(w, sd_box_dialog_w((si32)cell_width(sd::lbl_log_level) + 1 + 14));
-        w = std::max(w, sd_box_dialog_w((si32)cell_width(sd::chk_rawlist)));
-        // Tab strip and the right-aligned OK/Cancel block.
-        w = std::max(w, (si32)cell_width("Connection") + 2 + (si32)cell_width("SFTP") + 2
-                      + (si32)cell_width("Site") + 2 + (si32)cell_width("Debug") + 2
-                      + 2 * sd::pad_x);
-        w = std::max(w, 4 + 1 + 8 + 2 + 2 * sd::pad_x);
-        return w;
+        auto width = si32{};
+        for (auto row = si32{}; row < (si32)state.draft.keyfiles.size(); ++row)
+            width = std::max(width, cell_width(settings_key_cell(state, column, row)));
+        return width;
     }
 
-    // --- Private-key shared-table adapters ------------------------------------------
-    // Cell text: column 0 = filename (basename), 1 = comment, 2 = fingerprint/data.
-    inline auto kt_cell(settings_state const& st, si32 col, si32 row) -> text
+    inline void settings_key_selection_changed(
+        std::shared_ptr<settings_dialog_state> const& state)
     {
-        if (row < 0 || row >= (si32)st.draft.keyfiles.size()) return {};
-        if (col == 0) return fs::path{ st.draft.keyfiles[(size_t)row] }.filename().string();
-        if (col == 1) return row < (si32)st.key_comment.size() ? st.key_comment[(size_t)row] : text{};
-        return row < (si32)st.key_data.size() ? st.key_data[(size_t)row] : text{};
-    }
-    // Widest body content for column `col`; the shared table owns the rendered header allowance.
-    inline auto kt_col_content_w(settings_state const& st, si32 col) -> si32
-    {
-        auto w = si32{};
-        for (auto row = si32{}; row < (si32)st.draft.keyfiles.size(); ++row) w = std::max(w, cell_width(kt_cell(st, col, row)));
-        return w;
+        if (auto remove = state->key_remove_button_wp.lock()) remove->base::deface();
     }
 
-    // Close the settings overlay and clear the window's "dialog active" guard.
-    inline void sd_close(settings_state& st)
+    inline void settings_store_key(std::shared_ptr<settings_dialog_state> const& state,
+                                   text const& path, text const& comment, text const& data)
     {
-        if (auto w = st.window_wp.lock()) w->base::property("parvion.settings.active", faux) = faux;
-        if (auto o = st.overlay_wp.lock()) o->base::detach();
-    }
-    // Commit the edited draft to the controller (persists + applies to the live engine) and close.
-    inline void sd_accept(settings_state& st)
-    {
-        st.harvest(); // Gather edited fields into draft (keyfiles were mutated in place by Add/Remove).
-        if (st.ctrl) st.ctrl->update_settings(st.draft); // Stores cfg, applies onto the engine, saves + logs.
-        sd_close(st);
-    }
-
-    // Paint one "Label  [field]  (hint)" row with the field anchored at a fixed column `fx`
-    // (so every field in a group box lines up vertically). `cr` is the box content's right
-    // edge (exclusive): the label and hint are clipped to it so nothing bleeds past the box
-    // border when the dialog is forced below its negotiated minimum width. The input child is
-    // positioned later by the card's shared layer placement pass.
-    inline void sd_field_row(auto& canvas, settings_state& st, si32 x, si32 y, si32 fx, si32 cr,
-                             view label, sd::field_t fi, view hint)
-    {
-        put_str(canvas, x, y, label, theme::text_fg, theme::bg, std::max(0, std::min(fx - 1, cr) - x));
-        auto fw = sd::field_w[fi];
-        auto& f = st.fields[fi];
-        f.box = rect{{ fx, y }, { fw, 1 }};
-        if (hint.size()) { auto hx = fx + fw + 2; put_str(canvas, hx, y, hint, theme::subtext, theme::bg, std::max(0, cr - hx)); }
+        for (auto& existing : state->draft.keyfiles) if (existing == path) return;
+        state->draft.keyfiles.push_back(path);
+        state->key_comments.push_back(comment);
+        state->key_data.push_back(data);
+        state->key_selection = { (si32)state->draft.keyfiles.size() - 1 };
+        ++state->key_table_revision;
+        if (auto table = state->key_table_wp.lock()) table->base::deface();
+        settings_key_selection_changed(state);
     }
 
-    // Paint wrapped help text starting at (x,y) within `maxw`; returns the next free row.
-    inline auto sd_help(auto& canvas, si32 x, si32 y, si32 maxw, view s) -> si32
+    inline void settings_begin_key_conversion(std::shared_ptr<settings_dialog_state> const& state,
+                                              text const& path, bool retry = faux);
+
+    inline void settings_begin_key_conversion(std::shared_ptr<settings_dialog_state> const& state,
+                                              text const& path, bool retry)
     {
-        for (auto& ln : sd_wrap(s, maxw)) put_str(canvas, x, y++, ln, theme::subtext, theme::bg, maxw);
-        return y;
-    }
-
-    inline void settings_render(settings_state& st, auto& canvas, twod sz)
-    {
-        auto W = sz.x, H = sz.y;
-        st.key_table_area = {};
-        st.site_table_area = {};
-        if (W <= 4 || H <= 6) return;
-        canvas.fill(rect{{ 0, 0 }, { W, H }}, [&](cell& c){ c.bgc(theme::bg).fgc(theme::text_fg); });
-        // Title strip.
-        canvas.fill(rect{{ 0, 0 }, { W, 1 }}, [&](cell& c){ c.bgc(theme::surface); });
-        put_str(canvas, 1, 0, "Settings", theme::title_fg, theme::surface, W - 2);
-        // Top tab strip — tabs sit flush from the left with no leading blank and no gap
-        // between them (matching the queue panel's bottom tab strip: x starts at 0, each
-        // tab is label+2 wide with one padding cell per side, and x advances by exactly bw).
-        canvas.fill(rect{{ 0, 1 }, { W, 1 }}, [&](cell& c){ c.bgc(theme::header); });
-        auto labels = std::array<view, sd::tab_count>{ "Connection", "SFTP", "Site", "Debug" };
-        auto tx = si32{ 0 };
-        for (auto i = si32{}; i < sd::tab_count; ++i)
-        {
-            auto bw = (si32)cell_width(labels[i]) + 2; // One cell of padding on each side.
-            st.hit.tab_box[i] = rect{{ tx, 1 }, { bw, 1 }};
-            auto on = st.tab == i;
-            auto fg = on ? ui32{ theme::title_fg_act } : ui32{ theme::subtext };
-            auto bg = on ? ui32{ theme::surface }      : ui32{ theme::header };
-            canvas.fill(st.hit.tab_box[i], [&](cell& c){ c.bgc(bg); });
-            put_str(canvas, tx + 1, 1, labels[i], fg, bg, bw);
-            tx += bw;
-        }
-        auto ix = si32{ sd::pad_x };           // Content left.
-        auto iw = W - 2 * sd::pad_x;            // Content width.
-        auto inner = iw - 4;                    // Inside a group box (border + 1 pad each side).
-        auto cr = ix + 2 + inner;              // Box content right edge (exclusive): clip content here.
-        // --- Connection tab -----------------------------------------------------------
-        if (st.tab == sd::tab_connection)
-        {
-            auto y = si32{ 3 };                 // Blank row at y=2 (above first group box).
-            // Timeout group — box height adapts to its content (1 field row + wrapped help).
-            {
-                auto hl = (si32)sd_wrap(sd::help_timeout, inner).size();
-                auto bh = 2 + 1 + hl;           // borders + field row + help lines.
-                sd_box(canvas, rect{{ ix, y }, { iw, bh }}, "Timeout");
-                auto fx = ix + 2 + (si32)cell_width(sd::lbl_timeout) + 1;
-                sd_field_row(canvas, st, ix + 2, y + 1, fx, cr, sd::lbl_timeout, sd::f_timeout, sd::hnt_timeout);
-                sd_help(canvas, ix + 2, y + 2, inner, sd::help_timeout);
-                y += bh + 1;                    // box + 1 blank row.
-            }
-            // Reconnection group — two fields aligned to the longer label, then wrapped help.
-            {
-                auto hl = (si32)sd_wrap(sd::help_reconn, inner).size();
-                auto bh = 2 + 2 + hl;           // borders + 2 field rows + help lines.
-                sd_box(canvas, rect{{ ix, y }, { iw, bh }}, "Reconnection settings");
-                auto fx = ix + 2 + std::max((si32)cell_width(sd::lbl_retries),
-                                            (si32)cell_width(sd::lbl_delay)) + 1;
-                sd_field_row(canvas, st, ix + 2, y + 1, fx, cr, sd::lbl_retries, sd::f_retries, sd::hnt_retries);
-                sd_field_row(canvas, st, ix + 2, y + 2, fx, cr, sd::lbl_delay,   sd::f_delay,   sd::hnt_delay);
-                sd_help(canvas, ix + 2, y + 3, inner, sd::help_reconn);
-            }
-        }
-        // --- SFTP tab -----------------------------------------------------------------
-        else if (st.tab == sd::tab_sftp)
-        {
-            // Stack the lower group boxes from the bottom (content-sized) and let the Public Key
-            // Authentication box expand to fill the remaining space (its key table grows with it).
-            auto par_h   = si32{ 2 + 3 };       // Parallel transfers: borders + 3 field rows.
-            auto other_h = si32{ 2 + 1 };       // Other SFTP options: borders + checkbox row.
-            auto hash_h  = si32{ 2 + 1 };       // Hash verification: borders + one dropdown row.
-            auto par_y   = (H - 1) - 1 - par_h; // Above the (blank + button) rows.
-            auto other_y = par_y - 1 - other_h;
-            auto hash_y  = other_y - 1 - hash_h;
-            auto pk_y    = si32{ 3 };
-            auto pk_h    = std::max(6, (hash_y - 1) - pk_y); // Fill the gap above Hash verification.
-
-            // Public Key Authentication group.
-            sd_box(canvas, rect{{ ix, pk_y }, { iw, pk_h }}, "Public Key Authentication");
-            auto py = sd_help(canvas, ix + 2, pk_y + 1, inner, sd::help_pubkey);
-            put_str(canvas, ix + 2, py, sd::lbl_privkeys, theme::text_fg, theme::bg, inner);
-            // Add / Remove buttons sit on the box's last inner row; the table fills the rest.
-            auto btn_y = pk_y + pk_h - 2;
-            auto tbl_top = py + 1;
-            auto tbl_h = std::max(2, btn_y - 1 - tbl_top);
-            st.key_table_area = rect{{ ix + 2, tbl_top }, { inner, tbl_h }};
-            st.hit.addkey    = rect{{ ix + 2, btn_y }, { (si32)cell_width(sd::btn_addkey), 1 }};
-            st.hit.removekey = rect{{ st.hit.addkey.coor.x + st.hit.addkey.size.x + 1, btn_y }, { (si32)cell_width(sd::btn_removekey), 1 }};
-
-            // Other SFTP options group (compression checkbox).
-            sd_box(canvas, rect{{ ix, other_y }, { iw, other_h }}, "Other SFTP options");
-            st.hit.compression = rect{{ ix + 2, other_y + 1 }, { inner, 1 }};
-            put_str(canvas, ix + 2, other_y + 1, st.compression ? "\xE2\x96\xA3 Enable compression" : "\xE2\x96\xA1 Enable compression", theme::text_fg, theme::bg, inner);
-
-            // Hash verification group: a single dropdown selects the transfer hash algorithm;
-            // "None" (the default) disables hashing during transfers.
-            sd_box(canvas, rect{{ ix, hash_y }, { iw, hash_h }}, "Hash verification");
-            put_str(canvas, ix + 2, hash_y + 1, sd::lbl_hash_xfer, theme::text_fg, theme::bg, std::max(0, std::min((si32)cell_width(sd::lbl_hash_xfer), cr - (ix + 2))));
-            auto hax     = ix + 2 + (si32)cell_width(sd::lbl_hash_xfer) + 1;
-            auto halabel = text{ " " } + text{ st.hash_on_transfer ? hash_algo_label(st.hash_algo) : sd::hash_none } + " \xE2\x96\xBE "; // " None ▾ " / " SHA-256 ▾ "
-            st.hit.hash_algo = rect{{ hax, hash_y + 1 }, { std::max(0, std::min((si32)cell_width(halabel), cr - hax)), 1 }};
-
-            // Parallel transfers group — both input fields aligned to the longer label (item 4).
-            // Label/field/control all clip to the box content edge (cr) so nothing bleeds out.
-            sd_box(canvas, rect{{ ix, par_y }, { iw, par_h }}, "Parallel transfers");
-            auto fx = ix + 2 + std::max((si32)cell_width(sd::lbl_threshold), (si32)cell_width(sd::lbl_maxconn)) + 1;
-            // Row 1: threshold value field + unit dropdown.
-            put_str(canvas, ix + 2, par_y + 1, sd::lbl_threshold, theme::text_fg, theme::bg, std::max(0, std::min(fx - 1, cr) - (ix + 2)));
-            st.fields[sd::f_threshold].box = rect{{ fx, par_y + 1 }, { sd::field_w[sd::f_threshold], 1 }};
-            auto ux = fx + sd::field_w[sd::f_threshold] + 2;
-            auto ulabel = text{ " " } + text{ sftp_unit_label(st.threshold_unit) } + " \xE2\x96\xBE "; // " MiB ▾ "
-            st.hit.unit = rect{{ ux, par_y + 1 }, { std::max(0, std::min((si32)cell_width(ulabel), cr - ux)), 1 }};
-            // Row 2: max connections field (aligned to fx) + range hint.
-            put_str(canvas, ix + 2, par_y + 2, sd::lbl_maxconn, theme::text_fg, theme::bg, std::max(0, std::min(fx - 1, cr) - (ix + 2)));
-            st.fields[sd::f_maxconn].box = rect{{ fx, par_y + 2 }, { sd::field_w[sd::f_maxconn], 1 }};
-            { auto hx = fx + sd::field_w[sd::f_maxconn] + 2; put_str(canvas, hx, par_y + 2, sd::hnt_maxconn, theme::subtext, theme::bg, std::max(0, cr - hx)); }
-            // Row 3: allocation policy.
-            put_str(canvas, ix + 2, par_y + 3, sd::lbl_allocation, theme::text_fg, theme::bg,
-                    std::max(0, std::min(fx - 1, cr) - (ix + 2)));
-            auto alabel = text{ " " } + text{ transfer_allocation_label(st.transfer_allocation) } + " \xE2\x96\xBE ";
-            st.hit.allocation = rect{{ fx, par_y + 3 }, { std::max(0, std::min((si32)cell_width(alabel), cr - fx)), 1 }};
-        }
-        // --- Site tab ----------------------------------------------------------------
-        else if (st.tab == sd::tab_site)
-        {
-            auto box_y = si32{ 3 };
-            auto box_h = std::max(6, H - box_y - 2); // Leave one blank row before main OK/Cancel.
-            sd_box(canvas, rect{{ ix, box_y }, { iw, box_h }}, "Site Manager");
-            auto py = sd_help(canvas, ix + 2, box_y + 1, inner, sd::help_sites);
-            put_str(canvas, ix + 2, py, sd::lbl_sites, theme::text_fg, theme::bg, inner);
-            auto btn_y = box_y + box_h - 2;
-            auto tbl_top = py + 1;
-            auto tbl_h = std::max(2, btn_y - 1 - tbl_top);
-            st.site_table_area = rect{{ ix + 2, tbl_top }, { inner, tbl_h }};
-            st.hit.addsite = rect{{ ix + 2, btn_y }, { (si32)cell_width(sd::btn_addsite), 1 }};
-            st.hit.editsite = rect{{ st.hit.addsite.coor.x + st.hit.addsite.size.x + 1, btn_y },
-                                   { (si32)cell_width(sd::btn_editsite), 1 }};
-            st.hit.removesite = rect{{ st.hit.editsite.coor.x + st.hit.editsite.size.x + 1, btn_y },
-                                     { (si32)cell_width(sd::btn_removesite), 1 }};
-        }
-        // --- Debug tab ---------------------------------------------------------------
-        else
-        {
-            auto y = si32{ 3 };
-            auto help_h = (si32)sd_wrap(sd::help_debug, inner).size();
-            auto info_h = si32{ 2 + 1 + help_h };
-            sd_box(canvas, rect{{ ix, y }, { iw, info_h }}, "Debugging settings");
-            put_str(canvas, ix + 2, y + 1, sd::lbl_log_level, theme::text_fg, theme::bg, std::max(0, std::min((si32)cell_width(sd::lbl_log_level), cr - (ix + 2))));
-            auto lx = ix + 2 + (si32)cell_width(sd::lbl_log_level) + 1;
-            auto level_label = text{ " " } + std::to_string(st.log_debug_level) + " - " + text{ log_debug_label(st.log_debug_level) } + " \xE2\x96\xBE ";
-            st.hit.log_level = rect{{ lx, y + 1 }, { std::max(0, std::min((si32)cell_width(level_label), cr - lx)), 1 }};
-            sd_help(canvas, ix + 2, y + 2, inner, sd::help_debug);
-            y += info_h + 1;
-
-            auto raw_h = si32{ 2 + 1 };
-            sd_box(canvas, rect{{ ix, y }, { iw, raw_h }}, "Directory listing");
-            st.hit.raw_listing = rect{{ ix + 2, y + 1 }, { inner, 1 }};
-            put_str(canvas, ix + 2, y + 1, st.log_raw_listing ? "\xE2\x96\xA3 Show raw directory listing" : "\xE2\x96\xA1 Show raw directory listing", theme::text_fg, theme::bg, inner);
-        }
-        // --- Button row (OK + Cancel; right-aligned block) -----------------------------
-        auto okw = si32{ 4 }, cnw = si32{ 8 };
-        auto by = H - 1;
-        auto cx = W - 1 - cnw;
-        st.hit.cancel = rect{{ cx, by }, { cnw, 1 }};
-        st.hit.ok     = rect{{ cx - 1 - okw, by }, { okw, 1 }};
-    }
-
-    // sd_hit (point-in-rect) now lives in panes.hpp so the secret-prompt modal can share it.
-
-    // Append a parsed private key to the draft table. `path` is the original key, or — for an
-    // encrypted non-ppk key — its converted .ppk. De-dups and selects the new row.
-    inline void sd_store_key(settings_state& st, text const& path, text const& comment, text const& data)
-    {
-        for (auto& k : st.draft.keyfiles) if (k == path) return; // No duplicates.
-        st.draft.keyfiles.push_back(path);
-        st.key_comment.push_back(comment);
-        st.key_data.push_back(data);
-        st.key_marked = { (si32)st.draft.keyfiles.size() - 1 };
-        if (auto table = st.key_table_wp.lock()) table->base::deface();
-    }
-
-    // Forward declaration so the conversion can re-trigger the passphrase prompt on a failed attempt.
-    inline void sd_begin_convert(settings_state& st, text const& path, bool retry = faux);
-
-    // FileZilla CFZPuttyGenInterface::LoadKeyFile conversion path: an encrypted non-PuTTY key
-    // ("convertible") must be converted to a .ppk before the backend can use it. Verifying the
-    // passphrase and converting the key are the SAME expensive operation (decrypt the key, ~1s), so we
-    // do it ONCE: right after the passphrase, the key is decrypted and the .ppk is written to a TEMP
-    // file (off the UI thread, behind a spinner — the TUI never freezes). A wrong passphrase fails here
-    // and re-prompts early, before the picker. The remaining "Save converted key" step just COPIES the
-    // ready .ppk to the chosen path (instant) — no second decrypt. The temp .ppk is encrypted with the
-    // same passphrase (safe on disk) and is removed after Save / cancel. The settings card outlives
-    // these overlays (it stays attached beneath), so capturing &st is safe for the whole flow.
-    inline void sd_begin_convert(settings_state& st, text const& path, bool retry)
-    {
-        auto window = st.window_wp.lock();
+        auto window = state->window_wp.lock();
         if (!window) return;
-        auto stp = &st;
-        auto window_wp = st.window_wp;
-        auto card_wp   = st.card_wp;
-        auto base   = fs::path{ path }.filename().string();
-        auto prompt = "Enter the passphrase for \"" + base + "\". The key will be converted to PuTTY (.ppk) format, protected with the same passphrase.";
-        auto on_cancel = []{};
-        auto on_pass = [stp, path, window_wp, card_wp](text pass)
-        {
-            // Decrypt + write the .ppk to a temp file ONCE (async). This both verifies the passphrase
-            // (wrong -> re-prompt) and does all the heavy crypto a single time.
-            auto ec = std::error_code{};
-            auto tmpdir = fs::temp_directory_path(ec);
-            if (ec) tmpdir = fs::path{ "/tmp" };
-            static std::atomic<uint64_t> seq{ 0 };
-            auto tmp = (tmpdir / ("parvion-convert-" + std::to_string(seq.fetch_add(1)) + ".ppk")).string();
-            run_with_progress(window_wp, card_wp, {}, "Converting key...",
-                [path, pass, tmp](std::vector<text>& reps){ return pvputtygen_run("file " + path + "\npassword " + pass + "\nwrite " + tmp + "\nfingerprint\ncomment\n\n", reps); },
-                [stp, path, tmp, window_wp, card_wp](std::vector<text> reps, bool ok)
+        auto base = fs::path{ path }.filename().string();
+        auto prompt = "Enter the passphrase for \"" + base
+                    + "\". The key will be converted to PuTTY (.ppk) format, protected with the same passphrase.";
+        auto ec = std::error_code{};
+        auto temp_dir = fs::temp_directory_path(ec);
+        if (ec) temp_dir = fs::path{ "/tmp" };
+        static std::atomic<uint64_t> sequence{};
+        auto temp = (temp_dir / ("parvion-convert-"
+                    + std::to_string(sequence.fetch_add(1)) + ".ppk")).string();
+        window->base::attach(make_secret_dialog({
+            .window_wp = state->window_wp,
+            .focus_back_wp = state->popup_wp,
+            .title = "Convert private key",
+            .prompt = std::move(prompt),
+            .on_cancel = []{},
+            .is_retry = retry,
+            .work = {
+                .status = "Converting key...",
+                .run = [path, temp](text const& pass, std::vector<text>& replies)
                 {
-                    if (!ok || reps.size() < 5) // Wrong passphrase (or write error): clean up + re-prompt.
+                    return settings_pvputtygen_run("file " + path + "\npassword " + pass
+                        + "\nwrite " + temp + "\nfingerprint\ncomment\n\n", replies);
+                },
+                .on_done = [state, path, temp](std::vector<text> replies, bool ok)
+                {
+                    if (!ok || replies.size() < 5)
                     {
-                        auto e = std::error_code{}; fs::remove(fs::path{ tmp }, e);
-                        sd_begin_convert(*stp, path, /*retry*/true);
+                        auto error = std::error_code{};
+                        fs::remove(fs::path{ temp }, error);
+                        settings_begin_key_conversion(state, path, true);
                         return;
                     }
-                    // Replies in order: file (convertible), password, write, fingerprint, comment.
-                    auto data = reps[3], comment = reps[4];
-                    // Only the Save step remains: pick the output path; copying the ready .ppk is instant.
-                    auto def_dir  = fs::path{ path }.parent_path().string();
-                    auto def_name = fs::path{ path }.filename().replace_extension(".ppk").string();
-                    open_file_picker(window_wp, card_wp, {}, picker_mode::save, "Save converted key", def_dir, def_name,
-                        [stp, tmp, comment, data](text const& chosen)
+                    auto data = replies[3];
+                    auto comment = replies[4];
+                    auto default_dir = fs::path{ path }.parent_path().string();
+                    auto default_name = fs::path{ path }.filename().replace_extension(".ppk").string();
+                    auto picker = make_file_picker({
+                        .window_wp = state->window_wp,
+                        .focus_back_wp = state->popup_wp,
+                        .mode = file_picker_mode::save,
+                        .title = "Save converted key",
+                        .initial_dir = std::move(default_dir),
+                        .name = std::move(default_name),
+                        .on_accept = [state, temp, comment, data](text const& chosen)
                         {
-                            auto ec1 = std::error_code{};
-                            fs::copy_file(fs::path{ tmp }, fs::path{ chosen }, fs::copy_options::overwrite_existing, ec1);
-                            auto ec2 = std::error_code{}; fs::remove(fs::path{ tmp }, ec2);
-                            if (ec1) { if (stp->ctrl) stp->ctrl->log_line(logtype::error, "Could not save converted key to " + chosen); return; }
-                            sd_store_key(*stp, chosen, comment, data); // comment, data (fingerprint) from the convert step.
+                            auto copy_error = std::error_code{};
+                            fs::copy_file(fs::path{ temp }, fs::path{ chosen },
+                                          fs::copy_options::overwrite_existing, copy_error);
+                            auto remove_error = std::error_code{};
+                            fs::remove(fs::path{ temp }, remove_error);
+                            if (copy_error)
+                            {
+                                if (state->ctrl) state->ctrl->log_line(logtype::error,
+                                    "Could not save converted key to " + chosen);
+                                return;
+                            }
+                            settings_store_key(state, chosen, comment, data);
                         },
-                        [tmp]{ auto e = std::error_code{}; fs::remove(fs::path{ tmp }, e); }); // Cancel: drop the temp .ppk.
-                });
-        };
-        window->base::attach(make_secret_dialog(window_wp, card_wp, "Convert private key", prompt, on_pass, on_cancel, retry));
+                        .on_cancel = [temp]
+                        {
+                            auto error = std::error_code{};
+                            fs::remove(fs::path{ temp }, error);
+                        },
+                    });
+                    if (auto window = state->window_wp.lock())
+                        window->base::attach(picker.widget);
+                },
+            },
+        }));
     }
 
-    // Add a private key (FileZilla CFZPuttyGenInterface::LoadKeyFile): classify via pvputtygen and
-    // either store a usable key as-is, convert an encrypted non-ppk key, or reject (SSH1/unreadable).
-    inline void sd_add_key(settings_state& st, text const& path)
+    inline void settings_add_key(std::shared_ptr<settings_dialog_state> const& state,
+                                 text const& path)
     {
         if (path.empty()) return;
-        for (auto& k : st.draft.keyfiles) if (k == path) return; // No duplicates.
-        auto rs = std::vector<text>{};
-        pvputtygen_run("file " + path + "\nencrypted\n\n", rs);
-        auto kind = rs.empty() ? text{} : rs[0];
-        if (kind == "ok") // Native .ppk or an unencrypted importable key: usable as-is.
+        for (auto& existing : state->draft.keyfiles) if (existing == path) return;
+        auto replies = std::vector<text>{};
+        settings_pvputtygen_run("file " + path + "\nencrypted\n\n", replies);
+        auto kind = replies.empty() ? text{} : replies[0];
+        if (kind == "ok")
         {
-            auto comment = text{}, data = text{};
-            sd_keyinfo(path, comment, data);
-            sd_store_key(st, path, comment, data);
+            auto comment = text{};
+            auto data = text{};
+            settings_keyinfo(path, comment, data);
+            settings_store_key(state, path, comment, data);
         }
-        else if (kind == "convertible") sd_begin_convert(st, path, faux); // Encrypted non-ppk: convert to .ppk.
-        else if (st.ctrl)
+        else if (kind == "convertible") settings_begin_key_conversion(state, path);
+        else if (state->ctrl)
         {
-            st.ctrl->log_line(logtype::error, kind == "incompatible"
+            state->ctrl->log_line(logtype::error, kind == "incompatible"
                 ? text{ "SSH1 keys are not supported (SSH2 only): " + path }
                 : text{ "Could not load or parse private key: " + path });
         }
     }
-    // Remove the selected key rows from the draft table.
-    inline void sd_remove_keys(settings_state& st)
+
+    inline void settings_remove_keys(std::shared_ptr<settings_dialog_state> const& state)
     {
-        auto sel = st.key_marked;
-        if (sel.empty()) return;
-        auto nk = std::vector<text>{}, nc = std::vector<text>{}, nd = std::vector<text>{};
-        for (auto i = si32{}; i < (si32)st.draft.keyfiles.size(); ++i) if (!sel.count(i))
+        if (state->key_selection.empty()) return;
+        auto paths = std::vector<text>{};
+        auto comments = std::vector<text>{};
+        auto data = std::vector<text>{};
+        for (auto row = si32{}; row < (si32)state->draft.keyfiles.size(); ++row)
         {
-            nk.push_back(st.draft.keyfiles[i]);
-            nc.push_back(i < (si32)st.key_comment.size() ? st.key_comment[i] : text{});
-            nd.push_back(i < (si32)st.key_data.size()    ? st.key_data[i]    : text{});
+            if (state->key_selection.contains(row)) continue;
+            paths.push_back(state->draft.keyfiles[(size_t)row]);
+            comments.push_back(row < (si32)state->key_comments.size()
+                             ? state->key_comments[(size_t)row] : text{});
+            data.push_back(row < (si32)state->key_data.size()
+                         ? state->key_data[(size_t)row] : text{});
         }
-        st.draft.keyfiles = nk; st.key_comment = nc; st.key_data = nd;
-        st.key_marked.clear();
-        ++st.key_table_revision;
-        if (auto table = st.key_table_wp.lock()) table->base::deface();
+        state->draft.keyfiles = std::move(paths);
+        state->key_comments = std::move(comments);
+        state->key_data = std::move(data);
+        state->key_selection.clear();
+        ++state->key_table_revision;
+        if (auto table = state->key_table_wp.lock()) table->base::deface();
+        settings_key_selection_changed(state);
     }
 
-    // Adapt the draft key list to the reusable table. The dialog owns only data/preferences;
-    // make_table owns painting, selection gestures, scrolling, column menus and keyboard motion.
-    inline auto sd_key_table_cfg(settings_state& st) -> table_cfg
+    inline auto make_settings_key_table_cfg(std::shared_ptr<settings_dialog_state> const& state)
+        -> table_cfg
     {
-        auto stp = &st;
         auto cfg = table_cfg{};
-        cfg.deletion.window_wp = st.window_wp;
+        cfg.deletion.window_wp = state->window_wp;
         cfg.palette = table_palette{
-            .bg         = theme::bg,
-            .header     = theme::surface,
-            .text_fg    = theme::text_fg,
-            .subtext    = theme::subtext,
-            .sel_bg     = theme::sel_bg,
+            .bg = theme::bg,
+            .header = theme::surface,
+            .text_fg = theme::text_fg,
+            .subtext = theme::subtext,
+            .sel_bg = theme::sel_bg,
             .sel_bg_act = theme::sel_bg_act,
-            .sort_fg    = theme::sort_fg,
-            .sb_track   = theme::sb_track,
-            .sb_thumb   = theme::sb_thumb,
-            .sb_hover   = theme::sb_hover,
-            .sb_drag    = theme::sb_drag,
+            .sort_fg = theme::sort_fg,
+            .sb_track = theme::sb_track,
+            .sb_thumb = theme::sb_thumb,
+            .sb_hover = theme::sb_hover,
+            .sb_drag = theme::sb_drag,
         };
-        cfg.columns = [stp]
+        cfg.columns = [state]
         {
             auto table = qtable{};
-            for (auto i = si32{}; i < sd::kt_ncol; ++i)
+            for (auto column = si32{}; column < (si32)settings_sftp::key_headers.size(); ++column)
             {
                 table.add_column(qtable::column{
-                    .title = text{ sd::kt_headers[(size_t)i] },
-                    .width = stp->key_col_w[(size_t)i],
+                    .title = text{ settings_sftp::key_headers[(size_t)column] },
+                    .width = state->key_column_widths[(size_t)column],
                     .right = faux,
                     .resizable = true,
-                    .key = i,
-                }, stp->key_col_shown[(size_t)i], text{ sd::kt_menu_headers[(size_t)i] });
+                    .key = column,
+                }, state->key_columns_shown[(size_t)column],
+                   text{ settings_sftp::key_menu_headers[(size_t)column] });
             }
-            table.on_show_column = [stp](si32 key, bool shown)
+            table.on_show_column = [state](si32 column, bool shown)
             {
-                if (key >= 0 && key < sd::kt_ncol) stp->key_col_shown[(size_t)key] = shown;
+                if (column >= 0 && column < (si32)settings_sftp::key_headers.size())
+                    state->key_columns_shown[(size_t)column] = shown;
             };
-            table.on_resize_column = [stp](si32 key, si32 width)
+            table.on_resize_column = [state](si32 column, si32 width)
             {
-                if (key >= 0 && key < sd::kt_ncol)
-                    stp->key_col_w[(size_t)key] = width;
+                if (column >= 0 && column < (si32)settings_sftp::key_headers.size())
+                    state->key_column_widths[(size_t)column] = width;
             };
-            table.autofit = [stp](si32 key)
+            table.autofit = [state](si32 column)
             {
-                return key >= 0 && key < sd::kt_ncol ? kt_col_content_w(*stp, key) : si32{};
+                return settings_key_column_content_width(*state, column);
             };
             return table;
         };
-        cfg.row_count = [stp]{ return (si32)stp->draft.keyfiles.size(); };
-        cfg.viewport.behavior = [stp]{ return table_viewport_refresh{ stp->key_table_revision }; };
-        cfg.cell = [stp](si32 row, si32 key)
+        cfg.row_count = [state]{ return (si32)state->draft.keyfiles.size(); };
+        cfg.viewport.behavior = [state]
         {
-            return table_cell{ kt_cell(*stp, key, row), theme::text_fg };
+            return table_viewport_refresh{ state->key_table_revision };
         };
-        cfg.sort.compare = [stp](si32 a, si32 b, si32 key)
+        cfg.cell = [state](si32 row, si32 column)
         {
-            if (key < 0 || key >= sd::kt_ncol) return si32{};
-            auto lhs = kt_cell(*stp, key, a); utf::to_lower(lhs);
-            auto rhs = kt_cell(*stp, key, b); utf::to_lower(rhs);
+            return table_cell{ settings_key_cell(*state, column, row), theme::text_fg };
+        };
+        cfg.sort.compare = [state](si32 left, si32 right, si32 column)
+        {
+            auto lhs = settings_key_cell(*state, column, left); utf::to_lower(lhs);
+            auto rhs = settings_key_cell(*state, column, right); utf::to_lower(rhs);
             return lhs < rhs ? -1 : lhs > rhs ? 1 : 0;
         };
-        cfg.selection = [stp]
+        cfg.selection = [state]
         {
-            auto sel = qsel_cfg{};
-            sel.key_count = [stp]{ return (si32)stp->draft.keyfiles.size(); };
-            sel.is_selected = [stp](si32 key){ return stp->key_marked.contains(key); };
-            sel.on_select = [stp](si32 key, bool on)
+            auto selection = qsel_cfg{};
+            selection.key_count = [state]{ return (si32)state->draft.keyfiles.size(); };
+            selection.is_selected = [state](si32 key){ return state->key_selection.contains(key); };
+            selection.on_select = [state](si32 key, bool selected)
             {
-                if (key < 0 || key >= (si32)stp->draft.keyfiles.size()) return;
-                if (on) stp->key_marked.insert(key);
-                else    stp->key_marked.erase(key);
+                if (key < 0 || key >= (si32)state->draft.keyfiles.size()) return;
+                if (selected) state->key_selection.insert(key);
+                else          state->key_selection.erase(key);
+                settings_key_selection_changed(state);
             };
-            sel.on_clear = [stp]{ stp->key_marked.clear(); };
-            sel.has_selection = [stp]{ return !stp->key_marked.empty(); };
-            sel.in_scope = [stp](si32 key){ return key >= 0 && key < (si32)stp->draft.keyfiles.size(); };
-            sel.row_count = [stp]{ return (si32)stp->draft.keyfiles.size(); };
-            sel.key_of_row = [stp](si32 row)
+            selection.on_clear = [state]
             {
-                return row >= 0 && row < (si32)stp->draft.keyfiles.size() ? row : -1;
+                state->key_selection.clear();
+                settings_key_selection_changed(state);
             };
-            return sel;
-        };
-        cfg.on_key = [stp](hids& gear, netxs::wptr<ui::base>)
-        {
-            auto key = gear.keybd::generic();
-            if (key == input::key::Esc)
+            selection.has_selection = [state]{ return !state->key_selection.empty(); };
+            selection.in_scope = [state](si32 key)
             {
-                gear.set_handled();
-                sd_close(*stp);
-                return table_viewport_action{ table_viewport_action::handled };
-            }
-            if (key == input::key::KeyEnter)
+                return key >= 0 && key < (si32)state->draft.keyfiles.size();
+            };
+            selection.row_count = [state]{ return (si32)state->draft.keyfiles.size(); };
+            selection.key_of_row = [state](si32 row)
             {
-                gear.set_handled();
-                sd_accept(*stp);
-                return table_viewport_action{ table_viewport_action::handled };
-            }
-            return table_viewport_action{};
+                return row >= 0 && row < (si32)state->draft.keyfiles.size() ? row : -1;
+            };
+            return selection;
         };
         cfg.deletion.enabled = true;
-        cfg.deletion.on_remove_selected = [stp](netxs::wptr<ui::base>)
+        cfg.deletion.on_remove_selected = [state](netxs::wptr<ui::base>)
         {
-            sd_remove_keys(*stp);
-            if (auto card = stp->card_wp.lock()) card->base::deface();
+            settings_remove_keys(state);
         };
+        cfg.empty_text = []{ return text{ "No private keys configured." }; };
         cfg.behavior.wide_hit = true;
         return cfg;
     }
 
-    // --- Saved-site table + editor ---------------------------------------------------
-    inline auto sd_site_cell(settings_state const& st, si32 col, si32 row) -> text
+    inline void settings_open_key_picker(std::shared_ptr<settings_dialog_state> const& state,
+                                         id_t gear_id = {})
     {
-        if (row < 0 || row >= (si32)st.draft.sites.size()) return {};
-        auto const& site = st.draft.sites[(size_t)row];
-        if (col == 0) return site.name;
-        if (col == 1) return site.host;
-        if (col == 2) return std::to_string(site.port);
-        if (col == 3) return site.user;
+        auto picker = make_file_picker({
+            .window_wp = state->window_wp,
+            .focus_back_wp = state->popup_wp,
+            .gear_id = gear_id,
+            .mode = file_picker_mode::open,
+            .selection = file_picker_selection::files,
+            .title = "Add key file",
+            .initial_dir = user_home_dir(),
+            .on_accept = [state](text const& path){ settings_add_key(state, path); },
+        });
+        if (auto window = state->window_wp.lock())
+            window->base::attach(picker.widget);
+    }
+
+    inline auto make_sftp_page(std::shared_ptr<settings_dialog_state> const& state,
+                               std::function<void()> accept,
+                               std::function<void()> close) -> component
+    {
+        auto numeric_input = [accept, close](std::function<text()> value,
+                                             std::function<void(text)> change)
+        {
+            auto field = make_input({
+                .value = std::move(value),
+                .on_change = std::move(change),
+                .on_submit = [accept](text){ accept(); },
+                .on_cancel = [close]{ close(); },
+                .digits_only = true,
+                .palette = {
+                    .bg = theme::surface,
+                    .text_fg = theme::text_fg,
+                    .muted_fg = theme::subtext,
+                    .active = theme::sel_bg_act,
+                },
+            });
+            field.widget->limits({ 6, 1 }, { 6, 1 });
+            return field;
+        };
+
+        auto key_table = make_table(make_settings_key_table_cfg(state));
+        key_table.widget->limits({ 24, 5 }, { -1, 8 });
+        state->key_table_wp = ptr::shadow(key_table.widget);
+        auto key_buttons = flex::ctor({
+            .direction = flex_direction::row,
+            .align_items = flex_align::stretch,
+            .column_gap = 1,
+        });
+        key_buttons->limits({ 0, 1 }, { -1, 1 });
+        key_buttons->attach(make_button({
+            .label = []{ return text{ " Add key file... " }; },
+            .on_activate = [state](hids& gear, ui::base&)
+            {
+                settings_open_key_picker(state, gear.id);
+            },
+        }), { .basis = 17, .minimum = 17, .maximum = 17 });
+        auto remove_key = make_button({
+            .label = []{ return text{ " Remove key " }; },
+            .on_activate = [state](hids&, ui::base&){ settings_remove_keys(state); },
+            .enabled = [state]{ return !state->key_selection.empty(); },
+        });
+        state->key_remove_button_wp = ptr::shadow(remove_key.widget);
+        key_buttons->attach(std::move(remove_key),
+                            { .basis = 12, .minimum = 12, .maximum = 12 });
+
+        auto public_key_content = flex::ctor({
+            .direction = flex_direction::column,
+            .row_gap = 0,
+        });
+        public_key_content->attach(make_settings_label(settings_sftp::public_key_help,
+                                                        label_role::hint, true),
+                                   { .shrink = 0 });
+        public_key_content->attach(make_settings_label(settings_sftp::private_keys_label),
+                                   { .shrink = 0 });
+        public_key_content->attach(std::move(key_table),
+                                   { .grow = 1, .shrink = 0, .basis = 5, .minimum = 5, .maximum = 8 });
+        public_key_content->attach_separator(1);
+        public_key_content->attach(component{ key_buttons }, { .shrink = 0 });
+        auto public_key_box = make_groupbox({
+            .title = "Public Key Authentication",
+            .content = { public_key_content },
+        });
+
+        auto hash_options = std::vector<dropdown_option>{
+            { text{ settings_sftp::hash_none } },
+        };
+        for (auto algorithm = si32{}; algorithm < hash_algo_count; ++algorithm)
+            hash_options.push_back({ text{ hash_algo_label(algorithm) } });
+        auto hash_dropdown = make_dropdown({
+            .options = std::move(hash_options),
+            .selected = [state]{ return state->hash_on_transfer ? state->hash_algo + 1 : 0; },
+            .on_change = [state](si32 selected)
+            {
+                state->hash_on_transfer = selected > 0;
+                if (selected > 0) state->hash_algo = selected - 1;
+            },
+        });
+        auto hash_width = hash_dropdown.widget->base::min_sz.x;
+        auto hash_fields = grid::ctor({
+            .columns = {
+                { .weight = 0, .minimum = cell_width(settings_sftp::hash_label),
+                  .maximum = cell_width(settings_sftp::hash_label) },
+                { .weight = 0, .minimum = 1, .maximum = 1 },
+                { .weight = 0, .minimum = hash_width, .maximum = hash_width },
+                { .weight = 1 },
+            },
+            .rows = { { .weight = 0, .minimum = 1, .maximum = 1 } },
+            .handle_mode = grid_handle_mode::hidden,
+        });
+        hash_fields->attach(make_settings_label(settings_sftp::hash_label), { .column = 0 });
+        hash_fields->attach(std::move(hash_dropdown), { .column = 2 });
+        auto hash_box = make_groupbox({
+            .title = "Hash verification",
+            .content = { hash_fields },
+        });
+
+        auto compression_box = make_groupbox({
+            .title = "Other SFTP options",
+            .content = make_checkbox({
+                .label = []{ return text{ "Enable compression" }; },
+                .checked = [state]{ return state->compression; },
+                .on_change = [state](bool checked){ state->compression = checked; },
+            }),
+        });
+
+        auto unit_options = std::vector<dropdown_option>{};
+        for (auto unit = si32{}; unit < sftp_unit_count; ++unit)
+            unit_options.push_back({ text{ sftp_unit_label(unit) } });
+        auto unit_dropdown = make_dropdown({
+            .options = std::move(unit_options),
+            .selected = [state]{ return state->threshold_unit; },
+            .on_change = [state](si32 selected){ state->threshold_unit = selected; },
+        });
+        auto unit_width = unit_dropdown.widget->base::min_sz.x;
+
+        auto allocation_options = std::vector<dropdown_option>{};
+        for (auto policy = si32{}; policy < allocation_count; ++policy)
+            allocation_options.push_back({ text{ transfer_allocation_label(policy) } });
+        auto allocation_dropdown = make_dropdown({
+            .options = std::move(allocation_options),
+            .selected = [state]{ return state->transfer_allocation; },
+            .on_change = [state](si32 selected){ state->transfer_allocation = selected; },
+        });
+        auto allocation_width = allocation_dropdown.widget->base::min_sz.x;
+
+        auto threshold_controls = flex::ctor({
+            .direction = flex_direction::row,
+            .align_items = flex_align::stretch,
+            .column_gap = 1,
+        });
+        threshold_controls->attach(numeric_input(
+            [state]{ return state->threshold_value; },
+            [state](text value){ state->threshold_value = std::move(value); }),
+            { .basis = 6, .minimum = 6, .maximum = 6 });
+        threshold_controls->attach(std::move(unit_dropdown),
+            { .basis = unit_width, .minimum = unit_width, .maximum = unit_width });
+
+        auto connection_controls = flex::ctor({
+            .direction = flex_direction::row,
+            .align_items = flex_align::stretch,
+            .column_gap = 1,
+        });
+        connection_controls->attach(numeric_input(
+            [state]{ return state->max_connections; },
+            [state](text value){ state->max_connections = std::move(value); }),
+            { .basis = 6, .minimum = 6, .maximum = 6 });
+        connection_controls->attach(make_settings_label(settings_sftp::max_connections_hint,
+                                                         label_role::hint),
+            { .shrink = 0 });
+
+        auto label_width = std::max({ cell_width(settings_sftp::threshold_label),
+                                      cell_width(settings_sftp::max_connections_label),
+                                      cell_width(settings_sftp::allocation_label) });
+        auto control_width = std::max({ 6 + 2 + unit_width,
+                                        6 + 2 + cell_width(settings_sftp::max_connections_hint),
+                                        allocation_width });
+        auto parallel_fields = grid::ctor({
+            .columns = {
+                { .weight = 0, .minimum = label_width, .maximum = label_width },
+                { .weight = 0, .minimum = 1, .maximum = 1 },
+                { .weight = 0, .minimum = control_width, .maximum = control_width },
+                { .weight = 1 },
+            },
+            .rows = {
+                { .weight = 0, .minimum = 1, .maximum = 1 },
+                { .weight = 0, .minimum = 1, .maximum = 1 },
+                { .weight = 0, .minimum = 1, .maximum = 1 },
+            },
+            .handle_mode = grid_handle_mode::hidden,
+        });
+        parallel_fields->attach(make_settings_label(settings_sftp::threshold_label),
+                                { .column = 0, .row = 0 });
+        parallel_fields->attach(component{ threshold_controls }, { .column = 2, .row = 0 });
+        parallel_fields->attach(make_settings_label(settings_sftp::max_connections_label),
+                                { .column = 0, .row = 1 });
+        parallel_fields->attach(component{ connection_controls }, { .column = 2, .row = 1 });
+        parallel_fields->attach(make_settings_label(settings_sftp::allocation_label),
+                                { .column = 0, .row = 2 });
+        parallel_fields->attach(std::move(allocation_dropdown), { .column = 2, .row = 2 });
+        auto parallel_box = make_groupbox({
+            .title = "Parallel transfers",
+            .content = { parallel_fields },
+        });
+
+        auto page = flex::ctor({
+            .direction = flex_direction::column,
+            .row_gap = 1,
+            .column_padding_width = 2,
+            .row_padding_height = 0
+        });
+        page->attach(std::move(public_key_box), { .shrink = 0 });
+        page->attach(std::move(hash_box), { .shrink = 0 });
+        page->attach(std::move(compression_box), { .shrink = 0 });
+        page->attach(std::move(parallel_box), { .shrink = 0 });
+        return { page };
+    }
+
+    inline auto settings_site_cell(settings_dialog_state const& state,
+                                   si32 column, si32 row) -> text
+    {
+        if (row < 0 || row >= (si32)state.draft.sites.size()) return {};
+        auto const& site = state.draft.sites[(size_t)row];
+        if (column == 0) return site.name;
+        if (column == 1) return site.host;
+        if (column == 2) return std::to_string(site.port);
+        if (column == 3) return site.user;
         return {};
     }
 
-    inline auto sd_site_col_content_w(settings_state const& st, si32 col) -> si32
+    inline auto settings_site_column_content_width(settings_dialog_state const& state,
+                                                    si32 column) -> si32
     {
         auto width = si32{};
-        for (auto row = si32{}; row < (si32)st.draft.sites.size(); ++row)
-            width = std::max(width, cell_width(sd_site_cell(st, col, row)));
+        for (auto row = si32{}; row < (si32)state.draft.sites.size(); ++row)
+            width = std::max(width, cell_width(settings_site_cell(state, column, row)));
         return width;
     }
 
-    inline auto sd_single_site(settings_state const& st) -> si32
+    inline auto settings_single_site(settings_dialog_state const& state) -> si32
     {
-        if (st.site_marked.size() != 1) return -1;
-        auto selected = *st.site_marked.begin();
-        return selected >= 0 && selected < (si32)st.draft.sites.size() ? selected : -1;
+        if (state.site_selection.size() != 1) return -1;
+        auto selected = *state.site_selection.begin();
+        return selected >= 0 && selected < (si32)state.draft.sites.size() ? selected : -1;
     }
 
-    inline void sd_site_selection_changed(settings_state& st)
+    inline void settings_site_selection_changed(
+        std::shared_ptr<settings_dialog_state> const& state)
     {
-        if (auto button = st.button_editsite_wp.lock()) button->base::deface();
+        if (auto edit = state->site_edit_button_wp.lock()) edit->base::deface();
+        if (auto remove = state->site_remove_button_wp.lock()) remove->base::deface();
     }
 
-    inline void sd_remove_sites(settings_state& st)
+    inline void settings_remove_sites(std::shared_ptr<settings_dialog_state> const& state)
     {
-        if (st.site_marked.empty()) return;
+        if (state->site_selection.empty()) return;
         auto kept = std::vector<saved_site>{};
-        kept.reserve(st.draft.sites.size());
-        for (auto i = si32{}; i < (si32)st.draft.sites.size(); ++i)
-            if (!st.site_marked.contains(i)) kept.push_back(std::move(st.draft.sites[(size_t)i]));
-        st.draft.sites = std::move(kept);
-        st.site_marked.clear();
-        ++st.site_table_revision;
-        if (auto table = st.site_table_wp.lock()) table->base::deface();
-        sd_site_selection_changed(st);
-        if (auto card = st.card_wp.lock()) card->base::deface();
+        kept.reserve(state->draft.sites.size());
+        for (auto row = si32{}; row < (si32)state->draft.sites.size(); ++row)
+            if (!state->site_selection.contains(row))
+                kept.push_back(std::move(state->draft.sites[(size_t)row]));
+        state->draft.sites = std::move(kept);
+        state->site_selection.clear();
+        ++state->site_table_revision;
+        if (auto table = state->site_table_wp.lock()) table->base::deface();
+        settings_site_selection_changed(state);
     }
 
-    namespace sd
+    struct settings_site_editor_state
     {
-        enum site_field_t { sf_name, sf_host, sf_port, sf_user, sf_pass, sf_count };
-        inline constexpr auto site_field_labels = std::array<view, sf_count>{
-            "Site Name:", "Host:", "Port:", "User:", "Password:"
-        };
-    }
-
-    struct site_editor_state
-    {
-        settings_state* parent = nullptr;
+        std::shared_ptr<settings_dialog_state> parent;
         si32 edit_index = -1;
-        std::array<text, sd::sf_count> value{};
-        std::array<netxs::wptr<ui::base>, sd::sf_count> input_wp{};
-        netxs::wptr<ui::base> ok_wp, cancel_wp;
+        std::array<text, settings_site::field_count> value{};
         text error;
         bool done = faux;
+        netxs::wptr<ui::base> popup_wp;
+        netxs::wptr<ui::base> error_wp;
+        netxs::wptr<ui::base> error_separator_wp;
     };
 
-    inline void sd_site_editor_render(site_editor_state& st, auto& canvas, twod sz)
+    inline auto make_settings_site_editor(
+        std::shared_ptr<settings_dialog_state> const& parent,
+        si32 edit_index) -> ui::sptr
     {
-        canvas.fill(rect{ {}, sz }, [](cell& c){ c.bgc(theme::bg).fgc(theme::text_fg); });
-        canvas.fill(rect{ {}, { sz.x, 1 } }, [](cell& c){ c.bgc(theme::header); });
-        put_str(canvas, 2, 0, st.edit_index < 0 ? "Add SFTP Site" : "Edit SFTP Site",
-                theme::title_fg_act, theme::header, std::max(0, sz.x - 4));
-
-        auto label_w = si32{};
-        for (auto label : sd::site_field_labels) label_w = std::max(label_w, cell_width(label));
-        auto fx = 3 + label_w + 1;
-        auto fw = std::max(1, sz.x - fx - 3);
-        auto y = si32{ 3 };
-        for (auto i = si32{}; i < sd::sf_count; ++i, ++y)
+        auto state = std::make_shared<settings_site_editor_state>();
+        state->parent = parent;
+        state->edit_index = edit_index;
+        if (edit_index >= 0 && edit_index < (si32)parent->draft.sites.size())
         {
-            put_str(canvas, 3, y, sd::site_field_labels[(size_t)i],
-                    theme::text_fg, theme::bg, label_w);
-            if (auto input = st.input_wp[(size_t)i].lock())
-                input->base::extend(rect{{ fx, y }, { fw, 1 }});
+            auto const& site = parent->draft.sites[(size_t)edit_index];
+            state->value = { site.name, site.host, std::to_string(site.port), site.user, site.pass };
         }
-        put_str(canvas, 3, y + 1, "Password is optional.", theme::subtext, theme::bg,
-                std::max(0, sz.x - 6));
-        if (!st.error.empty())
-            put_str(canvas, 3, y + 3, st.error, theme::err_fg, theme::bg,
-                    std::max(0, sz.x - 6));
+        else state->value[settings_site::port] = "22";
 
-        auto by = sz.y - 2;
-        auto cnw = si32{ 10 }, okw = si32{ 6 };
-        auto cancel = rect{{ sz.x - 2 - cnw, by }, { cnw, 1 }};
-        auto ok = rect{{ cancel.coor.x - 2 - okw, by }, { okw, 1 }};
-        if (auto button = st.ok_wp.lock()) button->base::extend(ok);
-        if (auto button = st.cancel_wp.lock()) button->base::extend(cancel);
-    }
-
-    // Add/Edit share one five-field modal. The parent settings state is edited in place, but remains
-    // only a draft until the outer Settings dialog is accepted.
-    inline auto make_site_editor(settings_state& parent, si32 edit_index) -> ui::sptr
-    {
-        auto overlay = ui::cake::ctor()->alignment({ snap::both, snap::both });
-        auto overlay_wp = ptr::shadow(overlay);
-        auto finish = [window_wp = parent.window_wp, focus_wp = parent.card_wp, overlay_wp]
+        auto popup_ref = std::make_shared<netxs::wptr<ui::base>>();
+        auto gear_id = id_t{};
+        if (auto window = parent->window_wp.lock())
+            gear_id = window->bell::indexer.luafx.get_gear().id;
+        auto finish = [window_wp = parent->window_wp,
+                       focus_back_wp = parent->popup_wp,
+                       popup_ref,
+                       gear_id]
         {
             if (auto window = window_wp.lock())
             {
-                window->base::enqueue([focus_wp, overlay_wp](auto& win)
+                window->base::enqueue([focus_back_wp, popup_ref, gear_id](auto&)
                 {
-                    if (auto popup = overlay_wp.lock()) popup->base::detach();
-                    if (auto card = focus_wp.lock())
+                    if (auto popup = popup_ref->lock()) popup->base::detach();
+                    if (auto dialog = focus_back_wp.lock())
                     {
-                        pro::focus::set(card, win.bell::indexer.luafx.get_gear().id, solo::on);
-                        card->base::deface();
+                        pro::focus::set(dialog, gear_id, solo::on);
+                        dialog->base::deface();
                     }
                 });
             }
         };
-        overlay->attach(ui::mock::ctor())->invoke([finish](auto& boss)
-        {
-            auto myid = boss.bell::id;
-            boss.LISTEN(tier::release, e2::render::background::any, parent_canvas, -, (myid))
-            {
-                parent_canvas.fill([myid](cell& c){ c.bgc().faint(); c.fgc().faint(); c.link(myid); });
-            };
-            boss.on(tier::mouserelease, input::key::LeftClick, [finish](hids& gear)
-            {
-                finish();
-                gear.dismiss();
-            });
-        });
 
-        auto card_layer = overlay->attach(ui::cake::ctor())
-            ->alignment({ snap::center, snap::center })
-            ->limits({ 52, 16 }, { 72, 16 });
-        auto card_layer_wp = ptr::shadow(card_layer);
-        auto first_input = std::make_shared<netxs::wptr<ui::base>>();
-        auto card = card_layer->attach(ui::mock::ctor())
-            ->active()
-            ->plugin<pro::mouse>()
-            ->plugin<pro::focus>(pro::focus::mode::focusable)
-            ->plugin<pro::keybd>();
-        card->invoke([&parent, edit_index, finish, card_layer_wp, first_input](auto& boss)
+        auto show_error = [state](text error)
         {
-            auto& st = boss.base::field(site_editor_state{});
-            st.parent = &parent;
-            st.edit_index = edit_index;
-            if (edit_index >= 0 && edit_index < (si32)parent.draft.sites.size())
+            state->error = std::move(error);
+            if (auto label = state->error_wp.lock())
             {
-                auto const& site = parent.draft.sites[(size_t)edit_index];
-                st.value = { site.name, site.host, std::to_string(site.port), site.user, site.pass };
+                label->base::hidden = faux;
+                label->base::deface();
             }
-            else st.value[sd::sf_port] = "22";
-
-            auto submit = [&st, &boss, finish]
+            if (auto separator = state->error_separator_wp.lock())
+                separator->base::hidden = faux;
+            if (auto popup = state->popup_wp.lock())
             {
-                if (st.done || !st.parent) return;
-                auto& parent = *st.parent;
-                auto name = st.value[sd::sf_name];
-                auto host = st.value[sd::sf_host];
-                if (name.empty()) { st.error = "Site Name is required."; boss.base::deface(); return; }
-                if (host.empty()) { st.error = "Host is required."; boss.base::deface(); return; }
-                if (!valid_site_host(host))
+                popup->base::deface();
+                popup->base::reflow();
+            }
+        };
+        auto submit = [state, show_error, finish]
+        {
+            if (state->done || !state->parent) return;
+            auto& parent_state = *state->parent;
+            auto name = state->value[settings_site::name];
+            auto host = state->value[settings_site::host];
+            if (host.empty())
+            {
+                show_error("Host is required.");
+                return;
+            }
+            if (!valid_site_host(host))
+            {
+                show_error("Host must be a valid hostname, IPv4, or IPv6 address.");
+                return;
+            }
+            auto port = si32{ 22 };
+            auto const& port_text = state->value[settings_site::port];
+            if (!port_text.empty())
+            {
+                auto parsed = si64{};
+                for (auto c : port_text)
                 {
-                    st.error = "Host must be a valid hostname, IPv4, or IPv6 address.";
-                    boss.base::deface();
+                    if (c < '0' || c > '9')
+                    {
+                        show_error("Port must be a number from 1 to 65535.");
+                        return;
+                    }
+                    parsed = parsed * 10 + (c - '0');
+                    if (parsed > 65535) break;
+                }
+                if (parsed < 1 || parsed > 65535)
+                {
+                    show_error("Port must be a number from 1 to 65535.");
                     return;
                 }
-                for (auto i = si32{}; i < (si32)parent.draft.sites.size(); ++i)
-                    if (i != st.edit_index && parent.draft.sites[(size_t)i].name == name)
-                    {
-                        st.error = "Site Name must be unique.";
-                        boss.base::deface();
-                        return;
-                    }
-                auto port = si32{ 22 };
-                auto const& port_text = st.value[sd::sf_port];
-                if (!port_text.empty())
-                {
-                    auto parsed = si64{};
-                    for (auto c : port_text)
-                    {
-                        if (c < '0' || c > '9')
-                        {
-                            st.error = "Port must be a number from 1 to 65535.";
-                            boss.base::deface();
-                            return;
-                        }
-                        parsed = parsed * 10 + (c - '0');
-                        if (parsed > 65535) break;
-                    }
-                    if (parsed < 1 || parsed > 65535)
-                    {
-                        st.error = "Port must be a number from 1 to 65535.";
-                        boss.base::deface();
-                        return;
-                    }
-                    port = (si32)parsed;
-                }
-                auto site = saved_site{
-                    std::move(name),
-                    std::move(host),
-                    port,
-                    st.value[sd::sf_user],
-                    st.value[sd::sf_pass],
-                };
-                if (st.edit_index >= 0 && st.edit_index < (si32)parent.draft.sites.size())
-                {
-                    parent.draft.sites[(size_t)st.edit_index] = std::move(site);
-                    parent.site_marked = { st.edit_index };
-                }
-                else
-                {
-                    parent.draft.sites.push_back(std::move(site));
-                    parent.site_marked = { (si32)parent.draft.sites.size() - 1 };
-                }
-                ++parent.site_table_revision;
-                if (auto table = parent.site_table_wp.lock()) table->base::deface();
-                sd_site_selection_changed(parent);
-                if (auto parent_card = parent.card_wp.lock()) parent_card->base::deface();
-                st.done = true;
-                finish();
-            };
-            auto cancel = [&st, finish]
-            {
-                if (st.done) return;
-                st.done = true;
-                finish();
-            };
-
-            if (auto layer = card_layer_wp.lock())
-            {
-                for (auto i = si32{}; i < sd::sf_count; ++i)
-                {
-                    auto input = make_input({
-                        .value = [&st, i]{ return st.value[(size_t)i]; },
-                        .on_change = [&st, i, &boss](text value)
-                        {
-                            st.value[(size_t)i] = std::move(value);
-                            if (!st.error.empty()) { st.error.clear(); boss.base::deface(); }
-                        },
-                        .on_submit = [submit](text){ submit(); },
-                        .on_cancel = [cancel]{ cancel(); },
-                        .secret = i == sd::sf_pass,
-                        // Keep Port unfiltered so submit can distinguish an omitted value (default
-                        // 22) from invalid text and report the validation error explicitly.
-                        .digits_only = false,
-                        .focus_on_start = i == sd::sf_name,
-                        .palette = { .bg = theme::bg, .text_fg = theme::text_fg,
-                                     .muted_fg = theme::subtext, .active = theme::sel_bg_act },
-                    });
-                    st.input_wp[(size_t)i] = ptr::shadow(input.widget);
-                    if (i == sd::sf_name) *first_input = st.input_wp[(size_t)i];
-                    layer->base::attach(input.widget);
-                }
-                auto ok = make_button({
-                    .label = []{ return text{ " OK " }; },
-                    .on_activate = [submit](hids&, ui::base&){ submit(); },
-                });
-                st.ok_wp = ptr::shadow(ok.widget);
-                layer->base::attach(ok.widget);
-                auto cancel_button = make_button({
-                    .label = []{ return text{ " Cancel " }; },
-                    .on_activate = [cancel](hids&, ui::base&){ cancel(); },
-                });
-                st.cancel_wp = ptr::shadow(cancel_button.widget);
-                layer->base::attach(cancel_button.widget);
+                port = (si32)parsed;
             }
-            boss.LISTEN(tier::release, e2::render::any, parent_canvas)
-            {
-                sd_site_editor_render(st, parent_canvas, boss.base::size());
+
+            if (name.empty())
+                name = state->value[settings_site::user] + "@" + host
+                     + ":" + std::to_string(port);
+            for (auto row = si32{}; row < (si32)parent_state.draft.sites.size(); ++row)
+                if (row != state->edit_index
+                 && parent_state.draft.sites[(size_t)row].name == name)
+                {
+                    show_error("Site Name must be unique.");
+                    return;
+                }
+
+            auto site = saved_site{
+                std::move(name),
+                std::move(host),
+                port,
+                state->value[settings_site::user],
+                state->value[settings_site::password],
             };
-            boss.LISTEN(tier::preview, input::events::keybd::any, gear, -, (submit, cancel))
+            if (state->edit_index >= 0
+             && state->edit_index < (si32)parent_state.draft.sites.size())
             {
-                if (gear.payload != input::keybd::type::keypress) return;
-                if (gear.keystat == input::key::released || gear.keystat == input::key::interrupted) return;
-                if (gear.keybd::handled) return;
-                auto key = gear.keybd::generic();
-                if      (key == input::key::Esc)      { gear.set_handled(); cancel(); }
-                else if (key == input::key::KeyEnter) { gear.set_handled(); submit(); }
-            };
-        });
-        if (auto window = parent.window_wp.lock())
+                parent_state.draft.sites[(size_t)state->edit_index] = std::move(site);
+                parent_state.site_selection = { state->edit_index };
+            }
+            else
+            {
+                parent_state.draft.sites.push_back(std::move(site));
+                parent_state.site_selection = {
+                    (si32)parent_state.draft.sites.size() - 1
+                };
+            }
+            ++parent_state.site_table_revision;
+            if (auto table = parent_state.site_table_wp.lock()) table->base::deface();
+            settings_site_selection_changed(state->parent);
+            state->done = true;
+            finish();
+        };
+        auto cancel = [state, finish]
         {
-            auto gear_id = window->bell::indexer.luafx.get_gear().id;
-            window->base::enqueue([card_wp = ptr::shadow(card), first_input, gear_id](auto&)
+            if (std::exchange(state->done, true)) return;
+            finish();
+        };
+
+        auto label_width = si32{};
+        for (auto label : settings_site::field_labels)
+            label_width = std::max(label_width, cell_width(label));
+        auto fields = grid::ctor({
+            .columns = {
+                { .weight = 0, .minimum = label_width, .maximum = label_width },
+                { .weight = 0, .minimum = 1, .maximum = 1 },
+                { .weight = 1, .minimum = 1 },
+            },
+            .rows = std::vector<grid_track>((size_t)settings_site::field_count,
+                { .weight = 0, .minimum = 1, .maximum = 1 }),
+            .handle_mode = grid_handle_mode::hidden,
+        });
+        auto first_input = netxs::wptr<ui::base>{};
+        for (auto field = si32{}; field < settings_site::field_count; ++field)
+        {
+            fields->attach(make_settings_label(settings_site::field_labels[(size_t)field]),
+                           { .column = 0, .row = field });
+            auto input = make_input({
+                .value = [state, field]{ return state->value[(size_t)field]; },
+                .on_change = [state, field](text value)
+                {
+                    state->value[(size_t)field] = std::move(value);
+                    if (!state->error.empty())
+                    {
+                        state->error.clear();
+                        if (auto label = state->error_wp.lock())
+                        {
+                            label->base::hidden = true;
+                            label->base::deface();
+                        }
+                        if (auto separator = state->error_separator_wp.lock())
+                            separator->base::hidden = true;
+                        if (auto popup = state->popup_wp.lock())
+                        {
+                            popup->base::deface();
+                            popup->base::reflow();
+                        }
+                    }
+                },
+                .on_submit = [submit](text){ submit(); },
+                .on_cancel = cancel,
+                .secret = field == settings_site::password,
+                .digits_only = field == settings_site::port,
+                .focus_on_start = field == settings_site::name,
+                .palette = {
+                    .bg = theme::bg,
+                    .text_fg = theme::text_fg,
+                    .muted_fg = theme::subtext,
+                    .active = theme::sel_bg_act,
+                },
+            });
+            if (field == settings_site::name) first_input = ptr::shadow(input.widget);
+            fields->attach(std::move(input), { .column = 2, .row = field });
+        }
+
+        auto content = flex::ctor({
+            .direction = flex_direction::column,
+            .column_padding_width = 2,
+            .row_padding_height = 1,
+        });
+        content->attach(component{ fields }, {
+            .shrink = 0,
+            .basis = settings_site::field_count,
+            .minimum = settings_site::field_count,
+            .maximum = settings_site::field_count,
+        });
+        auto error_separator = content->attach_separator(1);
+        error_separator->base::hidden = true;
+        state->error_separator_wp = ptr::shadow(error_separator);
+        auto error = make_label({
+            .value = [state]{ return state->error; },
+            .palette = { .text = theme::err_fg },
+        });
+        error.widget->base::hidden = true;
+        state->error_wp = ptr::shadow(error.widget);
+        content->attach(std::move(error), {
+            .shrink = 0,
+            .basis = 1,
+            .minimum = 1,
+            .maximum = 1,
+        });
+
+        auto buttons = flex::ctor({
+            .direction = flex_direction::row,
+            .justify_content = flex_justify::end,
+            .align_items = flex_align::stretch,
+            .column_gap = 1,
+        });
+        buttons->attach(make_button({
+            .label = []{ return text{ " OK " }; },
+            .on_activate = [submit](hids&, ui::base&){ submit(); },
+        }), { .basis = 6, .minimum = 6, .maximum = 6 });
+        buttons->attach(make_button({
+            .label = []{ return text{ " Cancel " }; },
+            .on_activate = [cancel](hids&, ui::base&){ cancel(); },
+        }), { .basis = 10, .minimum = 10, .maximum = 10 });
+
+        auto popup = make_dialog({
+            .title = make_label({
+                .value = [title = text{ edit_index < 0 ? "Add SFTP Site"
+                                                       : "Edit SFTP Site" }]
+                {
+                    return title;
+                },
+                .palette = {
+                    .text = theme::title_fg_act,
+                    .background = theme::header,
+                },
+            }),
+            .content = { content },
+            .buttons = { buttons },
+            .position = dialog_anchor::center,
+            .size = {
+                .width = dialog_length::cells(64),
+            },
+            .minimum = { 52, 3 },
+            .maximum = { 72, -1 },
+            .fit_content_height = true,
+            .on_cancel = cancel,
+        });
+        *popup_ref = ptr::shadow(popup.widget);
+        state->popup_wp = *popup_ref;
+
+        if (auto window = parent->window_wp.lock())
+        {
+            window->base::enqueue([first_input, gear_id](auto&)
             {
-                if (auto input = first_input->lock()) pro::focus::set(input, gear_id, solo::on);
-                else if (auto editor = card_wp.lock()) pro::focus::set(editor, gear_id, solo::on);
+                if (auto input = first_input.lock()) pro::focus::set(input, gear_id, solo::on);
             });
         }
-        return overlay;
+        return popup.widget;
     }
 
-    inline void sd_open_site_editor(settings_state& st, si32 edit_index)
+    inline void settings_open_site_editor(
+        std::shared_ptr<settings_dialog_state> const& state,
+        si32 edit_index)
     {
-        auto window = st.window_wp.lock();
-        if (!window) return;
-        if (edit_index >= (si32)st.draft.sites.size()) return;
-        window->base::attach(make_site_editor(st, edit_index));
+        auto window = state->window_wp.lock();
+        if (!window || edit_index >= (si32)state->draft.sites.size()) return;
+        window->base::attach(make_settings_site_editor(state, edit_index));
     }
 
-    inline auto sd_site_table_cfg(settings_state& st) -> table_cfg
+    inline auto make_settings_site_table_cfg(
+        std::shared_ptr<settings_dialog_state> const& state,
+        std::function<void()> close) -> table_cfg
     {
-        auto stp = &st;
         auto cfg = table_cfg{};
-        cfg.deletion.window_wp = st.window_wp;
+        cfg.deletion.window_wp = state->window_wp;
         cfg.palette = table_palette{
-            .bg         = theme::bg,
-            .header     = theme::surface,
-            .text_fg    = theme::text_fg,
-            .subtext    = theme::subtext,
-            .sel_bg     = theme::sel_bg,
+            .bg = theme::bg,
+            .header = theme::surface,
+            .text_fg = theme::text_fg,
+            .subtext = theme::subtext,
+            .sel_bg = theme::sel_bg,
             .sel_bg_act = theme::sel_bg_act,
-            .sort_fg    = theme::sort_fg,
-            .sb_track   = theme::sb_track,
-            .sb_thumb   = theme::sb_thumb,
-            .sb_hover   = theme::sb_hover,
-            .sb_drag    = theme::sb_drag,
+            .sort_fg = theme::sort_fg,
+            .sb_track = theme::sb_track,
+            .sb_thumb = theme::sb_thumb,
+            .sb_hover = theme::sb_hover,
+            .sb_drag = theme::sb_drag,
         };
-        cfg.columns = [stp]
+        cfg.columns = [state]
         {
             auto table = qtable{};
-            for (auto i = si32{}; i < sd::site_ncol; ++i)
+            for (auto column = si32{}; column < (si32)settings_site::headers.size(); ++column)
             {
                 table.add_column(qtable::column{
-                    .title = text{ sd::site_headers[(size_t)i] },
-                    .width = stp->site_col_w[(size_t)i],
-                    .right = i == 2,
+                    .title = text{ settings_site::headers[(size_t)column] },
+                    .width = state->site_column_widths[(size_t)column],
+                    .right = column == 2,
                     .resizable = true,
-                    .key = i,
-                }, stp->site_col_shown[(size_t)i], text{ sd::site_menu_headers[(size_t)i] });
+                    .key = column,
+                }, state->site_columns_shown[(size_t)column],
+                   text{ settings_site::menu_headers[(size_t)column] });
             }
-            table.on_show_column = [stp](si32 key, bool shown)
+            table.on_show_column = [state](si32 column, bool shown)
             {
-                if (key >= 0 && key < sd::site_ncol) stp->site_col_shown[(size_t)key] = shown;
+                if (column >= 0 && column < (si32)settings_site::headers.size())
+                    state->site_columns_shown[(size_t)column] = shown;
             };
-            table.on_resize_column = [stp](si32 key, si32 width)
+            table.on_resize_column = [state](si32 column, si32 width)
             {
-                if (key >= 0 && key < sd::site_ncol) stp->site_col_w[(size_t)key] = width;
+                if (column >= 0 && column < (si32)settings_site::headers.size())
+                    state->site_column_widths[(size_t)column] = width;
             };
-            table.autofit = [stp](si32 key)
+            table.autofit = [state](si32 column)
             {
-                return key >= 0 && key < sd::site_ncol ? sd_site_col_content_w(*stp, key) : si32{};
+                return column >= 0 && column < (si32)settings_site::headers.size()
+                     ? settings_site_column_content_width(*state, column)
+                     : si32{};
             };
             return table;
         };
-        cfg.row_count = [stp]{ return (si32)stp->draft.sites.size(); };
-        cfg.viewport.behavior = [stp]{ return table_viewport_refresh{ stp->site_table_revision }; };
-        cfg.cell = [stp](si32 row, si32 key)
+        cfg.row_count = [state]{ return (si32)state->draft.sites.size(); };
+        cfg.viewport.behavior = [state]
         {
-            return table_cell{ sd_site_cell(*stp, key, row), theme::text_fg };
+            return table_viewport_refresh{ state->site_table_revision };
         };
-        cfg.sort.compare = [stp](si32 a, si32 b, si32 key)
+        cfg.cell = [state](si32 row, si32 column)
         {
-            if (key < 0 || key >= sd::site_ncol) return si32{};
-            if (key == 2)
+            return table_cell{ settings_site_cell(*state, column, row), theme::text_fg };
+        };
+        cfg.sort.compare = [state](si32 left, si32 right, si32 column)
+        {
+            if (column < 0 || column >= (si32)settings_site::headers.size()) return si32{};
+            if (column == 2)
             {
-                auto lhs = stp->draft.sites[(size_t)a].port;
-                auto rhs = stp->draft.sites[(size_t)b].port;
+                auto lhs = state->draft.sites[(size_t)left].port;
+                auto rhs = state->draft.sites[(size_t)right].port;
                 return lhs < rhs ? -1 : lhs > rhs ? 1 : 0;
             }
-            auto lhs = sd_site_cell(*stp, key, a); utf::to_lower(lhs);
-            auto rhs = sd_site_cell(*stp, key, b); utf::to_lower(rhs);
+            auto lhs = settings_site_cell(*state, column, left); utf::to_lower(lhs);
+            auto rhs = settings_site_cell(*state, column, right); utf::to_lower(rhs);
             return lhs < rhs ? -1 : lhs > rhs ? 1 : 0;
         };
-        cfg.selection = [stp]
+        cfg.selection = [state]
         {
-            auto sel = qsel_cfg{};
-            sel.key_count = [stp]{ return (si32)stp->draft.sites.size(); };
-            sel.is_selected = [stp](si32 key){ return stp->site_marked.contains(key); };
-            sel.on_select = [stp](si32 key, bool on)
+            auto selection = qsel_cfg{};
+            selection.key_count = [state]{ return (si32)state->draft.sites.size(); };
+            selection.is_selected = [state](si32 key)
             {
-                if (key < 0 || key >= (si32)stp->draft.sites.size()) return;
-                if (on) stp->site_marked.insert(key);
-                else    stp->site_marked.erase(key);
-                sd_site_selection_changed(*stp);
+                return state->site_selection.contains(key);
             };
-            sel.on_clear = [stp]
+            selection.on_select = [state](si32 key, bool selected)
             {
-                stp->site_marked.clear();
-                sd_site_selection_changed(*stp);
+                if (key < 0 || key >= (si32)state->draft.sites.size()) return;
+                if (selected) state->site_selection.insert(key);
+                else          state->site_selection.erase(key);
+                settings_site_selection_changed(state);
             };
-            sel.has_selection = [stp]{ return !stp->site_marked.empty(); };
-            sel.in_scope = [stp](si32 key){ return key >= 0 && key < (si32)stp->draft.sites.size(); };
-            sel.row_count = [stp]{ return (si32)stp->draft.sites.size(); };
-            sel.key_of_row = [stp](si32 row)
+            selection.on_clear = [state]
             {
-                return row >= 0 && row < (si32)stp->draft.sites.size() ? row : -1;
+                state->site_selection.clear();
+                settings_site_selection_changed(state);
             };
-            return sel;
+            selection.has_selection = [state]{ return !state->site_selection.empty(); };
+            selection.in_scope = [state](si32 key)
+            {
+                return key >= 0 && key < (si32)state->draft.sites.size();
+            };
+            selection.row_count = [state]{ return (si32)state->draft.sites.size(); };
+            selection.key_of_row = [state](si32 row)
+            {
+                return row >= 0 && row < (si32)state->draft.sites.size() ? row : -1;
+            };
+            return selection;
         };
-        cfg.on_activate = [stp](si32 row)
+        cfg.on_activate = [state](si32 row)
         {
-            if (sd_single_site(*stp) == row) sd_open_site_editor(*stp, row);
+            if (settings_single_site(*state) == row) settings_open_site_editor(state, row);
         };
-        cfg.on_key = [stp](hids& gear, netxs::wptr<ui::base>)
+        cfg.on_key = [close = std::move(close)](hids& gear, netxs::wptr<ui::base>)
         {
-            auto key = gear.keybd::generic();
-            if (key == input::key::Esc)
+            if (gear.keybd::generic() == input::key::Esc)
             {
                 gear.set_handled();
-                sd_close(*stp);
+                close();
                 return table_viewport_action{ table_viewport_action::handled };
             }
             return table_viewport_action{};
         };
         cfg.deletion.enabled = true;
-        cfg.deletion.on_remove_selected = [stp](netxs::wptr<ui::base>){ sd_remove_sites(*stp); };
+        cfg.deletion.on_remove_selected = [state](netxs::wptr<ui::base>)
+        {
+            settings_remove_sites(state);
+        };
         cfg.empty_text = []{ return text{ "No sites configured." }; };
         cfg.behavior.wide_hit = true;
         return cfg;
     }
 
-    // Build the threshold-unit dropdown menu (item 3): one radio row per unit (Byte..TiB). The
-    // selected row is published via radio_checked; each row's action sets st.threshold_unit.
-    inline auto sd_build_unit_menu(settings_state& st, netxs::wptr<ui::base> card_wp) -> std::vector<app::shared::menu::item>
+    inline auto make_site_page(std::shared_ptr<settings_dialog_state> const& state,
+                               std::function<void()> close) -> component
     {
-        namespace m = app::shared::menu;
-        auto items = std::vector<m::item>{};
-        auto stp = &st;
-        for (auto i = si32{}; i < sftp_unit_count; ++i)
-        {
-            auto row = m::item{ .alive = true, .label = text{ sftp_unit_label(i) }, .checked = (i == st.threshold_unit) };
-            row.action = [stp, card_wp, i](hids&)
-            {
-                stp->threshold_unit = i;
-                if (auto c = card_wp.lock()) c->base::deface();
-            };
-            items.push_back(std::move(row));
-        }
-        return items;
-    }
+        auto table = make_table(make_settings_site_table_cfg(state, std::move(close)));
+        table.widget->limits({ 24, 5 }, { -1, -1 });
+        state->site_table_wp = ptr::shadow(table.widget);
 
-    inline auto sd_build_allocation_menu(settings_state& st, netxs::wptr<ui::base> card_wp) -> std::vector<app::shared::menu::item>
-    {
-        namespace m = app::shared::menu;
-        auto items = std::vector<m::item>{};
-        auto stp = &st;
-        for (auto i = si32{}; i < allocation_count; ++i)
-        {
-            auto row = m::item{ .alive = true,
-                                .label = text{ transfer_allocation_label(i) },
-                                .checked = i == st.transfer_allocation };
-            row.action = [stp, card_wp, i](hids&)
-            {
-                stp->transfer_allocation = i;
-                if (auto c = card_wp.lock()) c->base::deface();
-            };
-            items.push_back(std::move(row));
-        }
-        return items;
-    }
-
-    // Transfer-hash dropdown (Settings -> SFTP -> Hash verification): "None" disables hashing on
-    // transfer; any algorithm enables it with that algorithm. Index 0 = None, 1..N = algorithms.
-    inline auto sd_build_hash_menu(settings_state& st, netxs::wptr<ui::base> card_wp) -> std::vector<app::shared::menu::item>
-    {
-        namespace m = app::shared::menu;
-        auto items = std::vector<m::item>{};
-        auto stp = &st;
-        auto deface = [card_wp]{ if (auto c = card_wp.lock()) c->base::deface(); };
-        auto none = m::item{ .alive = true, .label = text{ sd::hash_none }, .checked = !st.hash_on_transfer };
-        none.action = [stp, deface](hids&){ stp->hash_on_transfer = faux; deface(); };
-        items.push_back(std::move(none));
-        for (auto i = si32{}; i < hash_algo_count; ++i)
-        {
-            auto row = m::item{ .alive = true, .label = text{ hash_algo_label(i) }, .checked = (st.hash_on_transfer && i == st.hash_algo) };
-            row.action = [stp, deface, i](hids&){ stp->hash_on_transfer = true; stp->hash_algo = i; deface(); };
-            items.push_back(std::move(row));
-        }
-        return items;
-    }
-
-    // Debug-level dropdown (Settings -> Debug): 0=None .. 4=Debug.
-    inline auto sd_build_log_level_menu(settings_state& st, netxs::wptr<ui::base> card_wp) -> std::vector<app::shared::menu::item>
-    {
-        namespace m = app::shared::menu;
-        auto items = std::vector<m::item>{};
-        auto stp = &st;
-        auto deface = [card_wp]{ if (auto c = card_wp.lock()) c->base::deface(); };
-        for (auto i = si32{}; i < 5; ++i)
-        {
-            auto label = std::to_string(i) + " - " + text{ log_debug_label(i) };
-            auto row = m::item{ .alive = true, .label = label, .checked = (st.log_debug_level == i) };
-            row.action = [stp, deface, i](hids&){ stp->log_debug_level = i; deface(); };
-            items.push_back(std::move(row));
-        }
-        return items;
-    }
-
-    // "Add key file..." picker: the reusable Open-mode file picker (panes.hpp open_file_picker),
-    // seeded at the user's home and Windows drive-aware. Activating a file (double-click / Enter /
-    // Open) adds it as a key; an encrypted non-ppk key then converts (see sd_add_key). The settings
-    // card outlives the picker (it stays attached beneath), so capturing &st in on_accept is safe.
-    inline void sd_open_key_picker(settings_state& st, id_t gear_id = {})
-    {
-        open_file_picker(st.window_wp, st.card_wp, gear_id, picker_mode::open, "Add key file", user_home_dir(), {},
-                         [stp = &st](text const& path){ sd_add_key(*stp, path); });
-    }
-
-    // Build the Settings dialog overlay (dimming scrim + centered self-handling card).
-    // Build the Settings dialog overlay. `card_out` (when non-null) receives the inner card
-    // widget so the caller can grab keyboard focus on it after attaching (see OpenSettingsDialog).
-    inline auto make_settings_dialog(sftp_remote* ctrl, netxs::wptr<ui::base> window_wp, ui::sptr* card_out = nullptr) -> ui::sptr
-    {
-        auto overlay = ui::cake::ctor()->alignment({ snap::both, snap::both });
-        auto overlay_wp = ptr::shadow(overlay);
-        // Dimming backdrop (click outside cancels).
-        overlay->attach(ui::mock::ctor())->invoke([overlay_wp, window_wp](auto& boss)
-        {
-            auto myid = boss.bell::id;
-            boss.LISTEN(tier::release, e2::render::background::any, parent_canvas, -, (myid))
-            {
-                parent_canvas.fill([myid](cell& c){ c.bgc().faint(); c.fgc().faint(); c.link(myid); });
-            };
-            boss.on(tier::mouserelease, input::key::LeftClick, [overlay_wp, window_wp](hids& gear)
-            {
-                if (auto w = window_wp.lock()) w->base::property("parvion.settings.active", faux) = faux;
-                if (auto o = overlay_wp.lock()) o->base::detach();
-                gear.dismiss();
-            });
+        auto buttons = flex::ctor({
+            .direction = flex_direction::row,
+            .align_items = flex_align::stretch,
+            .column_gap = 1,
         });
-        // Centered card.
-        // The card's minimum width is negotiated from the form's internal components (see
-        // sd_min_width): wide enough that no group-box content ever overflows its border.
-        auto minw = sd_min_width();
-        auto card_layer = overlay->attach(ui::cake::ctor())
-            ->alignment({ snap::center, snap::center })
-            ->limits({ minw, 24 }, { std::max(minw, 104), 42 });
-        // The manually painted form is the back layer; the shared key table is attached as a
-        // separately focusable front layer once the form state has been initialized below.
-        auto card = card_layer->attach(ui::mock::ctor())
-            ->active()
-            ->plugin<pro::mouse>()
-            ->plugin<pro::focus>(pro::focus::mode::focused)
-            ->plugin<pro::keybd>();
-        auto card_layer_wp = ptr::shadow(card_layer);
-        card->invoke([ctrl, window_wp, overlay_wp, card_layer_wp](auto& boss)
-        {
-            auto& st = boss.base::field(settings_state{});
-            st.ctrl = ctrl;
-            st.window_wp = window_wp;
-            st.overlay_wp = overlay_wp;
-            st.card_wp = ptr::shadow(boss.This());
-            st.seed();
-            // Re-parse every persisted key so its Comment/Data populate the table on every open
-            // (FileZilla re-runs LoadKeyFile for each key when the SFTP page is shown). Without
-            // this, reopening Settings showed blank Comment/Data for already-added keys.
-            for (auto i = size_t{}; i < st.draft.keyfiles.size(); ++i)
+        buttons->limits({ 0, 1 }, { -1, 1 });
+        buttons->attach(make_button({
+            .label = []{ return text{ " Add " }; },
+            .on_activate = [state](hids&, ui::base&)
             {
-                auto comment = text{}, data = text{};
-                sd_keyinfo(st.draft.keyfiles[i], comment, data);
-                if (i < st.key_comment.size()) st.key_comment[i] = comment;
-                if (i < st.key_data.size())    st.key_data[i]    = data;
-            }
-
-            auto key_table = make_table(sd_key_table_cfg(st));
-            st.key_table_wp = ptr::shadow(key_table.widget);
-            key_table.widget->base::hidden = true; // Only the SFTP tab exposes this card layer.
-            auto site_table = make_table(sd_site_table_cfg(st));
-            st.site_table_wp = ptr::shadow(site_table.widget);
-            site_table.widget->base::hidden = true; // Only the Site tab exposes this card layer.
-            if (auto layer = card_layer_wp.lock())
+                settings_open_site_editor(state, -1);
+            },
+        }), { .basis = 5, .minimum = 5, .maximum = 5 });
+        auto edit = make_button({
+            .label = []{ return text{ " Edit " }; },
+            .on_activate = [state](hids&, ui::base&)
             {
-                layer->base::attach(key_table.widget);
-                layer->base::attach(site_table.widget);
-                for (auto i = si32{}; i < sd::f_count; ++i)
-                {
-                    auto input = make_input({
-                        .value = [&st, i]{ return st.fields[(size_t)i].val; },
-                        .on_change = [&st, i](text value){ st.fields[(size_t)i].val = std::move(value); },
-                        .on_submit = [&st](text){ sd_accept(st); },
-                        .on_cancel = [&st]{ sd_close(st); },
-                        .digits_only = true,
-                        .palette = { .bg = theme::bg, .text_fg = theme::text_fg,
-                                     .muted_fg = theme::subtext, .active = theme::sel_bg_act },
-                    });
-                    st.input_wp[(size_t)i] = ptr::shadow(input.widget);
-                    layer->base::attach(input.widget);
-                }
-                auto attach_button = [&](button_cfg cfg)
-                {
-                    auto button = make_button(std::move(cfg));
-                    auto weak = ptr::shadow(button.widget);
-                    layer->base::attach(button.widget);
-                    return weak;
-                };
-                st.button_ok_wp = attach_button({
-                    .label = []{ return text{ " OK " }; },
-                    .on_activate = [&st](hids&, ui::base&){ sd_accept(st); },
-                });
-                st.button_cancel_wp = attach_button({
-                    .label = []{ return text{ " Cancel " }; },
-                    .on_activate = [&st](hids&, ui::base&){ sd_close(st); },
-                });
-                st.button_add_wp = attach_button({
-                    .label = []{ return text{ sd::btn_addkey }; },
-                    .on_activate = [&st](hids& gear, ui::base&){ sd_open_key_picker(st, gear.id); },
-                });
-                st.button_remove_wp = attach_button({
-                    .label = []{ return text{ sd::btn_removekey }; },
-                    .on_activate = [&st](hids&, ui::base&){ sd_remove_keys(st); },
-                });
-                st.button_addsite_wp = attach_button({
-                    .label = []{ return text{ sd::btn_addsite }; },
-                    .on_activate = [&st](hids&, ui::base&){ sd_open_site_editor(st, -1); },
-                });
-                st.button_editsite_wp = attach_button({
-                    .label = []{ return text{ sd::btn_editsite }; },
-                    .on_activate = [&st](hids&, ui::base&)
-                    {
-                        if (auto selected = sd_single_site(st); selected >= 0)
-                            sd_open_site_editor(st, selected);
-                    },
-                    .enabled = [&st]{ return sd_single_site(st) >= 0; },
-                });
-                st.button_removesite_wp = attach_button({
-                    .label = []{ return text{ sd::btn_removesite }; },
-                    .on_activate = [&st](hids&, ui::base&){ sd_remove_sites(st); },
-                });
-                st.button_unit_wp = attach_button({
-                    .label = [&st]{ return text{ " " } + text{ sftp_unit_label(st.threshold_unit) } + " ▾ "; },
-                    .on_activate = [&st](hids&, ui::base& button)
-                    {
-                        app::shared::menu::open_dropdown_popup(button, sd_build_unit_menu(st, st.card_wp),
-                            { .source = app::shared::menu::popup_source::control,
-                              .radio = true,
-                              .radio_checked = st.threshold_unit });
-                    },
-                });
-                st.button_allocation_wp = attach_button({
-                    .label = [&st]{ return text{ " " } + text{ transfer_allocation_label(st.transfer_allocation) } + " ▾ "; },
-                    .on_activate = [&st](hids&, ui::base& button)
-                    {
-                        app::shared::menu::open_dropdown_popup(button, sd_build_allocation_menu(st, st.card_wp),
-                            { .source = app::shared::menu::popup_source::control,
-                              .radio = true,
-                              .radio_checked = st.transfer_allocation });
-                    },
-                });
-                st.button_hash_wp = attach_button({
-                    .label = [&st]
-                    {
-                        return text{ " " }
-                             + text{ st.hash_on_transfer ? hash_algo_label(st.hash_algo) : sd::hash_none }
-                             + " ▾ ";
-                    },
-                    .on_activate = [&st](hids&, ui::base& button)
-                    {
-                        auto selected = st.hash_on_transfer ? st.hash_algo + 1 : 0;
-                        app::shared::menu::open_dropdown_popup(button, sd_build_hash_menu(st, st.card_wp),
-                            { .source = app::shared::menu::popup_source::control,
-                              .radio = true,
-                              .radio_checked = selected });
-                    },
-                });
-                st.button_log_wp = attach_button({
-                    .label = [&st]
-                    {
-                        return text{ " " } + std::to_string(st.log_debug_level)
-                             + " - " + text{ log_debug_label(st.log_debug_level) } + " ▾ ";
-                    },
-                    .on_activate = [&st](hids&, ui::base& button)
-                    {
-                        app::shared::menu::open_dropdown_popup(button, sd_build_log_level_menu(st, st.card_wp),
-                            { .source = app::shared::menu::popup_source::control,
-                              .radio = true,
-                              .radio_checked = st.log_debug_level });
-                    },
-                });
-            }
-
-            boss.LISTEN(tier::release, e2::render::any, parent_canvas)
-            {
-                settings_render(st, parent_canvas, boss.base::size());
-                if (auto table = st.key_table_wp.lock())
-                {
-                    auto show = st.tab == sd::tab_sftp && st.key_table_area.size.x > 0 && st.key_table_area.size.y > 0;
-                    table->base::hidden = !show;
-                    if (show) table->base::extend(st.key_table_area);
-                }
-                if (auto table = st.site_table_wp.lock())
-                {
-                    auto show = st.tab == sd::tab_site && st.site_table_area.size.x > 0 && st.site_table_area.size.y > 0;
-                    table->base::hidden = !show;
-                    if (show) table->base::extend(st.site_table_area);
-                }
-                auto place = [](netxs::wptr<ui::base> const& weak, rect area, bool show)
-                {
-                    if (auto button = weak.lock())
-                    {
-                        show = show && area.size.x > 0 && area.size.y > 0;
-                        button->base::hidden = !show;
-                        if (show) button->base::extend(area);
-                    }
-                };
-                place(st.button_ok_wp,     st.hit.ok,        true);
-                place(st.button_cancel_wp, st.hit.cancel,    true);
-                place(st.button_add_wp,    st.hit.addkey,    st.tab == sd::tab_sftp);
-                place(st.button_remove_wp, st.hit.removekey, st.tab == sd::tab_sftp);
-                place(st.button_addsite_wp, st.hit.addsite, st.tab == sd::tab_site);
-                place(st.button_editsite_wp, st.hit.editsite, st.tab == sd::tab_site);
-                place(st.button_removesite_wp, st.hit.removesite, st.tab == sd::tab_site);
-                place(st.button_unit_wp,   st.hit.unit,      st.tab == sd::tab_sftp);
-                place(st.button_allocation_wp, st.hit.allocation, st.tab == sd::tab_sftp);
-                place(st.button_hash_wp,   st.hit.hash_algo, st.tab == sd::tab_sftp);
-                place(st.button_log_wp,    st.hit.log_level, st.tab == sd::tab_debug);
-                for (auto i = si32{}; i < sd::f_count; ++i)
-                    place(st.input_wp[(size_t)i], st.fields[(size_t)i].box,
-                          st.fields[(size_t)i].tab == st.tab);
-            };
-            boss.on(tier::mouserelease, input::key::LeftDown, [&](hids& gear)
-            {
-                pro::focus::set(boss.This(), gear.id, solo::on);
-                auto mx = (si32)gear.coord.x, my = (si32)gear.coord.y;
-                // Tabs.
-                for (auto i = si32{}; i < sd::tab_count; ++i) if (sd_hit(st.hit.tab_box[i], mx, my))
-                {
-                    if (st.tab != i) st.tab = i;
-                    boss.base::deface(); gear.dismiss(); return;
-                }
-                if (st.tab == sd::tab_sftp)
-                {
-                    if (sd_hit(st.hit.compression, mx, my)) { st.compression = !st.compression; }
-                }
-                else if (st.tab == sd::tab_debug)
-                {
-                    if (sd_hit(st.hit.raw_listing, mx, my)) { st.log_raw_listing = !st.log_raw_listing; }
-                }
-                boss.base::deface();
-            });
-            boss.on(tier::mouserelease, input::key::LeftClick, [&](hids& gear)
-            {
-                pro::focus::set(boss.This(), gear.id, solo::on);
-                boss.base::deface();
-                gear.dismiss();
-            });
-            boss.LISTEN(tier::preview, input::events::keybd::any, gear)
-            {
-                if (gear.payload != input::keybd::type::keypress) return;
-                if (gear.keystat == input::key::released || gear.keystat == input::key::interrupted) return;
-                if (gear.keybd::handled) return;
-                auto k = gear.keybd::generic();
-                if      (k == input::key::Esc)      { gear.set_handled(); sd_close(st); }
-                else if (k == input::key::KeyEnter) { gear.set_handled(); sd_accept(st); }
-            };
+                if (auto selected = settings_single_site(*state); selected >= 0)
+                    settings_open_site_editor(state, selected);
+            },
+            .enabled = [state]{ return settings_single_site(*state) >= 0; },
         });
-        if (card_out) *card_out = card; // Expose the card so the caller can focus it after attach.
-        return overlay;
+        state->site_edit_button_wp = ptr::shadow(edit.widget);
+        buttons->attach(std::move(edit), { .basis = 6, .minimum = 6, .maximum = 6 });
+        auto remove = make_button({
+            .label = []{ return text{ " Remove " }; },
+            .on_activate = [state](hids&, ui::base&){ settings_remove_sites(state); },
+            .enabled = [state]{ return !state->site_selection.empty(); },
+        });
+        state->site_remove_button_wp = ptr::shadow(remove.widget);
+        buttons->attach(std::move(remove), { .basis = 8, .minimum = 8, .maximum = 8 });
+
+        auto content = flex::ctor({
+            .direction = flex_direction::column,
+        });
+        content->attach(make_settings_label(settings_site::help, label_role::hint, true),
+                        { .shrink = 0 });
+        content->attach(make_settings_label(settings_site::sites_label), { .shrink = 0 });
+        content->attach(std::move(table),
+                        { .grow = 1, .shrink = 0, .basis = 5, .minimum = 5 });
+        content->attach_separator(1);
+        content->attach(component{ buttons }, { .shrink = 0 });
+        auto manager = make_groupbox({
+            .title = "Site Manager",
+            .content = { content },
+        });
+
+        auto page = flex::ctor({
+            .direction = flex_direction::column,
+            .row_gap = 1,
+            .column_padding_width = 2,
+            .row_padding_height = 0
+        });
+        page->attach(std::move(manager), { .grow = 1, .shrink = 0 });
+        return { page };
+    }
+
+    inline auto make_debug_page(std::shared_ptr<settings_dialog_state> const& state) -> component
+    {
+        auto levels = std::vector<dropdown_option>{};
+        for (auto level = si32{ log_debug_none }; level <= log_debug_debug; ++level)
+            levels.push_back({ std::to_string(level) + " - " + text{ log_debug_label(level) } });
+        auto level_dropdown = make_dropdown({
+            .options = std::move(levels),
+            .selected = [state]{ return state->log_debug_level; },
+            .on_change = [state](si32 selected){ state->log_debug_level = selected; },
+        });
+        auto level_width = level_dropdown.widget->base::min_sz.x;
+        auto level_fields = grid::ctor({
+            .columns = {
+                { .weight = 0, .minimum = cell_width(settings_debug::level_label),
+                  .maximum = cell_width(settings_debug::level_label) },
+                { .weight = 0, .minimum = 1, .maximum = 1 },
+                { .weight = 0, .minimum = level_width, .maximum = level_width },
+                { .weight = 1 },
+            },
+            .rows = { { .weight = 0, .minimum = 1, .maximum = 1 } },
+            .handle_mode = grid_handle_mode::hidden,
+        });
+        level_fields->attach(make_settings_label(settings_debug::level_label), { .column = 0 });
+        level_fields->attach(std::move(level_dropdown), { .column = 2 });
+
+        auto debugging_content = flex::ctor({ .direction = flex_direction::column });
+        debugging_content->attach(component{ level_fields }, { .shrink = 0 });
+        debugging_content->attach(make_settings_label(settings_debug::help, label_role::hint, true),
+                                  { .shrink = 0 });
+        auto debugging = make_groupbox({
+            .title = "Debugging settings",
+            .content = { debugging_content },
+        });
+        auto listing = make_groupbox({
+            .title = "Directory listing",
+            .content = make_checkbox({
+                .label = []{ return text{ "Show raw directory listing" }; },
+                .checked = [state]{ return state->log_raw_listing; },
+                .on_change = [state](bool checked){ state->log_raw_listing = checked; },
+            }),
+        });
+
+        auto page = flex::ctor({
+            .direction = flex_direction::column,
+            .row_gap = 1,
+            .column_padding_width = 2,
+            .row_padding_height = 0
+        });
+        page->attach(std::move(debugging), { .shrink = 0 });
+        page->attach(std::move(listing), { .shrink = 0 });
+        return { page };
+    }
+
+    inline auto make_settings_dialog(sftp_remote* ctrl,
+                                     netxs::wptr<ui::base> window_wp,
+                                     ui::sptr* card_out = nullptr) -> ui::sptr
+    {
+        auto state = std::make_shared<settings_dialog_state>();
+        state->ctrl = ctrl;
+        state->window_wp = window_wp;
+        if (ctrl) state->draft = ctrl->cfg;
+        state->timeout = std::to_string(state->draft.timeout);
+        state->reconnect_count = std::to_string(state->draft.reconnect_count);
+        state->reconnect_delay = std::to_string(state->draft.reconnect_delay);
+        state->threshold_value = std::to_string(state->draft.threshold_value);
+        state->max_connections = std::to_string(state->draft.max_connections);
+        state->compression = state->draft.compression;
+        state->threshold_unit = state->draft.threshold_unit;
+        state->transfer_allocation = state->draft.transfer_allocation;
+        state->hash_on_transfer = state->draft.hash_on_transfer;
+        state->hash_algo = state->draft.hash_algo;
+        state->log_debug_level = state->draft.log_debug_level;
+        state->log_raw_listing = state->draft.log_raw_listing;
+        state->key_comments.assign(state->draft.keyfiles.size(), text{});
+        state->key_data.assign(state->draft.keyfiles.size(), text{});
+        for (auto index = size_t{}; index < state->draft.keyfiles.size(); ++index)
+        {
+            settings_keyinfo(state->draft.keyfiles[index],
+                             state->key_comments[index], state->key_data[index]);
+        }
+
+        auto clear_guard = [state]
+        {
+            if (auto window = state->window_wp.lock())
+                window->base::property("parvion.settings.active", faux) = faux;
+        };
+        auto close = [state, clear_guard]
+        {
+            if (std::exchange(state->done, true)) return;
+            if (auto dropdown = active_dropdown_popup()) dismiss_dropdown(dropdown);
+            clear_guard();
+            if (auto popup = state->popup_wp.lock()) popup->base::detach();
+        };
+        auto accept = [state, clear_guard]
+        {
+            if (std::exchange(state->done, true)) return;
+            auto parse = [](text const& value)
+            {
+                return value.empty() ? 0 : std::atoi(value.c_str());
+            };
+            state->draft.timeout = parse(state->timeout);
+            state->draft.reconnect_count = parse(state->reconnect_count);
+            state->draft.reconnect_delay = parse(state->reconnect_delay);
+            state->draft.threshold_value = parse(state->threshold_value);
+            state->draft.max_connections = parse(state->max_connections);
+            state->draft.compression = state->compression;
+            state->draft.threshold_unit = state->threshold_unit;
+            state->draft.transfer_allocation = state->transfer_allocation;
+            state->draft.hash_on_transfer = state->hash_on_transfer;
+            state->draft.hash_algo = state->hash_algo;
+            state->draft.log_debug_level = state->log_debug_level;
+            state->draft.log_raw_listing = state->log_raw_listing;
+            state->draft.clamp();
+            if (state->ctrl) state->ctrl->update_settings(state->draft);
+            if (auto dropdown = active_dropdown_popup()) dismiss_dropdown(dropdown);
+            clear_guard();
+            if (auto popup = state->popup_wp.lock()) popup->base::detach();
+        };
+
+        auto scroll_page = [](component content)
+        {
+            auto page = grid::ctor({
+                .columns = { { .weight = 1 } },
+                .rows = { { .weight = 1 } },
+                .handle_mode = grid_handle_mode::hidden,
+                .column_padding_width = 0,
+                .row_padding_height = 1,
+                .border = faux,
+            });
+            page->attach(make_scrollview({ .content = std::move(content) }),
+                         { .column = 0, .row = 0 });
+            return component{ page };
+        };
+        auto pages = std::vector<tab_page_cfg>{};
+        pages.push_back(make_tab_page(scroll_page(make_connection_page(state, accept, close)),
+                                      []{ return text{ "Connection" }; }));
+        pages.push_back(make_tab_page(scroll_page(make_sftp_page(state, accept, close)),
+                                      []{ return text{ "SFTP" }; }));
+        pages.push_back(make_tab_page(scroll_page(make_site_page(state, close)),
+                                      []{ return text{ "Site" }; }));
+        pages.push_back(make_tab_page(scroll_page(make_debug_page(state)),
+                                      []{ return text{ "Debug" }; }));
+        auto tabs = make_tabs({
+            .pages = std::move(pages),
+            .active = 0,
+            .position = tab_position::top,
+        });
+
+        auto title = make_settings_label("Settings", label_role::text, faux, {
+            .text = theme::title_fg,
+            .background = theme::header,
+        });
+        auto buttons = flex::ctor({
+            .direction = flex_direction::row,
+            .justify_content = flex_justify::end,
+            .align_items = flex_align::stretch,
+            .column_gap = 1,
+        });
+        buttons->attach(make_button({
+            .label = []{ return text{ " OK " }; },
+            .on_activate = [accept](hids&, ui::base&){ accept(); },
+        }), { .basis = 6, .minimum = 6, .maximum = 6 });
+        buttons->attach(make_button({
+            .label = []{ return text{ " Cancel " }; },
+            .on_activate = [close](hids&, ui::base&){ close(); },
+        }), { .basis = 10, .minimum = 10, .maximum = 10 });
+
+        auto popup = make_dialog({
+            .title = std::move(title),
+            .content = std::move(tabs),
+            .buttons = { buttons },
+            .position = dialog_anchor::center,
+            .size = {
+                .width = dialog_length::ratio(0.80),
+                .height = dialog_length::ratio(0.80),
+            },
+            .minimum = { 76, 18 },
+            .maximum = { 104, 42 },
+            .on_cancel = [state, clear_guard]
+            {
+                if (!std::exchange(state->done, true))
+                {
+                    if (auto dropdown = active_dropdown_popup()) dismiss_dropdown(dropdown);
+                    clear_guard();
+                }
+            },
+        });
+        state->popup_wp = ptr::shadow(popup.widget);
+        if (card_out) *card_out = popup.widget;
+        return popup.widget;
     }
 }

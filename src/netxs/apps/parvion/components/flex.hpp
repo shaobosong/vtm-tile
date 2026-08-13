@@ -468,6 +468,7 @@ namespace netxs::app::parvion
             auto cross = cross_axis();
             auto minset = main_inset();
             auto cinset = cross_inset();
+            auto available_cross = std::max(0, value(new_area.size, cross) - cinset * 2);
 
             for (auto& entry : items)
             {
@@ -475,6 +476,14 @@ namespace netxs::app::parvion
                 entry.intrinsic = {};
                 if (entry.widget->base::hidden) continue;
                 auto probe = rect{};
+                // A vertical layout already knows the width it will offer its
+                // children.  Probe at that width so wrapping labels and titled
+                // containers can report their width-dependent natural height.
+                if (vertical() && effective_alignment(entry) == flex_align::stretch)
+                {
+                    auto padding = entry.config.padding.l + entry.config.padding.r;
+                    value(probe.size, cross, std::max(0, available_cross - padding));
+                }
                 entry.widget->base::recalc(probe);
                 entry.intrinsic = probe.size;
             }
@@ -482,6 +491,18 @@ namespace netxs::app::parvion
             auto visible = std::vector<size_t>{};
             for (auto index : visual_order)
                 if (!items[index].widget->base::hidden) visible.push_back(index);
+
+            auto preferred_basis = [&](item_entry const& entry)
+            {
+                auto main_padding = vertical()
+                                  ? entry.config.padding.t + entry.config.padding.b
+                                  : entry.config.padding.l + entry.config.padding.r;
+                auto basis = entry.config.basis < 0 ? value(entry.intrinsic, main) + main_padding
+                                                    : std::max(0, entry.config.basis);
+                return std::clamp(basis,
+                                  item_minimum(entry, main),
+                                  std::max(item_minimum(entry, main), item_maximum(entry, main)));
+            };
 
             auto main_minimum = si32{};
             if (!visible.empty())
@@ -497,8 +518,11 @@ namespace netxs::app::parvion
                         main_minimum = std::max(main_minimum, item_minimum(items[index], main));
                 }
             }
+            auto natural_main = main_gap() * std::max(0, (si32)visible.size() - 1);
+            for (auto index : visible) natural_main += preferred_basis(items[index]);
             value(new_area.size, main,
-                  std::max(value(new_area.size, main), main_minimum + minset * 2));
+                  std::max(value(new_area.size, main),
+                           (value(new_area.size, main) == 0 ? natural_main : main_minimum) + minset * 2));
             auto inner_main = std::max(0, value(new_area.size, main) - minset * 2);
 
             auto lines = std::vector<line_entry>{};
@@ -507,9 +531,7 @@ namespace netxs::app::parvion
                 auto& entry = items[index];
                 auto minimum = item_minimum(entry, main);
                 auto maximum = std::max(minimum, item_maximum(entry, main));
-                auto basis = entry.config.basis < 0 ? value(entry.intrinsic, main)
-                                                    : std::max(0, entry.config.basis);
-                basis = std::clamp(basis, minimum, maximum);
+                auto basis = std::clamp(preferred_basis(entry), minimum, maximum);
                 auto needs_line = lines.empty();
                 if (!needs_line && config.wrapping == flex_wrap::wrap)
                 {
@@ -533,6 +555,20 @@ namespace netxs::app::parvion
             auto inner_cross = std::max(0, value(new_area.size, cross) - cinset * 2);
 
             for (auto& line : lines) resolve_line(line, inner_main);
+
+            // A non-wrapping run of non-shrinkable items defines a hard natural
+            // extent.  Let the container grow so scrollviews can observe the
+            // overflow instead of allowing children to overlap outside it.
+            if (config.wrapping == flex_wrap::no_wrap && lines.size() == 1)
+            {
+                auto resolved = main_gap() * std::max(0, (si32)lines.front().sizes.size() - 1)
+                              + std::accumulate(lines.front().sizes.begin(), lines.front().sizes.end(), si32{});
+                if (resolved > inner_main)
+                {
+                    inner_main = resolved;
+                    value(new_area.size, main, inner_main + minset * 2);
+                }
+            }
 
             auto base_cross = cross_gap() * std::max(0, (si32)lines.size() - 1);
             for (auto& line : lines) base_cross += line.cross_size;
@@ -664,6 +700,14 @@ namespace netxs::app::parvion
             if (!widget) return widget;
             retained_components.push_back(std::move(item));
             return attach(widget, setup);
+        }
+
+        // Insert a fixed spacer between the previously attached item and the next
+        // one.  In row flow the spacer is `count` columns wide; in column flow it is
+        // `count` rows tall.  The gap never grows or shrinks.
+        auto attach_separator(si32 count) -> ui::sptr
+        {
+            return attach(ui::mock::ctor(), { .grow = 0, .shrink = 0, .basis = std::max(0, count) });
         }
 
         void remove(ui::sptr item) override

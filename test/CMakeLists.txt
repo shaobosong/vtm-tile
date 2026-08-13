@@ -69,6 +69,35 @@ target_include_directories(parvion_flex_test PRIVATE "${CMAKE_SOURCE_DIR}/src"
 target_link_libraries(parvion_flex_test PRIVATE Lua::Lua)
 add_test(NAME parvion_flex_test COMMAND parvion_flex_test)
 
+# Unit tests for semantic labels, titled group boxes, and their padded page composition.
+add_executable(parvion_form_components_test "parvion_form_components_test.cpp")
+target_include_directories(parvion_form_components_test PRIVATE "${CMAKE_SOURCE_DIR}/src"
+                                                                 ${LUA_INCLUDE_DIR})
+target_link_libraries(parvion_form_components_test PRIVATE Lua::Lua)
+add_test(NAME parvion_form_components_test COMMAND parvion_form_components_test)
+
+# Unit tests for the reusable Parvion modal dialog shell.
+add_executable(parvion_dialog_test "parvion_dialog_test.cpp")
+target_include_directories(parvion_dialog_test PRIVATE "${CMAKE_SOURCE_DIR}/src"
+                                                        ${LUA_INCLUDE_DIR})
+target_link_libraries(parvion_dialog_test PRIVATE Lua::Lua)
+add_test(NAME parvion_dialog_test COMMAND parvion_dialog_test)
+
+# Unit tests for the standalone Parvion Open/Save file picker: selection
+# policy plus fixed/proportional make_dialog sizing.
+add_executable(parvion_file_picker_test "parvion_file_picker_test.cpp")
+target_include_directories(parvion_file_picker_test PRIVATE "${CMAKE_SOURCE_DIR}/src"
+                                                             ${LUA_INCLUDE_DIR})
+target_link_libraries(parvion_file_picker_test PRIVATE Lua::Lua)
+add_test(NAME parvion_file_picker_test COMMAND parvion_file_picker_test)
+
+# Unit tests for the reusable arbitrary-child Parvion scroll viewport.
+add_executable(parvion_scrollview_test "parvion_scrollview_test.cpp")
+target_include_directories(parvion_scrollview_test PRIVATE "${CMAKE_SOURCE_DIR}/src"
+                                                            ${LUA_INCLUDE_DIR})
+target_link_libraries(parvion_scrollview_test PRIVATE Lua::Lua)
+add_test(NAME parvion_scrollview_test COMMAND parvion_scrollview_test)
+
 # Unit test for the shared Parvion progress-bar renderer and table-cell embedding contract.
 add_executable(parvion_progressbar_test "parvion_progressbar_test.cpp")
 target_include_directories(parvion_progressbar_test PRIVATE "${CMAKE_SOURCE_DIR}/src"
@@ -360,17 +389,30 @@ if(Python3_FOUND)
         TIMEOUT 900
         LABELS "tui;tile;maximize")
 
-    # The Parvion Edit -> Settings dialog (SFTP subset of FileZilla's Connection
-    # pages): the top-tabbed modal persists to <XDG_CONFIG_HOME>/parvion/settings,
-    # the SFTP tab's compression/threshold/key-table widgets, the pvputtygen
-    # public-key parse and encrypted-key -> .ppk conversion flow (save picker,
-    # overwrite confirm, wrong-passphrase retry), and Esc handling. Each case runs
-    # against an isolated XDG_CONFIG_HOME; key cases self-skip without ssh-keygen
-    # or /root/.ssh/id_rsa.
-    add_test(NAME parvion_settings_test
-             COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test_parvion_settings.py")
-    set_tests_properties(parvion_settings_test PROPERTIES
-        ENVIRONMENT "VTM_TILE_BINARY=$<TARGET_FILE:vtm-tile>;PUTTYRANDOMSEED=${CMAKE_CURRENT_BINARY_DIR}/parvion-settings-randomseed"
+    # Component-based Settings port: Connection form plus placeholder tabs,
+    # persistence, modal dismissal, and constrained-layout coverage.
+    add_test(NAME parvion_component_settings_test
+             COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test_parvion_component_settings.py")
+    set_tests_properties(parvion_component_settings_test PROPERTIES
+        ENVIRONMENT "VTM_TILE_BINARY=$<TARGET_FILE:vtm-tile>"
+        TIMEOUT 900
+        LABELS "tui;tile;parvion;settings")
+
+    # Retained-component SFTP page: structure, fixed-width dropdowns, and
+    # persistence/clamping of the migrated controls.
+    add_test(NAME parvion_sftp_components_test
+             COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test_parvion_sftp_components.py")
+    set_tests_properties(parvion_sftp_components_test PROPERTIES
+        ENVIRONMENT "VTM_TILE_BINARY=$<TARGET_FILE:vtm-tile>"
+        TIMEOUT 900
+        LABELS "tui;tile;parvion;settings")
+
+    # Retained-component Site and Debug pages: saved-site draft/editor behavior,
+    # logging controls, persistence, and cancellation.
+    add_test(NAME parvion_site_debug_components_test
+             COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test_parvion_site_debug_components.py")
+    set_tests_properties(parvion_site_debug_components_test PROPERTIES
+        ENVIRONMENT "VTM_TILE_BINARY=$<TARGET_FILE:vtm-tile>"
         TIMEOUT 900
         LABELS "tui;tile;parvion;settings")
 endif()

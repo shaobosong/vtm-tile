@@ -263,6 +263,33 @@ namespace
         return layout->get_item_area(a) == rect{ { 1, 1 }, { 6, 5 } }
             && layout->get_item_area(b) == rect{ { 11, 0 }, { 0, 0 } };
     }
+
+    auto test_column_separator_is_fixed_spacing() -> bool
+    {
+        auto layout = flex::ctor({
+            .direction = flex_direction::column,
+            .column_padding_width = 2,
+            .row_padding_height = 1,
+        });
+        auto before = layout->attach(ui::mock::ctor(), {
+            .shrink = 0,
+            .basis = 1,
+            .minimum = 1,
+            .maximum = 1,
+        });
+        auto separator = layout->attach_separator(1);
+        auto after = layout->attach(ui::mock::ctor(), {
+            .shrink = 0,
+            .basis = 1,
+            .minimum = 1,
+            .maximum = 1,
+        });
+        layout->base::extend({ {}, { 12, 5 } });
+
+        return layout->get_item_area(before) == rect{ { 2, 1 }, { 8, 1 } }
+            && layout->get_item_area(separator) == rect{ { 2, 2 }, { 8, 1 } }
+            && layout->get_item_area(after) == rect{ { 2, 3 }, { 8, 1 } };
+    }
 }
 
 int main()
@@ -277,11 +304,12 @@ int main()
     auto border = test_border_geometry_and_paint();
     auto padding = test_padding_without_border();
     auto item_padding = test_item_padding_uses_outer_slot();
+    auto separator = test_column_separator_is_fixed_spacing();
     auto ok = row && column && wrapping && justification && content && lifecycle
-           && border && padding && item_padding;
+           && border && padding && item_padding && separator;
     if (!ok) std::fprintf(stderr,
-        "row=%d column=%d wrapping=%d justification=%d content=%d lifecycle=%d border=%d padding=%d item_padding=%d\n",
-        row, column, wrapping, justification, content, lifecycle, border, padding, item_padding);
+        "row=%d column=%d wrapping=%d justification=%d content=%d lifecycle=%d border=%d padding=%d item_padding=%d separator=%d\n",
+        row, column, wrapping, justification, content, lifecycle, border, padding, item_padding, separator);
     if (!ok) std::fprintf(stderr, "parvion flex tests failed\n");
     return ok ? 0 : 1;
 }

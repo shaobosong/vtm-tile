@@ -105,6 +105,10 @@ namespace netxs::app::parvion
         // with the file's full path, so the picker copies its name into the Name field (overwrite
         // target). Unset for the Local/Remote site panes and the Open picker.
         std::function<void(text const&)> on_select;
+        // File-picker adapter: repaint controls whose enabled state follows the
+        // table's actual marked selection. Unlike `sel`, `marked` becomes empty
+        // when Esc or a blank click clears the selection.
+        std::function<void()> on_selection_change;
 
         // Effective data source: the SFTP controller for a remote pane, else self.
         auto const& cur_items() const { return remote ? remote->items : items; }
@@ -262,6 +266,7 @@ namespace netxs::app::parvion
     // tracks the clicked file (overwrite target). A no-op for ".."/directories and panes without it.
     inline void pane_fire_select(pane_state& st)
     {
+        if (st.on_selection_change) st.on_selection_change();
         if (!st.on_select) return;
         auto p = pane_selected_file(st);
         if (!p.empty()) st.on_select(p);
@@ -963,9 +968,17 @@ namespace netxs::app::parvion
                 state->sel = key;
                 pane_fire_select(*state);
             }
-            else state->marked.erase(key);
+            else
+            {
+                state->marked.erase(key);
+                if (state->on_selection_change) state->on_selection_change();
+            }
         };
-        s.on_clear      = [state]{ state->marked.clear(); };
+        s.on_clear      = [state]
+        {
+            state->marked.clear();
+            if (state->on_selection_change) state->on_selection_change();
+        };
         s.has_selection = [state]{ return !state->marked.empty(); };
         s.in_scope   = [state](si32 key){ return key >= 0 && key < state->total(); };
         s.row_count  = [state]{ return state->total(); };
@@ -985,9 +998,17 @@ namespace netxs::app::parvion
                 state->sel = hit;
                 pane_fire_select(*state);
             }
-            else state->marked.clear(); // The synthetic ".." row has no item selection.
+            else
+            {
+                state->marked.clear(); // The synthetic ".." row has no item selection.
+                if (state->on_selection_change) state->on_selection_change();
+            }
         };
-        menu.on_blank_rclick = [state]{ state->marked.clear(); };
+        menu.on_blank_rclick = [state]
+        {
+            state->marked.clear();
+            if (state->on_selection_change) state->on_selection_change();
+        };
         return menu;
     }
 
@@ -1228,180 +1249,4 @@ namespace netxs::app::parvion
         #endif
     }
 
-    // --- Reusable modal file picker (Open / Save) over the Local Site browser ---------------------
-    // Wraps make_file_pane in a dimming overlay, inheriting its path bar, resizable columns,
-    // scrollbars, selection and Windows drive-letter navigation. Two modes:
-    //   open : activating a file (double-click / Enter / Open) -> on_accept(full path); dirs navigate.
-    //   save : a "Name:" field (prefilled `name`) + Save button -> on_accept(<current dir>/<name>);
-    //          clicking a file fills the name; dirs navigate. The name field holds keyboard focus.
-    enum class picker_mode { open, save };
-    struct picker_btn
-    {
-        bool saving = faux;
-        text accept_label;            // " Open " or " Save ".
-        rect accept_box{}, cancel_box{};
-        netxs::wptr<ui::base> name_input_wp, accept_button_wp, cancel_button_wp;
-    };
-    // Attaches itself over `window_wp`; restores focus to `focus_back_wp` on close. `on_accept` receives
-    // the chosen path; `on_cancel` (optional) fires on Cancel / Esc / click-outside.
-    inline void open_file_picker(netxs::wptr<ui::base> window_wp, netxs::wptr<ui::base> focus_back_wp, id_t gear_id,
-                                 picker_mode mode, text title, text initial_dir, text name,
-                                 std::function<void(text const&)> on_accept, std::function<void()> on_cancel = {})
-    {
-        auto window = window_wp.lock();
-        if (!window) return;
-        if (!gear_id) gear_id = window->bell::indexer.luafx.get_gear().id; // Active gear for the focus grab.
-        auto saving = mode == picker_mode::save;
-        auto overlay = ui::cake::ctor()->alignment({ snap::both, snap::both });
-        auto overlay_wp = ptr::shadow(overlay);
-        auto close = [overlay_wp, focus_back_wp, gear_id]
-        {
-            if (auto o = overlay_wp.lock()) o->base::detach();
-            if (auto c = focus_back_wp.lock()) { pro::focus::set(c, gear_id, solo::on); c->base::deface(); }
-        };
-        auto close_deferred = [window_wp, close]{ if (auto w = window_wp.lock()) w->base::enqueue([close](auto&){ close(); }); else close(); };
-        auto do_cancel = [close_deferred, on_cancel]{ if (on_cancel) on_cancel(); close_deferred(); };
-        // Dimming backdrop (click outside cancels).
-        overlay->attach(ui::mock::ctor())->invoke([do_cancel](auto& boss)
-        {
-            auto myid = boss.bell::id;
-            boss.LISTEN(tier::release, e2::render::background::any, parent_canvas, -, (myid))
-            {
-                parent_canvas.fill([myid](cell& c){ c.bgc().faint(); c.fgc().faint(); c.link(myid); });
-            };
-            boss.on(tier::mouserelease, input::key::LeftClick, [do_cancel](hids& gear){ do_cancel(); gear.dismiss(); });
-        });
-        // Centered card: [ file pane | Open|Save / Cancel row ].
-        auto frame = overlay->attach(ui::fork::ctor(axis::Y))
-            ->alignment({ snap::center, snap::center })
-            ->limits({ 50, 14 }, { 90, 32 })
-            ->colors(theme::text_fg, theme::bg);
-        // A focused child editor gets first refusal on Esc (cancel edit / restore its value).
-        // Esc with no child-local action — or a later Esc after an editor leaves edit mode — bubbles
-        // up as keybd::post. Catch it at the modal boundary so cancellation is independent of which
-        // picker child currently owns focus.
-        frame->invoke([do_cancel](auto& boss)
-        {
-            boss.LISTEN(tier::release, input::events::keybd::post, gear, -, (do_cancel))
-            {
-                if (gear.keybd::handled
-                 || gear.payload != input::keybd::type::keypress
-                 || gear.keystat == input::key::released
-                 || gear.keystat == input::key::interrupted
-                 || gear.keybd::generic() != input::key::Esc) return;
-                gear.set_handled();
-                do_cancel();
-            };
-        });
-        auto fname = ptr::shared(std::move(name)); // The Save-as Name field.
-        pane_state* pane_st = nullptr;
-        auto pane = frame->attach(slot::_1, make_file_pane(title, true, local_lister(), initial_dir, /*grab*/ !saving, nullptr, nullptr, &pane_st, window_wp));
-        // Accept the chosen path: open -> the selected file; save -> <current dir>/<Name>.
-        auto do_accept = [saving, pane_st, fname, on_accept, close, window_wp]
-        {
-            if (!pane_st) { close(); return; }
-            auto path = text{};
-            if (saving)
-            {
-                if (fname->empty()) return;
-                path = child_path(pane_st->cur_path(), *fname, true);
-                // Overwrite confirmation when the chosen Name already exists as a file (this is also the
-                // double-click-a-file path). Mirrors the queue/pane delete prompts (show_close_confirmation).
-                auto ec = std::error_code{};
-                if (fs::is_regular_file(fs::path{ path }, ec))
-                {
-                    auto window = window_wp.lock();
-                    if (!window) return;
-                    auto base  = fs::path{ path }.filename().string();
-                    auto texts = app::shared::confirm_dialog_text{ "The file \"" + base + "\" already exists. Overwrite it?", "Overwrite", "Cancel" };
-                    auto cb = on_accept; auto closer = close; auto target = path; // Captured by value for the deferred confirm.
-                    app::shared::show_close_confirmation(*window, [cb, closer, target]{ if (cb) cb(target); closer(); }, {}, texts);
-                    return; // Cancel just dismisses the prompt; the picker stays open.
-                }
-            }
-            else { path = pane_selected_file(*pane_st); if (path.empty()) { close(); return; } }
-            if (on_accept) on_accept(path);
-            close();
-        };
-        auto bs = ptr::shared(picker_btn{ saving, saving ? text{ " Save " } : text{ " Open " } });
-        auto bottom_layer = frame->attach(slot::_2, ui::cake::ctor())->limits({ -1, 1 }, { -1, 1 });
-        auto bottom = bottom_layer->attach(ui::mock::ctor());
-        if (saving)
-        {
-            auto name_input = make_input({
-                .value = [fname]{ return *fname; },
-                .on_change = [fname](text value){ *fname = std::move(value); },
-                .on_submit = [do_accept](text){ do_accept(); },
-                .focus_on_start = true,
-            });
-            bottom_layer->attach(name_input.widget);
-            bs->name_input_wp = ptr::shadow(name_input.widget);
-        }
-        auto accept_button = make_button({
-            .label = [bs]{ return bs->accept_label; },
-            .on_activate = [do_accept](hids&, ui::base&){ do_accept(); },
-        });
-        bottom_layer->attach(accept_button.widget);
-        bs->accept_button_wp = ptr::shadow(accept_button.widget);
-        auto cancel_button = make_button({
-            .label = []{ return text{ " Cancel " }; },
-            .on_activate = [do_cancel](hids&, ui::base&){ do_cancel(); },
-        });
-        bottom_layer->attach(cancel_button.widget);
-        bs->cancel_button_wp = ptr::shadow(cancel_button.widget);
-        bottom->invoke([bs](auto& boss)
-        {
-            boss.LISTEN(tier::release, e2::render::any, parent_canvas, -, (bs))
-            {
-                auto sz = boss.base::size();
-                parent_canvas.fill(rect{{ 0, 0 }, sz }, [&](cell& c){ c.bgc(theme::surface); });
-                auto cnw = si32{ 8 }, acw = si32{ 6 };
-                bs->cancel_box = rect{{ sz.x - 1 - cnw, 0 }, { cnw, 1 }};
-                bs->accept_box = rect{{ bs->cancel_box.coor.x - 1 - acw, 0 }, { acw, 1 }};
-                if (bs->saving)
-                {
-                    put_str(parent_canvas, 0, 0, "Name:", theme::text_fg, theme::surface, 5);
-                    auto fx = si32{ 6 };
-                    auto fw = std::max(0, bs->accept_box.coor.x - 1 - fx);
-                    if (auto input = bs->name_input_wp.lock()) input->base::extend(rect{{ fx, 0 }, { fw, 1 }});
-                }
-                if (auto button = bs->accept_button_wp.lock()) button->base::extend(bs->accept_box);
-                if (auto button = bs->cancel_button_wp.lock()) button->base::extend(bs->cancel_box);
-            };
-        });
-        // Wire the pane callbacks now that the bottom bar exists (its weak_ptr lets on_pick/on_select
-        // repaint the Name field). Save: clicking or activating a file copies its name into the field
-        // (overwrite target); Open: activating a file accepts it. Unhandled Esc is owned by the picker
-        // frame above, independently of which child currently owns focus.
-        if (pane_st)
-        {
-            if (saving)
-            {
-                auto fill = [fname, input_wp = bs->name_input_wp](text const& path)
-                {
-                    *fname = fs::path{ path }.filename().string();
-                    if (auto input = input_wp.lock()) input->base::deface();
-                };
-                pane_st->on_select = fill; // Single click / arrow-nav onto a file: just track the Name.
-                // Double-click / Enter on a file: set the Name to it, then Save (do_accept overwrite-confirms).
-                pane_st->on_pick   = [fill, do_accept](text const& path){ fill(path); do_accept(); };
-            }
-            else pane_st->on_pick = [on_accept, close](text const& path){ if (on_accept) on_accept(path); close(); };
-        }
-        window->base::attach(overlay);
-        // These controls are constructed before the overlay joins the window, so an initial-focus
-        // plugin alone cannot reliably displace the Settings card. Hand focus over after attach,
-        // using the initiating gear to keep Esc/Enter inside the topmost modal.
-        auto focus_target = ui::sptr{};
-        if (saving) focus_target = bs->name_input_wp.lock();
-        else if (pane_st) focus_target = pane_st->table_wp.lock();
-        if (focus_target)
-        {
-            pro::focus::set(focus_target, gear_id, solo::on);
-            window->base::enqueue([target_wp = ptr::shadow(focus_target), gear_id](auto&)
-            {
-                if (auto target = target_wp.lock()) pro::focus::set(target, gear_id, solo::on);
-            });
-        }
-    }
 }

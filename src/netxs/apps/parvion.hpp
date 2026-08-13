@@ -32,7 +32,7 @@
 #include "parvion/components/flex.hpp"
 #include "parvion/components/grid.hpp"
 #include "parvion/settings_dialog.hpp"
-#include "parvion/prompts.hpp" // make_secret_dialog (live passphrase / password login modal)
+#include "parvion/secret_dialog.hpp" // make_secret_dialog (live passphrase / password login modal)
 
 namespace netxs::app::parvion
 {
@@ -380,7 +380,15 @@ namespace netxs::app::parvion
                         auto title  = req.is_passphrase ? text{ "SSH key passphrase" } : text{ "Password" };
                         auto submit = [cp](text v){ cp->provide_secret(std::move(v)); };
                         auto cancel = [cp]{ cp->cancel_secret(); };
-                        win.base::attach(make_secret_dialog(wp, {}, title, req.prompt, submit, cancel, req.is_retry, /*secret*/true));
+                        win.base::attach(make_secret_dialog({
+                            .window_wp = wp,
+                            .title = std::move(title),
+                            .prompt = req.prompt,
+                            .on_submit = std::move(submit),
+                            .on_cancel = std::move(cancel),
+                            .is_retry = req.is_retry,
+                            .secret = true,
+                        }));
                     });
                 };
             });

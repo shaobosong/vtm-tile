@@ -13,6 +13,7 @@ namespace netxs
         #define ctx_list  \
             X(applet    ) \
             X(cake      ) \
+            X(dialog    ) \
             X(defapp    ) \
             X(desktop   ) \
             X(dtvt      ) \
@@ -23,14 +24,17 @@ namespace netxs
             X(gate      ) \
             X(grid      ) \
             X(grip      ) \
+            X(groupbox  ) \
             X(gui_window) \
             X(item      ) \
             X(infopage  ) \
+            X(label     ) \
             X(list      ) \
             X(mock      ) \
             X(parvion   ) \
             X(postfx    ) \
             X(rail      ) \
+            X(scrollview) \
             X(taskbar   ) \
             X(terminal  ) \
             X(tile      ) \

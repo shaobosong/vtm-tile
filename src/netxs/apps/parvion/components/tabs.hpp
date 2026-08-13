@@ -158,19 +158,37 @@ namespace netxs::app::parvion
                     x += bw;
                 }
             };
-            boss.on(tier::mouserelease, input::key::LeftDown, [&](hids& gear)
+            auto select_at = [&](hids& gear)
             {
                 auto tc = tc_wp.lock();
                 if (!tc) { gear.dismiss(); return; }
-                auto mx = (si32)gear.coord.x;
-                auto my = (si32)gear.coord.y;
-                if (my == 0) for (auto i = si32{}; i < (si32)tabbox.size(); ++i)
+                auto select_point = [&](twod point)
                 {
-                    auto& b = tabbox[(size_t)i];
-                    if (mx >= b.coor.x && mx < b.coor.x + b.size.x) { tc->select(i, &gear); break; }
-                }
+                    if (point.y < 0 || point.y >= boss.base::size().y) return faux;
+                    for (auto i = si32{}; i < (si32)tabbox.size(); ++i)
+                    {
+                        auto& box = tabbox[(size_t)i];
+                        if (box.hittest(point))
+                        {
+                            tc->select(i, &gear);
+                            return true;
+                        }
+                    }
+                    return faux;
+                };
+                auto point = twod{ (si32)gear.coord.x, (si32)gear.coord.y };
+                // Most hosts deliver widget-local coordinates. Custom retained
+                // layers can preserve the parent coordinate space, so retry
+                // after removing this strip's assigned origin.
+                if (!select_point(point)) select_point(point - boss.base::region.coor);
                 gear.dismiss();
-            });
+            };
+            boss.on(tier::mouserelease, input::key::LeftDown, select_at);
+            // Some terminal bridges report a complete click without a separate
+            // press event. Re-running select_at on LeftClick is harmless after
+            // LeftDown (the page is already active) and keeps tabs operable on
+            // both input streams.
+            boss.on(tier::mouserelease, input::key::LeftClick, select_at);
         });
         return strip;
     }

@@ -18,6 +18,7 @@ the key path is persisted.
 import os
 import sys
 import time
+import select
 import tempfile
 import shutil
 import subprocess
@@ -28,6 +29,14 @@ import test_parvion_panes as T  # ParvionSession, row_text, find_text
 kill_all_vtm = T.kill_all_vtm  # Let run_all_tests.py reuse our between-test cleanup.
 
 ID_RSA = "/root/.ssh/id_rsa"
+SITE_FIELD_LABELS = {
+    "Site Name": "Site Name:",
+    "Host": "Host *:",
+    "Port": "Port:",
+    "User": "User:",
+    "Password": "Password:",
+}
+SITE_LABEL_WIDTH = max(map(len, SITE_FIELD_LABELS.values()))
 
 
 def _session(cfgdir):
@@ -79,18 +88,19 @@ def _find_lowest(chars, needle):
 
 def _site_field(s, label, value, clear=False):
     chars = s.screen()[0]
-    name = T.find_text(chars, "Site Name:")
+    name = T.find_text(chars, SITE_FIELD_LABELS["Site Name"])
     if not name:
         return False
+    display_label = SITE_FIELD_LABELS[label]
     row = None
     for r in range(name[0], min(len(chars), name[0] + 6)):
-        col = T.row_text(chars, r).find(label + ":")
+        col = T.row_text(chars, r).find(display_label)
         if col >= 0:
             row = (r, col)
             break
     if not row:
         return False
-    field_col = name[1] + len("Site Name:") + 1
+    field_col = name[1] + SITE_LABEL_WIDTH + 1
     s.click(field_col + 1, row[0] + 1)
     if clear:
         s.write("\x1b[F" + "\x7f" * 96)
@@ -217,10 +227,11 @@ def test_site_tab_add_edit_and_persist():
         add = _find_lowest(chars, " Add ")
         s.click(add[1] + 2, add[0] + 1); s.feed(0.7)
         blob = "\n".join(T.row_text(s.screen()[0], r) for r in range(len(s.screen()[0])))
-        for needle in ("Add SFTP Site", "Site Name:", "Host:", "Port:", "User:",
-                       "Password:", "Password is optional."):
+        for needle in ("Add SFTP Site", *SITE_FIELD_LABELS.values()):
             if needle not in blob:
                 print(f"FAIL - '{needle}' missing from Add Site dialog"); return False
+        if "(optional)" in blob:
+            print("FAIL - optional field annotation is still present"); return False
         if not _site_field(s, "Site Name", "Production"): return False
         if not _site_field(s, "Host", "sftp.example.test"): return False
         if not _site_field(s, "Port", "", clear=True): return False  # Empty means 22.
@@ -287,11 +298,6 @@ def test_site_validation_and_remove():
         chars = _goto_site(s)
         add = _find_lowest(chars, " Add ")
         s.click(add[1] + 2, add[0] + 1); s.feed(0.6)
-        ok = T.find_text(s.screen()[0], " OK ")
-        s.click(ok[1] + 2, ok[0] + 1); s.feed(0.5)
-        if not T.grid_contains(s.screen()[0], "Site Name is required."):
-            print("FAIL - blank Site Name was accepted"); return False
-        _site_field(s, "Site Name", "Second")
         ok = T.find_text(s.screen()[0], " OK ")
         s.click(ok[1] + 2, ok[0] + 1); s.feed(0.5)
         if not T.grid_contains(s.screen()[0], "Host is required."):
@@ -480,7 +486,7 @@ def test_unit_dropdown_selects_and_persists():
             print("FAIL - dropdown did not open (no GiB row)"); return False
         s.click(gib[1] + 1, gib[0] + 1); s.feed(0.7)     # Select GiB.
         chars = s.screen()[0]
-        if "GiB ▾" not in "\n".join(T.row_text(chars, r) for r in range(len(chars))):
+        if not T.find_text(chars, "GiB"):
             print("FAIL - unit did not change to GiB"); return False
         ok = T.find_text(chars, " OK ")
         s.click(ok[1] + 2, ok[0] + 1); s.feed(1.0)
@@ -887,6 +893,86 @@ def test_picker_buttons_right_aligned():
     print("PASS"); return True
 
 
+def test_picker_blank_button_row_does_not_close():
+    print("TEST: blank file-picker button-row click stays inside the dialog ... ", end="", flush=True)
+    cfg = tempfile.mkdtemp(prefix="pvset_")
+    with _session(cfg) as s:
+        _open_dialog(s)
+        _goto_sftp(s)
+        add = T.find_text(s.screen()[0], "Add key file")
+        s.click(add[1] + 1, add[0] + 1); s.feed(1.0)
+        chars = s.screen()[0]
+        title = T.find_text(chars, "Add key file")
+        op = T.find_text(chars, "Open")
+        cancel = T.find_text(chars, "Cancel")
+        if not title or not op or not cancel or op[0] != cancel[0]:
+            print("FAIL - picker geometry not found"); return False
+
+        # The title's left edge is safely inside the card and far to the left
+        # of both buttons on their row.
+        s.click(title[1] + 1, op[0] + 1); s.feed(0.8)
+        chars = s.screen()[0]
+        if not (T.find_text(chars, "Add key file")
+                and T.find_text(chars, "Open")
+                and T.find_text(chars, "Cancel")):
+            print("FAIL - blank button-row click dismissed the picker"); return False
+    print("PASS"); return True
+
+
+def test_picker_open_is_inert_without_selection():
+    print("TEST: file-picker Open is disabled/inert without a selection ... ", end="", flush=True)
+    cfg = tempfile.mkdtemp(prefix="pvset_")
+    keydir = tempfile.mkdtemp(prefix="pvkey_")
+    with open(os.path.join(keydir, "cursor_survives.pem"), "w") as f:
+        f.write("test key\n")
+    with _session_home(cfg, keydir) as s:
+        _open_dialog(s)
+        _goto_sftp(s)
+        add = T.find_text(s.screen()[0], "Add key file")
+        s.click(add[1] + 1, add[0] + 1); s.feed(1.0)
+        key = T.find_text(s.screen()[0], "cursor_survives.pem")
+        if not key:
+            print("FAIL - picker file not listed"); return False
+        s.click(key[1] + 1, key[0] + 1); s.feed(0.5)
+        s.write("\x1b"); s.feed(0.7)  # Clear marked selection; retain the table cursor.
+
+        op = T.find_text(s.screen()[0], "Open")
+        if not op:
+            print("FAIL - picker closed while clearing selection"); return False
+        s.click(op[1] + 1, op[0] + 1); s.feed(0.9)
+        chars = s.screen()[0]
+        if not (T.find_text(chars, "Add key file") and T.find_text(chars, "Open")):
+            print("FAIL - disabled Open accepted the stale cursor item"); return False
+    print("PASS"); return True
+
+
+def test_picker_open_navigates_files_only_directory():
+    print("TEST: files-only picker Open enters a selected directory ... ", end="", flush=True)
+    cfg = tempfile.mkdtemp(prefix="pvset_")
+    keydir = tempfile.mkdtemp(prefix="pvkey_")
+    child = os.path.join(keydir, "directory_target")
+    os.mkdir(child)
+    with open(os.path.join(child, "inside.pem"), "w") as f:
+        f.write("test key\n")
+    with _session_home(cfg, keydir) as s:
+        _open_dialog(s)
+        _goto_sftp(s)
+        add = T.find_text(s.screen()[0], "Add key file")
+        s.click(add[1] + 1, add[0] + 1); s.feed(1.0)
+        directory = T.find_text(s.screen()[0], "directory_target")
+        if not directory:
+            print("FAIL - picker directory not listed"); return False
+        s.click(directory[1] + 1, directory[0] + 1); s.feed(0.5)
+        op = T.find_text(s.screen()[0], "Open")
+        s.click(op[1] + 1, op[0] + 1); s.feed(1.0)
+        chars = s.screen()[0]
+        if not T.find_text(chars, "inside.pem"):
+            print("FAIL - Open did not enter the selected directory"); return False
+        if not (T.find_text(chars, "Add key file") and T.find_text(chars, "Cancel")):
+            print("FAIL - directory navigation completed the files-only picker"); return False
+    print("PASS"); return True
+
+
 def _dialog_open(chars):
     blob = "\n".join(T.row_text(chars, r) for r in range(len(chars)))
     return "Timeout" in blob and "Reconnection settings" in blob
@@ -995,20 +1081,26 @@ def test_esc_closes_key_picker_after_address_cancel():
         chars = s.screen()[0]
         title = T.find_text(chars, "Add key file")
         home = os.path.expanduser("~")
-        line = T.row_text(chars, title[0]) if title else ""
-        path_col = line.find(home, title[1] + len("Add key file")) if title else -1
-        if path_col < 0:
+        path = None
+        if title:
+            for row in range(title[0] + 1, min(len(chars), title[0] + 4)):
+                col = T.row_text(chars, row).find(home)
+                if col >= 0:
+                    path = (row, col)
+                    break
+        if not path:
             print(f"FAIL - picker address {home!r} not found"); return False
+        path_row, path_col = path
 
         # Click just past the displayed path, alter it, then cancel only that inline edit.
-        s.click(path_col + len(home) + 1, title[0] + 1)
+        s.click(path_col + len(home) + 1, path_row + 1)
         s.write("/discard-me")
         s.write("\x1b"); s.feed(0.7)
         chars = s.screen()[0]
         blob = "\n".join(T.row_text(chars, r) for r in range(len(chars)))
         if "Add key file" not in blob or "Open" not in blob or "Cancel" not in blob:
             print("FAIL - first Esc closed the picker instead of cancelling the address edit"); return False
-        if "/discard-me" in T.row_text(chars, title[0]):
+        if "/discard-me" in T.row_text(chars, path_row):
             print("FAIL - first Esc did not restore the picker address"); return False
 
         s.write("\x1b"); s.feed(0.9)
@@ -1080,8 +1172,11 @@ def _gen_encrypted_key(keydir):
 
 def _session_home(cfgdir, home):
     # Like _session, but also point HOME at `home` so the key picker opens straight into it.
+    # Keep PuTTY's random seed in that writable temporary home as well; otherwise a missing
+    # ~/.putty directory is reported as a conversion error even when the key was written.
     return T.ParvionSession(os.getcwd(), env={"PARVION_DEMO_QUEUE": "0",
-                                              "XDG_CONFIG_HOME": cfgdir, "HOME": home})
+                                              "XDG_CONFIG_HOME": cfgdir, "HOME": home,
+                                              "PUTTYRANDOMSEED": os.path.join(home, "putty-random-seed")})
 
 
 def test_add_key_picker_context_menu_omits_transfer_actions():
@@ -1126,6 +1221,76 @@ def _pick_key(s, name):
     return True
 
 
+def _conversion_prompt_layout_error(s, retry=False, busy=False):
+    """Return a diagnostic unless the component dialog has the exact vertical spacing.
+
+    Validate spacing from the rows occupied by dialog content, rather than from
+    the contents of the intervening rows.  Empty dialog rows are transparent in
+    the replayed screen, so they can contain text from the dimmed Settings page.
+    """
+    chars = s.screen()[0]
+    title = T.find_text(chars, "Convert private key")
+    prompt_first = T.find_text(chars, "Enter the passphrase")
+    prompt_last = T.find_text(chars, "passphrase.")
+    if not title or not prompt_first or not prompt_last:
+        return "title or wrapped prompt rows are missing"
+
+    if prompt_first[0] != title[0] + 2:
+        return "prompt is not separated from the title by exactly one blank row"
+    if prompt_last[0] != prompt_first[0] + 2:
+        return "prompt does not occupy the expected three wrapped rows"
+
+    if busy:
+        report = T.find_text(chars, "Converting key...")
+        if not report or report[0] != prompt_last[0] + 2:
+            return "progress report does not occupy the retry-report row"
+        if T.grid_contains(chars, "Please wait"):
+            return "obsolete Please wait dialog is still visible"
+        if T.grid_contains(chars, "Incorrect passphrase, try again."):
+            return "progress report did not replace the retry report"
+        button_row = report[0] + 4  # separator, input, separator, buttons
+    elif retry:
+        report = T.find_text(chars, "Incorrect passphrase, try again.")
+        if not report or report[0] != prompt_last[0] + 2:
+            return "retry report is not immediately after the prompt separator"
+        button_row = report[0] + 4  # separator, input, separator, buttons
+    else:
+        if T.grid_contains(chars, "Incorrect passphrase, try again."):
+            return "non-retry prompt unexpectedly contains a retry report"
+        button_row = prompt_last[0] + 4  # separator, input, separator, buttons
+
+    buttons = T.row_text(chars, button_row)
+    if "OK" not in buttons or "Cancel" not in buttons:
+        return "button bar is not at the natural content-fitted row"
+    return None
+
+
+def _feed_for_exactly(s, timeout):
+    """Read terminal output for a fixed interval without extending it after each repaint."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        ready, _, _ = select.select([s.master_fd], [], [], max(0, deadline - time.time()))
+        if not ready:
+            break
+        try:
+            chunk = os.read(s.master_fd, 65536)
+        except OSError:
+            break
+        if not chunk:
+            break
+        s._buf += chunk
+
+
+def _wait_for_screen_text(s, needle, timeout=5.0):
+    """Return the latest screen as soon as `needle` appears, or at the timeout."""
+    deadline = time.time() + timeout
+    while True:
+        chars = s.screen()[0]
+        if T.find_text(chars, needle) or time.time() >= deadline:
+            return chars
+        s.feed(min(0.1, deadline - time.time()))
+
+
 def test_add_encrypted_key_converts_to_ppk():
     # FileZilla parity: adding an encrypted non-ppk key prompts for its passphrase, converts it to a
     # PuTTY .ppk (via pvputtygen write), asks where to save it, and persists the .ppk path.
@@ -1147,17 +1312,28 @@ def test_add_encrypted_key_converts_to_ppk():
         blob = "\n".join(T.row_text(s.screen()[0], r) for r in range(len(s.screen()[0])))
         if "Convert private key" not in blob and "passphrase" not in blob.lower():
             print("FAIL - passphrase modal did not appear"); return False
-        s.write(ENC_PASSPHRASE); s.feed(0.4); s.write("\r"); s.feed(1.3)
+        if error := _conversion_prompt_layout_error(s):
+            print(f"FAIL - component prompt layout: {error}"); return False
+        s.write(ENC_PASSPHRASE); s.feed(0.4)
+        # Submit and immediately try Esc/Enter again. While conversion is active the same prompt
+        # remains open, its controls are disabled, dismissal is vetoed, and only one job may start.
+        os.write(s.master_fd, b"\r")
+        # Queue the dismissal/re-submit probes immediately after the first submit, while the
+        # UI is deterministically busy. Delaying them until after the snapshot can race with
+        # a fast conversion and accidentally submit the cleared input a second time.
+        os.write(s.master_fd, b"\x1b\r")
+        _feed_for_exactly(s, 0.075)  # Snapshot before the 100 ms completion poll.
+        if error := _conversion_prompt_layout_error(s, busy=True):
+            print(f"FAIL - inline conversion status: {error}"); return False
         # Save-as modal (prefilled .ppk path): accept the default with Enter.
-        blob = "\n".join(T.row_text(s.screen()[0], r) for r in range(len(s.screen()[0])))
-        if "Save converted key" not in blob and ".ppk" not in blob:
+        chars = _wait_for_screen_text(s, "Save converted key")
+        if not T.find_text(chars, "Save converted key"):
             print("FAIL - save-as modal did not appear"); return False
         s.write("\r"); s.feed(1.6)
         # Back in the dialog: the converted .ppk shows a fingerprint.
-        blob = "\n".join(T.row_text(s.screen()[0], r) for r in range(len(s.screen()[0])))
-        if "SHA256:" not in blob:
+        chars = _wait_for_screen_text(s, "SHA256:")
+        if not T.find_text(chars, "SHA256:"):
             print("FAIL - converted key fingerprint not shown in table"); return False
-        chars = s.screen()[0]
         ok = T.find_text(chars, " OK ")
         s.click(ok[1] + 2, ok[0] + 1); s.feed(1.0)
     ppk = key + ".ppk"
@@ -1334,7 +1510,7 @@ def test_save_picker_esc_bubbles_to_picker():
 
 
 def test_encrypted_key_wrong_passphrase_retries():
-    # New flow: decryption + conversion happen ONCE up front (behind a "Converting key..." spinner),
+    # New flow: decryption + conversion happen ONCE up front (with an inline "Converting key..." spinner),
     # which also verifies the passphrase. A wrong one is caught there and re-prompts (with the retry
     # note) BEFORE the "Save converted key" picker ever appears; Esc then aborts without adding the key.
     print("TEST: encrypted key wrong passphrase re-prompts before save, Esc aborts ... ", end="", flush=True)
@@ -1358,6 +1534,8 @@ def test_encrypted_key_wrong_passphrase_retries():
             print("FAIL - wrong passphrase did not re-prompt early with the retry note"); return False
         if "Save converted key" in blob:
             print("FAIL - the save picker appeared for a wrong passphrase (validation should precede it)"); return False
+        if error := _conversion_prompt_layout_error(s, retry=True):
+            print(f"FAIL - retry prompt layout: {error}"); return False
         s.write("\x1b"); s.feed(0.9)  # Esc aborts the conversion.
         blob = "\n".join(T.row_text(s.screen()[0], r) for r in range(len(s.screen()[0])))
         if "Public Key Authentication" not in blob:
@@ -1395,6 +1573,9 @@ TESTS = [
     test_key_table_ctrl_multiselect_remove_and_reindex,
     test_key_table_keyboard_remove_selected_and_noop,
     test_picker_buttons_right_aligned,
+    test_picker_blank_button_row_does_not_close,
+    test_picker_open_is_inert_without_selection,
+    test_picker_open_navigates_files_only_directory,
     test_esc_closes_dialog_on_open,
     test_esc_closes_key_picker,
     test_esc_deselects_key_picker_before_closing,

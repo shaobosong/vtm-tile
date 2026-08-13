@@ -51,7 +51,7 @@ def set_winsize(fd, rows, cols):
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
 
 
-def _parse_sgr(params, cur_bg):
+def _parse_sgr(params, cur_bg, cur_fg):
     parts = [p.decode() if p else "0" for p in (params.split(b";") if params else [b"0"])]
     i = 0
     while i < len(parts):
@@ -59,8 +59,13 @@ def _parse_sgr(params, cur_bg):
             n = int(parts[i] or "0")
         except ValueError:
             n = 0
-        if n == 0 or n == 49:
+        if n == 0:
             cur_bg = None
+            cur_fg = None
+        elif n == 49:
+            cur_bg = None
+        elif n == 39:
+            cur_fg = None
         elif n == 48 and i + 1 < len(parts):
             if parts[i + 1] == "2" and i + 4 < len(parts):
                 try:
@@ -68,15 +73,24 @@ def _parse_sgr(params, cur_bg):
                 except ValueError:
                     pass
                 i += 4
+        elif n == 38 and i + 1 < len(parts):
+            if parts[i + 1] == "2" and i + 4 < len(parts):
+                try:
+                    cur_fg = (int(parts[i + 2]), int(parts[i + 3]), int(parts[i + 4]))
+                except ValueError:
+                    pass
+                i += 4
         i += 1
-    return cur_bg
+    return cur_bg, cur_fg
 
 
-def replay(buf):
+def replay(buf, include_fg=False):
     chars = [[""] * COLS for _ in range(ROWS)]
     bg = [[None] * COLS for _ in range(ROWS)]
+    fg = [[None] * COLS for _ in range(ROWS)] if include_fg else None
     cr = cc = 0
     cbg = None
+    cfg = None
     i, n = 0, len(buf)
     while i < n:
         b = buf[i]
@@ -101,7 +115,7 @@ def replay(buf):
                     cr = max(0, min(ROWS - 1, r - 1))
                     cc = max(0, min(COLS - 1, c - 1))
                 elif final == b"m":
-                    cbg = _parse_sgr(params, cbg)
+                    cbg, cfg = _parse_sgr(params, cbg, cfg)
                 continue
             elif c1 == 0x5d:
                 j = i + 2
@@ -138,9 +152,11 @@ def replay(buf):
         if 0 <= cr < ROWS and 0 <= cc < COLS:
             chars[cr][cc] = g
             bg[cr][cc] = cbg
+            if fg is not None:
+                fg[cr][cc] = cfg
             if cc < COLS - 1:
                 cc += 1
-    return chars, bg
+    return (chars, bg, fg) if include_fg else (chars, bg)
 
 
 class ParvionSession:
@@ -205,6 +221,9 @@ class ParvionSession:
 
     def screen(self):
         return replay(self._buf)
+
+    def screen_with_fg(self):
+        return replay(self._buf, include_fg=True)
 
     def write(self, data, settle=0.5):
         os.write(self.master_fd, data.encode() if isinstance(data, str) else data)
