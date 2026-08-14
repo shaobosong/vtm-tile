@@ -16,6 +16,12 @@ target_include_directories(command_bar_fuzzy_test PRIVATE "${CMAKE_SOURCE_DIR}/s
 target_link_libraries(command_bar_fuzzy_test PRIVATE Lua::Lua)
 add_test(NAME command_bar_fuzzy_test COMMAND command_bar_fuzzy_test)
 
+add_executable(tile_overlay_cell_test "tile_overlay_cell_test.cpp")
+target_include_directories(tile_overlay_cell_test PRIVATE "${CMAKE_SOURCE_DIR}/src"
+                                                          ${LUA_INCLUDE_DIR})
+target_link_libraries(tile_overlay_cell_test PRIVATE Lua::Lua)
+add_test(NAME tile_overlay_cell_test COMMAND tile_overlay_cell_test)
+
 add_executable(ansi_sgr_state_machine_test "ansi_sgr_state_machine_test.cpp")
 target_include_directories(ansi_sgr_state_machine_test PRIVATE "${CMAKE_SOURCE_DIR}/src"
                                                                ${LUA_INCLUDE_DIR})

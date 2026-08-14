@@ -83,6 +83,30 @@ namespace netxs::app::tile
     static constexpr auto name = "Tiling Window Manager";
     static constexpr auto inheritance_limit = 30; // Tiling limits.
 
+    // Full-tile overlays preserve the rendered content behind their transparent
+    // backdrop, but every visible color channel still needs to be dimmed.
+    static void shade_overlay_backdrop(cell& c, id_t overlay_id)
+    {
+        c.bgc().faint();
+        c.fgc().faint();
+        if (auto underline = c.unc())
+        {
+            auto color = argb{ argb::vt256[underline] };
+            color.faint();
+            c.unc(color);
+        }
+        c.cur(text_cursor::none);
+        c.link(overlay_id);
+    }
+
+    // Pane-index labels are opaque. Clear the complete source cell before
+    // painting so terminal styles and metadata cannot leak into the badge.
+    static void paint_pane_index_cell(cell& c, argb bg, argb fg, auto const& glyph, id_t overlay_id)
+    {
+        c.wipe();
+        c.bgc(bg).fgc(fg).txt(glyph).link(overlay_id);
+    }
+
     static auto expand_appcfg(auto& appcfg)
     {
         auto current_module_file = os::process::binary();
@@ -2886,10 +2910,7 @@ namespace netxs::app::tile
                             // --- Dim the entire tile area (faint overlay). ---
                             parent_canvas.fill([ovl_id](cell& c)
                             {
-                                c.bgc().faint();
-                                c.fgc().faint();
-                                c.cur(text_cursor::none); // Suppress any terminal cursor bleeding through.
-                                c.link(ovl_id);
+                                shade_overlay_backdrop(c, ovl_id);
                             });
 
                             // --- Layout: bottom bar and top section (3:1 ratio). ---
@@ -5011,10 +5032,7 @@ namespace netxs::app::tile
                                 // Set link to overlay id to capture mouse events.
                                 parent_canvas.fill([ovl_id](cell& c)
                                 {
-                                    c.bgc().faint();
-                                    c.fgc().faint();
-                                    c.cur(text_cursor::none); // Suppress any terminal cursor bleeding through.
-                                    c.link(ovl_id);
+                                    shade_overlay_backdrop(c, ovl_id);
                                 });
                                 // Draw index label centered on each pane.
                                 // 5x10 pixel bitmap font rendered via half-block characters.
@@ -5133,7 +5151,7 @@ namespace netxs::app::tile
                                         // Background pad behind glyph.
                                         parent_canvas.fill(rect{{ gx - 1, gy - 1 }, { gcell_w + 2, gcell_h + 2 }}, [ovl_id](cell& c)
                                         {
-                                            c.bgc(label_bg).fgc(label_fg).txt(whitespace).link(ovl_id);
+                                            paint_pane_index_cell(c, label_bg, label_fg, whitespace, ovl_id);
                                         });
                                         // Render glyph: each cell row = 2 pixel rows via half-block chars.
                                         for (auto cy = si32{}; cy < gcell_h; cy++)
@@ -5147,10 +5165,9 @@ namespace netxs::app::tile
                                                 if (!top && !bot) continue;
                                                 parent_canvas.fill(rect{{ gx + cx, gy + cy }, { 1, 1 }}, [=](cell& c)
                                                 {
-                                                    if      (top && bot) c.bgc(label_fg).txt(whitespace);
-                                                    else if (top)        c.bgc(label_bg).fgc(label_fg).txt("\xe2\x96\x80"); // ▀
-                                                    else                 c.bgc(label_bg).fgc(label_fg).txt("\xe2\x96\x84"); // ▄
-                                                    c.link(ovl_id);
+                                                    if      (top && bot) paint_pane_index_cell(c, label_fg, label_fg, whitespace,       ovl_id);
+                                                    else if (top)        paint_pane_index_cell(c, label_bg, label_fg, "\xe2\x96\x80", ovl_id); // ▀
+                                                    else                 paint_pane_index_cell(c, label_bg, label_fg, "\xe2\x96\x84", ovl_id); // ▄
                                                 });
                                             }
                                         }
@@ -5165,11 +5182,11 @@ namespace netxs::app::tile
                                         auto ly = cy - bh / 2;
                                         parent_canvas.fill(rect{{ lx, ly }, { bw, bh }}, [ovl_id](cell& c)
                                         {
-                                            c.bgc(label_bg).fgc(label_fg).txt(whitespace).link(ovl_id);
+                                            paint_pane_index_cell(c, label_bg, label_fg, whitespace, ovl_id);
                                         });
                                         parent_canvas.fill(rect{{ cx, cy }, { 1, 1 }}, [&pane, ovl_id](cell& c)
                                         {
-                                            c.txt(pane.label).link(ovl_id);
+                                            paint_pane_index_cell(c, label_bg, label_fg, pane.label, ovl_id);
                                         });
                                     }
                                 }
@@ -5385,10 +5402,7 @@ namespace netxs::app::tile
                                 // Dim entire tile area.
                                 parent_canvas.fill([ovl_id](cell& c)
                                 {
-                                    c.bgc().faint();
-                                    c.fgc().faint();
-                                    c.cur(text_cursor::none);
-                                    c.link(ovl_id);
+                                    shade_overlay_backdrop(c, ovl_id);
                                 });
 
                                 auto& query        = *query_ptr;
