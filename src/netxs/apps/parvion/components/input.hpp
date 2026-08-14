@@ -26,6 +26,7 @@ namespace netxs::app::parvion
         ui32 background       = theme::surface;
         ui32 foreground       = theme::text_fg;
         ui32 muted_foreground = theme::subtext;
+        ui32 ghost_foreground = theme::ghost_fg;
         ui32 focus            = theme::sel_bg_act;
     };
 
@@ -34,6 +35,7 @@ namespace netxs::app::parvion
         std::function<text()>       value;
         std::function<void(text)>   on_change;
         std::function<text()>       prefix;
+        std::function<text()>       ghost;
         std::function<input_mode()> mode;
         std::function<void()>       on_activate;
         std::function<void(text)>   on_submit;
@@ -184,6 +186,10 @@ namespace netxs::app::parvion
                             cfg.palette.background, prefix_w);
                 auto field_w = std::max(0, size.x - prefix_w);
                 if (field_w <= 0) return;
+
+                if (mode == input_mode::edit && value.empty() && cfg.ghost)
+                    put_str(canvas, prefix_w, 0, cfg.ghost(), cfg.palette.ghost_foreground,
+                            cfg.palette.background, field_w);
 
                 if (mode == input_mode::view || mode == input_mode::disabled)
                 {

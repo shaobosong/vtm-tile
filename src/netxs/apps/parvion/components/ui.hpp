@@ -35,6 +35,7 @@ namespace netxs::app::parvion
         static constexpr auto header       = 0xFF11111Bu;
         static constexpr auto text_fg      = 0xFFCDD6F4u;
         static constexpr auto subtext      = 0xFF6C7086u;
+        static constexpr auto ghost_fg     = 0xFFA6ADC8u;
         static constexpr auto dir_fg       = 0xFF89B4FAu;
         static constexpr auto link_fg      = 0xFF94E2D5u;
         static constexpr auto sel_bg       = 0xFF45475Au;

@@ -18,15 +18,19 @@ namespace
         .background = 0xFF010203u,
         .foreground = 0xFF112233u,
         .muted_foreground = 0xFF445566u,
+        .ghost_foreground = 0xFF667788u,
         .focus = 0xFF778899u,
     };
 
-    auto render(input_mode mode, si32 width, text value = "abcdef", text prefix = {}) -> ui::face
+    auto render(input_mode mode, si32 width, text value = "abcdef", text prefix = {},
+                text ghost = {}, bool secret = faux) -> ui::face
     {
         auto input = make_input({
             .value = [value]{ return value; },
             .prefix = [prefix]{ return prefix; },
+            .ghost = [ghost]{ return ghost; },
             .mode = [mode]{ return mode; },
+            .secret = secret,
             .palette = palette,
         });
         input.widget->base::extend(rect{ {}, { width, 1 } });
@@ -80,6 +84,46 @@ namespace
             && value.und() == unln::line
             && value.unc() == argb{ palette.muted_foreground }.to_256cube();
     }
+
+    auto test_default_ghost_color() -> bool
+    {
+        return theme::ghost_fg == 0xFFA6ADC8u
+            && input_palette{}.ghost_foreground == theme::ghost_fg;
+    }
+
+    auto test_empty_edit_renders_clipped_ghost_after_prefix() -> bool
+    {
+        auto canvas = render(input_mode::edit, 4, "", ">", "ghost");
+        return canvas[{ 0, 0 }].txt() == ">"
+            && canvas[{ 0, 0 }].fgc() == argb{ palette.muted_foreground }
+            && canvas[{ 1, 0 }].txt() == "g"
+            && canvas[{ 1, 0 }].fgc() == argb{ palette.ghost_foreground }
+            && canvas[{ 2, 0 }].txt() == "h"
+            && canvas[{ 2, 0 }].fgc() == argb{ palette.ghost_foreground }
+            && canvas[{ 3, 0 }].txt() == "o"
+            && canvas[{ 3, 0 }].fgc() == argb{ palette.ghost_foreground };
+    }
+
+    auto test_ghost_visibility() -> bool
+    {
+        auto populated = render(input_mode::edit, 6, "real", {}, "ghost");
+        auto view = render(input_mode::view, 6, "", {}, "ghost");
+        auto disabled = render(input_mode::disabled, 6, "", {}, "ghost");
+        return populated[{ 0, 0 }].txt() == "r"
+            && populated[{ 0, 0 }].fgc() == argb{ palette.foreground }
+            && view[{ 0, 0 }].txt() == " "
+            && disabled[{ 0, 0 }].txt() == " ";
+    }
+
+    auto test_secret_ghost_is_not_masked() -> bool
+    {
+        auto empty = render(input_mode::edit, 6, "", {}, "secret", true);
+        auto populated = render(input_mode::edit, 6, "abc", {}, "secret", true);
+        return empty[{ 0, 0 }].txt() == "s"
+            && empty[{ 0, 0 }].fgc() == argb{ palette.ghost_foreground }
+            && populated[{ 0, 0 }].txt() == "*"
+            && populated[{ 0, 0 }].fgc() == argb{ palette.foreground };
+    }
 }
 
 int main()
@@ -94,5 +138,9 @@ int main()
     ok &= check(test_view_and_disabled_value_colors(), "view and disabled colors");
     ok &= check(test_truncated_value_colors(), "truncated colors");
     ok &= check(test_prefix_and_inactive_underline_stay_muted(), "prefix and underline colors");
+    ok &= check(test_default_ghost_color(), "default ghost color");
+    ok &= check(test_empty_edit_renders_clipped_ghost_after_prefix(), "empty edit ghost rendering");
+    ok &= check(test_ghost_visibility(), "ghost visibility");
+    ok &= check(test_secret_ghost_is_not_masked(), "secret ghost rendering");
     return ok ? 0 : 1;
 }
