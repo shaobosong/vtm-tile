@@ -273,7 +273,9 @@ namespace netxs::app::parvion
             {
                 if (!st.dragging) return;
                 auto prefix_w = cfg.prefix ? cell_width(cfg.prefix()) : 0;
-                st.caret_to(cfg, std::max(0, (si32)gear.coord.x - prefix_w));
+                // Preserve negative field-relative coordinates so dragging past the left edge
+                // can move the caret into text hidden before the current horizontal offset.
+                st.caret_to(cfg, (si32)gear.coord.x - prefix_w);
                 boss.base::deface();
             };
             boss.LISTEN(tier::release, e2::form::drag::stop::_<hids::buttons::left>, gear)

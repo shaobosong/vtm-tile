@@ -133,6 +133,34 @@ def test_field_drag_clamps_to_text():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_field_drag_scrolls_left():
+    """Dragging left of a horizontally scrolled field reveals and reaches earlier text."""
+    print("TEST: parvion connect bar - drag beyond left edge scrolls caret ... ", end="", flush=True)
+    d = tempfile.mkdtemp(prefix="parvioncb_")
+    try:
+        with T.ParvionSession(d) as s:
+            hf = _host_field(s)
+            if hf is None:
+                print("FAIL - 'Host:' label not found")
+                return False
+            r, x0 = hf
+            s.click(x0 + 1, r + 1)
+            s.write("abcdefghijklmnopqrstuv")  # Wider than the 16-cell Host field.
+            # Pull from inside the scrolled field through its left edge to terminal column 1.
+            # The signed out-of-bounds coordinates must walk the caret back through hidden text.
+            s.drag_path([(x0 + 8, r + 1), (x0 + 1, r + 1), (x0, r + 1), (1, r + 1)])
+            s.write("X")
+            s.write("\x1b[H")  # Reveal the beginning without changing the inserted text.
+            got = _host_text(s, r, x0)
+            if not got.startswith("Xabcdef"):
+                print(f"FAIL - Host field begins with {got!r}, want marker before 'abcdef'")
+                return False
+            print("PASS")
+            return True
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_tab_and_shift_tab_are_noops():
     """Tab chords are consumed by the active input and never move focus."""
     print("TEST: parvion connect bar - Tab/Shift+Tab are no-ops ... ", end="", flush=True)
@@ -350,6 +378,7 @@ TESTS = [
     test_field_press_focuses,
     test_field_drag_scrubs_caret,
     test_field_drag_clamps_to_text,
+    test_field_drag_scrolls_left,
     test_tab_and_shift_tab_are_noops,
     test_connect_fires_on_click,
     test_connect_button_visual_states,
