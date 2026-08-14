@@ -61,6 +61,13 @@ target_include_directories(parvion_button_test PRIVATE "${CMAKE_SOURCE_DIR}/src"
 target_link_libraries(parvion_button_test PRIVATE Lua::Lua)
 add_test(NAME parvion_button_test COMMAND parvion_button_test)
 
+# Unit test for the shared Parvion single-line input palette and renderer.
+add_executable(parvion_input_test "parvion_input_test.cpp")
+target_include_directories(parvion_input_test PRIVATE "${CMAKE_SOURCE_DIR}/src"
+                                                       ${LUA_INCLUDE_DIR})
+target_link_libraries(parvion_input_test PRIVATE Lua::Lua)
+add_test(NAME parvion_input_test COMMAND parvion_input_test)
+
 # Unit test for the shared Parvion fixed/resizable grid layout.
 add_executable(parvion_grid_test "parvion_grid_test.cpp")
 target_include_directories(parvion_grid_test PRIVATE "${CMAKE_SOURCE_DIR}/src"

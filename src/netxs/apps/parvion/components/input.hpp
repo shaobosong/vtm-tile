@@ -23,10 +23,10 @@ namespace netxs::app::parvion
 
     struct input_palette
     {
-        ui32 bg       = theme::surface;
-        ui32 text_fg  = theme::text_fg;
-        ui32 muted_fg = theme::subtext;
-        ui32 active   = theme::sel_bg_act;
+        ui32 background       = theme::surface;
+        ui32 foreground       = theme::text_fg;
+        ui32 muted_foreground = theme::subtext;
+        ui32 focus            = theme::sel_bg_act;
     };
 
     struct input_cfg
@@ -44,6 +44,17 @@ namespace netxs::app::parvion
         bool                        focus_on_start = faux;
         input_palette               palette{};
     };
+
+    namespace input_detail
+    {
+        inline auto value_foreground(input_mode mode, bool focused,
+                                     input_palette const& palette) -> ui32
+        {
+            if (mode == input_mode::disabled) return palette.muted_foreground;
+            return mode == input_mode::edit && focused ? palette.focus
+                                                       : palette.foreground;
+        }
+    }
 
     inline auto make_input(input_cfg cfg) -> component
     {
@@ -161,14 +172,16 @@ namespace netxs::app::parvion
                 auto prefix = cfg.prefix ? cfg.prefix() : text{};
                 auto prefix_w = std::min(size.x, cell_width(prefix));
                 auto active = mode == input_mode::edit && st.focused;
-                auto und = active ? cfg.palette.active : cfg.palette.muted_fg;
+                auto value_fg = input_detail::value_foreground(mode, st.focused, cfg.palette);
+                auto und = active ? cfg.palette.focus : cfg.palette.muted_foreground;
                 canvas.fill(rect{ {}, size }, [&](cell& c)
                 {
-                    c.bgc(cfg.palette.bg).und(unln::line).unc(argb{ und });
+                    c.bgc(cfg.palette.background).und(unln::line).unc(argb{ und });
                 });
 
                 if (prefix_w > 0)
-                    put_str(canvas, 0, 0, prefix, cfg.palette.muted_fg, cfg.palette.bg, prefix_w);
+                    put_str(canvas, 0, 0, prefix, cfg.palette.muted_foreground,
+                            cfg.palette.background, prefix_w);
                 auto field_w = std::max(0, size.x - prefix_w);
                 if (field_w <= 0) return;
 
@@ -184,15 +197,17 @@ namespace netxs::app::parvion
                         st.off = width - field_w + 1;
                         if (field_w > 1)
                         {
-                            put_str(canvas, prefix_w, 0, "\xE2\x80\xA6", cfg.palette.muted_fg, cfg.palette.bg, 1);
+                            put_str(canvas, prefix_w, 0, "\xE2\x80\xA6", value_fg,
+                                    cfg.palette.background, 1);
                             put_str(canvas, prefix_w + 1, 0, view{ disp }.substr(byte_at_cell(disp, st.off + 1)),
-                                    cfg.palette.muted_fg, cfg.palette.bg, field_w - 2);
+                                    value_fg, cfg.palette.background, field_w - 2);
                         }
                     }
                     else
                     {
                         st.off = 0;
-                        put_str(canvas, prefix_w, 0, disp, cfg.palette.muted_fg, cfg.palette.bg, field_w);
+                        put_str(canvas, prefix_w, 0, disp, value_fg,
+                                cfg.palette.background, field_w);
                     }
                     return;
                 }
@@ -203,16 +218,15 @@ namespace netxs::app::parvion
                 if (ccell - st.off >= field_w)  st.off = ccell - field_w + 1;
                 st.off = std::clamp(st.off, 0, std::max(0, total - field_w + 1));
                 auto shown = view{ disp }.substr(byte_at_cell(disp, st.off));
-                put_str(canvas, prefix_w, 0, shown,
-                        active ? cfg.palette.active : cfg.palette.text_fg,
-                        cfg.palette.bg, field_w);
+                put_str(canvas, prefix_w, 0, shown, value_fg,
+                        cfg.palette.background, field_w);
                 if (active)
                 {
                     auto cx = prefix_w + ccell - st.off;
                     if (cx >= prefix_w && cx < size.x)
                         canvas.fill(rect{{ cx, 0 }, { 1, 1 }}, [&](cell& c)
                         {
-                            c.bgc(cfg.palette.active).fgc(cfg.palette.bg);
+                            c.bgc(cfg.palette.focus).fgc(cfg.palette.background);
                         });
                 }
             };

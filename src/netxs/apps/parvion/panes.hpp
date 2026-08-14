@@ -1109,10 +1109,10 @@ namespace netxs::app::parvion
             },
             .blur = input_blur::cancel,
             .palette = {
-                .bg = theme::header,
-                .text_fg = theme::title_fg_act,
-                .muted_fg = theme::title_fg,
-                .active = theme::sel_bg_act,
+                .background = theme::header,
+                .foreground = theme::title_fg_act,
+                .muted_foreground = theme::subtext,
+                .focus = theme::sel_bg_act,
             },
         });
         title->attach(input.widget);
@@ -1168,8 +1168,8 @@ namespace netxs::app::parvion
             },
             .blur = input_blur::submit,
             .focus_on_start = true,
-            .palette = { .bg = theme::surface, .text_fg = theme::text_fg,
-                         .muted_fg = theme::subtext, .active = theme::sel_bg_act },
+            .palette = { .background = theme::surface, .foreground = theme::text_fg,
+                         .muted_foreground = theme::subtext, .focus = theme::sel_bg_act },
         });
 
         auto cfg = table_cfg{};

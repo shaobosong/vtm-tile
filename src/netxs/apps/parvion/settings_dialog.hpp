@@ -245,10 +245,10 @@ namespace netxs::app::parvion
                 .on_cancel = [close]{ close(); },
                 .digits_only = true,
                 .palette = {
-                    .bg = theme::surface,
-                    .text_fg = theme::text_fg,
-                    .muted_fg = theme::subtext,
-                    .active = theme::sel_bg_act,
+                    .background = theme::surface,
+                    .foreground = theme::text_fg,
+                    .muted_foreground = theme::subtext,
+                    .focus = theme::sel_bg_act,
                 },
             });
             field.widget->limits({ 6, 1 }, { 6, 1 });
@@ -636,10 +636,10 @@ namespace netxs::app::parvion
                 .on_cancel = [close]{ close(); },
                 .digits_only = true,
                 .palette = {
-                    .bg = theme::surface,
-                    .text_fg = theme::text_fg,
-                    .muted_fg = theme::subtext,
-                    .active = theme::sel_bg_act,
+                    .background = theme::surface,
+                    .foreground = theme::text_fg,
+                    .muted_foreground = theme::subtext,
+                    .focus = theme::sel_bg_act,
                 },
             });
             field.widget->limits({ 6, 1 }, { 6, 1 });
@@ -1066,10 +1066,10 @@ namespace netxs::app::parvion
                 .digits_only = field == settings_site::port,
                 .focus_on_start = field == settings_site::name,
                 .palette = {
-                    .bg = theme::bg,
-                    .text_fg = theme::text_fg,
-                    .muted_fg = theme::subtext,
-                    .active = theme::sel_bg_act,
+                    .background = theme::bg,
+                    .foreground = theme::text_fg,
+                    .muted_foreground = theme::subtext,
+                    .focus = theme::sel_bg_act,
                 },
             });
             if (field == settings_site::name) first_input = ptr::shadow(input.widget);

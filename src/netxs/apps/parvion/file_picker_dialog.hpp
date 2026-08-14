@@ -277,10 +277,10 @@ namespace netxs::app::parvion
                 .on_submit = [accept](text){ (*accept)(); },
                 .focus_on_start = true,
                 .palette = {
-                    .bg = theme::surface,
-                    .text_fg = theme::text_fg,
-                    .muted_fg = theme::subtext,
-                    .active = theme::sel_bg_act,
+                    .background = theme::surface,
+                    .foreground = theme::text_fg,
+                    .muted_foreground = theme::subtext,
+                    .focus = theme::sel_bg_act,
                 },
             });
             state->name_input_wp = ptr::shadow(name_input.widget);

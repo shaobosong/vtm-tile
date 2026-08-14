@@ -217,8 +217,8 @@ namespace netxs::app::parvion
             .on_cancel = cancel,
             .secret = cfg.secret,
             .focus_on_start = true,
-            .palette = { .bg = theme::bg, .text_fg = theme::text_fg,
-                         .muted_fg = theme::subtext, .active = theme::sel_bg_act },
+            .palette = { .background = theme::bg, .foreground = theme::text_fg,
+                         .muted_foreground = theme::subtext, .focus = theme::sel_bg_act },
         });
         auto input_wp = ptr::shadow(input.widget);
         content->attach(std::move(input), { .shrink = 0, .basis = 1, .minimum = 1, .maximum = 1 });
