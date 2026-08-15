@@ -239,6 +239,26 @@ namespace netxs::app::parvion
     }
     inline void tb_vsb_to(textbox_state& st, si32 y, tb_sb const& sb) { auto t = sb.track_h - sb.thumb_h; if (t <= 0) return; st.scroll  = std::clamp(((y - st.sb_grab  - sb.top) * sb.maxscroll + t / 2) / t, 0, sb.maxscroll); }
     inline void tb_hsb_to(textbox_state& st, si32 x, tb_sb const& sb) { auto t = sb.track_h - sb.thumb_h; if (t <= 0) return; st.hscroll = std::clamp(((x - st.hsb_grab - sb.x)   * sb.maxscroll + t / 2) / t, 0, sb.maxscroll); }
+    inline auto tb_key_scroll(textbox_state& st, si32 k, si32 ctlstat) -> bool
+    {
+        auto ctrl  = !!(ctlstat & hids::anyCtrl);
+        auto shift = !!(ctlstat & hids::anyShift);
+        auto alt   = !!(ctlstat & hids::anyAlt);
+        auto maxv  = std::max(0, st.total - st.body_rows);
+        auto value = st.scroll;
+        auto handled = true;
+             if (ctrl && !shift && !alt && (k == input::key::KeyHome || k == input::key::NumpadHome)) value = 0;
+        else if (ctrl && !shift && !alt && (k == input::key::KeyEnd  || k == input::key::NumpadEnd))  value = maxv;
+        else if (!ctrl && !shift && !alt && (k == input::key::KeyUpArrow   || k == input::key::NumpadUpArrow))   value -= 1;
+        else if (!ctrl && !shift && !alt && (k == input::key::KeyDownArrow || k == input::key::NumpadDownArrow)) value += 1;
+        else if (!ctrl && !shift && !alt && (k == input::key::KeyPageUp   || k == input::key::NumpadPageUp))   value -= std::max(1, st.body_rows);
+        else if (!ctrl && !shift && !alt && (k == input::key::KeyPageDown || k == input::key::NumpadPageDown)) value += std::max(1, st.body_rows);
+        else handled = faux;
+        if (!handled) return faux;
+        st.scroll = std::clamp(value, 0, maxv);
+        st.follow = st.scroll == maxv;
+        return true;
+    }
     inline void tb_paint_scrollbars(textbox_state const& st, auto& canvas)
     {
         if (auto sb = tb_vsb(st); sb.ok)
@@ -649,6 +669,12 @@ namespace netxs::app::parvion
                 if (gear.payload != input::keybd::type::keypress) return;
                 if (gear.keystat == input::key::released || gear.keystat == input::key::interrupted) return;
                 if (gear.keybd::handled) return;
+                if (tb_key_scroll(st, gear.keybd::generic(), gear.ctlstat))
+                {
+                    gear.set_handled();
+                    boss.base::deface();
+                    return;
+                }
                 if (cfg.on_key) cfg.on_key(gear, ptr::shadow(boss.This()));
             };
         });

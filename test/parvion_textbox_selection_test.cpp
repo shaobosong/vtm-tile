@@ -168,6 +168,61 @@ namespace
         return wlo.ln == 1 && wlo.cl == 0 && whi.ln == 1 && whi.cl == 2
             && llo.ln == 1 && llo.cl == 0 && lhi.ln == 1 && lhi.cl == 2;
     }
+
+    auto test_key_scroll_pages_and_clamps() -> bool
+    {
+        auto st = textbox_state{};
+        st.total = 100; st.body_rows = 10; st.scroll = 50;
+        if (!tb_key_scroll(st, input::key::KeyPageUp, 0) || st.scroll != 40 || st.follow) return faux;
+        if (!tb_key_scroll(st, input::key::KeyPageDown, 0) || st.scroll != 50 || st.follow) return faux;
+        st.scroll = 6;
+        if (!tb_key_scroll(st, input::key::KeyPageUp, 0) || st.scroll != 0 || st.follow) return faux;
+        st.scroll = 86;
+        return tb_key_scroll(st, input::key::KeyPageDown, 0)
+            && st.scroll == 90
+            && st.follow;
+    }
+
+    auto test_key_scroll_arrows_and_clamps() -> bool
+    {
+        auto st = textbox_state{};
+        st.total = 12; st.body_rows = 5; st.scroll = 3;
+        if (!tb_key_scroll(st, input::key::KeyUpArrow, 0) || st.scroll != 2 || st.follow) return faux;
+        if (!tb_key_scroll(st, input::key::KeyDownArrow, 0) || st.scroll != 3 || st.follow) return faux;
+        st.scroll = 0;
+        if (!tb_key_scroll(st, input::key::NumpadUpArrow, 0) || st.scroll != 0 || st.follow) return faux;
+        st.scroll = 6;
+        return tb_key_scroll(st, input::key::NumpadDownArrow, 0)
+            && st.scroll == 7
+            && st.follow;
+    }
+
+    auto test_key_scroll_ctrl_home_end() -> bool
+    {
+        auto st = textbox_state{};
+        st.total = 25; st.body_rows = 8; st.scroll = 9;
+        if (!tb_key_scroll(st, input::key::KeyHome, input::hids::LCtrl)
+         || st.scroll != 0 || st.follow) return faux;
+        return tb_key_scroll(st, input::key::NumpadEnd, input::hids::RCtrl)
+            && st.scroll == 17
+            && st.follow;
+    }
+
+    auto test_key_scroll_modifier_filter_and_numpad() -> bool
+    {
+        auto st = textbox_state{};
+        st.total = 30; st.body_rows = 5; st.scroll = 10; st.follow = faux;
+        if (tb_key_scroll(st, input::key::KeyHome, 0)
+         || tb_key_scroll(st, input::key::KeyEnd, input::hids::LCtrl | input::hids::LShift)
+         || tb_key_scroll(st, input::key::KeyUpArrow, input::hids::LShift)
+         || tb_key_scroll(st, input::key::KeyDownArrow, input::hids::LCtrl)
+         || tb_key_scroll(st, input::key::KeyPageUp, input::hids::LCtrl)
+         || tb_key_scroll(st, input::key::KeyPageDown, input::hids::LAlt)
+         || st.scroll != 10 || st.follow) return faux;
+        return tb_key_scroll(st, input::key::NumpadPageUp, 0)
+            && st.scroll == 5
+            && !st.follow;
+    }
 }
 
 int main()
@@ -187,6 +242,10 @@ int main()
         { "select_all_survives_appends",  test_select_all_survives_appends },
         { "select_all_rejects_epoch_shift", test_select_all_rejects_epoch_shift },
         { "line_span_select_unchanged_by_sel_all", test_line_span_select_unchanged_by_sel_all },
+        { "key_scroll_pages_and_clamps", test_key_scroll_pages_and_clamps },
+        { "key_scroll_arrows_and_clamps", test_key_scroll_arrows_and_clamps },
+        { "key_scroll_ctrl_home_end", test_key_scroll_ctrl_home_end },
+        { "key_scroll_modifier_filter_and_numpad", test_key_scroll_modifier_filter_and_numpad },
     };
 
     auto failed = 0;
