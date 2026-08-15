@@ -62,6 +62,7 @@ namespace netxs::app::parvion
         const void*  head_id   = nullptr;
         si32         base_lo_ln = 0, base_lo_cl = 0, base_hi_ln = 0, base_hi_cl = 0;
         si32         drag_x = 0, drag_y = 0;
+        si32         vert_cell = -1; // Retained visual goal column for repeated Shift+Up/Down.
         ui64         seen_epoch = 0;
     };
 
@@ -161,6 +162,7 @@ namespace netxs::app::parvion
         st.sel = faux; st.dragging = faux; st.selm = textbox_state::sel_none;
         st.anchor_ln = st.anchor_cl = st.head_ln = st.head_cl = 0;
         st.anchor_id = st.head_id = nullptr;
+        st.vert_cell = -1;
     }
     inline auto tb_select_all(textbox_state& st, textbox_cfg const& cfg) -> bool
     {
@@ -173,8 +175,30 @@ namespace netxs::app::parvion
         st.base_lo_ln = lo.ln; st.base_lo_cl = lo.cl; st.base_hi_ln = hi.ln; st.base_hi_cl = hi.cl;
         st.selm = textbox_state::sel_all; st.sel = true; st.dragging = faux;
         st.follow = faux; st.drag = textbox_state::d_none;
+        st.vert_cell = -1;
         st.seen_epoch = cfg.epoch ? cfg.epoch() : 0;
         return tb_has_selection(st);
+    }
+    inline auto tb_select_span(textbox_state& st, textbox_cfg const& cfg, tb_pos p,
+                               textbox_state::selmode mode, bool dragging) -> bool
+    {
+        auto n = cfg.line_count ? cfg.line_count() : 0;
+        if (n <= 0) return faux;
+        p.ln = std::clamp(p.ln, 0, n - 1);
+        p.cl = std::clamp(p.cl, 0, cluster_count(tb_line_text(cfg, p.ln)));
+        auto [lo, hi] = mode == textbox_state::sel_word ? tb_word_span(cfg, p)
+                      : mode == textbox_state::sel_line ? tb_line_span(cfg, p)
+                      : tb_whole_span(cfg);
+        st.base_lo_ln = lo.ln; st.base_lo_cl = lo.cl;
+        st.base_hi_ln = hi.ln; st.base_hi_cl = hi.cl;
+        st.anchor_ln = lo.ln; st.anchor_cl = lo.cl;
+        st.head_ln = hi.ln; st.head_cl = hi.cl;
+        st.anchor_id = cfg.line_id ? cfg.line_id(lo.ln) : nullptr;
+        st.head_id   = cfg.line_id ? cfg.line_id(hi.ln) : nullptr;
+        st.selm = mode; st.sel = true; st.dragging = dragging;
+        st.follow = faux; st.drag = textbox_state::d_none; st.vert_cell = -1;
+        st.seen_epoch = cfg.epoch ? cfg.epoch() : 0;
+        return true;
     }
     inline auto tb_index_of(textbox_cfg const& cfg, si32 n, const void* id) -> si32
     {
@@ -259,6 +283,159 @@ namespace netxs::app::parvion
         st.follow = st.scroll == maxv;
         return true;
     }
+    inline auto tb_class_at(view s, si32 cl) -> int
+    {
+        auto off = cluster_to_byte(s, cl);
+        return off < s.size() ? tb_cclass(s.substr(off)) : 0;
+    }
+    inline auto tb_step_char(textbox_cfg const& cfg, tb_pos p, si32 dir) -> tb_pos
+    {
+        auto n = cfg.line_count ? cfg.line_count() : 0;
+        if (n <= 0) return {};
+        p.ln = std::clamp(p.ln, 0, n - 1);
+        auto len = cluster_count(tb_line_text(cfg, p.ln));
+        p.cl = std::clamp(p.cl, 0, len);
+        if (dir < 0)
+        {
+            if (p.cl > 0) --p.cl;
+            else if (p.ln > 0)
+            {
+                --p.ln;
+                p.cl = cluster_count(tb_line_text(cfg, p.ln));
+            }
+        }
+        else
+        {
+            if (p.cl < len) ++p.cl;
+            else if (p.ln + 1 < n) { ++p.ln; p.cl = 0; }
+        }
+        return p;
+    }
+    inline auto tb_step_word(textbox_cfg const& cfg, tb_pos p, si32 dir) -> tb_pos
+    {
+        auto n = cfg.line_count ? cfg.line_count() : 0;
+        if (n <= 0) return {};
+        p.ln = std::clamp(p.ln, 0, n - 1);
+        p.cl = std::clamp(p.cl, 0, cluster_count(tb_line_text(cfg, p.ln)));
+        if (dir > 0)
+        {
+            auto s = tb_line_text(cfg, p.ln);
+            auto len = cluster_count(s);
+            if (p.cl < len && tb_class_at(s, p.cl) != 0)
+            {
+                auto cls = tb_class_at(s, p.cl);
+                while (p.cl < len && tb_class_at(s, p.cl) == cls) ++p.cl;
+            }
+            // Treat spaces and logical newlines as separators leading to the next run.
+            while (true)
+            {
+                s = tb_line_text(cfg, p.ln);
+                len = cluster_count(s);
+                if (p.cl < len)
+                {
+                    if (tb_class_at(s, p.cl) != 0) break;
+                    ++p.cl;
+                }
+                else if (p.ln + 1 < n) { ++p.ln; p.cl = 0; }
+                else break;
+            }
+        }
+        else
+        {
+            // Skip separators to the left, including logical newlines and blank lines.
+            while (p.ln > 0 || p.cl > 0)
+            {
+                if (p.cl == 0)
+                {
+                    --p.ln;
+                    p.cl = cluster_count(tb_line_text(cfg, p.ln));
+                    continue;
+                }
+                auto s = tb_line_text(cfg, p.ln);
+                if (tb_class_at(s, p.cl - 1) != 0) break;
+                --p.cl;
+            }
+            if (p.cl > 0)
+            {
+                auto s = tb_line_text(cfg, p.ln);
+                auto cls = tb_class_at(s, p.cl - 1);
+                while (p.cl > 0 && tb_class_at(s, p.cl - 1) == cls) --p.cl;
+            }
+        }
+        return p;
+    }
+    inline void tb_reveal_caret(textbox_state& st, textbox_cfg const& cfg)
+    {
+        auto n = cfg.line_count ? cfg.line_count() : 0;
+        if (n <= 0) return;
+        if (st.body_rows > 0)
+        {
+            if      (st.head_ln < st.scroll)                       st.scroll = st.head_ln;
+            else if (st.head_ln >= st.scroll + st.body_rows)      st.scroll = st.head_ln - st.body_rows + 1;
+            st.scroll = std::clamp(st.scroll, 0, std::max(0, n - st.body_rows));
+        }
+        if (st.disp_w > 0)
+        {
+            auto x = 1 + caret_cell(tb_line_text(cfg, st.head_ln), st.head_cl);
+            if      (x < st.hscroll)                  st.hscroll = x;
+            else if (x > st.hscroll + st.disp_w)      st.hscroll = x - st.disp_w;
+            st.hscroll = std::clamp(st.hscroll, 0, std::max(0, st.content_w - st.disp_w));
+        }
+    }
+    inline auto tb_key_select(textbox_state& st, textbox_cfg const& cfg, si32 k, si32 ctlstat) -> bool
+    {
+        auto ctrl  = !!(ctlstat & hids::anyCtrl);
+        auto shift = !!(ctlstat & hids::anyShift);
+        auto alt   = !!(ctlstat & hids::anyAlt);
+        if (!shift || alt) return faux;
+
+        auto left  = k == input::key::KeyLeftArrow  || k == input::key::NumpadLeftArrow;
+        auto right = k == input::key::KeyRightArrow || k == input::key::NumpadRightArrow;
+        auto up    = k == input::key::KeyUpArrow    || k == input::key::NumpadUpArrow;
+        auto down  = k == input::key::KeyDownArrow  || k == input::key::NumpadDownArrow;
+        auto home  = k == input::key::KeyHome       || k == input::key::NumpadHome;
+        auto end   = k == input::key::KeyEnd        || k == input::key::NumpadEnd;
+        if (ctrl ? !(left || right || home || end)
+                 : !(left || right || up || down || home || end)) return faux;
+
+        auto n = cfg.line_count ? cfg.line_count() : 0;
+        if (n <= 0) return true;
+        if (st.sel && !tb_reanchor(st, cfg, n)) tb_sel_clear(st);
+        if (!st.sel)
+        {
+            st.anchor_ln = st.head_ln = 0;
+            st.anchor_cl = st.head_cl = 0;
+            st.anchor_id = st.head_id = cfg.line_id ? cfg.line_id(0) : nullptr;
+            st.sel = true;
+            st.seen_epoch = cfg.epoch ? cfg.epoch() : 0;
+        }
+
+        auto p = tb_pos{ std::clamp(st.head_ln, 0, n - 1), st.head_cl };
+        auto s = tb_line_text(cfg, p.ln);
+        p.cl = std::clamp(p.cl, 0, cluster_count(s));
+        if (!ctrl && (up || down))
+        {
+            if (st.vert_cell < 0) st.vert_cell = caret_cell(s, p.cl);
+            p.ln = std::clamp(p.ln + (up ? -1 : 1), 0, n - 1);
+            p.cl = cell_to_cluster(tb_line_text(cfg, p.ln), st.vert_cell);
+        }
+        else
+        {
+            st.vert_cell = -1;
+            if      (left || right) p = ctrl ? tb_step_word(cfg, p, left ? -1 : 1)
+                                             : tb_step_char(cfg, p, left ? -1 : 1);
+            else if (home)         p = ctrl ? tb_pos{ 0, 0 } : tb_pos{ p.ln, 0 };
+            else if (end)          p = ctrl ? tb_pos{ n - 1, cluster_count(tb_line_text(cfg, n - 1)) }
+                                             : tb_pos{ p.ln, cluster_count(tb_line_text(cfg, p.ln)) };
+        }
+
+        st.head_ln = p.ln; st.head_cl = p.cl;
+        st.head_id = cfg.line_id ? cfg.line_id(p.ln) : nullptr;
+        st.selm = textbox_state::sel_char; st.sel = true; st.dragging = faux;
+        st.follow = faux; st.drag = textbox_state::d_none;
+        tb_reveal_caret(st, cfg);
+        return true;
+    }
     inline void tb_paint_scrollbars(textbox_state const& st, auto& canvas)
     {
         if (auto sb = tb_vsb(st); sb.ok)
@@ -309,11 +486,15 @@ namespace netxs::app::parvion
                            : st.selm == textbox_state::sel_line ? tb_line_span(cfg, p)
                            : tb_whole_span(cfg);
             auto blo = tb_pos{ st.base_lo_ln, st.base_lo_cl }, bhi = tb_pos{ st.base_hi_ln, st.base_hi_cl };
-            auto lo = elo < blo ? elo : blo, hi = bhi < ehi ? ehi : bhi;
-            st.anchor_ln = lo.ln; st.anchor_cl = lo.cl; st.head_ln = hi.ln; st.head_cl = hi.cl;
-            st.anchor_id = cfg.line_id ? cfg.line_id(lo.ln) : nullptr;
-            st.head_id   = cfg.line_id ? cfg.line_id(hi.ln) : nullptr;
+            auto reverse = p < blo;
+            auto anchor = reverse ? bhi : blo;
+            auto head   = reverse ? elo : ehi;
+            st.anchor_ln = anchor.ln; st.anchor_cl = anchor.cl;
+            st.head_ln = head.ln; st.head_cl = head.cl;
+            st.anchor_id = cfg.line_id ? cfg.line_id(anchor.ln) : nullptr;
+            st.head_id   = cfg.line_id ? cfg.line_id(head.ln) : nullptr;
         }
+        st.vert_cell = -1;
         return true;
     }
     inline auto tb_drag_autoscroll(textbox_state& st, textbox_cfg const& cfg) -> bool
@@ -537,7 +718,20 @@ namespace netxs::app::parvion
                     else if (mx >= tx + sb.thumb_h) st.hscroll = std::clamp(st.hscroll + page, 0, sb.maxscroll);
                     boss.base::deface(); gear.dismiss(); return;
                 }
-                if (tb_has_selection(st) && !(gear.ctlstat & hids::anyShift)) { tb_sel_clear(st); boss.base::deface(); gear.dismiss(); return; }
+                if (!(gear.ctlstat & hids::anyShift))
+                {
+                    auto n = cfg.line_count ? cfg.line_count() : 0;
+                    if (n > 0)
+                    {
+                        auto p = tb_hit(st, cfg, mx, my);
+                        st.anchor_ln = st.head_ln = p.ln; st.anchor_cl = st.head_cl = p.cl;
+                        st.anchor_id = st.head_id = cfg.line_id ? cfg.line_id(p.ln) : nullptr;
+                        st.selm = textbox_state::sel_char; st.sel = true; st.dragging = faux;
+                        st.follow = faux; st.drag = textbox_state::d_none; st.vert_cell = -1;
+                        st.seen_epoch = cfg.epoch ? cfg.epoch() : 0;
+                        boss.base::deface();
+                    }
+                }
                 gear.dismiss();
             });
             boss.on(tier::mouserelease, input::key::RightClick, [&](hids& gear)
@@ -612,7 +806,7 @@ namespace netxs::app::parvion
                 st.anchor_ln = st.head_ln = p.ln; st.anchor_cl = st.head_cl = p.cl;
                 st.anchor_id = st.head_id = cfg.line_id ? cfg.line_id(p.ln) : nullptr;
                 st.selm = textbox_state::sel_char; st.sel = true; st.dragging = true;
-                st.follow = faux; st.drag = textbox_state::d_none;
+                st.follow = faux; st.drag = textbox_state::d_none; st.vert_cell = -1;
                 st.seen_epoch = cfg.epoch ? cfg.epoch() : 0;
                 boss.base::deface();
             };
@@ -646,16 +840,8 @@ namespace netxs::app::parvion
                 if (n == 0) return;
                 pro::focus::set(boss.This(), gear.id, solo::on);
                 auto p = tb_hit(st, cfg, mx, my);
-                auto [lo, hi] = mode == textbox_state::sel_word ? tb_word_span(cfg, p)
-                              : mode == textbox_state::sel_line ? tb_line_span(cfg, p)
-                              : tb_whole_span(cfg);
                 st.drag_x = mx; st.drag_y = my;
-                st.base_lo_ln = lo.ln; st.base_lo_cl = lo.cl; st.base_hi_ln = hi.ln; st.base_hi_cl = hi.cl;
-                st.anchor_ln = lo.ln; st.anchor_cl = lo.cl; st.head_ln = hi.ln; st.head_cl = hi.cl;
-                st.anchor_id = cfg.line_id ? cfg.line_id(lo.ln) : nullptr;
-                st.head_id   = cfg.line_id ? cfg.line_id(hi.ln) : nullptr;
-                st.selm = mode; st.sel = true; st.dragging = dragging; st.follow = faux; st.drag = textbox_state::d_none;
-                st.seen_epoch = cfg.epoch ? cfg.epoch() : 0;
+                tb_select_span(st, cfg, p, mode, dragging);
                 gear.dismiss(); boss.base::deface();
             };
             boss.on(tier::mouserelease, input::key::LeftDoubleClick, [&, span_select](hids& gear) { span_select(gear, textbox_state::sel_word, faux); });
@@ -669,6 +855,12 @@ namespace netxs::app::parvion
                 if (gear.payload != input::keybd::type::keypress) return;
                 if (gear.keystat == input::key::released || gear.keystat == input::key::interrupted) return;
                 if (gear.keybd::handled) return;
+                if (tb_key_select(st, cfg, gear.keybd::generic(), gear.ctlstat))
+                {
+                    gear.set_handled();
+                    boss.base::deface();
+                    return;
+                }
                 if (tb_key_scroll(st, gear.keybd::generic(), gear.ctlstat))
                 {
                     gear.set_handled();

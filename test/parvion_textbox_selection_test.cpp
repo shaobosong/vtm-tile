@@ -1,8 +1,8 @@
 // Copyright (c) Shaobo Song
 // Licensed under the MIT license.
 
-// Unit tests for the Parvion textbox selection modes, with the focus on the
-// quadruple-click "select all" mode (textbox_state::sel_all): the whole-document
+// Unit tests for the Parvion textbox mouse and keyboard selection modes, including
+// directional anchor/caret behavior and quadruple-click "select all": the whole-document
 // span helper, the select-all arming (anchor/head/base + mode), the selection
 // text it produces, drag stability in sel_all mode, and id-anchored survival of
 // live log appends.
@@ -30,6 +30,16 @@ namespace
             return out;
         };
         return cfg;
+    }
+
+    void arm_caret(textbox_state& st, textbox_cfg const& cfg, tb_pos p)
+    {
+        st.anchor_ln = st.head_ln = p.ln;
+        st.anchor_cl = st.head_cl = p.cl;
+        st.anchor_id = st.head_id = cfg.line_id ? cfg.line_id(p.ln) : nullptr;
+        st.selm = textbox_state::sel_char;
+        st.sel = true;
+        st.seen_epoch = cfg.epoch ? cfg.epoch() : 0;
     }
 
     auto test_whole_span_nonempty() -> bool
@@ -169,6 +179,152 @@ namespace
             && llo.ln == 1 && llo.cl == 0 && lhi.ln == 1 && lhi.cl == 2;
     }
 
+    auto test_word_drag_uses_directional_anchor_and_caret() -> bool
+    {
+        auto cfg = make_cfg({ "zero one two" });
+        auto st = textbox_state{};
+        st.body_rows = 1;
+        if (!tb_select_span(st, cfg, tb_pos{ 0, 6 }, textbox_state::sel_word, true)) return faux;
+        if (st.anchor_cl != 5 || st.head_cl != 8) return faux;
+
+        // Reverse: the original word's right edge is fixed; the caret is at the new left edge.
+        if (!tb_drag_head(st, cfg, 2, 0)
+         || st.anchor_ln != 0 || st.anchor_cl != 8
+         || st.head_ln != 0 || st.head_cl != 0
+         || tb_selection_text(st, cfg) != "zero one") return faux;
+
+        // Forward and crossing back over the origin restore the corresponding directional endpoints.
+        if (!tb_drag_head(st, cfg, 11, 0)
+         || st.anchor_cl != 5 || st.head_cl != 12
+         || tb_selection_text(st, cfg) != "one two") return faux;
+        return tb_drag_head(st, cfg, 7, 0)
+            && st.anchor_cl == 5 && st.head_cl == 8;
+    }
+
+    auto test_line_drag_uses_directional_anchor_and_caret() -> bool
+    {
+        auto cfg = make_cfg({ "abc", "de", "f" });
+        auto st = textbox_state{};
+        st.body_rows = 3;
+        if (!tb_select_span(st, cfg, tb_pos{ 1, 1 }, textbox_state::sel_line, true)
+         || st.anchor_ln != 1 || st.anchor_cl != 0
+         || st.head_ln != 1 || st.head_cl != 2) return faux;
+        if (!tb_drag_head(st, cfg, 2, 0)
+         || st.anchor_ln != 1 || st.anchor_cl != 2
+         || st.head_ln != 0 || st.head_cl != 0
+         || tb_selection_text(st, cfg) != "abc\nde") return faux;
+        return tb_drag_head(st, cfg, 2, 2)
+            && st.anchor_ln == 1 && st.anchor_cl == 0
+            && st.head_ln == 2 && st.head_cl == 1
+            && tb_selection_text(st, cfg) == "de\nf";
+    }
+
+    auto test_key_select_char_crosses_anchor_and_lines() -> bool
+    {
+        auto cfg = make_cfg({ "ab", "cd" });
+        auto st = textbox_state{};
+        arm_caret(st, cfg, tb_pos{ 0, 1 });
+        auto shift = input::hids::LShift;
+        if (!tb_key_select(st, cfg, input::key::KeyRightArrow, shift)
+         || st.anchor_cl != 1 || st.head_ln != 0 || st.head_cl != 2
+         || tb_selection_text(st, cfg) != "b") return faux;
+        if (!tb_key_select(st, cfg, input::key::KeyLeftArrow, shift)
+         || tb_has_selection(st)) return faux;
+        if (!tb_key_select(st, cfg, input::key::KeyLeftArrow, shift)
+         || st.anchor_cl != 1 || st.head_cl != 0
+         || tb_selection_text(st, cfg) != "a") return faux;
+        if (!tb_key_select(st, cfg, input::key::KeyRightArrow, shift)
+         || !tb_key_select(st, cfg, input::key::KeyRightArrow, shift)
+         || !tb_key_select(st, cfg, input::key::KeyRightArrow, shift)) return faux;
+        return st.head_ln == 1 && st.head_cl == 0
+            && tb_selection_text(st, cfg) == "b\n";
+    }
+
+    auto test_key_select_vertical_retains_visual_goal() -> bool
+    {
+        auto cfg = make_cfg({ "abcdef", "x", "\xE8\xA1\xA8" "abc" }); // 表abc is five cells.
+        auto st = textbox_state{};
+        arm_caret(st, cfg, tb_pos{ 0, 5 });
+        auto shift = input::hids::RShift;
+        if (!tb_key_select(st, cfg, input::key::KeyDownArrow, shift)
+         || st.head_ln != 1 || st.head_cl != 1 || st.vert_cell != 5) return faux;
+        if (!tb_key_select(st, cfg, input::key::NumpadDownArrow, shift)
+         || st.head_ln != 2 || st.head_cl != 4 || st.vert_cell != 5) return faux;
+        if (!tb_key_select(st, cfg, input::key::KeyUpArrow, shift)
+         || !tb_key_select(st, cfg, input::key::KeyUpArrow, shift)) return faux;
+        return st.head_ln == 0 && st.head_cl == 5 && st.vert_cell == 5;
+    }
+
+    auto test_key_select_platform_word_boundaries() -> bool
+    {
+        auto cfg = make_cfg({ "one  two.three", "", " four" });
+        auto st = textbox_state{};
+        arm_caret(st, cfg, tb_pos{ 0, 0 });
+        auto chord = input::hids::LShift | input::hids::LCtrl;
+        if (!tb_key_select(st, cfg, input::key::KeyRightArrow, chord)
+         || st.head_ln != 0 || st.head_cl != 5) return faux;  // Skip "one" and spaces.
+        if (!tb_key_select(st, cfg, input::key::KeyRightArrow, chord)
+         || st.head_cl != 8) return faux;                     // Stop before punctuation.
+        if (!tb_key_select(st, cfg, input::key::KeyRightArrow, chord)
+         || st.head_cl != 9) return faux;                     // Punctuation is its own run.
+        if (!tb_key_select(st, cfg, input::key::KeyRightArrow, chord)
+         || st.head_ln != 2 || st.head_cl != 1) return faux;  // Skip newlines, blank line, and space.
+        if (!tb_key_select(st, cfg, input::key::NumpadLeftArrow, chord)) return faux;
+        return st.head_ln == 0 && st.head_cl == 9;
+    }
+
+    auto test_key_select_home_end_scopes() -> bool
+    {
+        auto cfg = make_cfg({ "abc", "de", "fgh" });
+        auto st = textbox_state{};
+        arm_caret(st, cfg, tb_pos{ 1, 1 });
+        auto shift = input::hids::LShift;
+        auto chord = shift | input::hids::RCtrl;
+        if (!tb_key_select(st, cfg, input::key::KeyEnd, shift)
+         || st.head_ln != 1 || st.head_cl != 2) return faux;
+        if (!tb_key_select(st, cfg, input::key::NumpadHome, shift)
+         || st.head_ln != 1 || st.head_cl != 0) return faux;
+        if (!tb_key_select(st, cfg, input::key::KeyEnd, chord)
+         || st.head_ln != 2 || st.head_cl != 3) return faux;
+        if (!tb_key_select(st, cfg, input::key::NumpadHome, chord)
+         || st.head_ln != 0 || st.head_cl != 0) return faux;
+        return st.anchor_ln == 1 && st.anchor_cl == 1
+            && tb_selection_text(st, cfg) == "abc\nd";
+    }
+
+    auto test_key_select_ids_visibility_and_mode() -> bool
+    {
+        auto cfg = make_cfg({ "a", "b", "c", "0123456789" });
+        cfg.line_id = [](si32 i){ return reinterpret_cast<const void*>((intptr_t)i + 1); };
+        auto st = textbox_state{};
+        st.body_rows = 2; st.disp_w = 5; st.content_w = 11; st.total = 4;
+        arm_caret(st, cfg, tb_pos{ 2, 0 });
+        st.selm = textbox_state::sel_word;
+        st.dragging = true;
+        auto shift = input::hids::LShift;
+        if (!tb_key_select(st, cfg, input::key::KeyDownArrow, shift)
+         || st.head_ln != 3 || st.head_id != reinterpret_cast<const void*>((intptr_t)4)
+         || st.anchor_id != reinterpret_cast<const void*>((intptr_t)3)
+         || st.scroll != 2 || st.selm != textbox_state::sel_char || st.dragging) return faux;
+        return tb_key_select(st, cfg, input::key::KeyEnd, shift)
+            && st.head_cl == 10 && st.hscroll == 6 && !st.follow;
+    }
+
+    auto test_key_select_defaults_and_modifier_filter() -> bool
+    {
+        auto cfg = make_cfg({ "ab" });
+        auto st = textbox_state{};
+        auto shift = input::hids::LShift;
+        if (tb_key_select(st, cfg, input::key::KeyRightArrow, 0)
+         || tb_key_select(st, cfg, input::key::KeyPageDown, shift)
+         || tb_key_select(st, cfg, input::key::KeyUpArrow, shift | input::hids::LCtrl)
+         || tb_key_select(st, cfg, input::key::KeyLeftArrow, shift | input::hids::LAlt)) return faux;
+        return tb_key_select(st, cfg, input::key::NumpadRightArrow, shift)
+            && st.sel && st.anchor_ln == 0 && st.anchor_cl == 0
+            && st.head_ln == 0 && st.head_cl == 1
+            && tb_selection_text(st, cfg) == "a";
+    }
+
     auto test_key_scroll_pages_and_clamps() -> bool
     {
         auto st = textbox_state{};
@@ -242,6 +398,14 @@ int main()
         { "select_all_survives_appends",  test_select_all_survives_appends },
         { "select_all_rejects_epoch_shift", test_select_all_rejects_epoch_shift },
         { "line_span_select_unchanged_by_sel_all", test_line_span_select_unchanged_by_sel_all },
+        { "word_drag_uses_directional_anchor_and_caret", test_word_drag_uses_directional_anchor_and_caret },
+        { "line_drag_uses_directional_anchor_and_caret", test_line_drag_uses_directional_anchor_and_caret },
+        { "key_select_char_crosses_anchor_and_lines", test_key_select_char_crosses_anchor_and_lines },
+        { "key_select_vertical_retains_visual_goal", test_key_select_vertical_retains_visual_goal },
+        { "key_select_platform_word_boundaries", test_key_select_platform_word_boundaries },
+        { "key_select_home_end_scopes", test_key_select_home_end_scopes },
+        { "key_select_ids_visibility_and_mode", test_key_select_ids_visibility_and_mode },
+        { "key_select_defaults_and_modifier_filter", test_key_select_defaults_and_modifier_filter },
         { "key_scroll_pages_and_clamps", test_key_scroll_pages_and_clamps },
         { "key_scroll_arrows_and_clamps", test_key_scroll_arrows_and_clamps },
         { "key_scroll_ctrl_home_end", test_key_scroll_ctrl_home_end },
