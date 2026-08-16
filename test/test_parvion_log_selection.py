@@ -590,6 +590,45 @@ def test_log_selection_survives_log_update():
     print("PASS"); return True
 
 
+def test_log_clear_all_rearms_follow():
+    """Clear All re-arms tail-follow: live appends after the cleared log pin to the bottom.
+
+    A click disengages follow (the view freezes); Clear All empties the log. The textbox
+    must reset its follow flag, so ticks appended by the demo seam afterwards auto-scroll
+    the view to the tail again instead of leaving it stuck at the head. The Message-log
+    body holds ~14 rows, so the pumped ticks (TICK=4 => ~5/sec) overshoot the viewport and
+    the distinction is visible: the newest tick must sit on the bottom row and old ticks
+    must be scrolled out.
+    """
+    print("TEST: parvion message log - Clear All re-arms tail-follow ... ", end="", flush=True)
+    with _session({"PARVION_DEMO_LOG_TICK": "4"}) as s:  # append a line every ~200ms.
+        info = _enter_log(s)
+        if info is None:
+            print("FAIL: message log / seeded lines not found"); return False
+        lr, lc, _ = info
+        s.click(lc + 1, lr + 1)  # plain click: disengages follow and freezes the view.
+        s.click(lc + 2, lr + 1, button=2)
+        s.write("l")  # C&lear All.
+        _pump(s, 6.0)  # enough live appends (~5/s) to overflow the 14-row body.
+        chars, _ = s.screen()
+        if T.grid_contains(chars, "log line"):
+            print("FAIL: Clear-All shortcut did not empty the message log"); return False
+        tick_rows = {}
+        for r in range(T.ROWS):
+            m = re.search(r"tick (\d+)", T.row_text(chars, r))
+            if m: tick_rows[int(m.group(1))] = r
+        if not tick_rows:
+            print("FAIL: no live-appended 'tick' lines appeared after Clear All"); return False
+        latest = max(tick_rows)
+        if len(tick_rows) == latest:
+            print("FAIL: log did not overflow the viewport (test inconclusive)"); return False
+        if tick_rows.get(latest) != max(tick_rows.values()):
+            print("FAIL: latest tick is not pinned to the bottom after Clear All"); return False
+        if 1 in tick_rows:
+            print("FAIL: view is not at the tail after Clear All (tick 1 still visible)"); return False
+    print("PASS"); return True
+
+
 TESTS = [
     test_log_menu_button_tracks_selection,
     test_log_char_drag_selects,
@@ -605,6 +644,7 @@ TESTS = [
     test_log_context_menu_grouping,
     test_log_context_menu_shortcuts,
     test_log_clear_all_disabled_when_empty,
+    test_log_clear_all_rearms_follow,
     test_log_scrollbar_press_and_drag_feedback,
     test_log_live_appends_arrive,
     test_log_selection_survives_log_update,

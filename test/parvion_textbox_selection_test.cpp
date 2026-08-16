@@ -42,6 +42,17 @@ namespace
         st.seen_epoch = cfg.epoch ? cfg.epoch() : 0;
     }
 
+    // Minimal canvas stub: textbox_render only needs fill(rect, cell-mutator).
+    struct mock_canvas
+    {
+        template<class Fx>
+        void fill(rect, Fx fx)
+        {
+            auto c = cell{};
+            fx(c);
+        }
+    };
+
     auto test_whole_span_nonempty() -> bool
     {
         auto cfg = make_cfg({ "abc", "de", "fgh" });
@@ -379,6 +390,31 @@ namespace
             && st.scroll == 5
             && !st.follow;
     }
+
+    auto test_empty_render_rearms_follow() -> bool
+    {
+        // Clear All empties the log while follow is disengaged (scrolled up / selecting):
+        // rendering the empty view must re-arm tail-follow so new lines auto-scroll again.
+        auto cfg = textbox_cfg{};
+        cfg.line_count = []{ return si32{ 0 }; };
+        cfg.line = [](si32){ return std::vector<textseg>{}; };
+        auto st = textbox_state{};
+        st.follow = faux;
+        auto canvas = mock_canvas{};
+        textbox_render(st, cfg, canvas, twod{ 20, 10 });
+        return st.follow;
+    }
+
+    auto test_nonempty_render_keeps_follow_disengaged() -> bool
+    {
+        // A populated view must not silently re-arm follow: the user scrolled up on purpose.
+        auto cfg = make_cfg({ "abc", "de", "fgh" });
+        auto st = textbox_state{};
+        st.follow = faux;
+        auto canvas = mock_canvas{};
+        textbox_render(st, cfg, canvas, twod{ 20, 10 });
+        return !st.follow;
+    }
 }
 
 int main()
@@ -410,6 +446,8 @@ int main()
         { "key_scroll_arrows_and_clamps", test_key_scroll_arrows_and_clamps },
         { "key_scroll_ctrl_home_end", test_key_scroll_ctrl_home_end },
         { "key_scroll_modifier_filter_and_numpad", test_key_scroll_modifier_filter_and_numpad },
+        { "empty_render_rearms_follow", test_empty_render_rearms_follow },
+        { "nonempty_render_keeps_follow_disengaged", test_nonempty_render_keeps_follow_disengaged },
     };
 
     auto failed = 0;

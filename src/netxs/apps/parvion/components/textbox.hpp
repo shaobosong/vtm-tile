@@ -586,6 +586,7 @@ namespace netxs::app::parvion
 
         if (n == 0)
         {
+            st.follow = true; // Re-arm tail-follow: new content resumes auto-scrolling.
             if (cfg.empty_text) put_str(canvas, 1, st.body_top, cfg.empty_text(), theme::subtext, theme::bg, std::max(1, st.disp_w - 1));
         }
         else if (st.body_rows > 0)
