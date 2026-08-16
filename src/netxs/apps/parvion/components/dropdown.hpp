@@ -33,13 +33,20 @@ namespace netxs::app::parvion
         ui32 popup_hover         = 0xFF555668u;
     };
 
+    enum class dropdown_width_mode
+    {
+        maximum,
+        selected,
+    };
+
     struct dropdown_cfg
     {
         std::vector<dropdown_option> options;
         std::function<si32()> selected;
         std::function<void(si32)> on_change;
         std::function<bool()> enabled; // Null means enabled.
-        si32 width = -1;               // Negative/zero means widest-option width.
+        si32 width = -1;               // Positive values override width_mode.
+        dropdown_width_mode width_mode = dropdown_width_mode::maximum;
         dropdown_palette palette{};
     };
 
@@ -95,16 +102,46 @@ namespace netxs::app::parvion
         return selected >= 0 && selected < (si32)cfg.options.size() ? selected : -1;
     }
 
+    inline auto dropdown_option_width(dropdown_option const& option) -> si32
+    {
+        return std::max(4, cell_width(option.label) + 4); // Pads, gap, and arrow.
+    }
+
+    inline auto dropdown_maximum_width(dropdown_cfg const& cfg) -> si32
+    {
+        auto width = si32{ 4 };
+        for (auto& option : cfg.options)
+            width = std::max(width, dropdown_option_width(option));
+        return width;
+    }
+
+    inline auto dropdown_selected_width(dropdown_cfg const& cfg) -> si32
+    {
+        auto selected = dropdown_selected(cfg);
+        return selected >= 0 ? dropdown_option_width(cfg.options[(size_t)selected])
+                             : 4;
+    }
+
     inline auto dropdown_default_width(dropdown_cfg const& cfg) -> si32
     {
-        auto widest = si32{};
-        for (auto& option : cfg.options) widest = std::max(widest, cell_width(option.label));
-        return std::max(4, widest + 4); // Leading/trailing pad, gap, and arrow.
+        return cfg.width_mode == dropdown_width_mode::selected
+             ? dropdown_selected_width(cfg)
+             : dropdown_maximum_width(cfg);
     }
 
     inline auto dropdown_resolved_width(dropdown_cfg const& cfg) -> si32
     {
         return cfg.width > 0 ? std::max(1, cfg.width) : dropdown_default_width(cfg);
+    }
+
+    inline void dropdown_sync_trigger_width(dropdown_model const& model)
+    {
+        auto trigger = model.trigger.lock();
+        if (!trigger) return;
+        auto size = twod{ dropdown_resolved_width(model.config), 1 };
+        if (trigger->base::min_sz == size && trigger->base::max_sz == size) return;
+        trigger->base::limits(size, size);
+        trigger->base::reflow();
     }
 
     inline auto dropdown_trigger_area(ui::base& trigger, ui::sptr const& host) -> rect
@@ -218,6 +255,7 @@ namespace netxs::app::parvion
          || !cfg.options[(size_t)index].enabled) return;
         if (cfg.on_change) cfg.on_change(index);
         dismiss_dropdown(popup);
+        dropdown_sync_trigger_width(*popup->model);
     }
 
     inline auto dropdown_popup_coord(rect area, twod point) -> twod
@@ -275,7 +313,7 @@ namespace netxs::app::parvion
         popup->painted = ptr::shared<rect>();
         popup->trigger_area = dropdown_trigger_area(trigger, host);
         popup->width = std::max(dropdown_resolved_width(model->config),
-                                dropdown_default_width(model->config));
+                                dropdown_maximum_width(model->config));
         model->state.open = true;
         model->trigger = ptr::shadow(ui::sptr{ trigger.This() });
         active_dropdown_popup() = popup;
