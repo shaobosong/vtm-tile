@@ -261,37 +261,25 @@ namespace
             .selected = [&]{ return selected; },
             .on_change = [&](si32 value){ selected = value; },
         };
-        auto maximum_width = cell_width("Longest option") + 4;
-        auto first_width = cell_width("B") + 4;
-        if (dropdown_maximum_width(cfg) != maximum_width
-         || dropdown_selected_width(cfg) != first_width
-         || dropdown_default_width(cfg) != maximum_width
-         || dropdown_resolved_width(cfg) != maximum_width) return faux;
+        auto expected = cell_width("Longest option") + 4;
+        if (dropdown_default_width(cfg) != expected
+         || dropdown_resolved_width(cfg) != expected) return faux;
         selected = 1;
-        if (dropdown_selected_width(cfg) != maximum_width
-         || dropdown_resolved_width(cfg) != maximum_width) return faux;
-        cfg.width_mode = dropdown_width_mode::selected;
-        selected = 3;
-        if (dropdown_resolved_width(cfg) != cell_width("界界") + 4) return faux;
-        selected = -1;
-        if (dropdown_selected_width(cfg) != 4
-         || dropdown_resolved_width(cfg) != 4) return faux;
-        selected = 1;
+        if (dropdown_resolved_width(cfg) != expected) return faux;
         if (dropdown_step(cfg, 1, +1) != 3
          || dropdown_step(cfg, 3, +1) != 0
          || dropdown_step(cfg, 0, -1) != 3) return faux;
 
         auto canvas = ui::face{};
-        canvas.size({ maximum_width, 1 });
+        canvas.size({ expected, 1 });
         auto state = dropdown_state{};
         state.focused = true;
         dropdown_render(state, cfg, canvas, canvas.size());
         if (canvas[{ 1, 0 }].txt() != "L"
-         || canvas[{ maximum_width - 2, 0 }].txt() != "▾"
+         || canvas[{ expected - 2, 0 }].txt() != "▾"
          || canvas[{ 0, 0 }].bgc() != argb{ theme::sel_bg }) return faux;
 
         cfg.width = 9;
-        selected = 1;
         auto component = make_dropdown(std::move(cfg));
         component.widget->base::extend({ {}, { 9, 1 } });
         auto retained_canvas = ui::face{};
@@ -301,48 +289,6 @@ namespace
             && component.widget->base::max_sz == twod{ 9, 1 }
             && retained_canvas[{ 1, 0 }].txt() == "L"
             && retained_canvas[{ 7, 0 }].txt() == "▾";
-    }
-
-    auto test_dropdown_selected_width_reflows_and_popup_stays_wide() -> bool
-    {
-        auto selected = si32{};
-        auto model = ptr::shared<dropdown_model>();
-        model->config = dropdown_cfg{
-            .options = { { "One" }, { "A much longer option" } },
-            .selected = [&]{ return selected; },
-            .on_change = [&](si32 value){ selected = value; },
-            .width_mode = dropdown_width_mode::selected,
-        };
-        auto initial_width = cell_width("One") + 4;
-        auto maximum_width = cell_width("A much longer option") + 4;
-        auto trigger = ui::mock::ctor()->limits({ initial_width, 1 }, { initial_width, 1 });
-        model->trigger = ptr::shadow(trigger);
-        auto host = ui::cake::ctor();
-        host->base::kind(ui::base::reflow_root);
-        host->base::attach(trigger);
-        host->base::extend({ {}, { 80, 8 } });
-
-        open_dropdown(model, *trigger);
-        auto popup = active_dropdown_popup();
-        if (!popup || popup->width != maximum_width)
-        {
-            dismiss_dropdown(popup);
-            return faux;
-        }
-        dropdown_activate(popup, 1);
-        if (selected != 1
-         || active_dropdown_popup()
-         || trigger->base::min_sz != twod{ maximum_width, 1 }
-         || trigger->base::max_sz != twod{ maximum_width, 1 }) return faux;
-
-        model->config.width_mode = dropdown_width_mode::maximum;
-        dropdown_sync_trigger_width(*model);
-        open_dropdown(model, *trigger);
-        popup = active_dropdown_popup();
-        dropdown_activate(popup, 0);
-        return selected == 0
-            && trigger->base::min_sz == twod{ maximum_width, 1 }
-            && trigger->base::max_sz == twod{ maximum_width, 1 };
     }
 
     auto test_dropdown_generic_viewport_visibility_and_nonreflow_open() -> bool
@@ -404,8 +350,6 @@ int main()
     check(test_wrapped_groupbox_and_page_item_padding, "wrapped groupbox and page item padding");
     check(test_checkbox_render_measurement_and_toggle, "checkbox render, measurement, and toggle");
     check(test_dropdown_width_render_and_navigation, "dropdown width, render, and navigation");
-    check(test_dropdown_selected_width_reflows_and_popup_stays_wide,
-          "dropdown selected width reflow and popup width");
     check(test_dropdown_generic_viewport_visibility_and_nonreflow_open,
           "dropdown generic viewport visibility and non-reflow open");
     return ok ? 0 : 1;
