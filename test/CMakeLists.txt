@@ -61,6 +61,15 @@ target_include_directories(parvion_button_test PRIVATE "${CMAKE_SOURCE_DIR}/src"
 target_link_libraries(parvion_button_test PRIVATE Lua::Lua)
 add_test(NAME parvion_button_test COMMAND parvion_button_test)
 
+# Unit test for the shared Parvion popup-menu component: the application.hpp
+# popup-menu port (cascading dropdowns, radiomenus, separators, check rows,
+# keyboard shortcuts, hover-switch) and its configuration/API contract.
+add_executable(parvion_popup_menu_test "parvion_popup_menu_test.cpp")
+target_include_directories(parvion_popup_menu_test PRIVATE "${CMAKE_SOURCE_DIR}/src"
+                                                           ${LUA_INCLUDE_DIR})
+target_link_libraries(parvion_popup_menu_test PRIVATE Lua::Lua)
+add_test(NAME parvion_popup_menu_test COMMAND parvion_popup_menu_test)
+
 # Unit test for the shared Parvion single-line input palette and renderer.
 add_executable(parvion_input_test "parvion_input_test.cpp")
 target_include_directories(parvion_input_test PRIVATE "${CMAKE_SOURCE_DIR}/src"
