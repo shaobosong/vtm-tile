@@ -4,7 +4,6 @@
 #include "netxs/apps.hpp"
 #include "vtm-common.hpp"
 #include "netxs/apps/parvion/components/button.hpp"
-#include "netxs/apps/parvion/connectbar.hpp"
 #include "netxs/apps/parvion/components/tabs.hpp"
 
 #include <cstdio>
@@ -96,12 +95,6 @@ namespace
             && !button_hit({ 6, 1 }, 6, 0)
             && !button_hit({ 6, 1 }, 0, 1)
             && !button_hit({ 6, 1 }, -1, 0);
-    }
-
-    auto test_connect_caption_remains_responsive() -> bool
-    {
-        return cb_resolve(cb_form_width()).connect == " Connect "
-            && cb_resolve(cb_min_width()).connect == " » ";
     }
 
     auto test_counted_tab_abbreviation_preserves_suffix() -> bool
@@ -213,7 +206,6 @@ int main()
            && test_disabled_palette_and_overlays()
            && test_enabled_defaults_true()
            && test_hit_bounds()
-           && test_connect_caption_remains_responsive()
            && test_counted_tab_abbreviation_preserves_suffix()
            && test_tab_abbreviation_prioritizes_longer_titles()
            && test_tab_abbreviation_balances_tied_titles()

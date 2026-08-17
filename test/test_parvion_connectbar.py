@@ -271,6 +271,131 @@ def test_connect_drag_off_cancels_click():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_responsive_narrow_bar_stays_interactive():
+    """The fully compact retained form keeps Connect/dropdown adjacency and input hit boxes."""
+    print("TEST: parvion connect bar - narrow retained layout stays interactive ... ", end="", flush=True)
+    d = tempfile.mkdtemp(prefix="parvioncb_")
+    try:
+        with T.ParvionSession(d) as s:
+            narrow_cols = 54
+            T.set_winsize(s.master_fd, T.ROWS, narrow_cols)
+            s.feed(1.0)
+            chars = s.screen()[0]
+            host = T.find_text(chars, "H:")
+            if host is None:
+                print("FAIL - compact Host label not found")
+                return False
+            r, host_label_x = host
+            row = T.row_text(chars, r)[:narrow_cols]
+            compact = row.find(" » ")
+            history = row.find("▾", compact + 3 if compact >= 0 else 0)
+            if compact < 0 or history != compact + 4:
+                print(f"FAIL - compact Connect/history are not flush: {row!r}")
+                return False
+
+            # Empty-host Connect must still activate while compact. Reveal its
+            # status after restoring enough width for the status label.
+            s.click(compact + 2, r + 1)
+            T.set_winsize(s.master_fd, T.ROWS, T.COLS)
+            s.feed(1.0)
+            if not T.grid_contains(s.screen()[0], "Enter a host name."):
+                print("FAIL - compact Connect button did not activate")
+                return False
+
+            # Resize compact again and verify the retained Host input owns the
+            # field cells immediately after the abbreviated label.
+            T.set_winsize(s.master_fd, T.ROWS, narrow_cols)
+            s.feed(1.0)
+            chars = s.screen()[0]
+            host = T.find_text(chars, "H:")
+            if host is None:
+                print("FAIL - compact Host label disappeared after second resize")
+                return False
+            r, host_label_x = host
+            host_input_x = host_label_x + len("H:") + 1
+            s.click(host_input_x + 1, r + 1)
+            s.write("hi")
+
+            T.set_winsize(s.master_fd, T.ROWS, T.COLS)
+            s.feed(1.0)
+            full_host = _host_field(s)
+            if full_host is None or _host_text(s, *full_host) != "hi":
+                print("FAIL - typing through compact Host hit box did not update the field")
+                return False
+            print("PASS")
+            return True
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_history_dropdown_follows_trigger_during_resize():
+    """An open history popup must re-anchor after the connect bar reflows."""
+    print("TEST: parvion connect history follows trigger during resize ... ", end="", flush=True)
+    d = tempfile.mkdtemp(prefix="parvioncb_")
+    try:
+        with T.ParvionSession(d, env={"XDG_CONFIG_HOME": d, "PARVION_DEMO_QUEUE": "0"}) as s:
+            narrow_cols = 54
+            T.set_winsize(s.master_fd, T.ROWS, narrow_cols)
+            s.feed(1.0)
+            chars = s.screen()[0]
+            compact = T.find_text(chars, " » ")
+            history = T.find_text_on_row(chars, "▾", compact[0]) if compact else None
+            if history is None:
+                print("FAIL - compact Quick Connect history button not found")
+                return False
+            s.click(history[1] + 1, history[0] + 1)
+            chars = s.screen()[0]
+            narrow_popup = T.find_text(chars, "Clear history")
+            if narrow_popup is None:
+                print("FAIL - compact history dropdown did not open")
+                return False
+
+            T.set_winsize(s.master_fd, T.ROWS, T.COLS)
+            s.feed(1.0)
+            chars = s.screen()[0]
+            connect = T.find_text(chars, " Connect ")
+            wide_history = T.find_text_on_row(chars, "▾", connect[0]) if connect else None
+            wide_popup = T.find_text(chars, "Clear history")
+            if wide_history is None or wide_popup is None:
+                print("FAIL - history trigger or open popup disappeared after widening")
+                return False
+            if wide_history[1] <= history[1] or wide_popup[1] <= narrow_popup[1]:
+                print(f"FAIL - trigger/popup did not move right: "
+                      f"trigger {history[1]}->{wide_history[1]}, popup {narrow_popup[1]}->{wide_popup[1]}")
+                return False
+            # At full width the popup fits at its preferred anchor. Both the
+            # arrow-only trigger and popup labels have one cell of left padding,
+            # so their visible glyphs align exactly when the live anchor is used.
+            if wide_popup[1] != wide_history[1]:
+                print(f"FAIL - popup stayed at stale x={wide_popup[1]}, "
+                      f"current trigger x={wide_history[1]}")
+                return False
+
+            # The trigger's own preview-tier carve-out must move with it too;
+            # otherwise this click dismisses in preview and immediately reopens
+            # in the trigger handler instead of toggling the chain off.
+            s.click(wide_history[1] + 1, wide_history[0] + 1)
+            if T.grid_contains(s.screen()[0], "Clear history"):
+                print("FAIL - moved history trigger did not toggle the popup off")
+                return False
+
+            # Reopen and prove the moved popup retained a live hit target, not
+            # merely a correctly repainted label.
+            s.click(wide_history[1] + 1, wide_history[0] + 1)
+            wide_popup = T.find_text(s.screen()[0], "Clear history")
+            if wide_popup is None:
+                print("FAIL - moved history trigger did not reopen the popup")
+                return False
+            s.click(wide_popup[1] + 1, wide_popup[0] + 1)
+            if T.grid_contains(s.screen()[0], "Clear history"):
+                print("FAIL - moved history row was not interactive")
+                return False
+            print("PASS")
+            return True
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_history_dropdown_does_not_arm_menubar_hover_switch():
     """A control dropdown must not start a menu-bar hover-switch session."""
     print("TEST: parvion connect history does not arm menu-bar hover ... ", end="", flush=True)
@@ -300,6 +425,36 @@ def test_history_dropdown_does_not_arm_menubar_hover_switch():
                 return False
             if not T.grid_contains(chars, "Clear history"):
                 print("FAIL - hovering Edit dismissed the history dropdown")
+                return False
+            print("PASS")
+            return True
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_history_dropdown_in_host_outside_click_still_dismisses():
+    """Removing mouse-halt dismissal must not affect delivered outside clicks."""
+    print("TEST: parvion connect history keeps in-host outside-click dismissal ... ",
+          end="", flush=True)
+    d = tempfile.mkdtemp(prefix="parvioncb_")
+    try:
+        with T.ParvionSession(d) as s:
+            chars = _open_history(s)
+            if chars is None or not T.grid_contains(chars, "Clear history"):
+                print("FAIL - Quick Connect history dropdown did not open")
+                return False
+            host = _host_field(s)
+            if host is None:
+                print("FAIL - Host field not found")
+                return False
+            row, field_x = host
+            s.click(field_x + 1, row + 1)
+            if T.grid_contains(s.screen()[0], "Clear history"):
+                print("FAIL - delivered outside click did not dismiss the dropdown")
+                return False
+            s.write("x")
+            if _host_text(s, row, field_x) != "x":
+                print("FAIL - outside click did not pass through to the Host field")
                 return False
             print("PASS")
             return True
@@ -383,9 +538,12 @@ TESTS = [
     test_connect_fires_on_click,
     test_connect_button_visual_states,
     test_connect_drag_off_cancels_click,
+    test_responsive_narrow_bar_stays_interactive,
+    test_history_dropdown_follows_trigger_during_resize,
     test_site_connection_empty_submenu_is_first_and_separated,
     test_site_connection_fills_bar_and_connects,
     test_history_dropdown_does_not_arm_menubar_hover_switch,
+    test_history_dropdown_in_host_outside_click_still_dismisses,
 ]
 
 

@@ -4,12 +4,15 @@
 #pragma once
 
 // parvion/connectbar.hpp: FileZilla-style Quick Connect bar — editable Host / User /
-// Pass / Port fields + a Connect button, rendered in the command_bar style.
-// Phase 1 wires the input form; the Connect action drives the SFTP session in
-// later phases (for now it reports the target into the status area).
+// Pass / Port fields + a Connect button, composed from retained Parvion
+// components and rendered in the command_bar style.
 
 #include "panes.hpp" // theme, shared menus, and SFTP/controller types
 #include "components/button.hpp"
+#include "components/popup_menu.hpp"
+#include "components/flex.hpp"
+#include "components/input.hpp"
+#include "components/label.hpp"
 
 namespace netxs::app::parvion
 {
@@ -57,7 +60,7 @@ namespace netxs::app::parvion
     // One resolved connect-form layout: per-field label strings + field widths + padded Connect.
     struct cb_layout { std::array<text, 4> label; std::array<si32, 4> field; text connect; };
 
-    // Width the layout occupies, mirroring connect_render's x-advance (lead + per-field
+    // Width the layout occupies, mirroring cb_arrange's x-advance (lead + per-field
     // label+space+field+gap + the padded Connect button). The ▾ button sits flush after it.
     inline auto cb_layout_width(cb_layout const& L) -> si32
     {
@@ -108,19 +111,45 @@ namespace netxs::app::parvion
     inline auto cb_form_width() -> si32 { return cb_layout_width(cb_resolve(si16max)); } // Full, uncompressed.
     inline auto cb_min_width()  -> si32 { return cb_layout_width(cb_resolve(0));       } // Fully compressed.
 
+    // Retained-child geometry for one resolved form width. Keeping this calculation
+    // independent from the component makes the exact responsive policy directly testable.
+    struct cb_geometry
+    {
+        cb_layout layout;
+        std::array<rect, 4> label;
+        std::array<rect, 4> field;
+        rect connect;
+    };
+
+    inline auto cb_arrange(si32 width) -> cb_geometry
+    {
+        auto geometry = cb_geometry{};
+        geometry.layout = cb_resolve(width);
+        auto x = si32{ 1 };
+        for (auto i = si32{}; i < 4; ++i)
+        {
+            auto label_width = cell_width(geometry.layout.label[(size_t)i]);
+            geometry.label[(size_t)i] = { { x, 0 }, { label_width, 1 } };
+            x += label_width + 1;
+            geometry.field[(size_t)i] = { { x, 0 }, { geometry.layout.field[(size_t)i], 1 } };
+            x += geometry.layout.field[(size_t)i] + 1;
+        }
+        auto button_width = cell_width(geometry.layout.connect);
+        geometry.connect = { { std::max(x, width - button_width), 0 }, { button_width, 1 } };
+        return geometry;
+    }
+
     struct connect_state
     {
         std::array<text, 4> fld{};      // Host/User/Pass/Port values bound to make_input widgets.
-        std::array<netxs::wptr<ui::base>, 4> input_wp{};
-        text connect_label;             // Live responsive caption consumed by the shared button.
+        cb_layout layout;               // Live responsive labels/caption consumed by retained children.
         text status;                    // Result/hint shown to the right.
         sftp_remote* ctrl = nullptr;    // SFTP controller driven by Connect.
-        netxs::wptr<ui::base> form_wptr;   // Painted form widget (to deface after dropdown actions).
-        netxs::wptr<ui::base> connect_wptr;// Shared Connect button, positioned by connect_render().
-        netxs::wptr<ui::base> status_wptr; // Status strip widget (to deface when the status text changes).
+        netxs::wptr<ui::base> form_wptr;   // Retained form (to deface after dropdown actions).
+        netxs::wptr<ui::base> status_wptr; // Status label (to deface when the status text changes).
     };
 
-    // Set the bar's status hint and repaint the (separate) status strip widget.
+    // Set the bar's status hint and repaint the separate retained status label.
     inline void cb_set_status(connect_state& st, text msg)
     {
         st.status = std::move(msg);
@@ -137,54 +166,146 @@ namespace netxs::app::parvion
         cb_set_status(st, {}); // The controller drives status from here on.
     }
 
-    inline void connect_render(connect_state& st, auto& canvas, twod size)
+    // The connect form has a deliberately specialized sizing policy, but all of
+    // its visible and interactive children are shared retained components. This
+    // adapter only applies cb_arrange() geometry and paints the common gap surface.
+    class connect_form
+        : public ui::form<connect_form>
     {
-        auto w = size.x;
-        auto h = size.y;
-        if (w <= 0 || h <= 0) return;
-        canvas.fill(rect{{ 0, 0 }, { w, h }}, [&](cell& c){ c.bgc(theme::surface); });
-        auto layout = cb_resolve(w); // Smoothly compress labels/Connect/fields to fit the width.
-        auto x = si32{ 1 };
-        for (auto i = si32{}; i < 4; ++i)
+        std::shared_ptr<connect_state> state;
+        std::array<ui::sptr, 4> labels;
+        std::array<ui::sptr, 4> inputs;
+        ui::sptr connect;
+        std::array<rect, 4> label_areas;
+        std::array<rect, 4> input_areas;
+        rect connect_area;
+        std::vector<component> retained_components;
+
+        void retain(component item, ui::sptr& widget)
         {
-            auto& lbl = layout.label[i];
-            put_str(canvas, x, 0, lbl, theme::subtext, theme::surface, std::max(0, w - x));
-            x += cell_width(lbl) + 1; // Advance by the nominal label width (+ the trailing space).
-            auto fw = layout.field[i];
-            if (auto input = st.input_wp[(size_t)i].lock())
-                input->base::extend(rect{{ x, 0 }, { fw, 1 }});
-            x += fw + 1; // One-cell gap after each field.
+            widget = item.widget;
+            if (!widget) return;
+            retained_components.push_back(std::move(item));
+            ui::base::attach(widget);
         }
-        st.connect_label = layout.connect;
-        auto bw = cell_width(st.connect_label); // Display cells (the padded compact glyph " » " is three cells).
-        // Right-align the Connect button against the form's right edge so it stays flush with the
-        // ▾ history button (the next sibling) at every width; the gap left of it (between the Port
-        // field and Connect) is the responsive spacer that absorbs the slack as the form shrinks.
-        auto cx = std::max(x, w - bw);
-        if (auto button = st.connect_wptr.lock()) button->base::extend(rect{{ cx, 0 }, { bw, 1 }});
-        // The status hint is painted by a separate strip to the right of the ▾ button.
-    }
+
+    protected:
+        void deform(rect& new_area) override
+        {
+            new_area.size.y = std::max(1, new_area.size.y);
+            auto geometry = cb_arrange(new_area.size.x);
+            state->layout = geometry.layout;
+            label_areas = geometry.label;
+            input_areas = geometry.field;
+            connect_area = geometry.connect;
+            for (auto i = size_t{}; i < labels.size(); ++i)
+            {
+                if (labels[i]) labels[i]->base::recalc(label_areas[i]);
+                if (inputs[i]) inputs[i]->base::recalc(input_areas[i]);
+            }
+            if (connect) connect->base::recalc(connect_area);
+        }
+
+        void inform(rect new_area) override
+        {
+            for (auto i = size_t{}; i < labels.size(); ++i)
+            {
+                auto label_area = label_areas[i];
+                label_area.coor += new_area.coor;
+                if (labels[i]) labels[i]->base::notify(label_area);
+                auto input_area = input_areas[i];
+                input_area.coor += new_area.coor;
+                if (inputs[i]) inputs[i]->base::notify(input_area);
+            }
+            auto button_area = connect_area;
+            button_area.coor += new_area.coor;
+            if (connect) connect->base::notify(button_area);
+        }
+
+    public:
+        static constexpr auto classname = basename::parvion;
+
+        connect_form(std::shared_ptr<connect_state> shared)
+            : state{ std::move(shared) }
+        {
+            state->layout = cb_resolve(cb_form_width());
+            LISTEN(tier::release, e2::render::any, parent_canvas)
+            {
+                if (auto context2D = nested_2D_context(parent_canvas))
+                {
+                    parent_canvas.fill(rect{ {}, base::size() },
+                        [](cell& c){ c.bgc(theme::surface); });
+                    for (auto& label : labels) if (label) label->render(parent_canvas);
+                    for (auto& input : inputs) if (input) input->render(parent_canvas);
+                    if (connect) connect->render(parent_canvas);
+                }
+            };
+        }
+
+        // ui::base::attach() needs this form's shared ownership to be established,
+        // so retained children are installed immediately after domain creation.
+        void install_children()
+        {
+            for (auto i = si32{}; i < 4; ++i)
+            {
+                retain(make_label({
+                    .value = [sp = state, i]{ return sp->layout.label[(size_t)i]; },
+                    .role = label_role::hint,
+                    .palette = { .background = theme::surface },
+                }), labels[(size_t)i]);
+                retain(make_input({
+                    .value = [sp = state, i]{ return sp->fld[(size_t)i]; },
+                    .on_change = [sp = state, i](text value){ sp->fld[(size_t)i] = std::move(value); },
+                    .on_submit = [sp = state](text){ cb_connect(*sp); },
+                    .secret = connect_fields[(size_t)i].secret,
+                    .digits_only = i == cf_port,
+                }), inputs[(size_t)i]);
+            }
+            retain(make_button({
+                .label = [sp = state]{ return sp->layout.connect; },
+                .on_activate = [sp = state](hids&, ui::base&){ cb_connect(*sp); },
+            }), connect);
+        }
+
+        auto get_label_area(size_t index) const -> rect
+        {
+            return index < label_areas.size() ? label_areas[index] : rect{};
+        }
+
+        auto get_input_area(size_t index) const -> rect
+        {
+            return index < input_areas.size() ? input_areas[index] : rect{};
+        }
+
+        auto get_connect_area() const -> rect { return connect_area; }
+
+        static auto ctor(std::shared_ptr<connect_state> state)
+        {
+            auto form = ui::tui_domain().create<connect_form>(std::move(state));
+            form->install_children();
+            return form;
+        }
+    };
 
     // Build the ▾ button's dropdown: saved Site Connection submenu / separator / Clear-bar /
     // Clear-history / a separator / recent servers (newest first). Rebuilt per open so it
     // reflects the live settings, fields, and history.
-    // Each row carries a native action (menu::item::action), run by the popup's activate_leaf.
-    inline auto build_history_menu(std::shared_ptr<connect_state> sp) -> std::vector<app::shared::menu::item>
+    // Each row carries a native activation callback owned by the shared menu component.
+    inline auto build_history_menu(std::shared_ptr<connect_state> sp) -> std::vector<popup_menu_item>
     {
-        namespace m = app::shared::menu;
         auto deface_form = [sp]{ if (auto f = sp->form_wptr.lock()) f->base::deface(); };
-        auto items = std::vector<m::item>{};
-        auto sites = m::item{ .alive = true, .label = "Site Connection", .type = m::kind::dropdown };
+        auto items = std::vector<popup_menu_item>{};
+        auto sites = popup_menu_item{ .label = "Site Connection", .kind = popup_menu_item_kind::submenu };
         if (!sp->ctrl || sp->ctrl->cfg.sites.empty())
         {
-            sites.children.push_back(m::item{ .alive = true, .label = "Empty", .disabled = true });
+            sites.children.push_back(popup_menu_item{ .label = "Empty", .enabled = false });
         }
         else
         {
             for (auto const& site : sp->ctrl->cfg.sites)
             {
-                auto row = m::item{ .alive = true, .label = site.name };
-                row.action = [sp, deface_form, entry = site](hids&)
+                auto row = popup_menu_item{ .label = site.name };
+                row.on_activate = [sp, deface_form, entry = site](hids&)
                 {
                     sp->fld[cf_host] = entry.host;
                     sp->fld[cf_user] = entry.user;
@@ -197,9 +318,9 @@ namespace netxs::app::parvion
             }
         }
         items.push_back(std::move(sites));
-        items.push_back(m::item{ .alive = true, .type = m::kind::separator });
-        auto clear_bar = m::item{ .alive = true, .label = "Clear Quickconnect bar" };
-        clear_bar.action = [sp, deface_form](hids&)
+        items.push_back(popup_menu_item{ .kind = popup_menu_item_kind::separator });
+        auto clear_bar = popup_menu_item{ .label = "Clear Quickconnect bar" };
+        clear_bar.on_activate = [sp, deface_form](hids&)
         {
             for (auto& value : sp->fld) value.clear();
             sp->fld[cf_port] = "22";
@@ -207,18 +328,18 @@ namespace netxs::app::parvion
             deface_form();
         };
         items.push_back(std::move(clear_bar));
-        auto clear_hist = m::item{ .alive = true, .label = "Clear history" };
-        clear_hist.action = [sp](hids&){ if (sp->ctrl) sp->ctrl->clear_recent(); };
+        auto clear_hist = popup_menu_item{ .label = "Clear history" };
+        clear_hist.on_activate = [sp](hids&){ if (sp->ctrl) sp->ctrl->clear_recent(); };
         items.push_back(std::move(clear_hist));
         if (sp->ctrl && !sp->ctrl->recent.empty())
         {
-            items.push_back(m::item{ .alive = true, .type = m::kind::separator });
+            items.push_back(popup_menu_item{ .kind = popup_menu_item_kind::separator });
             for (auto& r : sp->ctrl->recent)
             {
                 auto label = (r.user.empty() ? text{} : r.user + "@") + r.host
                            + (r.port == 22 ? text{} : ":" + std::to_string(r.port));
-                auto row = m::item{ .alive = true, .label = label };
-                row.action = [sp, deface_form, entry = r](hids&)
+                auto row = popup_menu_item{ .label = label };
+                row.on_activate = [sp, deface_form, entry = r](hids&)
                 {
                     sp->fld[cf_host] = entry.host;
                     sp->fld[cf_user] = entry.user;
@@ -235,87 +356,63 @@ namespace netxs::app::parvion
 
     inline auto make_connect_bar(sftp_remote* ctrl = nullptr) -> ui::sptr
     {
-        // One shared connect_state drives both the painted form and the ▾ dropdown's row actions.
+        // One shared connect_state drives both the retained form and the ▾ dropdown's row actions.
         auto sp = std::make_shared<connect_state>();
         sp->ctrl = ctrl;
         sp->fld[cf_port] = "22";
 
-        // The painter owns only labels/layout; four independent make_input children own editing.
-        auto form_layer = ui::cake::ctor();
-        auto form = form_layer->attach(ui::mock::ctor());
-        form->invoke([sp](auto& boss)
-        {
-            auto& st = *boss.base::field(sp); // Shared state, kept alive for this widget's lifetime.
-            boss.LISTEN(tier::release, e2::render::any, parent_canvas)
-            {
-                connect_render(st, parent_canvas, boss.base::size());
-            };
-        });
-        for (auto i = si32{}; i < 4; ++i)
-        {
-            auto input = make_input({
-                .value = [sp, i]{ return sp->fld[(size_t)i]; },
-                .on_change = [sp, i](text value){ sp->fld[(size_t)i] = std::move(value); },
-                .on_submit = [sp](text){ cb_connect(*sp); },
-                .secret = connect_fields[(size_t)i].secret,
-                .digits_only = i == cf_port,
-            });
-            form_layer->attach(input.widget);
-            sp->input_wp[(size_t)i] = ptr::shadow(input.widget);
-        }
-        auto connect = make_button({
-            .label = [sp]{ return sp->connect_label; },
-            .on_activate = [sp](hids&, ui::base&)
-            {
-                cb_connect(*sp);
-            },
-        });
-        form_layer->attach(connect.widget);
-        sp->connect_wptr = ptr::shadow(connect.widget);
+        auto form = connect_form::ctor(sp);
         // Min = fully-compressed width so the form never pins a large window min-width (keeps the
-        // menu controls on-screen when narrow); max = full uncompressed width. Between the two,
-        // connect_render compresses smoothly to whatever width the parent fork hands it.
-        form_layer->limits({ cb_min_width(), 1 }, { cb_form_width(), 1 });
-        sp->form_wptr = ptr::shadow(form_layer);
+        // menu controls on-screen when narrow); max = full uncompressed width. cb_arrange()
+        // applies the exact historical compression policy between those bounds.
+        form->limits({ cb_min_width(), 1 }, { cb_form_width(), 1 });
+        sp->form_wptr = ptr::shadow(form);
 
-        // The ▾ Quick Connect history button: a real ui::item so menu::open_dropdown_popup can
-        // anchor a dropdown overlay beneath it (hover uses the menu-bar xlight overlay). Placed
+        // The ▾ Quick Connect history button: a dropdown-menu trigger with an
+        // empty (arrow-only) label. Its items are rebuilt from the live
+        // settings and history on every open via the cfg items provider, and
+        // the popup is a dropdown-source chain: hovering the tile's menu-bar
+        // triggers must NOT hover-switch it (see
+        // test_history_dropdown_does_not_arm_menubar_hover_switch). Placed
         // immediately to the right of the Connect button.
-        auto drop = ui::item::ctor(" ▾ ")
-            ->active(cell{}.bgc(theme::surface))
-            ->shader(cell::shaders::xlight, e2::form::state::hover)
-            ->limits({ 3, 1 }, { 3, 1 });
-        drop->invoke([sp](auto& boss)
-        {
-            boss.on(tier::mouserelease, input::key::LeftClick, [&boss, sp](hids& gear)
-            {
-                app::shared::menu::open_dropdown_popup(boss, build_history_menu(sp),
-                    { .source = app::shared::menu::popup_source::control });
-                gear.dismiss();
-            });
+        auto drop = make_dropdown_menu({
+            .label = []{ return text{}; },
+            .items = [sp]{ return build_history_menu(sp); },
+            .palette = { .background = theme::surface },
         });
 
-        // The status-hint strip fills the remaining width to the right of the ▾ button.
-        auto strip = ui::mock::ctor();
-        strip->invoke([sp](auto& boss)
-        {
-            boss.LISTEN(tier::release, e2::render::any, parent_canvas, -, (sp))
-            {
-                auto sz = boss.base::size();
-                if (sz.x <= 0 || sz.y <= 0) return;
-                parent_canvas.fill(rect{{ 0, 0 }, { sz.x, sz.y }}, [&](cell& c){ c.bgc(theme::surface); });
-                if (!sp->status.empty()) put_str(parent_canvas, 1, 0, sp->status, theme::subtext, theme::surface, std::max(0, sz.x - 1));
-            };
+        // The live hint label fills the remaining width to the right of the ▾
+        // button. Prefixing non-empty text preserves the historical one-cell inset.
+        auto status = make_label({
+            .value = [sp]{ return sp->status.empty() ? text{} : " " + sp->status; },
+            .role = label_role::hint,
+            .palette = { .background = theme::surface },
         });
-        sp->status_wptr = ptr::shadow(strip);
+        sp->status_wptr = ptr::shadow(status.widget);
 
-        // [ fields+Connect form | ▾ | status ]: ratio s1=1,s2=0 grows the form up to its (tier)
-        // max and hands the remainder to the tail, so ▾ sits flush right after the Connect button.
-        auto bar  = ui::fork::ctor(axis::X, 0, 1, 0);
-        bar->attach(slot::_1, form_layer);
-        auto tail = bar->attach(slot::_2, ui::fork::ctor(axis::X, 0, 0, 1));
-        tail->attach(slot::_1, drop);
-        tail->attach(slot::_2, strip);
+        // [ fields+Connect form | ▾ | status ]: the form shrinks only between
+        // its historical max/min, the trigger remains fixed, and status consumes
+        // the remaining space. This keeps Connect flush with the dropdown.
+        auto bar = flex::ctor();
+        bar->attach(component{ form }, {
+            .grow = 1,
+            .shrink = 1,
+            .basis = cb_form_width(),
+            .minimum = cb_min_width(),
+            .maximum = cb_form_width(),
+        });
+        bar->attach(std::move(drop), {
+            .grow = 0,
+            .shrink = 0,
+            .basis = 3,
+            .minimum = 3,
+            .maximum = 3,
+        });
+        bar->attach(std::move(status), {
+            .grow = 1,
+            .shrink = 0,
+            .basis = 0,
+        });
         return bar;
     }
 }

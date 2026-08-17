@@ -61,6 +61,13 @@ target_include_directories(parvion_button_test PRIVATE "${CMAKE_SOURCE_DIR}/src"
 target_link_libraries(parvion_button_test PRIVATE Lua::Lua)
 add_test(NAME parvion_button_test COMMAND parvion_button_test)
 
+# Unit test for the retained Quick Connect composition and its exact responsive geometry.
+add_executable(parvion_connectbar_component_test "parvion_connectbar_component_test.cpp")
+target_include_directories(parvion_connectbar_component_test PRIVATE "${CMAKE_SOURCE_DIR}/src"
+                                                                      ${LUA_INCLUDE_DIR})
+target_link_libraries(parvion_connectbar_component_test PRIVATE Lua::Lua)
+add_test(NAME parvion_connectbar_component_test COMMAND parvion_connectbar_component_test)
+
 # Unit test for the shared Parvion popup-menu component: the application.hpp
 # popup-menu port (cascading dropdowns, radiomenus, separators, check rows,
 # keyboard shortcuts, hover-switch) and its configuration/API contract.
