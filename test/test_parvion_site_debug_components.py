@@ -17,11 +17,11 @@ kill_all_vtm = T.kill_all_vtm
 TEXT_FG = (205, 214, 244)
 DISABLED_FG = (108, 112, 134)
 SITE_FIELD_LABELS = {
-    "Site Name": "Site Name:",
-    "Host": "Host *:",
-    "Port": "Port:",
-    "User": "User:",
-    "Password": "Password:",
+    "Site Name": "Site Name",
+    "Host": "Host *",
+    "Port": "Port",
+    "User": "User",
+    "Password": "Password",
 }
 SITE_LABEL_WIDTH = max(map(len, SITE_FIELD_LABELS.values()))
 
@@ -70,7 +70,19 @@ def settings_values(cfgdir):
 
 def replace_site_field(s, label, value, clear=False):
     chars = s.screen()[0]
-    first = T.find_text(chars, SITE_FIELD_LABELS["Site Name"])
+    # Anchor on the editor title so the "Site Name" table header on the page
+    # behind the editor is not mistaken for the editor's field label.
+    title = T.find_text(chars, "Add SFTP Site")
+    if not title:
+        title = T.find_text(chars, "Edit SFTP Site")
+    if not title:
+        return False
+    first = None
+    for row in range(title[0], len(chars)):
+        column = T.row_text(chars, row).find(SITE_FIELD_LABELS["Site Name"])
+        if column >= 0:
+            first = (row, column)
+            break
     if not first:
         return False
     display_label = SITE_FIELD_LABELS[label]
@@ -377,11 +389,11 @@ def test_site_editor_validation():
             print("FAIL - malformed Host was accepted")
             return False
         replace_site_field(s, "Host", "validation.example.test", clear=True)
-        replace_site_field(s, "Port", "invalid", clear=True)
+        replace_site_field(s, "Port", "99999", clear=True)
         ok = T.find_text(s.screen()[0], " OK ")
         s.click(ok[1] + 2, ok[0] + 1)
         if not T.grid_contains(s.screen()[0], "Port must be a number from 1 to 65535."):
-            print("FAIL - invalid Port was accepted")
+            print("FAIL - out-of-range Port was accepted")
             return False
         s.write("\x1b")
         if T.grid_contains(s.screen()[0], "Add SFTP Site"):

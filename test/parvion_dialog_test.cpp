@@ -227,6 +227,7 @@ namespace
             .title = { ui::mock::ctor() },
             .content = { ui::mock::ctor() },
             .buttons = { ui::mock::ctor() },
+            .position = dialog_anchor::top_left,
             .on_cancel = [&]{ ++cancelled; },
         });
         auto root = ui::cake::ctor();
@@ -243,6 +244,11 @@ namespace
         root->on(tier::mouserelease, input::key::MouseWheel,
             [&](input::hids&){ ++wheel_events; });
         root->attach(popup.widget);
+        // Lay the dialog out over the root so the replayed coordinate (0,0)
+        // lands on the card.  The backdrop is armed asynchronously after
+        // attach; without a definite card area an armed backdrop would treat
+        // any replayed click as an outside click and dismiss the dialog.
+        popup.widget->base::extend({ {}, { 80, 30 } });
 
         auto dialog_widget = std::dynamic_pointer_cast<dialog>(popup.widget);
         if (!dialog_widget) return faux;
