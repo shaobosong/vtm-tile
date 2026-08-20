@@ -71,6 +71,14 @@ namespace
             .kind = popup_menu_item_kind::separator,
         };
         auto disabled = popup_menu_item{ .label = "Disabled", .enabled = false };
+        auto empty_submenu = popup_menu_item{
+            .label = "Empty",
+            .kind = popup_menu_item_kind::submenu,
+        };
+        auto action_with_children = popup_menu_item{
+            .label = "Action",
+            .children = { popup_menu_item{ .label = "Ignored" } },
+        };
         auto items = std::vector<popup_menu_item>{
             separator,
             disabled,
@@ -80,6 +88,10 @@ namespace
         return !dm::is_selectable(separator)
             && !dm::is_interactive(separator)
             && !dm::is_interactive(disabled)
+            && dm::is_submenu(empty_submenu)
+            && !dm::is_activatable(empty_submenu)
+            && !dm::is_submenu(action_with_children)
+            && dm::is_activatable(action_with_children)
             && dm::is_interactive(items[2])
             && dm::next_interactive(items, -1, +1) == 2
             && dm::next_interactive(items, 2, +1) == 3
@@ -92,18 +104,26 @@ namespace
     auto test_live_state_resolution() -> bool
     {
         auto radio = popup_menu_item{
-            .kind = popup_menu_item_kind::radio_submenu,
+            .kind = popup_menu_item_kind::submenu,
             .children = {
                 popup_menu_item{ .label = "A" },
                 popup_menu_item{ .label = "B", .checked = true },
                 popup_menu_item{ .label = "C" },
             },
+            .child_group = popup_menu_group::radio,
         };
         if (dm::resolve_selected(radio) != 1) return faux;
-        radio.selected_index = []{ return 2; };
+        radio.selected_child = []{ return 2; };
         if (dm::resolve_selected(radio) != 2) return faux;
-        radio.selected_index = []{ return 42; };
+        radio.selected_child = []{ return 42; };
         if (dm::resolve_selected(radio) != -1) return faux;
+
+        auto root = popup_menu_content{
+            .items = radio.children,
+            .group = popup_menu_group::radio,
+            .selected_index = []{ return 0; },
+        };
+        if (dm::resolve_selected(root) != 0) return faux;
 
         auto queried = si32{};
         auto rows = std::vector<popup_menu_item>{
@@ -132,6 +152,9 @@ namespace
         };
         if (dm::popup_dimensions(items, 1) != twod{ 21, 3 }) return faux;
         items[1].children.push_back(popup_menu_item{ .label = "child" });
+        // Child data does not change an action row into a submenu.
+        if (dm::popup_dimensions(items, 1) != twod{ 21, 3 }) return faux;
+        items[1].kind = popup_menu_item_kind::submenu;
         if (dm::popup_dimensions(items, 1) != twod{ 23, 3 }) return faux;
         if (dm::popup_dimensions(items, 1, true) != twod{ 25, 3 }) return faux;
         items.push_back(popup_menu_item{
@@ -140,6 +163,12 @@ namespace
         });
         if (dm::popup_dimensions(items, 1) != twod{ 25, 4 }) return faux;
         if (dm::popup_dimensions(items, 3) != twod{ 29, 4 }) return faux;
+
+        auto empty_submenu = popup_menu_item{
+            .label = "Empty",
+            .kind = popup_menu_item_kind::submenu,
+        };
+        if (dm::popup_dimensions({ empty_submenu }, 1) != twod{ 9, 1 }) return faux;
 
         auto wide = std::vector<popup_menu_item>{ popup_menu_item{ .label = "界面" } };
         return dm::popup_dimensions(wide, 1) == twod{ 6, 1 };
@@ -153,8 +182,12 @@ namespace
 
         auto parent = rect{ { 10, 2 }, { 12, 5 } };
         auto child = twod{ 8, 3 };
+        auto trigger = rect{ { 4, 5 }, { 8, 1 } };
         return dm::submenu_anchor(parent, 2, child, 35) == twod{ 22, 4 }
-            && dm::submenu_anchor(parent, 2, child, 28) == twod{ 2, 4 };
+            && dm::submenu_anchor(parent, 2, child, 28) == twod{ 2, 4 }
+            && dm::root_anchor(trigger, popup_menu_placement::below()) == twod{ 4, 7 }
+            && dm::root_anchor(trigger, popup_menu_placement::below({ 1, -1 })) == twod{ 5, 6 }
+            && dm::root_anchor(trigger, popup_menu_placement::at({ 2, 0 })) == twod{ 6, 5 };
     }
 
     auto test_paint_label() -> bool
@@ -186,13 +219,20 @@ namespace
 
     auto test_config_defaults_and_trigger_width() -> bool
     {
-        auto cfg = popup_menu_cfg{};
+        auto cfg = popup_menu_trigger_cfg{};
         if (!dm::enabled(cfg)
          || cfg.padding != 1
-         || cfg.source != popup_menu_source::dropdown_menu
-         || cfg.radio_group) return faux;
-        auto open = popup_menu_open_cfg{};
-        if (open.source != popup_menu_source::dropdown_menu) return faux;
+         || cfg.popup.behavior.hover_group
+         || !cfg.popup.behavior.toggle_on_trigger_click
+         || cfg.popup.style.padding != 1) return faux;
+        auto open = popup_menu_open_options{};
+        if (open.placement.kind != popup_menu_placement_kind::below_trigger
+         || open.placement.offset != twod{}
+         || open.behavior.hover_group
+         || !open.behavior.toggle_on_trigger_click) return faux;
+        auto point = popup_menu_placement::at({ 4, 7 });
+        if (point.kind != popup_menu_placement_kind::trigger_offset
+         || point.offset != twod{ 4, 7 }) return faux;
         if (dm::trigger_width(cfg, "&Menu") != 8) return faux;
         if (dm::trigger_width(cfg, "") != 3) return faux;
         cfg.padding = 0;
@@ -201,37 +241,50 @@ namespace
         return !dm::enabled(cfg);
     }
 
+    auto test_hover_group_scope() -> bool
+    {
+        auto first = make_popup_menu_hover_group();
+        auto second = make_popup_menu_hover_group();
+        if (!first || !second || first == second) return faux;
+
+        auto ungrouped = popup_menu_behavior{};
+        auto first_open = popup_menu_behavior{ .hover_group = first };
+        auto first_target = popup_menu_behavior{ .hover_group = first };
+        auto second_target = popup_menu_behavior{ .hover_group = second };
+        return dm::hover_switch_compatible(first_open, first_target)
+            && !dm::hover_switch_compatible(first_open, second_target)
+            && !dm::hover_switch_compatible(first_open, ungrouped)
+            && !dm::hover_switch_compatible(ungrouped, first_target)
+            && !dm::hover_switch_compatible(ungrouped, ungrouped);
+    }
+
     auto test_make_trigger_factories() -> bool
     {
-        // A structurally identical trigger is expected from every public
-        // factory; each pins a different popup source (verified by
-        // construction), while geometry and padding pass through unchanged.
+        // The public factory produces the retained trigger geometry. Trigger
+        // padding is independent from popup row padding and hover switching.
         auto check = [](auto make) -> bool
         {
-            auto cfg = popup_menu_cfg{};
+            auto cfg = popup_menu_trigger_cfg{};
             cfg.label = []{ return text{ "&Menu" }; };
-            cfg.items = []{ return std::vector<popup_menu_item>{ { .label = "Item" } }; };
+            cfg.content = []{ return popup_menu_content{ .items = { { .label = "Item" } } }; };
             auto component = make(std::move(cfg));
             if (!component || !component.widget) return faux;
             if (component.widget->base::min_sz != twod{ 8, 1 }
              || component.widget->base::max_sz != twod{ 8, 1 }) return faux;
-            if (component.widget->base::property("menu.padding", si32{ 1 }) != 1) return faux;
 
-            auto arrow_cfg = popup_menu_cfg{};
+            auto arrow_cfg = popup_menu_trigger_cfg{};
             arrow_cfg.label = []{ return text{}; };
-            arrow_cfg.items = []{ return std::vector<popup_menu_item>{ { .label = "X" } }; };
+            arrow_cfg.content = []{ return popup_menu_content{ .items = { { .label = "X" } } }; };
             auto arrow = make(std::move(arrow_cfg));
             if (!arrow || arrow.widget->base::min_sz.x != 3) return faux;
 
-            auto padded_cfg = popup_menu_cfg{};
+            auto padded_cfg = popup_menu_trigger_cfg{};
             padded_cfg.label = []{ return text{ "M" }; };
             padded_cfg.padding = 3;
             auto padded = make(std::move(padded_cfg));
-            return padded && padded.widget->base::property("menu.padding", si32{ 1 }) == 3;
+            return padded && padded.widget->base::min_sz.x == 9;
         };
-        return check(make_dropdown_menu)
-            && check(make_context_menu)
-            && check(make_menu_bar);
+        return check(make_popup_menu_trigger);
     }
 }
 
@@ -244,7 +297,8 @@ int main()
            && test_live_popup_geometry()
            && test_paint_label()
            && test_config_defaults_and_trigger_width()
+           && test_hover_group_scope()
            && test_make_trigger_factories();
-    if (!ok) std::fprintf(stderr, "parvion dropdown menu tests failed\n");
+    if (!ok) std::fprintf(stderr, "parvion popup menu tests failed\n");
     return ok ? 0 : 1;
 }

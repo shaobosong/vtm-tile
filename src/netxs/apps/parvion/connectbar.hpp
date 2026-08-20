@@ -291,11 +291,14 @@ namespace netxs::app::parvion
     // Clear-history / a separator / recent servers (newest first). Rebuilt per open so it
     // reflects the live settings, fields, and history.
     // Each row carries a native activation callback owned by the shared menu component.
-    inline auto build_history_menu(std::shared_ptr<connect_state> sp) -> std::vector<popup_menu_item>
+    inline auto build_history_menu(std::shared_ptr<connect_state> sp) -> popup_menu_content
     {
         auto deface_form = [sp]{ if (auto f = sp->form_wptr.lock()) f->base::deface(); };
         auto items = std::vector<popup_menu_item>{};
-        auto sites = popup_menu_item{ .label = "Site Connection", .kind = popup_menu_item_kind::submenu };
+        auto sites = popup_menu_item{
+            .label = "Site Connection",
+            .kind = popup_menu_item_kind::submenu,
+        };
         if (!sp->ctrl || sp->ctrl->cfg.sites.empty())
         {
             sites.children.push_back(popup_menu_item{ .label = "Empty", .enabled = false });
@@ -351,7 +354,7 @@ namespace netxs::app::parvion
                 items.push_back(std::move(row));
             }
         }
-        return items;
+        return { .items = std::move(items) };
     }
 
     inline auto make_connect_bar(sftp_remote* ctrl = nullptr) -> ui::sptr
@@ -370,14 +373,14 @@ namespace netxs::app::parvion
 
         // The ▾ Quick Connect history button: a dropdown-menu trigger with an
         // empty (arrow-only) label. Its items are rebuilt from the live
-        // settings and history on every open via the cfg items provider, and
-        // the popup is a dropdown-source chain: hovering the tile's menu-bar
-        // triggers must NOT hover-switch it (see
+        // settings and history on every open via the content provider. Its
+        // interaction options leave hover switching disabled, so hovering the
+        // tile's menu-bar triggers must NOT switch it (see
         // test_history_dropdown_does_not_arm_menubar_hover_switch). Placed
         // immediately to the right of the Connect button.
-        auto drop = make_dropdown_menu({
+        auto drop = make_popup_menu_trigger({
             .label = []{ return text{}; },
-            .items = [sp]{ return build_history_menu(sp); },
+            .content = [sp]{ return build_history_menu(sp); },
             .palette = { .background = theme::surface },
         });
 

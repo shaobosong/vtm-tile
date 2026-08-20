@@ -5,11 +5,12 @@
 
 // parvion/components/popup_menu.hpp: A retained cascading menu component.
 //
-// Callers describe live trigger data and menu rows through popup_menu_cfg.
-// The implementation keeps one process-wide popup session, renders every
-// level as an overlay on the applet host, and owns keyboard/mouse routing until
-// the session is dismissed. The older application.hpp menu and the form
-// selector in dropdown.hpp remain independent.
+// Callers provide a live trigger and a popup_menu_content snapshot. Placement,
+// interaction, trigger styling, and popup styling are independent settings;
+// none is inferred from another. The implementation keeps one process-wide
+// popup session, renders every level as an overlay on the applet host, and owns
+// keyboard/mouse routing until the session is dismissed. The older
+// application.hpp menu and the form selector in dropdown.hpp remain independent.
 
 #include "ui.hpp"
 
@@ -26,17 +27,14 @@ namespace netxs::app::parvion
     {
         action,
         submenu,
-        radio_submenu,
         separator,
         checkbox,
     };
 
-    // Only menu_bar sessions participate in hover-switching between triggers.
-    enum class popup_menu_source : si32
+    enum class popup_menu_group : si32
     {
-        dropdown_menu,
-        menu_bar,
-        context_menu,
+        plain,
+        radio,
     };
 
     struct popup_menu_item
@@ -46,44 +44,97 @@ namespace netxs::app::parvion
         bool checked{}; // Static radio/checkbox fallback when no live provider is set.
         bool enabled{ true };
         std::vector<popup_menu_item> children;
-        std::function<si32()> selected_index; // radio_submenu live selection.
+        popup_menu_group child_group{ popup_menu_group::plain };
+        std::function<si32()> selected_child; // Radio-child live selection.
         std::function<bool()> is_checked;     // checkbox live state.
         std::function<void(hids&)> on_activate;
     };
 
-    struct popup_menu_palette
+    struct popup_menu_content
+    {
+        std::vector<popup_menu_item> items;
+        popup_menu_group group{ popup_menu_group::plain };
+        std::function<si32()> selected_index;
+    };
+
+    struct popup_menu_trigger_palette
     {
         ui32 background                = theme::sel_bg;
         ui32 foreground                = theme::text_fg;
         ui32 disabled_foreground       = theme::subtext;
-        ui32 popup_background          = 0xFF3D3E50u;
-        ui32 popup_background_alt      = 0xFF393A4Cu;
-        ui32 popup_hover               = 0xFF555668u;
-        ui32 popup_hover_alt           = 0xFF515264u;
-        ui32 popup_foreground          = 0xFFCDD6F4u;
-        ui32 popup_disabled_foreground = 0xFF6C7086u;
     };
 
-    // Options for opening a popup directly from an existing trigger.
-    struct popup_menu_open_cfg
+    struct popup_menu_palette
     {
-        popup_menu_source source{ popup_menu_source::dropdown_menu };
-        bool radio_group{ faux };
-        si32 selected_index{ -1 };
-        twod anchor{ -1, -1 }; // Non-negative x: explicit point inside the trigger.
-        popup_menu_palette palette{};
+        ui32 background          = 0xFF3D3E50u;
+        ui32 background_alt      = 0xFF393A4Cu;
+        ui32 hover               = 0xFF555668u;
+        ui32 hover_alt           = 0xFF515264u;
+        ui32 foreground          = 0xFFCDD6F4u;
+        ui32 disabled_foreground = 0xFF6C7086u;
     };
 
-    struct popup_menu_cfg
+    struct popup_menu_style
     {
-        std::function<text()> label;
-        std::function<std::vector<popup_menu_item>()> items;
-        bool radio_group{ faux };
-        std::function<si32()> selected_index;
-        std::function<bool()> enabled; // Null means enabled.
-        popup_menu_source source{ popup_menu_source::dropdown_menu };
         si32 padding{ 1 };
         popup_menu_palette palette{};
+    };
+
+    // Identity token shared by the triggers that form one menu bar. Keeping
+    // the token alive in each trigger configuration also keeps it alive for
+    // the duration of an open popup session.
+    struct popup_menu_hover_group final {};
+    using popup_menu_hover_group_handle = std::shared_ptr<popup_menu_hover_group const>;
+
+    inline auto make_popup_menu_hover_group() -> popup_menu_hover_group_handle
+    {
+        return std::make_shared<popup_menu_hover_group>();
+    }
+
+    struct popup_menu_behavior
+    {
+        popup_menu_hover_group_handle hover_group{}; // Null disables menu-bar-style hover switching.
+        bool toggle_on_trigger_click{ true }; // Re-clicking the trigger closes its popup.
+    };
+
+    enum class popup_menu_placement_kind : si32
+    {
+        below_trigger,
+        trigger_offset,
+    };
+
+    struct popup_menu_placement
+    {
+        popup_menu_placement_kind kind{ popup_menu_placement_kind::below_trigger };
+        twod offset{};
+
+        static auto below(twod offset = {}) -> popup_menu_placement
+        {
+            return { popup_menu_placement_kind::below_trigger, offset };
+        }
+
+        static auto at(twod offset) -> popup_menu_placement
+        {
+            return { popup_menu_placement_kind::trigger_offset, offset };
+        }
+    };
+
+    // Options shared by retained triggers and direct popup opening.
+    struct popup_menu_open_options
+    {
+        popup_menu_placement placement{};
+        popup_menu_behavior behavior{};
+        popup_menu_style style{};
+    };
+
+    struct popup_menu_trigger_cfg
+    {
+        std::function<text()> label;
+        std::function<popup_menu_content()> content;
+        std::function<bool()> enabled; // Null means enabled.
+        si32 padding{ 1 };
+        popup_menu_trigger_palette palette{};
+        popup_menu_open_options popup{};
     };
 
     namespace popup_menu_detail
@@ -91,8 +142,7 @@ namespace netxs::app::parvion
         static constexpr auto radio_gutter = si32{ 2 };
         static constexpr auto check_gutter = si32{ 2 };
         static constexpr auto no_mouse_lock = twod{ -32768, -32768 };
-        static constexpr auto padding_property = "menu.padding";
-        static constexpr auto open_property = "menu.dropdown.open";
+        static constexpr auto open_property = "menu.popup.open";
 
         struct parsed_label
         {
@@ -130,9 +180,19 @@ namespace netxs::app::parvion
             return item.kind != popup_menu_item_kind::separator;
         }
 
+        inline auto is_submenu(popup_menu_item const& item) -> bool
+        {
+            return item.kind == popup_menu_item_kind::submenu;
+        }
+
         inline auto is_interactive(popup_menu_item const& item) -> bool
         {
             return is_selectable(item) && item.enabled;
+        }
+
+        inline auto is_activatable(popup_menu_item const& item) -> bool
+        {
+            return is_interactive(item) && !is_submenu(item);
         }
 
         inline auto has_check_rows(std::vector<popup_menu_item> const& items) -> bool
@@ -160,7 +220,12 @@ namespace netxs::app::parvion
 
         inline auto resolve_selected(popup_menu_item const& item) -> si32
         {
-            return resolve_selected(item.children, item.selected_index);
+            return resolve_selected(item.children, item.selected_child);
+        }
+
+        inline auto resolve_selected(popup_menu_content const& content) -> si32
+        {
+            return resolve_selected(content.items, content.selected_index);
         }
 
         inline auto snapshot_items(std::vector<popup_menu_item> items)
@@ -204,7 +269,7 @@ namespace netxs::app::parvion
         {
             auto has_submenus = std::any_of(items.begin(), items.end(), [](auto const& item)
             {
-                return !item.children.empty();
+                return is_submenu(item);
             });
             auto has_checks = has_check_rows(items);
             auto width = si32{ 2 };
@@ -231,6 +296,13 @@ namespace netxs::app::parvion
             return desired;
         }
 
+        inline auto root_anchor(rect trigger, popup_menu_placement const& placement) -> twod
+        {
+            return placement.kind == popup_menu_placement_kind::trigger_offset
+                 ? trigger.coor + placement.offset
+                 : trigger.coor + twod{ 0, trigger.size.y + 1 } + placement.offset;
+        }
+
         inline auto submenu_anchor(rect parent, si32 row, twod child_size, si32 host_width) -> twod
         {
             auto right = parent.coor.x + parent.size.x;
@@ -239,7 +311,7 @@ namespace netxs::app::parvion
             return { x, parent.coor.y + row };
         }
 
-        inline auto trigger_width(popup_menu_cfg const& cfg, text const& label) -> si32
+        inline auto trigger_width(popup_menu_trigger_cfg const& cfg, text const& label) -> si32
         {
             auto width = parse_label(label).width
                        + 2 * std::max(0, cfg.padding)
@@ -247,9 +319,17 @@ namespace netxs::app::parvion
             return std::max(3, width);
         }
 
-        inline auto enabled(popup_menu_cfg const& cfg) -> bool
+        inline auto enabled(popup_menu_trigger_cfg const& cfg) -> bool
         {
             return !cfg.enabled || cfg.enabled();
+        }
+
+        inline auto hover_switch_compatible(popup_menu_behavior const& open,
+                                            popup_menu_behavior const& target) -> bool
+        {
+            return open.hover_group
+                && target.hover_group
+                && open.hover_group == target.hover_group;
         }
 
         inline void paint_label(auto& canvas, si32 x, si32 y, text const& source,
@@ -354,14 +434,14 @@ namespace netxs::app::parvion
             netxs::sptr<hook> mouse_hook;
             std::vector<popup_ptr> popups;
             popup_menu_palette palette{};
-            popup_menu_source source{ popup_menu_source::dropdown_menu };
+            popup_menu_behavior behavior{};
             si32 padding{ 1 };
-            twod explicit_anchor{ -1, -1 };
+            popup_menu_placement placement{};
             bool closing{};
 
-            auto context_mode() const -> bool
+            auto trigger_click_toggles() const -> bool
             {
-                return explicit_anchor.x >= 0;
+                return behavior.toggle_on_trigger_click;
             }
 
             auto trigger_rect() const -> rect
@@ -415,9 +495,9 @@ namespace netxs::app::parvion
 
             void activate(popup_ptr const& popup, si32 index, hids& gear)
             {
-                if (!popup || !popup->interactive(index)) return;
+                if (!popup || index < 0 || index >= (si32)popup->items.size()) return;
                 auto const& item = popup->items[(size_t)index];
-                if (!item.children.empty()) return;
+                if (!is_activatable(item)) return;
                 if (item.on_activate) item.on_activate(gear);
                 dismiss();
             }
@@ -429,9 +509,10 @@ namespace netxs::app::parvion
                 parent->child_row = -1;
                 if (!parent->interactive(index)) return;
                 auto const& item = parent->items[(size_t)index];
+                if (!is_submenu(item)) return;
                 if (item.children.empty()) return;
 
-                auto radio = item.kind == popup_menu_item_kind::radio_submenu;
+                auto radio = item.child_group == popup_menu_group::radio;
                 auto selected = radio ? resolve_selected(item) : -1;
                 auto child_size = popup_dimensions(item.children, padding, radio);
                 auto weak_session = netxs::wptr<menu_session>{ shared_from_this() };
@@ -499,7 +580,7 @@ namespace netxs::app::parvion
                 if (key == input::key::KeyRightArrow)
                 {
                     if (popup->interactive(selected)
-                     && !popup->items[(size_t)selected].children.empty())
+                     && is_submenu(popup->items[(size_t)selected]))
                         focus_child(popup, selected, gear.coord);
                     stamp();
                     gear.set_handled(faux);
@@ -522,7 +603,7 @@ namespace netxs::app::parvion
                 {
                     if (popup->interactive(selected))
                     {
-                        if (!popup->items[(size_t)selected].children.empty())
+                        if (is_submenu(popup->items[(size_t)selected]))
                             focus_child(popup, selected, gear.coord);
                         else
                             activate(popup, selected, gear);
@@ -544,7 +625,7 @@ namespace netxs::app::parvion
                             popup->selected_row = index;
                             popup->deface();
                             stamp();
-                            if (!popup->items[(size_t)index].children.empty())
+                            if (is_submenu(popup->items[(size_t)index]))
                                 focus_child(popup, index, gear.coord);
                             else
                                 activate(popup, index, gear);
@@ -565,7 +646,7 @@ namespace netxs::app::parvion
                  && cause != input::key::MiddleDown) return;
 
                 auto point = twod{ (si32)gear.coord.x, (si32)gear.coord.y };
-                if (!context_mode() && trigger_rect().hittest(point)) return;
+                if (trigger_click_toggles() && trigger_rect().hittest(point)) return;
                 for (auto const& popup : popups)
                 {
                     if (popup->painted_bounds.hittest(point)) return;
@@ -603,8 +684,8 @@ namespace netxs::app::parvion
                     gear.dismiss();
                     return;
                 }
-                if (!popup->items[(size_t)index].children.empty()) open_submenu(popup, index);
-                else activate(popup, index, gear);
+                if (is_submenu(popup->items[(size_t)index])) open_submenu(popup, index);
+                else                                             activate(popup, index, gear);
                 gear.dismiss();
             }
 
@@ -635,9 +716,9 @@ namespace netxs::app::parvion
                 auto bounds_h = height + (top_edge ? 1 : 0) + (bottom_edge ? 1 : 0);
                 popup->painted_bounds = { { position.x, bounds_y }, { width, bounds_h } };
 
-                auto level_bg = popup->depth & 1 ? palette.popup_background_alt
-                                                 : palette.popup_background;
-                auto popup_fg = palette.popup_foreground;
+                auto level_bg = popup->depth & 1 ? palette.background_alt
+                                                 : palette.background;
+                auto popup_fg = palette.foreground;
                 for (auto row = si32{}; row < height; ++row)
                 {
                     auto const& item = popup->items[(size_t)row];
@@ -657,11 +738,11 @@ namespace netxs::app::parvion
                     }
 
                     auto hovered = row == popup->selected_row && item.enabled;
-                    auto hover_bg = popup->depth & 1 ? palette.popup_hover_alt
-                                                     : palette.popup_hover;
+                    auto hover_bg = popup->depth & 1 ? palette.hover_alt
+                                                     : palette.hover;
                     auto bg = hovered ? hover_bg : level_bg;
-                    auto fg = item.enabled ? palette.popup_foreground
-                                           : palette.popup_disabled_foreground;
+                    auto fg = item.enabled ? palette.foreground
+                                           : palette.disabled_foreground;
                     canvas.fill(rect{ { position.x, position.y + row }, { width, 1 } }, [=](cell& c)
                     {
                         c.wipe();
@@ -685,7 +766,7 @@ namespace netxs::app::parvion
                     paint_label(canvas, position.x + padding + gutter, position.y + row,
                                 item.label, fg, bg,
                                 width - 2 * padding - gutter - right_reserve, overlay_id);
-                    if (!item.children.empty())
+                    if (is_submenu(item))
                     {
                         put_str(canvas, position.x + width - 2, position.y + row, "▸", fg, bg, 1);
                     }
@@ -735,7 +816,7 @@ namespace netxs::app::parvion
                     popup->radio_selected = resolve_selected(popup->items);
                 popup->has_submenus = std::any_of(popup->items.begin(), popup->items.end(), [](auto const& item)
                 {
-                    return !item.children.empty();
+                    return is_submenu(item);
                 });
                 popup->has_checks = has_check_rows(popup->items);
                 popup->dimensions = popup_dimensions(popup->items, padding, radio_group);
@@ -771,7 +852,7 @@ namespace netxs::app::parvion
             }
         };
 
-        inline void render_trigger(trigger_state& state, popup_menu_cfg const& cfg,
+        inline void render_trigger(trigger_state& state, popup_menu_trigger_cfg const& cfg,
                                    auto& canvas, twod size)
         {
             if (size.x <= 0 || size.y <= 0) return;
@@ -803,14 +884,14 @@ namespace netxs::app::parvion
         if (auto session = popup_menu_detail::active_session()) session->dismiss();
     }
 
-    inline void open_popup_menu(ui::base& trigger,
-                                   std::vector<popup_menu_item> const& items,
-                                   popup_menu_open_cfg const& options = {})
+    inline void show_popup_menu(ui::base& trigger,
+                                popup_menu_content const& content,
+                                popup_menu_open_options const& options = {})
     {
         using namespace popup_menu_detail;
-        if (items.empty()) return;
+        if (content.items.empty()) return;
         auto& open = trigger.base::property(open_property, faux);
-        if (open)
+        if (open && options.behavior.toggle_on_trigger_click)
         {
             dismiss_popup_menu();
             return;
@@ -825,10 +906,10 @@ namespace netxs::app::parvion
         session->trigger_shadow = ptr::shadow(ui::sptr{ trigger.This() });
         session->keyboard_hook = ptr::shared<hook>();
         session->mouse_hook = ptr::shared<hook>();
-        session->source = options.source;
-        session->palette = options.palette;
-        session->padding = std::max(0, trigger.base::property(padding_property, si32{ 1 }));
-        session->explicit_anchor = options.anchor;
+        session->behavior = options.behavior;
+        session->palette = options.style.palette;
+        session->padding = std::max(0, options.style.padding);
+        session->placement = options.placement;
         open = true;
         active_session() = session;
         session->install_hooks();
@@ -838,118 +919,105 @@ namespace netxs::app::parvion
         {
             auto current = weak_session.lock();
             if (!current) return twod{};
-            auto area = current->trigger_rect();
-            return current->context_mode()
-                 ? area.coor + current->explicit_anchor
-                 : area.coor + twod{ 0, area.size.y + 1 };
+            return root_anchor(current->trigger_rect(), current->placement);
         };
-        session->attach_popup(std::move(anchor), items,
-                              options.radio_group, options.selected_index);
+        auto radio = content.group == popup_menu_group::radio;
+        auto selected = radio ? resolve_selected(content) : -1;
+        session->attach_popup(std::move(anchor), content.items, radio, selected);
         trigger.base::deface();
     }
 
     namespace popup_menu_detail
     {
-        inline auto make_trigger(popup_menu_cfg cfg) -> component
+        class popup_menu_trigger
+            : public ui::form<popup_menu_trigger>
         {
-            auto initial_label = cfg.label ? cfg.label() : text{};
-            auto width = trigger_width(cfg, initial_label);
-            auto form = ui::mock::ctor()->active()
-                ->plugin<pro::mouse>()
-                ->plugin<pro::focus>(pro::focus::mode::focusable)
-                ->plugin<pro::keybd>()
-                ->limits({ width, 1 }, { width, 1 });
-            form->invoke([cfgv = std::move(cfg)](auto& boss)
+            popup_menu_trigger_cfg config;
+            trigger_state state;
+
+            void open()
             {
-                auto& cfg = boss.base::field(popup_menu_cfg{ cfgv });
-                auto& state = boss.base::field(trigger_state{});
-                auto& open = boss.base::field(std::function<void()>{});
-                boss.base::property(padding_property, si32{ 1 }) = cfg.padding;
-                open = [&]
+                if (!enabled(config)) return;
+                auto content = config.content ? config.content() : popup_menu_content{};
+                show_popup_menu(*this, content, config.popup);
+            }
+
+        public:
+            static constexpr auto classname = basename::parvion;
+
+            popup_menu_trigger(popup_menu_trigger_cfg setup)
+                : config{ std::move(setup) }
+            {
+                LISTEN(tier::release, e2::render::any, canvas)
                 {
-                    if (!enabled(cfg)) return;
-                    auto items = cfg.items ? cfg.items() : std::vector<popup_menu_item>{};
-                    if (items.empty()) return;
-                    auto selected = cfg.selected_index ? cfg.selected_index() : -1;
-                    open_popup_menu(boss, items,
-                        { .source = cfg.source,
-                          .radio_group = cfg.radio_group,
-                          .selected_index = selected,
-                          .palette = cfg.palette });
+                    render_trigger(state, config, canvas, base::size());
                 };
-                boss.LISTEN(tier::release, e2::render::any, canvas)
-                {
-                    render_trigger(state, cfg, canvas, boss.base::size());
-                };
-                boss.LISTEN(tier::release, e2::form::state::focus::count, count)
+                LISTEN(tier::release, e2::form::state::focus::count, count)
                 {
                     auto focused = count != 0;
                     if (state.focused != focused)
                     {
                         state.focused = focused;
-                        boss.base::deface();
+                        base::deface();
                     }
                 };
-                boss.on(tier::mouserelease, input::key::MouseMove, [&](hids&)
+                on(tier::mouserelease, input::key::MouseMove, [&](hids&)
                 {
-                    if (!state.hover && enabled(cfg))
+                    if (!state.hover && enabled(config))
                     {
                         state.hover = true;
-                        boss.base::deface();
+                        base::deface();
                     }
                 });
-                boss.on(tier::mouserelease, input::key::MouseLeave, [&](hids&)
+                on(tier::mouserelease, input::key::MouseLeave, [&](hids&)
                 {
                     if (state.hover || state.press)
                     {
                         state.hover = state.press = faux;
-                        boss.base::deface();
+                        base::deface();
                     }
                 });
-                boss.on(tier::mouserelease, input::key::LeftDown, [&](hids& gear)
+                on(tier::mouserelease, input::key::LeftDown, [&](hids& gear)
                 {
-                    if (enabled(cfg))
+                    if (enabled(config))
                     {
-                        pro::focus::set(boss.This(), gear.id, solo::on);
+                        pro::focus::set(This(), gear.id, solo::on);
                         state.press = true;
-                        boss.base::deface();
+                        base::deface();
                     }
                     gear.dismiss();
                 });
-                boss.on(tier::mouserelease, input::key::LeftUp, [&](hids& gear)
+                on(tier::mouserelease, input::key::LeftUp, [&](hids& gear)
                 {
                     if (state.press)
                     {
                         state.press = faux;
-                        boss.base::deface();
+                        base::deface();
                     }
                     gear.dismiss();
                 });
-                boss.on(tier::mouserelease, input::key::LeftClick, [&](hids& gear)
+                on(tier::mouserelease, input::key::LeftClick, [&](hids& gear)
                 {
                     open();
                     gear.dismiss();
                 });
-                boss.on(tier::mouserelease, input::key::MouseEnter, [&](hids&)
+                on(tier::mouserelease, input::key::MouseEnter, [&](hids&)
                 {
-                    if (cfg.source != popup_menu_source::menu_bar || !enabled(cfg)) return;
+                    if (!enabled(config)) return;
                     auto session = active_session();
-                    if (!session || session->source != popup_menu_source::menu_bar) return;
-                    if (boss.base::property(open_property, faux)) return;
+                    if (!session
+                     || !hover_switch_compatible(session->behavior,
+                                                 config.popup.behavior)) return;
+                    if (base::property(open_property, faux)) return;
                     if (auto trigger = session->trigger_shadow.lock())
                     {
-                        if (trigger.get() == static_cast<ui::base*>(&boss)) return;
+                        if (trigger.get() == static_cast<ui::base*>(this)) return;
                     }
-                    auto items = cfg.items ? cfg.items() : std::vector<popup_menu_item>{};
-                    if (items.empty()) return;
-                    auto selected = cfg.selected_index ? cfg.selected_index() : -1;
-                    open_popup_menu(boss, items,
-                        { .source = cfg.source,
-                          .radio_group = cfg.radio_group,
-                          .selected_index = selected,
-                          .palette = cfg.palette });
+                    auto content = config.content ? config.content() : popup_menu_content{};
+                    if (content.items.empty()) return;
+                    show_popup_menu(*this, content, config.popup);
                 });
-                boss.LISTEN(tier::preview, input::events::keybd::any, gear)
+                LISTEN(tier::preview, input::events::keybd::any, gear)
                 {
                     if (!state.focused || gear.keybd::handled
                      || gear.payload != input::keybd::type::keypress
@@ -963,28 +1031,26 @@ namespace netxs::app::parvion
                         gear.set_handled();
                     }
                 };
-            });
-            return { form };
-        }
+            }
+
+            static auto ctor(popup_menu_trigger_cfg setup)
+            {
+                auto label = setup.label ? setup.label() : text{};
+                auto width = trigger_width(setup, label);
+                return ui::tui_domain().create<popup_menu_trigger>(std::move(setup))
+                    ->active()
+                    ->plugin<pro::mouse>()
+                    ->plugin<pro::focus>(pro::focus::mode::focusable)
+                    ->plugin<pro::keybd>()
+                    ->limits({ width, 1 }, { width, 1 });
+            }
+        };
     } // namespace popup_menu_detail
 
-    // Public component factories: each pins the trigger's popup source so
-    // callers never set it by hand; the core factory stays in detail.
-    inline auto make_dropdown_menu(popup_menu_cfg cfg) -> component
+    // Public retained trigger factory. Menu-bar-style hover switching requires
+    // the same non-null hover-group handle on both the open and hovered trigger.
+    inline auto make_popup_menu_trigger(popup_menu_trigger_cfg cfg) -> component
     {
-        cfg.source = popup_menu_source::dropdown_menu;
-        return popup_menu_detail::make_trigger(std::move(cfg));
-    }
-
-    inline auto make_context_menu(popup_menu_cfg cfg) -> component
-    {
-        cfg.source = popup_menu_source::context_menu;
-        return popup_menu_detail::make_trigger(std::move(cfg));
-    }
-
-    inline auto make_menu_bar(popup_menu_cfg cfg) -> component
-    {
-        cfg.source = popup_menu_source::menu_bar;
-        return popup_menu_detail::make_trigger(std::move(cfg));
+        return { popup_menu_detail::popup_menu_trigger::ctor(std::move(cfg)) };
     }
 }
