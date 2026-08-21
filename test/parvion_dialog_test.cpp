@@ -105,7 +105,7 @@ namespace
         });
         auto prompt = make_label({
             .value = []{ return text{ "alpha beta gamma delta" }; },
-            .wrap = true,
+            .overflow = label_overflow::wrap,
         });
         auto prompt_widget = prompt.widget;
         content->attach(std::move(prompt), { .shrink = 0 });

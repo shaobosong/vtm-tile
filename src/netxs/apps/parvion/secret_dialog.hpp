@@ -179,7 +179,7 @@ namespace netxs::app::parvion
         });
         content->attach(make_label({
             .value = [prompt = std::move(cfg.prompt)]{ return prompt; },
-            .wrap = true,
+            .overflow = label_overflow::wrap,
         }), { .shrink = 0 });
 
         content->attach_separator(1);

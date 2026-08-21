@@ -24,7 +24,7 @@ namespace
         auto hint = make_label({
             .value = [&]{ return value; },
             .role = label_role::hint,
-            .wrap = true,
+            .overflow = label_overflow::wrap,
         });
         auto widget = std::dynamic_pointer_cast<label>(hint.widget);
         if (!widget) return faux;
@@ -46,6 +46,71 @@ namespace
         return canvas[{ 0, 0 }].fgc() == argb{ theme::subtext }
             && canvas[{ 0, 0 }].txt() == "a"
             && canvas[{ 0, 1 }].txt() == "b";
+    }
+
+    auto test_label_overflow_ellipsis_and_tooltip() -> bool
+    {
+        auto value = text{ "alpha\n界界界" };
+        auto clipped = make_label({ .value = [&]{ return value; } });
+        auto clipped_widget = std::dynamic_pointer_cast<label>(clipped.widget);
+        if (!clipped_widget) return faux;
+        clipped.widget->base::extend({ {}, { 4, 2 } });
+        if (clipped_widget->get_lines() != std::vector<text>{ "alpha", "界界界" }
+         || !clipped_widget->get_tooltip().empty()) return faux;
+        auto clipped_canvas = ui::face{};
+        clipped_canvas.size({ 4, 2 });
+        clipped.widget->render(clipped_canvas);
+        if (clipped_canvas[{ 0, 0 }].link()) return faux;
+
+        auto abbreviated = make_label({
+            .value = [&]{ return value; },
+            .overflow = label_overflow::ellipsis,
+        });
+        auto abbreviated_widget = std::dynamic_pointer_cast<label>(abbreviated.widget);
+        if (!abbreviated_widget) return faux;
+        abbreviated.widget->base::extend({ {}, { 4, 2 } });
+        if (abbreviated_widget->get_lines() != std::vector<text>{ "alp…", "界…" }
+         || abbreviated_widget->get_tooltip() != value) return faux;
+
+        auto canvas = ui::face{};
+        canvas.size({ 4, 2 });
+        abbreviated.widget->render(canvas);
+        if (canvas[{ 3, 0 }].txt() != "…"
+         || canvas[{ 2, 1 }].txt() != "…"
+         || canvas[{ 0, 0 }].link() != abbreviated.widget->id) return faux;
+
+        value = "fits";
+        abbreviated.widget->base::extend({ {}, { 4, 1 } });
+        if (!abbreviated_widget->get_tooltip().empty()
+         || abbreviated_widget->get_lines() != std::vector<text>{ "fits" }) return faux;
+
+        auto one_cell = make_label({
+            .value = []{ return text{ "wide" }; },
+            .overflow = label_overflow::ellipsis,
+        });
+        auto one_cell_widget = std::dynamic_pointer_cast<label>(one_cell.widget);
+        one_cell.widget->base::extend({ {}, { 1, 1 } });
+        return one_cell_widget
+            && one_cell_widget->get_lines() == std::vector<text>{ "…" }
+            && one_cell_widget->get_tooltip() == "wide";
+    }
+
+    auto test_flex_shrinks_ellipsis_label_to_assigned_width() -> bool
+    {
+        auto layout = flex::ctor();
+        auto abbreviated = make_label({
+            .value = []{ return text{ "long label" }; },
+            .overflow = label_overflow::ellipsis,
+        });
+        auto abbreviated_widget = std::dynamic_pointer_cast<label>(abbreviated.widget);
+        auto label_item = layout->attach(std::move(abbreviated));
+        layout->attach(ui::mock::ctor()->limits({ 4, 1 }, { 4, 1 }), { .shrink = 0 });
+        layout->base::extend({ {}, { 8, 1 } });
+
+        return abbreviated_widget
+            && layout->get_item_area(label_item).size.x == 4
+            && abbreviated_widget->get_lines() == std::vector<text>{ "lon…" }
+            && abbreviated_widget->get_tooltip() == "long label";
     }
 
     auto test_groupbox_geometry_paint_and_lifecycle() -> bool
@@ -197,7 +262,7 @@ namespace
             auto content = make_label({
                 .value = []{ return text{ "one two three four" }; },
                 .role = label_role::hint,
-                .wrap = true,
+                .overflow = label_overflow::wrap,
             });
             return make_groupbox({ .title = "Group", .content = std::move(content) });
         };
@@ -342,6 +407,9 @@ int main()
         }
     };
     check(test_label_roles_measurement_and_wrap, "label roles, measurement, and wrap");
+    check(test_label_overflow_ellipsis_and_tooltip, "label overflow, ellipsis, and tooltip");
+    check(test_flex_shrinks_ellipsis_label_to_assigned_width,
+          "flex shrinks ellipsis label to assigned width");
     check(test_groupbox_geometry_paint_and_lifecycle, "groupbox geometry, paint, and lifecycle");
     check(test_groupbox_clips_child_and_honors_ancestor_viewport,
           "groupbox child and ancestor clipping");

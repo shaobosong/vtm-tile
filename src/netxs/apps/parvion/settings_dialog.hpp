@@ -113,13 +113,13 @@ namespace netxs::app::parvion
 
     inline auto make_settings_label(view value,
                                     label_role role = label_role::text,
-                                    bool wrap = faux,
+                                    label_overflow overflow = label_overflow::clip,
                                     label_palette palette = {}) -> component
     {
         return make_label({
             .value = [value = text{ value }]{ return value; },
             .role = role,
-            .wrap = wrap,
+            .overflow = overflow,
             .palette = palette,
         });
     }
@@ -277,7 +277,7 @@ namespace netxs::app::parvion
         auto timeout_content = flex::ctor({ .direction = flex_direction::column });
         timeout_content->attach(component{ timeout_fields });
         timeout_content->attach(make_settings_label(settings_connection::timeout_help,
-                                                     label_role::hint, true));
+                                                     label_role::hint, label_overflow::wrap));
         auto timeout_box = make_groupbox({
             .title = "Timeout",
             .content = { timeout_content },
@@ -318,7 +318,7 @@ namespace netxs::app::parvion
 
         auto reconnect_content = flex::ctor({ .direction = flex_direction::column });
         reconnect_content->attach(component{ reconnect_fields });
-        reconnect_content->attach(make_settings_label(settings_connection::reconnect_help, label_role::hint, true));
+        reconnect_content->attach(make_settings_label(settings_connection::reconnect_help, label_role::hint, label_overflow::wrap));
         auto reconnect_box = make_groupbox({
             .title = "Reconnection settings",
             .content = { reconnect_content },
@@ -676,7 +676,7 @@ namespace netxs::app::parvion
             .row_gap = 0,
         });
         public_key_content->attach(make_settings_label(settings_sftp::public_key_help,
-                                                        label_role::hint, true),
+                                                        label_role::hint, label_overflow::wrap),
                                    { .shrink = 0 });
         public_key_content->attach(make_settings_label(settings_sftp::private_keys_label),
                                    { .shrink = 0 });
@@ -1334,7 +1334,7 @@ namespace netxs::app::parvion
         auto content = flex::ctor({
             .direction = flex_direction::column,
         });
-        content->attach(make_settings_label(settings_site::help, label_role::hint, true),
+        content->attach(make_settings_label(settings_site::help, label_role::hint, label_overflow::wrap),
                         { .shrink = 0 });
         content->attach(make_settings_label(settings_site::sites_label), { .shrink = 0 });
         content->attach(std::move(table),
@@ -1383,7 +1383,7 @@ namespace netxs::app::parvion
 
         auto debugging_content = flex::ctor({ .direction = flex_direction::column });
         debugging_content->attach(component{ level_fields }, { .shrink = 0 });
-        debugging_content->attach(make_settings_label(settings_debug::help, label_role::hint, true),
+        debugging_content->attach(make_settings_label(settings_debug::help, label_role::hint, label_overflow::wrap),
                                   { .shrink = 0 });
         auto debugging = make_groupbox({
             .title = "Debugging settings",
@@ -1504,7 +1504,7 @@ namespace netxs::app::parvion
             .position = tab_position::top,
         });
 
-        auto title = make_settings_label("Settings", label_role::text, faux, {
+        auto title = make_settings_label("Settings", label_role::text, label_overflow::clip, {
             .text = theme::title_fg,
             .background = theme::header,
         });

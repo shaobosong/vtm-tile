@@ -4,8 +4,8 @@
 #pragma once
 
 // parvion/components/label.hpp: A retained text label with semantic text and
-// hint roles.  Wrapping and measurement use terminal display cells so layout
-// agrees with the renderer for wide and combining graphemes.
+// hint roles.  Overflow handling and measurement use terminal display cells
+// so layout agrees with the renderer for wide and combining graphemes.
 
 #include "ui.hpp"
 
@@ -15,6 +15,13 @@ namespace netxs::app::parvion
     {
         text,
         hint,
+    };
+
+    enum class label_overflow
+    {
+        clip,
+        ellipsis,
+        wrap,
     };
 
     struct label_palette
@@ -28,7 +35,7 @@ namespace netxs::app::parvion
     {
         std::function<text()> value;
         label_role role = label_role::text;
-        bool wrap = faux;
+        label_overflow overflow = label_overflow::clip;
         label_palette palette{};
     };
 
@@ -138,8 +145,23 @@ namespace netxs::app::parvion
 
         auto layout(view value, si32 width) const -> std::vector<text>
         {
-            return config.wrap ? wrap_label_text(value, width)
-                               : label_explicit_lines(value);
+            if (config.overflow == label_overflow::wrap)
+                return wrap_label_text(value, width);
+
+            auto result = label_explicit_lines(value);
+            if (config.overflow == label_overflow::ellipsis)
+                for (auto& line : result) line = fit_ellipsis(line, width);
+            return result;
+        }
+
+        auto tooltip() const -> text
+        {
+            if (config.overflow != label_overflow::ellipsis) return {};
+            auto value = current();
+            auto width = base::size().x;
+            for (auto& line : label_explicit_lines(value))
+                if (cell_width(line) > width) return value;
+            return {};
         }
 
     protected:
@@ -163,6 +185,10 @@ namespace netxs::app::parvion
         label(label_cfg setup)
             : config{ std::move(setup) }
         {
+            on(tier::mouserelease, input::key::MouseHover, [&](hids&)
+            {
+                base::signal(tier::preview, e2::form::prop::ui::tooltip, tooltip());
+            });
             LISTEN(tier::release, e2::render::any, canvas)
             {
                 auto size = base::size();
@@ -178,10 +204,14 @@ namespace netxs::app::parvion
 
         auto get_lines() const -> std::vector<text> const& { return lines; }
         auto get_foreground() const -> ui32 { return foreground(); }
+        auto get_tooltip() const -> text { return tooltip(); }
 
         static auto ctor(label_cfg setup)
         {
-            return ui::tui_domain().create<label>(std::move(setup));
+            auto has_tooltip = setup.overflow == label_overflow::ellipsis;
+            auto item = ui::tui_domain().create<label>(std::move(setup));
+            if (has_tooltip) item->active()->template plugin<pro::notes>();
+            return item;
         }
     };
 
