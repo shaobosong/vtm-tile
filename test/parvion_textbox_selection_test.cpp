@@ -415,6 +415,53 @@ namespace
         textbox_render(st, cfg, canvas, twod{ 20, 10 });
         return !st.follow;
     }
+
+    auto test_context_menu_uses_shared_popup_items() -> bool
+    {
+        auto empty_cfg = make_cfg({});
+        auto empty_st = textbox_state{};
+        auto empty = tb_context_menu(empty_st, empty_cfg, {});
+        if (empty.items.size() != 3
+         || empty.items[0].label != "&Copy"
+         || empty.items[0].enabled
+         || empty.items[1].kind != popup_menu_item_kind::separator
+         || empty.items[2].label != "Select &All"
+         || empty.items[2].enabled) return faux;
+
+        auto cfg = make_cfg({ "abc" });
+        auto st = textbox_state{};
+        if (!tb_select_all(st, cfg)) return faux;
+        auto selected = tb_context_menu(st, cfg, {});
+        return selected.items.size() == 3
+            && selected.items[0].enabled
+            && selected.items[2].enabled;
+    }
+
+    auto test_context_menu_adapter_arranges_core_items() -> bool
+    {
+        auto cfg = make_cfg({ "abc" });
+        auto called = faux;
+        cfg.menu = [&called](netxs::wptr<ui::base>, popup_menu_item copy,
+                            popup_menu_item select_all)
+        {
+            called = copy.label == "&Copy"
+                  && !copy.enabled
+                  && select_all.label == "Select &All"
+                  && select_all.enabled;
+            auto items = std::vector<popup_menu_item>{};
+            items.push_back(std::move(copy));
+            items.push_back(popup_menu_item{ .label = "C&lear All" });
+            items.push_back(popup_menu_item{ .kind = popup_menu_item_kind::separator });
+            items.push_back(std::move(select_all));
+            return popup_menu_content{ .items = std::move(items) };
+        };
+        auto st = textbox_state{};
+        auto content = tb_context_menu(st, cfg, {});
+        return called
+            && content.items.size() == 4
+            && content.items[1].label == "C&lear All"
+            && content.items[2].kind == popup_menu_item_kind::separator;
+    }
 }
 
 int main()
@@ -448,6 +495,8 @@ int main()
         { "key_scroll_modifier_filter_and_numpad", test_key_scroll_modifier_filter_and_numpad },
         { "empty_render_rearms_follow", test_empty_render_rearms_follow },
         { "nonempty_render_keeps_follow_disengaged", test_nonempty_render_keeps_follow_disengaged },
+        { "context_menu_uses_shared_popup_items", test_context_menu_uses_shared_popup_items },
+        { "context_menu_adapter_arranges_core_items", test_context_menu_adapter_arranges_core_items },
     };
 
     auto failed = 0;

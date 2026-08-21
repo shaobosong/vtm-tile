@@ -762,15 +762,14 @@ namespace netxs::app::parvion
     }
 
     // Unified right-click menu: selected-item actions, then pane-wide actions.
-    inline auto build_pane_menu(pane_state& st, netxs::wptr<ui::base> panel_wp) -> std::vector<app::shared::menu::item>
+    inline auto build_pane_menu(pane_state& st, netxs::wptr<ui::base> panel_wp) -> popup_menu_content
     {
-        namespace m = app::shared::menu;
-        auto items = std::vector<m::item>{};
+        auto items = std::vector<popup_menu_item>{};
         auto selected = pane_selected_item_count(st) > 0;
         auto add = [&](text label, bool disabled, auto fn)
         {
-            auto row = m::item{ .alive = true, .label = std::move(label), .disabled = disabled };
-            row.action = [panel_wp, fn](hids&){ if (auto p = panel_wp.lock()) { fn(); p->base::deface(); } };
+            auto row = popup_menu_item{ .label = std::move(label), .enabled = !disabled };
+            row.on_activate = [panel_wp, fn](hids&){ if (auto p = panel_wp.lock()) { fn(); p->base::deface(); } };
             items.push_back(std::move(row));
         };
         // A file picker reuses the local pane, but has no transfer/hash controller: its context
@@ -790,12 +789,16 @@ namespace netxs::app::parvion
         {
             auto names = pane_selection_names(st);
             auto paths = pane_selection_paths(st);
-            auto sub = m::item{ .alive = true, .label = "&Copy", .type = m::kind::dropdown, .disabled = names.empty() };
-            auto name = m::item{ .alive = true, .label = "&Name", .disabled = names.empty() };
-            name.action = [names](hids& gear){ if (!names.empty()) gear.set_clipboard(dot_00, names, mime::textonly); };
+            auto sub = popup_menu_item{
+                .label = "&Copy",
+                .kind = popup_menu_item_kind::submenu,
+                .enabled = !names.empty(),
+            };
+            auto name = popup_menu_item{ .label = "&Name", .enabled = !names.empty() };
+            name.on_activate = [names](hids& gear){ if (!names.empty()) gear.set_clipboard(dot_00, names, mime::textonly); };
             sub.children.push_back(std::move(name));
-            auto path = m::item{ .alive = true, .label = "&Full Path", .disabled = paths.empty() };
-            path.action = [paths](hids& gear){ if (!paths.empty()) gear.set_clipboard(dot_00, paths, mime::textonly); };
+            auto path = popup_menu_item{ .label = "&Full Path", .enabled = !paths.empty() };
+            path.on_activate = [paths](hids& gear){ if (!paths.empty()) gear.set_clipboard(dot_00, paths, mime::textonly); };
             sub.children.push_back(std::move(path));
             items.push_back(std::move(sub));
         }
@@ -809,27 +812,31 @@ namespace netxs::app::parvion
             auto has_file = faux;
             for (auto row : st.marked)
                 if (row > 0 && row - 1 < (si32)its.size() && !its[(size_t)(row - 1)].is_dir) { has_file = true; break; }
-            auto sub = m::item{ .alive = true, .label = "Calculate C&hecksum", .type = m::kind::dropdown, .disabled = !has_file };
+            auto sub = popup_menu_item{
+                .label = "Calculate C&hecksum",
+                .kind = popup_menu_item_kind::submenu,
+                .enabled = has_file,
+            };
             static constexpr auto labels = std::array<view, hash_algo_count>{
                 "&MD5", "SHA-&1", "SHA-&256", "SHA-&384", "SHA-&512"
             };
             for (auto a = si32{}; a < hash_algo_count; ++a)
             {
-                auto row = m::item{ .alive = true, .label = text{ labels[(size_t)a] } };
-                row.action = [panel_wp, &st, a](hids&){ if (auto p = panel_wp.lock()) { pane_hash_selection(st, a); p->base::deface(); } };
+                auto row = popup_menu_item{ .label = text{ labels[(size_t)a] } };
+                row.on_activate = [panel_wp, &st, a](hids&){ if (auto p = panel_wp.lock()) { pane_hash_selection(st, a); p->base::deface(); } };
                 sub.children.push_back(std::move(row));
             }
             items.push_back(std::move(sub));
         }
 
-        items.push_back(m::item{ .alive = true, .type = m::kind::separator });
+        items.push_back(popup_menu_item{ .kind = popup_menu_item_kind::separator });
         add("R&efresh", faux, [&st]{ pane_reload_reset_view(st); });
         {
-            auto sub = m::item{ .alive = true, .label = "&New", .type = m::kind::dropdown };
+            auto sub = popup_menu_item{ .label = "&New", .kind = popup_menu_item_kind::submenu };
             auto add_new = [&](text label, auto fn)
             {
-                auto row = m::item{ .alive = true, .label = std::move(label) };
-                row.action = [panel_wp, fn](hids&)
+                auto row = popup_menu_item{ .label = std::move(label) };
+                row.on_activate = [panel_wp, fn](hids&)
                 {
                     if (auto p = panel_wp.lock())
                     {
@@ -844,7 +851,7 @@ namespace netxs::app::parvion
             add_new("&Folder",   [&st]{ pane_create_dir(st); });
             items.push_back(std::move(sub));
         }
-        return items;
+        return { .items = std::move(items) };
     }
 
     inline void pane_sync(pane_state& st)
@@ -989,7 +996,7 @@ namespace netxs::app::parvion
     inline auto pane_menu(std::shared_ptr<pane_state> const& state, netxs::wptr<ui::base> panel_wp) -> qmenu_cfg
     {
         auto menu = qmenu_cfg{};
-        menu.items = [state, panel_wp]{ return build_pane_menu(*state, panel_wp); };
+        menu.content = [state, panel_wp]{ return build_pane_menu(*state, panel_wp); };
         menu.on_item_rclick = [state](si32 hit)
         {
             if (hit > 0)

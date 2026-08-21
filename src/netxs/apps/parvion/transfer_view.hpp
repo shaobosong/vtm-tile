@@ -249,13 +249,12 @@ namespace netxs::app::parvion
     // tab-wide "All" actions for blank-area and header invocations, then tab-scoped selection.
     inline auto xfer_menu(sftp_remote* ctrl, si32 status,
                           netxs::wptr<ui::base> panel_wp,
-                          netxs::wptr<ui::base> window_wp) -> std::vector<app::shared::menu::item>
+                          netxs::wptr<ui::base> window_wp) -> popup_menu_content
     {
-        namespace m = app::shared::menu;
         auto deface = [panel_wp]{ if (auto p = panel_wp.lock()) p->base::deface(); };
         auto sel    = xfer_selection_pred(status);
         auto scope  = [status](queue_item const& it){ return tab_status_match(status, it); };
-        auto items  = std::vector<m::item>{};
+        auto items  = std::vector<popup_menu_item>{};
         auto any_selected = std::ranges::any_of(ctrl->queue, sel);
         auto any_in_scope = std::ranges::any_of(ctrl->queue, scope);
         // Blank-area and header invocations both carry no selection over (blank right-click always
@@ -270,8 +269,8 @@ namespace netxs::app::parvion
         });
         auto add = [&](text label, bool disabled, auto fn)
         {
-            auto row = m::item{ .alive = true, .label = std::move(label), .disabled = disabled };
-            row.action = [deface, fn](hids&){ fn(); deface(); };
+            auto row = popup_menu_item{ .label = std::move(label), .enabled = !disabled };
+            row.on_activate = [deface, fn](hids&){ fn(); deface(); };
             items.push_back(std::move(row));
         };
         add(bulk ? "&Start All" : "&Start", !any_target, [ctrl, target]{ ctrl->queue_start(target); });
@@ -295,28 +294,32 @@ namespace netxs::app::parvion
             auto local = xfer_copy_payload(ctrl, status, &queue_item::local_path);
             auto remote = xfer_copy_payload(ctrl, status, &queue_item::remote_path);
             auto reason = status == 1 ? xfer_copy_payload(ctrl, status, &queue_item::error) : text{};
-            auto copy = m::item{ .alive = true, .label = "&Copy", .type = m::kind::dropdown, .disabled = local.empty() && remote.empty() && reason.empty() };
-            auto local_name = m::item{ .alive = true, .label = "&Local Name", .disabled = local.empty() };
-            local_name.action = [local](hids& g){ if (!local.empty()) g.set_clipboard(dot_00, local, mime::textonly); };
+            auto copy = popup_menu_item{
+                .label = "&Copy",
+                .kind = popup_menu_item_kind::submenu,
+                .enabled = !local.empty() || !remote.empty() || !reason.empty(),
+            };
+            auto local_name = popup_menu_item{ .label = "&Local Name", .enabled = !local.empty() };
+            local_name.on_activate = [local](hids& g){ if (!local.empty()) g.set_clipboard(dot_00, local, mime::textonly); };
             copy.children.push_back(std::move(local_name));
-            auto remote_name = m::item{ .alive = true, .label = "&Remote Name", .disabled = remote.empty() };
-            remote_name.action = [remote](hids& g){ if (!remote.empty()) g.set_clipboard(dot_00, remote, mime::textonly); };
+            auto remote_name = popup_menu_item{ .label = "&Remote Name", .enabled = !remote.empty() };
+            remote_name.on_activate = [remote](hids& g){ if (!remote.empty()) g.set_clipboard(dot_00, remote, mime::textonly); };
             copy.children.push_back(std::move(remote_name));
             if (status == 1)
             {
-                auto failed_reason = m::item{ .alive = true, .label = "&Failed Reason", .disabled = reason.empty() };
-                failed_reason.action = [reason](hids& g){ if (!reason.empty()) g.set_clipboard(dot_00, reason, mime::textonly); };
+                auto failed_reason = popup_menu_item{ .label = "&Failed Reason", .enabled = !reason.empty() };
+                failed_reason.on_activate = [reason](hids& g){ if (!reason.empty()) g.set_clipboard(dot_00, reason, mime::textonly); };
                 copy.children.push_back(std::move(failed_reason));
             }
             items.push_back(std::move(copy));
         }
 
-        items.push_back(m::item{ .alive = true, .type = m::kind::separator });
+        items.push_back(popup_menu_item{ .kind = popup_menu_item_kind::separator });
         add("Select &All", !any_in_scope, [ctrl, status, scope]
         {
             for (auto& it : ctrl->queue) xfer_select(it, status, scope(it));
         });
-        return items;
+        return { .items = std::move(items) };
     }
     inline auto xfer_remove_confirmation(sftp_remote* ctrl, si32 status) -> app::shared::confirm_dialog_text
     {
@@ -434,7 +437,7 @@ namespace netxs::app::parvion
         {
             auto deface = [panel_wp]{ if (auto p = panel_wp.lock()) p->base::deface(); };
             auto mc = qmenu_cfg{};
-            mc.items = [ctrl, status, panel_wp, window_wp]
+            mc.content = [ctrl, status, panel_wp, window_wp]
             {
                 return xfer_menu(ctrl, status, panel_wp, window_wp);
             };

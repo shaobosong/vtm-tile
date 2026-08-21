@@ -155,14 +155,13 @@ namespace
 
     auto test_numeric_menu_shortcuts() -> bool
     {
-        namespace m = app::shared::menu;
-        return m::label_shortcut_char("SHA-&256") == '2'
-            && m::label_display_length("SHA-&256") == 7;
+        auto parsed = popup_menu_detail::parse_label("SHA-&256");
+        return parsed.shortcut == '2'
+            && parsed.width == 7;
     }
 
     auto test_column_menu_uses_caller_shortcuts() -> bool
     {
-        namespace m = app::shared::menu;
         auto roster = std::vector<qtable::col_toggle>{
             { "&Source",    0, true },
             { "&Path",      1, true },
@@ -171,12 +170,17 @@ namespace
             { "P&rogress",  4, true },
             { "R&esult",    5, true },
         };
-        auto items = build_columns_menu(roster, {}, {});
+        auto content = build_columns_menu(roster, {}, {});
         auto keys = text{};
-        for (auto& row : items) keys += m::label_shortcut_char(row.label);
+        for (auto& row : content.items)
+        {
+            if (row.kind != popup_menu_item_kind::checkbox || !row.checked) return faux;
+            keys += popup_menu_detail::parse_label(row.label).shortcut;
+        }
         auto plain = build_columns_menu({ { "Plain", 0, true } }, {}, {});
         return keys == "spaire"
-            && m::label_shortcut_char(plain.front().label) == 0;
+            && plain.items.size() == 1
+            && popup_menu_detail::parse_label(plain.items.front().label).shortcut == 0;
     }
 
     auto test_page_navigation_visits_edges_first() -> bool

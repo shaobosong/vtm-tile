@@ -14,7 +14,7 @@
 //
 // make_textbox() returns the common retained component handle. Containers can wrap it as needed.
 
-#include "../panes.hpp" // ui::sptr, theme, shared menu utilities.
+#include "popup_menu.hpp"
 
 namespace netxs::app::parvion
 {
@@ -32,9 +32,9 @@ namespace netxs::app::parvion
         std::function<const void*(si32)>                  line_id;    // stable identity of line i (null => index).
         std::function<ui64()>                             epoch;      // layout epoch; a change drops the selection.
         std::function<text()>                             empty_text; // shown when line_count()==0 (null => none).
-        std::function<std::vector<app::shared::menu::item>(netxs::wptr<ui::base>,
-                                                           app::shared::menu::item,
-                                                           app::shared::menu::item)> menu; // App arranges core-supplied Copy/Select all rows.
+        std::function<popup_menu_content(netxs::wptr<ui::base>,
+                                         popup_menu_item,
+                                         popup_menu_item)> menu; // App arranges core-supplied Copy/Select all rows.
         std::function<bool(hids&, netxs::wptr<ui::base>)> on_key;     // app keys (Delete clear-finished); null => none.
     };
 
@@ -525,34 +525,34 @@ namespace netxs::app::parvion
 
     // Build the same selection-aware menu for either a body right-click or the fixed menu button.
     inline auto tb_context_menu(textbox_state& st, textbox_cfg& cfg, netxs::wptr<ui::base> panel_wp)
-        -> std::vector<app::shared::menu::item>
+        -> popup_menu_content
     {
-        namespace m = app::shared::menu;
         auto has  = tb_has_selection(st);
         auto out  = has ? tb_selection_text(st, cfg) : text{};
-        auto copy = m::item{ .alive = true, .label = "&Copy", .disabled = !has };
-        copy.action = [out](hids& g){ if (!out.empty()) g.set_clipboard(dot_00, out, mime::textonly); };
+        auto copy = popup_menu_item{ .label = "&Copy", .enabled = has };
+        copy.on_activate = [out](hids& g){ if (!out.empty()) g.set_clipboard(dot_00, out, mime::textonly); };
 
         auto n = cfg.line_count ? cfg.line_count() : 0;
-        auto select_all = m::item{ .alive = true, .label = "Select &All", .disabled = n == 0 };
-        select_all.action = [stp = &st, cfgp = &cfg, panel_wp](hids&)
+        auto select_all = popup_menu_item{ .label = "Select &All", .enabled = n != 0 };
+        select_all.on_activate = [stp = &st, cfgp = &cfg, panel_wp](hids&)
         {
             if (tb_select_all(*stp, *cfgp))
                 if (auto panel = panel_wp.lock()) panel->base::deface();
         };
 
         if (cfg.menu) return cfg.menu(panel_wp, std::move(copy), std::move(select_all));
-        auto items = std::vector<m::item>{};
+        auto items = std::vector<popup_menu_item>{};
         items.push_back(std::move(copy));
-        items.push_back(m::item{ .alive = true, .type = m::kind::separator });
+        items.push_back(popup_menu_item{ .kind = popup_menu_item_kind::separator });
         items.push_back(std::move(select_all));
-        return items;
+        return { .items = std::move(items) };
     }
     inline void tb_open_context_menu(auto& boss, textbox_state& st, textbox_cfg& cfg, twod at)
     {
-        app::shared::menu::open_dropdown_popup(
-            boss, tb_context_menu(st, cfg, ptr::shadow(boss.This())),
-            { .source = app::shared::menu::popup_source::context_menu, .cursor = at });
+        show_popup_menu(boss, tb_context_menu(st, cfg, ptr::shadow(boss.This())), {
+            .placement = popup_menu_placement::at(at),
+            .behavior = { .toggle_on_trigger_click = false },
+        });
     }
     inline void tb_paint_menu_button(textbox_state const& st, auto& canvas)
     {

@@ -17,7 +17,7 @@
 //
 // make_table() returns the common retained component handle. Containers can wrap it as needed.
 
-#include "input.hpp"
+#include "popup_menu.hpp"
 
 #include <algorithm>
 #include <functional>
@@ -307,9 +307,9 @@ namespace netxs::app::parvion
     // column roster); the body uses one menu after synchronizing selection with the click target.
     struct qmenu_cfg
     {
-        std::function<std::vector<app::shared::menu::item>()>     items;           // Unified body menu (null = none).
-        std::function<void(si32)>                                 on_item_rclick;  // Selection sync for a row (null = none).
-        std::function<void()>                                     on_blank_rclick; // Selection reset on blank (null = none).
+        std::function<popup_menu_content()> content;         // Unified body menu (null = none).
+        std::function<void(si32)>           on_item_rclick;  // Selection sync for a row (null = none).
+        std::function<void()>               on_blank_rclick; // Selection reset on blank (null = none).
     };
 
     // Sorting configuration: source-row comparator and optional grouping key.
@@ -800,23 +800,27 @@ namespace netxs::app::parvion
 
     // ---- Menu layer --------------------------------------------------------------------------------
     inline auto build_columns_menu(std::vector<qtable::col_toggle> const& roster,
-                                   std::function<void(si32, bool)> set_shown, std::function<void()> deface) -> std::vector<app::shared::menu::item>
+                                   std::function<void(si32, bool)> set_shown,
+                                   std::function<void()> deface) -> popup_menu_content
     {
-        namespace m = app::shared::menu;
-        auto items = std::vector<m::item>{};
+        auto items = std::vector<popup_menu_item>{};
         auto shown = si32{};
         for (auto& c : roster) if (c.shown) ++shown;
         for (auto& c : roster)
         {
-            auto row = m::item{ .alive = true, .label = c.title, .type = m::kind::check, .checked = c.shown };
-            row.action = [set_shown, deface, key = c.key, on = c.shown, shown](hids&)
+            auto row = popup_menu_item{
+                .label = c.title,
+                .kind = popup_menu_item_kind::checkbox,
+                .checked = c.shown,
+            };
+            row.on_activate = [set_shown, deface, key = c.key, on = c.shown, shown](hids&)
             {
                 if (on && shown <= 1) return; // Never hide the last visible column.
                 set_shown(key, !on); deface();
             };
             items.push_back(std::move(row));
         }
-        return items;
+        return { .items = std::move(items) };
     }
     inline auto q_has_columns_menu(qtable const& t) -> bool
     {
@@ -828,18 +832,20 @@ namespace netxs::app::parvion
     }
     inline void q_open_columns_menu(auto& boss, qtable const& t, twod at)
     {
-        namespace m = app::shared::menu;
         if (!q_has_columns_menu(t)) return;
         auto panel_wp = ptr::shadow(boss.This());
         auto deface   = [panel_wp]{ if (auto p = panel_wp.lock()) p->base::deface(); };
-        m::open_dropdown_popup(boss, build_columns_menu(t.roster, t.on_show_column, deface),
-            { .source = m::popup_source::context_menu, .cursor = at });
+        show_popup_menu(boss, build_columns_menu(t.roster, t.on_show_column, deface), {
+            .placement = popup_menu_placement::at(at),
+            .behavior = { .toggle_on_trigger_click = false },
+        });
     }
     inline void q_open_table_menu(auto& boss, qmenu_cfg const& cfg, twod at)
     {
-        namespace m = app::shared::menu;
-        if (cfg.items) m::open_dropdown_popup(boss, cfg.items(),
-            { .source = m::popup_source::context_menu, .cursor = at });
+        if (cfg.content) show_popup_menu(boss, cfg.content(), {
+            .placement = popup_menu_placement::at(at),
+            .behavior = { .toggle_on_trigger_click = false },
+        });
     }
     inline void q_context_menu(auto& boss, table_state& st, si32 mx, si32 my, qtable const& t, qmenu_cfg const& cfg)
     {

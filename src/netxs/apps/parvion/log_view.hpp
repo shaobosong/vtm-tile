@@ -61,23 +61,22 @@ namespace netxs::app::parvion
     // The Message-log right-click menu: Copy / Clear all / separator / Select all.
     inline auto build_log_menu(sftp_remote* ctrl,
                                netxs::wptr<ui::base> panel_wp,
-                               app::shared::menu::item copy,
-                               app::shared::menu::item select_all) -> std::vector<app::shared::menu::item>
+                               popup_menu_item copy,
+                               popup_menu_item select_all) -> popup_menu_content
     {
-        namespace m = app::shared::menu;
         auto deface = [panel_wp]{ if (auto p = panel_wp.lock()) p->base::deface(); };
-        auto items = std::vector<m::item>{};
+        auto items = std::vector<popup_menu_item>{};
 
         items.push_back(std::move(copy));
 
-        auto clear = m::item{ .alive = true, .label = "C&lear All", .disabled = ctrl->logger.lines.empty() };
-        clear.action = [ctrl, deface](hids&){ ctrl->logger.clear(); ctrl->dirty = true; deface(); };
+        auto clear = popup_menu_item{ .label = "C&lear All", .enabled = !ctrl->logger.lines.empty() };
+        clear.on_activate = [ctrl, deface](hids&){ ctrl->logger.clear(); ctrl->dirty = true; deface(); };
         items.push_back(std::move(clear));
 
-        items.push_back(m::item{ .alive = true, .type = m::kind::separator });
+        items.push_back(popup_menu_item{ .kind = popup_menu_item_kind::separator });
 
         items.push_back(std::move(select_all));
-        return items;
+        return { .items = std::move(items) };
     }
 
     inline auto make_log_view(sftp_remote* ctrl, netxs::wptr<ui::base> window_wp) -> tab_page_cfg

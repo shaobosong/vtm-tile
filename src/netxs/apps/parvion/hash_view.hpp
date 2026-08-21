@@ -241,20 +241,23 @@ namespace netxs::app::parvion
                           netxs::wptr<ui::base> panel_wp,
                           netxs::wptr<ui::base> window_wp) -> qmenu_cfg
     {
-        namespace m = app::shared::menu;
         auto deface = [panel_wp]{ if (auto p = panel_wp.lock()) p->base::deface(); };
         auto cfg = qmenu_cfg{};
-        cfg.items = [ctrl, deface, panel_wp, window_wp]() -> std::vector<m::item>
+        cfg.content = [ctrl, deface, panel_wp, window_wp]() -> popup_menu_content
         {
-            auto items = std::vector<m::item>{};
+            auto items = std::vector<popup_menu_item>{};
             auto paths = hash_copy_path_payload(ctrl);
             auto digests = hash_copy_digest_payload(ctrl);
-            auto copy = m::item{ .alive = true, .label = "&Copy", .type = m::kind::dropdown, .disabled = paths.empty() };
-            auto path = m::item{ .alive = true, .label = "&Path", .disabled = paths.empty() };
-            path.action = [paths](hids& g){ if (!paths.empty()) g.set_clipboard(dot_00, paths, mime::textonly); };
+            auto copy = popup_menu_item{
+                .label = "&Copy",
+                .kind = popup_menu_item_kind::submenu,
+                .enabled = !paths.empty(),
+            };
+            auto path = popup_menu_item{ .label = "&Path", .enabled = !paths.empty() };
+            path.on_activate = [paths](hids& g){ if (!paths.empty()) g.set_clipboard(dot_00, paths, mime::textonly); };
             copy.children.push_back(std::move(path));
-            auto digest = m::item{ .alive = true, .label = "&Digest", .disabled = digests.empty() };
-            digest.action = [digests](hids& g){ if (!digests.empty()) g.set_clipboard(dot_00, digests, mime::textonly); };
+            auto digest = popup_menu_item{ .label = "&Digest", .enabled = !digests.empty() };
+            digest.on_activate = [digests](hids& g){ if (!digests.empty()) g.set_clipboard(dot_00, digests, mime::textonly); };
             copy.children.push_back(std::move(digest));
             items.push_back(std::move(copy));
 
@@ -263,26 +266,26 @@ namespace netxs::app::parvion
             // the whole queue; a selection scopes the action to the selected rows.
             if (ctrl->hash_selected_count())
             {
-                auto rm = m::item{ .alive = true, .label = "&Remove" };
-                rm.action = [ctrl, panel_wp, window_wp](hids&){ hash_confirm_remove_selected(ctrl, panel_wp, window_wp); };
+                auto rm = popup_menu_item{ .label = "&Remove" };
+                rm.on_activate = [ctrl, panel_wp, window_wp](hids&){ hash_confirm_remove_selected(ctrl, panel_wp, window_wp); };
                 items.push_back(std::move(rm));
             }
             else
             {
-                auto rm = m::item{ .alive = true, .label = "&Remove All", .disabled = ctrl->hash_queue.empty() };
-                rm.action = [ctrl, panel_wp, window_wp](hids&){ hash_confirm_remove_all(ctrl, panel_wp, window_wp); };
+                auto rm = popup_menu_item{ .label = "&Remove All", .enabled = !ctrl->hash_queue.empty() };
+                rm.on_activate = [ctrl, panel_wp, window_wp](hids&){ hash_confirm_remove_all(ctrl, panel_wp, window_wp); };
                 items.push_back(std::move(rm));
             }
 
-            items.push_back(m::item{ .alive = true, .type = m::kind::separator });
-            auto select_all = m::item{ .alive = true, .label = "Select &All", .disabled = ctrl->hash_queue.empty() };
-            select_all.action = [ctrl, deface](hids&)
+            items.push_back(popup_menu_item{ .kind = popup_menu_item_kind::separator });
+            auto select_all = popup_menu_item{ .label = "Select &All", .enabled = !ctrl->hash_queue.empty() };
+            select_all.on_activate = [ctrl, deface](hids&)
             {
                 for (auto& it : ctrl->hash_queue) it.selected = true;
                 deface();
             };
             items.push_back(std::move(select_all));
-            return items;
+            return { .items = std::move(items) };
         };
         cfg.on_item_rclick = [ctrl, deface](si32 hit){ if (hit >= 0 && hit < (si32)ctrl->hash_queue.size() && !ctrl->hash_queue[(size_t)hit].selected) { for (auto& it : ctrl->hash_queue) it.selected = faux; ctrl->hash_queue[(size_t)hit].selected = true; deface(); } };
         cfg.on_blank_rclick = [ctrl, deface]{ auto any = faux; for (auto& it : ctrl->hash_queue) { any |= it.selected; it.selected = faux; } if (any) deface(); };
