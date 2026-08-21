@@ -499,6 +499,8 @@ namespace netxs::app::parvion
                 auto const& item = popup->items[(size_t)index];
                 if (!is_activatable(item)) return;
                 if (item.on_activate) item.on_activate(gear);
+                if (auto trigger = trigger_shadow.lock())
+                    trigger->bell::indexer.luafx.set_gear(gear);
                 dismiss();
             }
 
