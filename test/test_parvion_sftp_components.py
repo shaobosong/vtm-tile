@@ -104,6 +104,16 @@ def test_sftp_component_structure():
             if needle not in text:
                 print(f"FAIL - {needle!r} missing")
                 return False
+        allocation = T.find_text(chars, "Channel allocation:")
+        if not allocation or "└" not in T.row_text(chars, allocation[0] + 1):
+            print("FAIL - Parallel transfers reserved an unused scrollbar row")
+            return False
+        hash_label = T.find_text(chars, "Calculate target file hash during transfers:")
+        compression = T.find_text(chars, "Enable compression")
+        if (not hash_label or "└" not in T.row_text(chars, hash_label[0] + 1)
+                or not compression or "└" not in T.row_text(chars, compression[0] + 1)):
+            print("FAIL - SFTP groupbox reserved an unused scrollbar row")
+            return False
     print("PASS")
     return True
 
@@ -265,20 +275,140 @@ def test_narrow_sftp_groupbox_inner_clipping():
             if C.open_dialog(s) is None or goto_sftp(s) is None:
                 print("FAIL - SFTP page did not open")
                 return False
-            # Move below the internally bounded private-key table to the three
-            # direct-child groupboxes under test.
+            # Move below the internally bounded private-key table to the two
+            # groupboxes under test. Vertical wheel input passes through any
+            # nested horizontal-only viewport crossed along the way.
             for _ in range(40):
                 os.write(s.master_fd, b"\x1b[<65;20;5M")
             s.feed(0.6)
             chars = s.screen()[0]
             cases = (
-                ("Calculate target", "Calculate target file hash during transfers:"),
                 ("Enable compres", "Enable compression"),
                 ("Enable parallel", "Enable parallel transfers for files larger than:"),
             )
             for visible, complete in cases:
                 if not intact_right_edge(chars, visible) or T.find_text(chars, complete):
                     print(f"FAIL - {visible!r} overwrote its groupbox right edge")
+                    return False
+    finally:
+        T.ROWS, T.COLS = old_rows, old_cols
+    print("PASS")
+    return True
+
+
+def test_small_parallel_transfers_horizontal_scrollview():
+    print("TEST: small Parallel transfers groupbox scrolls horizontally ... ",
+          end="", flush=True)
+    cfg = tempfile.mkdtemp(prefix="pv_sftp_parallel_scroll_")
+    old_rows, old_cols = T.ROWS, T.COLS
+    T.ROWS, T.COLS = 20, 25
+    try:
+        with session(cfg) as s:
+            if C.open_dialog(s) is None or goto_sftp(s) is None:
+                print("FAIL - SFTP page did not open")
+                return False
+
+            # Scroll the outer page until the Parallel transfers groupbox is
+            # visible. Keep the pointer above its nested horizontal viewport.
+            for _ in range(40):
+                os.write(s.master_fd, b"\x1b[<65;20;5M")
+            s.feed(0.6)
+            before = s.screen()[0]
+            title = T.find_text(before, "Parallel transfe")
+            leading = T.find_text(before, "Enable parallel")
+            if not title or not leading:
+                print("FAIL - Parallel transfers groupbox was not revealed")
+                return False
+
+            border_row = T.row_text(before, leading[0])
+            right_border = border_row.find("│", leading[1])
+            scrollbar_row = title[0] + 4
+            if (right_border < 1 or border_row[right_border - 1] != " "
+                    or "▂" not in T.row_text(before, scrollbar_row)):
+                print("FAIL - horizontal scrollbar or groupbox right edge is missing")
+                return False
+
+            # A genuine horizontal wheel event exposes the fixed grid's
+            # trailing controls.
+            wheel_x = max(2, leading[1] + 1)
+            wheel_y = leading[0] + 1
+            for _ in range(30):
+                os.write(s.master_fd,
+                         f"\x1b[<67;{wheel_x};{wheel_y}M".encode())
+            s.feed(0.7)
+            after = s.screen()[0]
+            trailing = T.find_text(after, "queue order")
+            if not trailing or T.find_text(after, "Enable parallel"):
+                print("FAIL - wheel input did not reveal trailing parallel controls")
+                return False
+
+            trailing_row = T.row_text(after, trailing[0])
+            right_border = trailing_row.find("│", trailing[1])
+            if (right_border < 1 or trailing_row[right_border - 1] != " "
+                    or "▂" not in T.row_text(after, scrollbar_row)):
+                print("FAIL - scrolling damaged the frame or added a vertical scrollbar")
+                return False
+    finally:
+        T.ROWS, T.COLS = old_rows, old_cols
+    print("PASS")
+    return True
+
+
+def test_small_hash_and_compression_scrollviews():
+    print("TEST: small Hash and compression controls scroll horizontally ... ",
+          end="", flush=True)
+    cfg = tempfile.mkdtemp(prefix="pv_sftp_small_scrollviews_")
+    old_rows, old_cols = T.ROWS, T.COLS
+    T.ROWS, T.COLS = 20, 25
+    try:
+        with session(cfg) as s:
+            if C.open_dialog(s) is None or goto_sftp(s) is None:
+                print("FAIL - SFTP page did not open")
+                return False
+            for _ in range(40):
+                os.write(s.master_fd, b"\x1b[<65;20;5M")
+            s.feed(0.5)
+            for _ in range(4):
+                os.write(s.master_fd, b"\x1b[<64;20;5M")
+            s.feed(0.5)
+            before = s.screen()[0]
+            hash_title = T.find_text(before, "Hash verificatio")
+            hash_leading = T.find_text(before, "Calculate target")
+            compression_title = T.find_text(before, "Other SFTP optio")
+            compression_leading = T.find_text(before, "Enable compres")
+            if not all((hash_title, hash_leading, compression_title, compression_leading)):
+                print("FAIL - narrow Hash or compression groupbox is incomplete")
+                return False
+            if ("▂" not in T.row_text(before, hash_title[0] + 2)
+                    or "▂" not in T.row_text(before, compression_title[0] + 2)):
+                print("FAIL - Hash or compression scrollbar is missing")
+                return False
+
+            for _ in range(30):
+                os.write(s.master_fd,
+                         f"\x1b[<67;{hash_leading[1] + 1};{hash_leading[0] + 1}M".encode())
+            s.feed(0.5)
+            after_hash = s.screen()[0]
+            dropdown = T.find_text(after_hash, "None")
+            if not dropdown or T.find_text(after_hash, "Calculate target"):
+                print("FAIL - Hash fields did not reveal the trailing dropdown")
+                return False
+
+            compression_leading = T.find_text(after_hash, "Enable compres")
+            for _ in range(30):
+                os.write(s.master_fd,
+                         f"\x1b[<67;{compression_leading[1] + 1};{compression_leading[0] + 1}M".encode())
+            s.feed(0.5)
+            after = s.screen()[0]
+            trailing = T.find_text(after, "able compression")
+            if not trailing or T.find_text(after, "□ Enable compres"):
+                print("FAIL - compression checkbox did not scroll horizontally")
+                return False
+            for position in (dropdown, trailing):
+                row = T.row_text(after, position[0])
+                border = row.find("│", position[1])
+                if border < 1 or row[border - 1] != " ":
+                    print("FAIL - scrolling damaged an SFTP groupbox frame")
                     return False
     finally:
         T.ROWS, T.COLS = old_rows, old_cols
@@ -366,6 +496,8 @@ TESTS = [
     test_remove_key_button_tracks_table_selection,
     test_sftp_controls_persist_clamp_and_keep_dropdown_width,
     test_narrow_sftp_groupbox_inner_clipping,
+    test_small_parallel_transfers_horizontal_scrollview,
+    test_small_hash_and_compression_scrollviews,
     test_dropdown_open_preserves_scroll_and_hidden_trigger_closes_popup,
 ]
 

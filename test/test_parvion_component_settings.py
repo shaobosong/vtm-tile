@@ -75,10 +75,19 @@ def test_structure_and_tabs():
         for needle in ("Settings", "Connection", "SFTP", "Site", "Debug", "OK", "Cancel",
                        "Timeout", "Timeout in seconds", "(10-9999, 0 to disable)",
                        "Reconnection settings", "Maximum number of retries",
-                       "Delay between failed login attempts", "(0-999 seconds)"):
+                       "Delay between failed login attempts", "(0-999 seconds)",
+                       "Please note that some servers might ban you"):
             if needle not in text:
                 print(f"FAIL - '{needle}' missing")
                 return False
+        delay = T.find_text(chars, "Delay between failed login attempts:")
+        if not delay or "Please note" not in T.row_text(chars, delay[0] + 1):
+            print("FAIL - Reconnection settings reserved an unused scrollbar row")
+            return False
+        timeout = T.find_text(chars, "Timeout in seconds:")
+        if not timeout or "If no data" not in T.row_text(chars, timeout[0] + 1):
+            print("FAIL - Timeout reserved an unused scrollbar row")
+            return False
         sftp = T.find_text(chars, "SFTP")
         s.click(sftp[1] + 1, sftp[0] + 1)
         if "Public Key Authentication" not in blob(s.screen()[0]):
@@ -187,11 +196,127 @@ def test_constrained_connection_scrollview():
     return True
 
 
+def test_small_reconnection_fields_scroll_but_wrapped_hint_stays_put():
+    print("TEST: small Reconnection fields scroll without moving wrapped hint ... ",
+          end="", flush=True)
+    cfg = tempfile.mkdtemp(prefix="pv_component_reconnect_scroll_")
+    old_rows, old_cols = T.ROWS, T.COLS
+    T.ROWS, T.COLS = 20, 25
+    try:
+        with session(cfg) as s:
+            if open_dialog(s) is None:
+                print("FAIL - dialog did not open")
+                return False
+
+            # Reveal the Reconnection settings groupbox using the outer page
+            # viewport, keeping the pointer above its nested field viewport.
+            for _ in range(30):
+                os.write(s.master_fd, b"\x1b[<65;20;5M")
+            s.feed(0.7)
+            before = s.screen()[0]
+            title = T.find_text(before, "Reconnection set")
+            leading = T.find_text(before, "Maximum number")
+            hint_start = T.find_text(before, "Please note that")
+            hint_end = T.find_text(before, "short intervals.")
+            if not title or not leading or not hint_start or not hint_end:
+                print("FAIL - narrow Reconnection settings content is incomplete")
+                return False
+
+            scrollbar_row = title[0] + 3
+            field_row = T.row_text(before, leading[0])
+            right_border = field_row.find("│", leading[1])
+            if (right_border < 1 or field_row[right_border - 1] != " "
+                    or "▂" not in T.row_text(before, scrollbar_row)):
+                print("FAIL - horizontal scrollbar or groupbox right edge is missing")
+                return False
+            wrapped_before = [T.row_text(before, row)
+                              for row in range(hint_start[0], hint_end[0] + 1)]
+
+            # A genuine horizontal wheel event follows the nested X axis.
+            for _ in range(30):
+                os.write(s.master_fd,
+                         f"\x1b[<67;{leading[1] + 1};{leading[0] + 1}M".encode())
+            s.feed(0.7)
+            after = s.screen()[0]
+            retry_range = T.find_text(after, "0 for unlimited)")
+            delay_range = T.find_text(after, "seconds)")
+            hint_after = T.find_text(after, "Please note that")
+            wrapped_after = [T.row_text(after, row)
+                             for row in range(hint_start[0], hint_end[0] + 1)]
+            if (not retry_range or not delay_range
+                    or T.find_text(after, "Maximum number")
+                    or hint_after != hint_start or wrapped_after != wrapped_before):
+                print("FAIL - fields did not scroll independently of the wrapped hint")
+                return False
+
+            range_row = T.row_text(after, delay_range[0])
+            right_border = range_row.find("│", delay_range[1])
+            if (right_border < 1 or range_row[right_border - 1] != " "
+                    or "▂" not in T.row_text(after, scrollbar_row)):
+                print("FAIL - horizontal scrolling damaged the groupbox frame")
+                return False
+    finally:
+        T.ROWS, T.COLS = old_rows, old_cols
+    print("PASS")
+    return True
+
+
+def test_small_timeout_fields_scroll_but_wrapped_hint_stays_put():
+    print("TEST: small Timeout fields scroll without moving wrapped hint ... ",
+          end="", flush=True)
+    cfg = tempfile.mkdtemp(prefix="pv_component_timeout_scroll_")
+    old_rows, old_cols = T.ROWS, T.COLS
+    T.ROWS, T.COLS = 20, 25
+    try:
+        with session(cfg) as s:
+            before = open_dialog(s)
+            if before is None:
+                print("FAIL - dialog did not open")
+                return False
+            title = T.find_text(before, "Timeout")
+            leading = T.find_text(before, "Timeout in secon")
+            hint_start = T.find_text(before, "If no data is")
+            if not title or not leading or not hint_start:
+                print("FAIL - narrow Timeout content is incomplete")
+                return False
+            scrollbar_row = title[0] + 2
+            wrapped_before = [T.row_text(before, row)
+                              for row in range(hint_start[0], 17)]
+            if "▂" not in T.row_text(before, scrollbar_row):
+                print("FAIL - Timeout horizontal scrollbar is missing")
+                return False
+
+            for _ in range(30):
+                os.write(s.master_fd,
+                         f"\x1b[<67;{leading[1] + 1};{leading[0] + 1}M".encode())
+            s.feed(0.7)
+            after = s.screen()[0]
+            trailing = T.find_text(after, "9, 0 to disable)")
+            wrapped_after = [T.row_text(after, row)
+                             for row in range(hint_start[0], 17)]
+            if (not trailing or T.find_text(after, "Timeout in secon")
+                    or T.find_text(after, "If no data is") != hint_start
+                    or wrapped_after != wrapped_before):
+                print("FAIL - Timeout fields did not scroll independently of the hint")
+                return False
+            row = T.row_text(after, trailing[0])
+            border = row.find("│", trailing[1])
+            if border < 1 or row[border - 1] != " ":
+                print("FAIL - Timeout scrolling damaged the groupbox frame")
+                return False
+    finally:
+        T.ROWS, T.COLS = old_rows, old_cols
+    print("PASS")
+    return True
+
+
 TESTS = [
     test_structure_and_tabs,
     test_connection_edits_persist_and_clamp,
     test_cancel_and_escape_do_not_persist,
     test_constrained_connection_scrollview,
+    test_small_reconnection_fields_scroll_but_wrapped_hint_stays_put,
+    test_small_timeout_fields_scroll_but_wrapped_hint_stays_put,
 ]
 
 

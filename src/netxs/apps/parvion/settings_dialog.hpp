@@ -255,6 +255,7 @@ namespace netxs::app::parvion
             return field;
         };
 
+        auto timeout_range_width = cell_width(settings_connection::timeout_range);
         auto timeout_fields = grid::ctor({
             .columns = {
                 { .weight = 0, .minimum = cell_width(settings_connection::timeout_label),
@@ -262,7 +263,8 @@ namespace netxs::app::parvion
                 { .weight = 0, .minimum = 1, .maximum = 1 },
                 { .weight = 0, .minimum = 6, .maximum = 6 },
                 { .weight = 0, .minimum = 1, .maximum = 1 },
-                { .weight = 1 },
+                { .weight = 0, .minimum = timeout_range_width,
+                  .maximum = timeout_range_width },
             },
             .rows = { { .weight = 0, .minimum = 1, .maximum = 1 } },
             .handle_mode = grid_handle_mode::hidden,
@@ -274,10 +276,14 @@ namespace netxs::app::parvion
         timeout_fields->attach(make_settings_label(settings_connection::timeout_range, label_role::hint),
                                { .column = 4 });
 
+        auto timeout_scroll = make_scrollview({
+            .content = { timeout_fields },
+            .scroll_axes = axes::X_only,
+        });
         auto timeout_content = flex::ctor({ .direction = flex_direction::column });
-        timeout_content->attach(component{ timeout_fields });
+        timeout_content->attach(std::move(timeout_scroll));
         timeout_content->attach(make_settings_label(settings_connection::timeout_help,
-                                                     label_role::hint, label_overflow::wrap));
+                                                    label_role::hint, label_overflow::wrap));
         auto timeout_box = make_groupbox({
             .title = "Timeout",
             .content = { timeout_content },
@@ -285,13 +291,16 @@ namespace netxs::app::parvion
 
         auto reconnect_label_width = std::max(cell_width(settings_connection::retries_label),
                                               cell_width(settings_connection::delay_label));
+        auto reconnect_range_width = std::max(cell_width(settings_connection::retries_range),
+                                              cell_width(settings_connection::delay_range));
         auto reconnect_fields = grid::ctor({
             .columns = {
                 { .weight = 0, .minimum = reconnect_label_width, .maximum = reconnect_label_width },
                 { .weight = 0, .minimum = 1, .maximum = 1 },
                 { .weight = 0, .minimum = 6, .maximum = 6 },
                 { .weight = 0, .minimum = 1, .maximum = 1 },
-                { .weight = 1 },
+                { .weight = 0, .minimum = reconnect_range_width,
+                  .maximum = reconnect_range_width },
             },
             .rows = {
                 { .weight = 0, .minimum = 1, .maximum = 1 },
@@ -316,9 +325,15 @@ namespace netxs::app::parvion
         reconnect_fields->attach(make_settings_label(settings_connection::delay_range, label_role::hint),
                                  { .column = 4, .row = 1 });
 
+        auto reconnect_scroll = make_scrollview({
+            .content = { reconnect_fields },
+            .scroll_axes = axes::X_only,
+        });
         auto reconnect_content = flex::ctor({ .direction = flex_direction::column });
-        reconnect_content->attach(component{ reconnect_fields });
-        reconnect_content->attach(make_settings_label(settings_connection::reconnect_help, label_role::hint, label_overflow::wrap));
+        reconnect_content->attach(std::move(reconnect_scroll));
+        reconnect_content->attach(make_settings_label(settings_connection::reconnect_help,
+                                                      label_role::hint,
+                                                      label_overflow::wrap));
         auto reconnect_box = make_groupbox({
             .title = "Reconnection settings",
             .content = { reconnect_content },
@@ -717,18 +732,26 @@ namespace netxs::app::parvion
         });
         hash_fields->attach(make_settings_label(settings_sftp::hash_label), { .column = 0 });
         hash_fields->attach(std::move(hash_dropdown), { .column = 2 });
+        auto hash_scroll = make_scrollview({
+            .content = { hash_fields },
+            .scroll_axes = axes::X_only,
+        });
         auto hash_box = make_groupbox({
             .title = "Hash verification",
-            .content = { hash_fields },
+            .content = std::move(hash_scroll),
         });
 
-        auto compression_box = make_groupbox({
-            .title = "Other SFTP options",
+        auto compression_scroll = make_scrollview({
             .content = make_checkbox({
                 .label = []{ return text{ "Enable compression" }; },
                 .checked = [state]{ return state->compression; },
                 .on_change = [state](bool checked){ state->compression = checked; },
             }),
+            .scroll_axes = axes::X_only,
+        });
+        auto compression_box = make_groupbox({
+            .title = "Other SFTP options",
+            .content = std::move(compression_scroll),
         });
 
         auto unit_options = std::vector<dropdown_option>{};
@@ -805,9 +828,13 @@ namespace netxs::app::parvion
         parallel_fields->attach(make_settings_label(settings_sftp::allocation_label),
                                 { .column = 0, .row = 2 });
         parallel_fields->attach(std::move(allocation_dropdown), { .column = 2, .row = 2 });
+        auto parallel_scroll = make_scrollview({
+            .content = { parallel_fields },
+            .scroll_axes = axes::X_only,
+        });
         auto parallel_box = make_groupbox({
             .title = "Parallel transfers",
-            .content = { parallel_fields },
+            .content = std::move(parallel_scroll),
         });
 
         auto page = flex::ctor({
@@ -1381,21 +1408,29 @@ namespace netxs::app::parvion
         level_fields->attach(make_settings_label(settings_debug::level_label), { .column = 0 });
         level_fields->attach(std::move(level_dropdown), { .column = 2 });
 
+        auto level_scroll = make_scrollview({
+            .content = { level_fields },
+            .scroll_axes = axes::X_only,
+        });
         auto debugging_content = flex::ctor({ .direction = flex_direction::column });
-        debugging_content->attach(component{ level_fields }, { .shrink = 0 });
+        debugging_content->attach(std::move(level_scroll), { .shrink = 0 });
         debugging_content->attach(make_settings_label(settings_debug::help, label_role::hint, label_overflow::wrap),
                                   { .shrink = 0 });
         auto debugging = make_groupbox({
             .title = "Debugging settings",
             .content = { debugging_content },
         });
-        auto listing = make_groupbox({
-            .title = "Directory listing",
+        auto listing_scroll = make_scrollview({
             .content = make_checkbox({
                 .label = []{ return text{ "Show raw directory listing" }; },
                 .checked = [state]{ return state->log_raw_listing; },
                 .on_change = [state](bool checked){ state->log_raw_listing = checked; },
             }),
+            .scroll_axes = axes::X_only,
+        });
+        auto listing = make_groupbox({
+            .title = "Directory listing",
+            .content = std::move(listing_scroll),
         });
 
         auto page = flex::ctor({

@@ -221,6 +221,35 @@ namespace
         return true;
     }
 
+    auto test_intrinsic_height_only_reserves_required_scrollbar() -> bool
+    {
+        auto narrow = scrollview::ctor({
+            .content = fixed_content({ 20, 3 }),
+            .primary_axis = axis::X,
+            .scroll_axes = axes::X_only,
+        });
+        auto narrow_area = rect{ {}, { 10, 0 } };
+        narrow->base::recalc(narrow_area);
+        narrow->base::notify(narrow_area);
+        if (narrow_area.size != twod{ 10, 4 }
+         || !narrow->has_horizontal_scrollbar()
+         || narrow->has_vertical_scrollbar()
+         || narrow->get_viewport().size != twod{ 10, 3 }) return faux;
+
+        auto wide = scrollview::ctor({
+            .content = fixed_content({ 20, 3 }),
+            .primary_axis = axis::X,
+            .scroll_axes = axes::X_only,
+        });
+        auto wide_area = rect{ {}, { 20, 0 } };
+        wide->base::recalc(wide_area);
+        wide->base::notify(wide_area);
+        return wide_area.size == twod{ 20, 3 }
+            && !wide->has_horizontal_scrollbar()
+            && !wide->has_vertical_scrollbar()
+            && wide->get_viewport().size == twod{ 20, 3 };
+    }
+
     auto test_track_paging_and_drag() -> bool
     {
         auto view = scrollview::ctor({ .content = fixed_content({ 8, 40 }) });
@@ -375,6 +404,8 @@ int main()
     ok &= check("horizontal_content_clipping", test_horizontal_content_is_clipped_to_viewport());
     ok &= check("horizontal_scrollbar_matches_table_highlighting",
                 test_horizontal_scrollbar_matches_table_highlighting());
+    ok &= check("intrinsic_height_only_reserves_required_scrollbar",
+                test_intrinsic_height_only_reserves_required_scrollbar());
     ok &= check("track_paging_and_drag", test_track_paging_and_drag());
     ok &= check("horizontal_track_paging_and_drag", test_horizontal_track_paging_and_drag());
     ok &= check("primary_axis_wheel_routing", test_primary_axis_wheel_routing());

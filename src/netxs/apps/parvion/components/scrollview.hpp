@@ -149,6 +149,18 @@ namespace netxs::app::parvion
         }
 
     protected:
+        void deform(rect& new_area) override
+        {
+            auto measured = measure(std::max(new_area.size, dot_00));
+            if (new_area.size.x <= 0) new_area.size.x = measured.size.x;
+            if (new_area.size.y <= 0)
+            {
+                auto needs_horizontal_bar = allows(axis::X)
+                                         && measured.size.x > new_area.size.x;
+                new_area.size.y = measured.size.y + (needs_horizontal_bar ? 1 : 0);
+            }
+        }
+
         void inform(rect new_area) override
         {
             auto show_x = faux;

@@ -521,6 +521,12 @@ def test_debug_structure_persistence_and_cancel():
             if needle not in text:
                 print(f"FAIL - {needle!r} missing")
                 return False
+        level = T.find_text(chars, "Debug information in message log:")
+        raw = T.find_text(chars, "Show raw directory listing")
+        if (not level or "The higher" not in T.row_text(chars, level[0] + 1)
+                or not raw or "└" not in T.row_text(chars, raw[0] + 1)):
+            print("FAIL - Debug groupbox reserved an unused scrollbar row")
+            return False
 
         current = T.find_text(chars, "0 - None")
         s.click(current[1] + 1, current[0] + 1)
@@ -609,6 +615,75 @@ def test_debug_narrow_groupbox_inner_clipping():
     return True
 
 
+def test_debug_controls_scroll_but_wrapped_hint_stays_put():
+    print("TEST: narrow Debug controls scroll independently of wrapped hint ... ",
+          end="", flush=True)
+    cfg = tempfile.mkdtemp(prefix="pv_debug_scrollviews_")
+    old_rows, old_cols = T.ROWS, T.COLS
+    T.ROWS, T.COLS = 20, 35
+    try:
+        with session(cfg) as s:
+            if C.open_dialog(s) is None or goto_tab(s, "Debug") is None:
+                print("FAIL - Debug page did not open")
+                return False
+            before = s.screen()[0]
+            title = T.find_text(before, "Debugging settings")
+            leading = T.find_text(before, "Debug information")
+            hint_start = T.find_text(before, "The higher the debug")
+            hint_end = T.find_text(before, "level.")
+            if not all((title, leading, hint_start, hint_end)):
+                print("FAIL - narrow Debugging settings content is incomplete")
+                return False
+            wrapped_before = [T.row_text(before, row)
+                              for row in range(hint_start[0], hint_end[0] + 1)]
+            if "▂" not in T.row_text(before, title[0] + 2):
+                print("FAIL - Debugging settings scrollbar is missing")
+                return False
+
+            for _ in range(30):
+                os.write(s.master_fd,
+                         f"\x1b[<67;{leading[1] + 1};{leading[0] + 1}M".encode())
+            s.feed(0.5)
+            after_debug = s.screen()[0]
+            trailing = T.find_text(after_debug, "0 - None")
+            wrapped_after = [T.row_text(after_debug, row)
+                             for row in range(hint_start[0], hint_end[0] + 1)]
+            if (not trailing or T.find_text(after_debug, "Debug information")
+                    or T.find_text(after_debug, "The higher the debug") != hint_start
+                    or wrapped_after != wrapped_before):
+                print("FAIL - debug fields did not scroll independently of the hint")
+                return False
+
+            for _ in range(40):
+                os.write(s.master_fd, b"\x1b[<65;30;15M")
+            s.feed(0.6)
+            listing = s.screen()[0]
+            listing_title = T.find_text(listing, "Directory listing")
+            listing_leading = T.find_text(listing, "Show raw directory")
+            if (not listing_title or not listing_leading
+                    or "▂" not in T.row_text(listing, listing_title[0] + 2)):
+                print("FAIL - Directory listing scrollbar is missing")
+                return False
+            for _ in range(30):
+                os.write(s.master_fd,
+                         f"\x1b[<67;{listing_leading[1] + 1};{listing_leading[0] + 1}M".encode())
+            s.feed(0.5)
+            after = s.screen()[0]
+            listing_trailing = T.find_text(after, "Show raw directory listing")
+            if not listing_trailing or T.find_text(after, "□ Show raw directory"):
+                print("FAIL - Directory listing checkbox did not scroll")
+                return False
+            row = T.row_text(after, listing_trailing[0])
+            border = row.find("│", listing_trailing[1])
+            if border < 1 or row[border - 1] != " ":
+                print("FAIL - Directory listing scrolling damaged the frame")
+                return False
+    finally:
+        T.ROWS, T.COLS = old_rows, old_cols
+    print("PASS")
+    return True
+
+
 TESTS = [
     test_site_structure_add_edit_and_persist,
     test_empty_site_name_is_generated_and_stays_unique,
@@ -619,6 +694,7 @@ TESTS = [
     test_site_multiselect_edit_gate_and_batch_delete,
     test_debug_structure_persistence_and_cancel,
     test_debug_narrow_groupbox_inner_clipping,
+    test_debug_controls_scroll_but_wrapped_hint_stays_put,
 ]
 
 
