@@ -267,7 +267,10 @@ namespace netxs::app::parvion
                     c.bgc(config.palette.bg).fgc(color).txt(mark).link(myid);
                 });
                 if (press || drag)
-                    canvas.fill(bar.thumb, [](cell& c){ c.xlight(2); });
+                {
+                    if (vertical) canvas.fill(bar.thumb, [](cell& c){ c.xlight(2); });
+                    else          canvas.fill(bar.thumb, [](cell& c){ c.fgc().xlight(2); });
+                }
             };
             draw(vertical_scrollbar(), true, vertical_hover,
                  dragging == drag_vertical, vertical_press);

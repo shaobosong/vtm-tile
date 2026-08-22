@@ -168,6 +168,59 @@ namespace
             && canvas[{ 3, 5 }].txt() == "\xe2\x96\x82";
     }
 
+    auto test_horizontal_scrollbar_matches_table_highlighting() -> bool
+    {
+        auto palette = scrollview_palette{
+            .bg = 0xFF102030,
+            .track = 0xFF203040,
+            .thumb = 0xFF304050,
+            .hover = 0xFF405060,
+            .dragging = 0xFF506070,
+        };
+        auto viewport = scrollview::ctor({
+            .content = fixed_content({ 40, 3 }),
+            .primary_axis = axis::X,
+            .scroll_axes = axes::X_only,
+            .palette = palette,
+        });
+        viewport->base::extend({ {}, { 10, 4 } });
+        auto bar = viewport->horizontal_scrollbar();
+        if (!bar.ok) return faux;
+        auto thumb_point = bar.thumb.coor;
+        auto track_point = twod{ bar.track.coor.x + bar.track.size.x - 1,
+                                 bar.track.coor.y };
+        auto check = [&](view mark, argb track, argb thumb)
+        {
+            auto canvas = ui::face{};
+            canvas.size({ 10, 4 });
+            viewport->paint_scrollbars(canvas);
+            auto const& track_cell = canvas[track_point];
+            auto const& thumb_cell = canvas[thumb_point];
+            return track_cell.txt() == mark
+                && thumb_cell.txt() == mark
+                && track_cell.bgc() == argb{ palette.bg }
+                && thumb_cell.bgc() == argb{ palette.bg }
+                && track_cell.fgc() == track
+                && thumb_cell.fgc() == thumb;
+        };
+
+        if (!check("\xe2\x96\x82", argb{ palette.track }, argb{ palette.thumb })) return faux;
+        viewport->update_hover(track_point);
+        if (!check("\xe2\x96\x84", argb{ palette.track }, argb{ palette.hover })) return faux;
+
+        auto pressed = argb{ palette.hover };
+        pressed.xlight(2);
+        if (!viewport->press_at(thumb_point)
+         || !check("\xe2\x96\x84", argb{ palette.track }, pressed)) return faux;
+
+        auto dragged = argb{ palette.dragging };
+        dragged.xlight(2);
+        if (!viewport->start_drag(thumb_point)
+         || !check("\xe2\x96\x84", argb{ palette.track }, dragged)) return faux;
+        viewport->stop_drag();
+        return true;
+    }
+
     auto test_track_paging_and_drag() -> bool
     {
         auto view = scrollview::ctor({ .content = fixed_content({ 8, 40 }) });
@@ -320,6 +373,8 @@ int main()
     ok &= check("primary_bar_creates_secondary_overflow", test_primary_bar_can_create_secondary_overflow());
     ok &= check("vertical_content_clipping", test_vertical_content_is_clipped_to_viewport());
     ok &= check("horizontal_content_clipping", test_horizontal_content_is_clipped_to_viewport());
+    ok &= check("horizontal_scrollbar_matches_table_highlighting",
+                test_horizontal_scrollbar_matches_table_highlighting());
     ok &= check("track_paging_and_drag", test_track_paging_and_drag());
     ok &= check("horizontal_track_paging_and_drag", test_horizontal_track_paging_and_drag());
     ok &= check("primary_axis_wheel_routing", test_primary_axis_wheel_routing());
