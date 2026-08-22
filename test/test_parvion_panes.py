@@ -31,6 +31,7 @@ VTM_TILE_BINARY = os.path.abspath(os.environ.get(
     "VTM_TILE_BINARY",
     os.path.join(os.path.dirname(__file__), "..", "build", "vtm-tile"),
 ))  # Absolute: the child chdir()s into the temp dir before exec.
+TEST_VTM_CONFIG = "<config><timings><wheelrate=1/></timings></config>"
 
 COLS, ROWS = 120, 44
 SETTLE = 1.5
@@ -162,7 +163,8 @@ def replay(buf, include_fg=False):
 class ParvionSession:
     def __init__(self, cwd, env=None):
         self.cwd = cwd
-        self.env = env or {"PARVION_DEMO_QUEUE": "1"}
+        self.env = dict(env or {"PARVION_DEMO_QUEUE": "1"})
+        self.env.setdefault("VTM_CONFIG", TEST_VTM_CONFIG)
         self.master_fd = None
         self.pid = None
         self._buf = b""
