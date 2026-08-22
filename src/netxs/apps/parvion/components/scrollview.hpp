@@ -79,13 +79,13 @@ namespace netxs::app::parvion
             return std::max(dot_00, content_size - viewport.size);
         }
 
-        auto measure(twod frame) -> rect
+        auto measure(twod frame, twod coor = dot_00) -> rect
         {
             frame = std::max(frame, dot_00);
             auto request = frame;
             if (allows(axis::X)) request.x = std::max(request.x, content->base::min_sz.x);
             if (allows(axis::Y)) request.y = std::max(request.y, content->base::min_sz.y);
-            auto area = rect{ {}, request };
+            auto area = rect{ coor, request };
             content->base::recalc(area);
             return area;
         }
@@ -189,7 +189,12 @@ namespace netxs::app::parvion
             measured = measure(viewport.size);
             content_size = measured.size;
             offset = std::clamp(offset, dot_00, maximum_offset());
-            measured.coor = viewport.coor - offset;
+            // recalc() stashes the area it receives as pending geometry, and
+            // notify() promotes that stash into the child's region, so the
+            // second pass must be anchored at the scrolled origin.  Otherwise
+            // a resize leaves the child at zero while retaining the offset
+            // (and drawing the thumb at the retained position).
+            measured = measure(viewport.size, viewport.coor - offset);
             content->base::notify(measured);
         }
 

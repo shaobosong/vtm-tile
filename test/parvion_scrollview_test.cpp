@@ -65,6 +65,27 @@ namespace
         return { child };
     }
 
+    auto indexed_content(twod size) -> component
+    {
+        auto child = ui::mock::ctor()->limits(size, size);
+        child->invoke([](auto& boss)
+        {
+            boss.LISTEN(tier::release, netxs::ui::e2::render::any, canvas)
+            {
+                auto size = boss.base::size();
+                for (auto y = si32{}; y < size.y; ++y)
+                {
+                    auto glyph = text(1, (char)('a' + y % 26));
+                    canvas.fill(rect{ { 0, y }, { size.x, 1 } }, [&](cell& c)
+                    {
+                        c.bgc(theme::bg).fgc(theme::text_fg).txt(glyph);
+                    });
+                }
+            };
+        });
+        return { child };
+    }
+
     auto test_vertical_default() -> bool
     {
         auto view = scrollview::ctor({ .content = fixed_content({ 8, 20 }) });
@@ -387,6 +408,35 @@ namespace
             && activated == 1
             && deactivated == 1;
     }
+
+    auto test_resize_keeps_content_aligned_with_offset() -> bool
+    {
+        auto content = indexed_content({ 8, 20 });
+        auto child = content.widget;
+        auto view = scrollview::ctor({ .content = std::move(content) });
+        view->base::extend({ {}, { 10, 5 } });
+        view->set_offset({ 0, 14 });
+
+        // Growing the viewport reduces the maximum from 15 to 13, so the
+        // retained offset is clamped while staying near the bottom.
+        view->base::extend({ {}, { 10, 7 } });
+        if (view->get_offset() != twod{ 0, 13 }
+         || child->base::coor() != twod{ 0, -13 }) return faux;
+
+        auto canvas = ui::face{};
+        canvas.size({ 10, 7 });
+        view->render(canvas);
+        if (canvas[{ 0, 0 }].txt() != "n") return faux;
+
+        // Shrinking again leaves the absolute offset valid and must not move
+        // the content back to its first row during the second relayout.
+        view->base::extend({ {}, { 10, 4 } });
+        canvas.size({ 10, 4 });
+        view->render(canvas);
+        return view->get_offset() == twod{ 0, 13 }
+            && child->base::coor() == twod{ 0, -13 }
+            && canvas[{ 0, 0 }].txt() == "n";
+    }
 }
 
 int main()
@@ -411,6 +461,8 @@ int main()
     ok &= check("primary_axis_wheel_routing", test_primary_axis_wheel_routing());
     ok &= check("primary_axis_keyboard_routing", test_primary_axis_keyboard_routing());
     ok &= check("nested_flex_and_lifecycle", test_nested_flex_and_lifecycle());
+    ok &= check("resize_keeps_content_aligned_with_offset",
+                test_resize_keeps_content_aligned_with_offset());
     if (!ok) std::fprintf(stderr, "parvion scrollview tests failed\n");
     return ok ? 0 : 1;
 }
