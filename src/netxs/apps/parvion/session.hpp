@@ -1036,10 +1036,31 @@ namespace netxs::app::parvion
     struct sftp_remote
     {
         enum stage_t { s_idle, s_greeting, s_opening, s_connected, s_failed };
-        enum cmd_t   { c_none, c_open, c_pwd, c_ls, c_cd, c_op, // c_op: mkdir/rm/rmdir/mv, then re-list.
+        enum cmd_t   { c_none, c_open, c_pwd, c_ls, c_cd, c_cd_rollback,
+                       c_op,    // c_op: mkdir/rm/rmdir/mv, then re-list.
                        c_rls,   // Recursive-walk listing (ls <path>) for a folder download/delete; result drives recop.
                        c_recop, // A recop one-shot command (mkdir for upload, rm/rmdir for delete); advance regardless of result.
                        c_keyfile }; // Pre-auth `keyfile <path>` registration; its Done advances to the next key or `open`.
+        using steady_clock = std::chrono::steady_clock;
+
+        // A browse navigation is a transaction: the backend cwd may move before its listing is
+        // available, while `path`/`items` remain the last committed view. This single object owns
+        // every staged value and the rollback needed to keep backend cwd and visible state aligned.
+        struct navigation
+        {
+            enum phase_t  { idle, changing_directory, waiting_to_list, listing_destination, rolling_back };
+            enum origin_t { user, reconnect_restore };
+            phase_t phase = idle;
+            origin_t origin = user;
+            text source;
+            text target;
+            text fallback_name;       // Set only for Enter/double-click on a symlink.
+            si64 fallback_size = -1;
+            steady_clock::time_point list_due{};
+
+            auto active() const { return phase != idle; }
+            auto has_fallback() const { return !fallback_name.empty(); }
+        };
 
         sftp_session          session;
         text                  exe;
@@ -1047,11 +1068,7 @@ namespace netxs::app::parvion
         stage_t               stage = s_idle;
         cmd_t                 await = c_none;
         text                  path = "/";
-        text                  pending_path;
-        bool                  path_pending = faux; // A cd staged `pending_path`; reveal it (commit to `path`)
-                                                   // only when its listing arrives (c_ls), so the header never
-                                                   // shows the destination over the previous dir's contents and
-                                                   // a second double-click still resolves against the dir on screen.
+        navigation            nav;
         text                  last_reply;
         std::vector<direntry> items;
         std::vector<direntry> pending;
@@ -1142,7 +1159,7 @@ namespace netxs::app::parvion
         bool                   rec_cmds_built = faux; // delete: rec_cmds assembled once the walk finished.
         std::vector<queue_item> rec_uploads;    // upload: per-file uploads to enqueue once the mkdirs complete.
         size_t                 rec_download_files = 0; // download: files queued by the active recursive walk.
-        bool  remote_refresh_pending = faux; // A completed upload landed in the displayed remote dir; re-list when idle.
+        text  remote_refresh_path;    // Displayed remote dir touched by an upload; re-list only if still displayed when idle.
         ui64  local_gen = 0;          // Bumped when a download completes into the displayed local dir (pane re-lists).
         // Async local delete (delete_local_async): the detached worker touches only this
         // shared block of atomics, never the pane or this object's non-atomic fields, so it
@@ -1175,7 +1192,6 @@ namespace netxs::app::parvion
         // keep it warm with a periodic cheap `pwd` (FileZilla CFtpControlSocket keep-alive)
         // and, if it drops anyway, transparently reconnect and restore the current dir
         // (mirrors the engine's reconnect-on-broken-connection).
-        using steady_clock = std::chrono::steady_clock;
         steady_clock::time_point last_activity = steady_clock::now(); // Last control-session traffic (send or recv).
         steady_clock::time_point retry_at{};        // Earliest time for the next reconnect attempt.
         si32  keep_skip = 0;          // Outstanding keepalive replies to swallow (kept off the nav state machine).
@@ -1192,8 +1208,6 @@ namespace netxs::app::parvion
                                       // gap, not total op time, since last_activity resets on every inbound batch.
         si32  dbg_ls_delay_ms = 0;    // Test seam (env PARVION_DEBUG_LS_DELAY_MS): hold the post-cd `ls` this long to
                                       // widen the cd->ls window so navigation races are reproducible. 0 = off (prod).
-        bool  ls_deferred = faux;     // A post-cd `ls` is currently being held by dbg_ls_delay_ms.
-        steady_clock::time_point ls_due{}; // When the held `ls` becomes due.
 
         static auto stage_name(stage_t s) -> view
         {
@@ -1216,6 +1230,7 @@ namespace netxs::app::parvion
                 case c_pwd:     return "pwd";
                 case c_ls:      return "list";
                 case c_cd:      return "cwd";
+                case c_cd_rollback: return "cwd-rollback";
                 case c_op:      return "operation";
                 case c_rls:     return "recursive-list";
                 case c_recop:   return "recursive-operation";
@@ -1304,6 +1319,10 @@ namespace netxs::app::parvion
         // stall on a reply that never comes. A drop flips this false within one poll, and
         // poll() then reconnects.
         auto connected() const { return stage == s_connected && session.alive(); }
+        // `await` is strictly a wire command in flight. Navigation can remain busy between its cd
+        // and delayed ls without a command outstanding, so callers must use this combined gate.
+        auto control_idle() const { return await == c_none && !nav.active(); }
+        auto browse_available() const { return connected() && recop == rec_none && control_idle(); }
 
         // After a transfer completes, is the destination directory still the one shown on
         // the destination side? Upload -> remote `path`; download -> local `local_dir`.
@@ -1326,7 +1345,7 @@ namespace netxs::app::parvion
         // keeps both artifacts in its destination dir, so the first check covers it alone.
         void refresh_panes(queue_item const& it)
         {
-            if (dest_in_view(it)) { if (it.download) ++local_gen; else remote_refresh_pending = true; }
+            if (dest_in_view(it)) { if (it.download) ++local_gen; else remote_refresh_path = it.dest_dir; }
             if (!it.download && local_dir_of(it) == local_dir) ++local_gen;
         }
 
@@ -1486,7 +1505,8 @@ namespace netxs::app::parvion
             pass = std::move(pw);
             path = "/";
             await = c_none;
-            remote_refresh_pending = faux;
+            nav = {};
+            remote_refresh_path.clear();
             reset_recop(); // Drop any half-finished folder walk from a previous session.
             idle_pool.clear(); // Drop pooled transfer connections to the previous server.
             recovering = faux; restoring = faux; reconnect_tries = 0; keep_skip = 0; // Fresh user-initiated connect, not a recovery.
@@ -1515,7 +1535,8 @@ namespace netxs::app::parvion
             session.stop();
             stage = s_idle;
             await = c_none;
-            remote_refresh_pending = faux;
+            nav = {};
+            remote_refresh_path.clear();
             reset_recop(); // Drop any half-finished folder walk.
             idle_pool.clear(); // Close pooled transfer connections.
             recovering = faux; restoring = faux; reconnect_tries = 0; keep_skip = 0; // User asked to disconnect: don't auto-reconnect.
@@ -1559,13 +1580,15 @@ namespace netxs::app::parvion
             // A completed upload landed in the displayed remote dir: re-list it. Only when
             // the control session is idle, so we don't clobber an in-flight cd/ls (checked
             // here, after pump_queue, so `await` reflects this tick's drained replies).
-            if (remote_refresh_pending && recop == rec_none && connected() && await == c_none)
+            if (!remote_refresh_path.empty() && browse_available())
             {
-                remote_refresh_pending = faux;
-                list_dir();
+                auto refresh_path = std::exchange(remote_refresh_path, text{});
+                if (refresh_path == path) list_dir();
             }
-            // Test seam: a post-cd `ls` held by PARVION_DEBUG_LS_DELAY_MS is now due.
-            if (ls_deferred && await == c_cd && steady_clock::now() >= ls_due) { ls_deferred = faux; list_dir(); }
+            // Test seam: a post-cd `ls` held by PARVION_DEBUG_LS_DELAY_MS is now due. No wire
+            // command is outstanding in this phase, but nav.active() keeps all other owners out.
+            if (nav.phase == navigation::waiting_to_list && steady_clock::now() >= nav.list_due)
+                start_navigation_listing();
             drive_recop(); // Pace a recursive folder download/upload/delete on the idle control session.
             // Fold async local-delete progress into local_gen (the timer re-lists the local pane
             // per tick, so rows vanish as items go). `running` is read before `done`: seeing 0
@@ -1587,16 +1610,18 @@ namespace netxs::app::parvion
         // The established control link dropped: remember where we were and hand off to the
         // backoff-paced reconnect driver. The stale `items` stay on screen (pane shows the
         // "Reconnecting..." status) until the restored listing replaces them.
-        void begin_recover()
+        void begin_recover(bool preserve_attempts = faux)
         {
             if (recovering) return;
+            preserve_attempts = preserve_attempts
+                             || (nav.active() && nav.origin == navigation::reconnect_restore);
             recovering = true;
-            reconnect_tries = 0;
+            if (!preserve_attempts) reconnect_tries = 0;
             resume_path = path;                 // cd back here once re-authed
             await = c_none;
-            ls_deferred = faux;                 // Drop any held (test-seam) listing.
+            nav = {};                           // Drop staged paths, fallbacks and deferred listings.
             keep_skip = 0;
-            remote_refresh_pending = faux;
+            remote_refresh_path.clear();
             retry_at = steady_clock::now();     // first attempt immediately
             stage = s_idle;                     // leave s_connected; drive_reconnect() relaunches
             fail("Control connection lost. Reconnecting...");
@@ -1626,6 +1651,7 @@ namespace netxs::app::parvion
         {
             session.stop();
             await = c_none;
+            nav = {};
             keep_skip = 0;
             restoring = true; // restore resume_path after auth (see complete()/c_open)
             mark("Reconnecting to " + host + " (attempt " + std::to_string(reconnect_tries) + ")...");
@@ -1672,7 +1698,7 @@ namespace netxs::app::parvion
             if (stage != s_connected || !session.alive()) return;
             auto now = steady_clock::now();
             if (keep_skip > 0) return;    // A keepalive is still outstanding; maybe_watchdog() owns its timeout now.
-            if (await != c_none) return; // Control session busy with a real command.
+            if (!control_idle()) return; // A command or deferred navigation owns the control session.
             if (now - last_activity < std::chrono::seconds{ keepalive_sec }) return;
             ++keep_skip;
             last_activity = now;
@@ -1892,42 +1918,54 @@ namespace netxs::app::parvion
         // Browsing and one-shot remote ops are blocked while a recursive folder operation owns the
         // control session (FileZilla disables navigation during a recursive operation), so a stray
         // cd/mkdir can't interleave with the walk's `ls` commands.
+        auto begin_navigation(text target, text fallback_name = {}, si64 fallback_size = -1,
+                              navigation::origin_t origin = navigation::user, text message = {}) -> bool
+        {
+            if (!browse_available() || target.empty()) return faux;
+            nav = {};
+            nav.phase = navigation::changing_directory;
+            nav.origin = origin;
+            nav.source = path;
+            nav.target = std::move(target);
+            nav.fallback_name = std::move(fallback_name);
+            nav.fallback_size = fallback_size;
+            await = c_cd;
+            send_cmd("cd " + quote_name(nav.target));
+            if (!message.empty()) mark(std::move(message));
+            return true;
+        }
         void chdir(text const& name)
         {
-            if (!connected() || recop != rec_none || await != c_none) return; // Ignore a second nav while one is in flight.
-            pending_path = child_path(path, name, faux);
-            path_pending = true;
-            await = c_cd;
-            send_cmd("cd " + quote_name(pending_path));
-            mark("Entering " + pending_path + "...");
+            auto target = child_path(path, name, faux);
+            begin_navigation(target, {}, -1, navigation::user, "Entering " + target + "...");
+        }
+        // A listing identifies a symlink but not its referent type. The normal remote cd command
+        // follows links and authoritatively opens directories; failure retains file-like activation.
+        void activate_link(text const& name, si64 size)
+        {
+            if (name.empty()) return;
+            begin_navigation(child_path(path, name, faux), name, size);
         }
         void cdup()
         {
-            if (!connected() || recop != rec_none || await != c_none) return; // Ignore a second nav while one is in flight.
-            pending_path = parent_path(path, faux);
-            path_pending = true;
-            await = c_cd;
-            send_cmd("cd " + quote_name(pending_path));
+            begin_navigation(parent_path(path, faux));
         }
         // Address-bar navigation: cd to an explicit path (absolute, or resolved against the
         // current dir when relative). A failed cd keeps the old path (handled as any browse).
         void chdir_abs(text const& newpath)
         {
-            if (!connected() || recop != rec_none || await != c_none || newpath.empty()) return;
+            if (newpath.empty()) return;
             // Resolve against the current dir when relative, then collapse "."/".." segments so the
             // committed path (and the title) is the real target, not e.g. "/home/user/..".
             auto full = newpath.front() == '/' ? newpath : child_path(path, newpath, faux);
-            pending_path = normalize_posix(full);
-            path_pending = true;
-            await = c_cd;
-            send_cmd("cd " + quote_name(pending_path));
-            mark("Entering " + pending_path + "...");
+            auto target = normalize_posix(full);
+            begin_navigation(target, {}, -1, navigation::user, "Entering " + target + "...");
         }
         // Remote file operations (psftp/parvionsftp verbs): each fires the command and then re-lists the
         // current directory once the backend reports done (handled as c_op in command_done).
         auto remote_touch(text const& name) -> bool
         {
-            if (!connected() || recop != rec_none || await != c_none || name.empty()) return faux;
+            if (!browse_available() || name.empty()) return faux;
             await = c_op;
             send_cmd("parvion-touch " + quote_name(child_path(path, name, faux)));
             mark("Creating document " + name + "...");
@@ -1935,7 +1973,7 @@ namespace netxs::app::parvion
         }
         auto remote_mkdir(text const& name) -> bool
         {
-            if (!connected() || recop != rec_none || await != c_none || name.empty()) return faux;
+            if (!browse_available() || name.empty()) return faux;
             await = c_op;
             send_cmd("mkdir " + quote_name(child_path(path, name, faux)));
             mark("Creating directory " + name + "...");
@@ -1943,21 +1981,21 @@ namespace netxs::app::parvion
         }
         void remote_remove(text const& name, bool is_dir)
         {
-            if (!connected() || recop != rec_none || await != c_none || name.empty()) return;
+            if (!browse_available() || name.empty()) return;
             await = c_op;
             send_cmd((is_dir ? text{ "rmdir " } : text{ "rm " }) + quote_name(child_path(path, name, faux)));
             mark("Deleting " + name + "...");
         }
         auto remote_rename(text const& oldname, text const& newname) -> bool
         {
-            if (!connected() || recop != rec_none || await != c_none || oldname.empty() || newname.empty()) return faux;
+            if (!browse_available() || oldname.empty() || newname.empty()) return faux;
             await = c_op;
             send_cmd("mv " + quote_name(child_path(path, oldname, faux)) + " " + quote_name(child_path(path, newname, faux)));
             mark("Renaming " + oldname + " to " + newname + "...");
             return true;
         }
         // Re-list the current remote directory when the control link is next idle (poll() drains it).
-        void request_refresh() { remote_refresh_pending = true; }
+        void request_refresh() { remote_refresh_path = path; }
 
     private:
         // Synchronous local tree-walk for an upload: append a parent-first `mkdir` for each local
@@ -1995,7 +2033,7 @@ namespace netxs::app::parvion
         // from poll() once the session is connected and no other command is in flight.
         void drive_recop()
         {
-            if (recop == rec_none || !connected() || await != c_none) return;
+            if (recop == rec_none || !connected() || !control_idle()) return;
             if (!rec_stack.empty()) // Walk phase: list the next remote dir.
             {
                 rec_cur = rec_stack.back();
@@ -2049,7 +2087,7 @@ namespace netxs::app::parvion
                 auto msg = text{ "Remote directory tree prepared." };
                 if (upload_files) msg = "Remote directory tree prepared; queued " + std::to_string(upload_files) + " upload(s).";
                 mark(std::move(msg));
-                remote_refresh_pending = true; // Show the freshly-created remote tree.
+                remote_refresh_path = path; // Show the freshly-created remote tree if it is still displayed.
             }
             else if (was == rec_delete)
             {
@@ -2614,11 +2652,69 @@ namespace netxs::app::parvion
         }
         void list_dir()
         {
-            auto list_path = path_pending && !pending_path.empty() ? pending_path : path;
             pending.clear();
-            mark("Retrieving directory listing of \"" + list_path + "\"...");
+            mark("Retrieving directory listing of \"" + path + "\"...");
             await = c_ls;
             send_cmd("ls");
+        }
+
+        void start_navigation_listing()
+        {
+            if (nav.phase != navigation::waiting_to_list || await != c_none) return;
+            pending.clear();
+            nav.phase = navigation::listing_destination;
+            mark("Retrieving directory listing of \"" + nav.target + "\"...");
+            await = c_ls;
+            send_cmd("ls");
+        }
+
+        void start_navigation_rollback()
+        {
+            if (!nav.active() || await != c_none) return;
+            pending.clear();
+            nav.phase = navigation::rolling_back;
+            await = c_cd_rollback;
+            send_cmd("cd " + quote_name(nav.source));
+        }
+
+        // One failure exit owns all cleanup for browse commands. `path`/`items` are committed only
+        // by a successful destination listing, so every failure can safely preserve the old view.
+        void command_failed(cmd_t command)
+        {
+            await = c_none;
+            switch (command)
+            {
+                case c_cd:
+                    if (nav.phase == navigation::changing_directory)
+                    {
+                        auto origin = nav.origin;
+                        auto fallback_name = nav.fallback_name;
+                        auto fallback_size = nav.fallback_size;
+                        nav = {};
+                        if (origin == navigation::reconnect_restore) begin_recover(true);
+                        else if (!fallback_name.empty()) enqueue_download(fallback_name, fallback_size);
+                    }
+                    else nav = {};
+                    break;
+                case c_cd_rollback:
+                    nav = {};
+                    begin_recover(); // Backend cwd is now unknown; restore the committed path.
+                    break;
+                case c_ls:
+                    pending.clear();
+                    if (nav.phase == navigation::listing_destination)
+                    {
+                        if (nav.origin == navigation::reconnect_restore)
+                        {
+                            nav = {};
+                            begin_recover(true);
+                        }
+                        else start_navigation_rollback();
+                    }
+                    break;
+                default:
+                    break;
+            }
         }
 
         void process(sftp_msg const& m)
@@ -2637,7 +2733,11 @@ namespace netxs::app::parvion
                     if (!m.line.empty()) trace(dbg_info, text{ m.first() });
                     break;
                 case sftp_evt::error:
-                    fail(text{ m.first() });
+                    // A symlink activation deliberately asks cd to classify its referent. Failure is
+                    // the expected file/broken-link branch; Done queues the original download.
+                    if (await == c_cd && nav.phase == navigation::changing_directory && nav.has_fallback())
+                        trace(dbg_info, "Symlink directory probe failed: " + text{ m.first() });
+                    else fail(text{ m.first() });
                     if (stage != s_connected) stage = s_failed;
                     break;
                 case sftp_evt::ask_hostkey:
@@ -2722,7 +2822,7 @@ namespace netxs::app::parvion
                     else
                     {
                         trace(dbg_info, "SFTP command in state " + text{ cmd_name(await) } + " finished with result " + text{ m.first() });
-                        await = c_none; path_pending = faux; ls_deferred = faux;
+                        command_failed(await);
                     } // Failed browse cmd (cd/ls/op): it still terminated, so release the control session
                       // (else the in-flight guard would wedge navigation) and drop any staged path/ls.
                     break;
@@ -2789,15 +2889,15 @@ namespace netxs::app::parvion
             {
                 case c_open:
                     stage = s_connected;
-                    recovering = faux; reconnect_tries = 0; // Link restored; stand down the reconnect driver.
+                    recovering = faux; // Authentication succeeded; path restoration below still must complete.
+                    if (!restoring) reconnect_tries = 0;
                     if (restoring) // Reconnect: cd back to where we were instead of landing in the home dir.
                     {
                         restoring = faux;
-                        pending_path = resume_path.empty() ? text{ "/" } : resume_path;
-                        path_pending = true; // Restored path is revealed once its listing returns (c_ls).
-                        await = c_cd;
-                        send_cmd("cd " + quote_name(pending_path));
-                        mark("Reconnected. Restoring " + pending_path + "...");
+                        await = c_none;
+                        auto target = resume_path.empty() ? text{ "/" } : resume_path;
+                        begin_navigation(target, {}, -1, navigation::reconnect_restore,
+                                         "Reconnected. Restoring " + target + "...");
                     }
                     else
                     {
@@ -2811,19 +2911,42 @@ namespace netxs::app::parvion
                     list_dir();
                     break;
                 case c_ls:
+                {
+                    auto restored = nav.phase == navigation::listing_destination
+                                 && nav.origin == navigation::reconnect_restore;
                     items = std::move(pending);
                     pending.clear();
                     sort_dir(items);
-                    if (path_pending) { path = pending_path; path_pending = faux; } // Reveal the dir only now (with its listing).
+                    if (nav.phase == navigation::listing_destination)
+                    {
+                        path = nav.target; // Reveal path and destination items in the same completion.
+                        nav = {};
+                    }
                     ++gen;
                     await = c_none;
+                    if (restored) reconnect_tries = 0;
                     mark("Directory listing of " + path + " successful");
                     break;
+                }
+                case c_cd_rollback:
+                    await = c_none;
+                    nav = {}; // Source items never moved; backend cwd is aligned again.
+                    break;
                 case c_cd:
-                    // Don't reveal pending_path yet; c_ls commits it once the listing is in. The test seam
-                    // holds the `ls` (await stays c_cd) to widen this window for navigation-race tests.
-                    if (dbg_ls_delay_ms > 0) { ls_deferred = true; ls_due = steady_clock::now() + std::chrono::milliseconds{ dbg_ls_delay_ms }; }
-                    else list_dir();
+                    await = c_none;
+                    if (nav.phase == navigation::changing_directory)
+                    {
+                        nav.phase = navigation::waiting_to_list;
+                        nav.list_due = dbg_ls_delay_ms > 0
+                                     ? steady_clock::now() + std::chrono::milliseconds{ dbg_ls_delay_ms }
+                                     : steady_clock::now();
+                        if (dbg_ls_delay_ms <= 0) start_navigation_listing();
+                    }
+                    else
+                    {
+                        trace(dbg_warning, "cd completed without an active navigation transaction");
+                        nav = {};
+                    }
                     break;
                 case c_op:   // mkdir/rm/rmdir/mv finished: refresh the current directory.
                     list_dir();

@@ -32,6 +32,7 @@ import sys
 import time
 import shutil
 import tempfile
+import textwrap
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import test_parvion_panes as T       # ParvionSession, replay, row_text, find_text, grid_contains, ROWS, ...
@@ -78,6 +79,104 @@ def _remote_header(s):
     return (pos[0], path, col)
 
 
+def _make_symlink_backend(directory):
+    """Create a tiny deterministic parvionsftp protocol peer for symlink activation tests."""
+    helper = os.path.join(directory, "fake-parvionsftp.py")
+    command_log = os.path.join(directory, "commands.log")
+    source = "#!/usr/bin/env python3\n" + textwrap.dedent(r'''
+        import os
+        import shlex
+        import sys
+
+        command_log = os.environ["PARVION_FAKE_COMMAND_LOG"]
+        fail_target_list = os.environ.get("PARVION_FAKE_FAIL_TARGET_LIST") == "1"
+        fail_rollback = os.environ.get("PARVION_FAKE_FAIL_ROLLBACK") == "1"
+        rollback_marker = command_log + ".rollback-failed"
+        cwd = "/"
+
+        def event(kind, payload):
+            sys.stdout.write(chr(ord("0") + kind) + payload + "\n")
+            sys.stdout.flush()
+
+        def listing(longname, name):
+            event(8, longname)
+            sys.stdout.write("0\n" + name + "\n")
+            sys.stdout.flush()
+
+        event(0, "parvionSftp started, protocol_version=12")
+        for raw in sys.stdin:
+            raw = raw.rstrip("\r\n")
+            if not raw:
+                continue
+            with open(command_log, "a", encoding="utf-8") as log:
+                log.write(raw + "\n")
+            words = shlex.split(raw)
+            cmd = words[0]
+            if cmd == "keyfile":
+                event(1, "1")
+            elif cmd == "open":
+                event(0, "Connected")
+            elif cmd == "pwd":
+                event(0, f'Current directory is: "{cwd}"')
+            elif cmd == "ls":
+                if cwd == "/dir_link" and fail_target_list:
+                    event(2, "Unable to open destination listing")
+                    event(1, "0")
+                else:
+                    if cwd == "/":
+                        listing("lrwxrwxrwx 1 user group 0 Jan 1 00:00 dir_link -> real_dir", "dir_link")
+                        listing("lrwxrwxrwx 1 user group 7 Jan 1 00:00 file_link -> real_file", "file_link")
+                        listing("lrwxrwxrwx 1 user group 0 Jan 1 00:00 broken_link -> missing", "broken_link")
+                        listing("drwxr-xr-x 1 user group 0 Jan 1 00:00 real_dir", "real_dir")
+                    else:
+                        listing("-rw-r--r-- 1 user group 3 Jan 1 00:00 inside.txt", "inside.txt")
+                    event(1, "1")
+            elif cmd == "cd":
+                target = words[1]
+                if target == "/dir_link" or target == "/real_dir":
+                    cwd = target
+                    event(0, f'New directory is: "{cwd}"')
+                elif target == "/":
+                    if fail_rollback and not os.path.exists(rollback_marker):
+                        open(rollback_marker, "w").close()
+                        event(2, "Rollback failed")
+                        event(1, "0")
+                    else:
+                        cwd = target
+                        event(0, f'New directory is: "{cwd}"')
+                else:
+                    event(2, f"Directory {target}: not a directory")
+                    event(1, "0")
+            else:
+                event(2, f"Unsupported command: {cmd}")
+                event(1, "0")
+    ''')
+    with open(helper, "w", encoding="utf-8") as f:
+        f.write(source)
+    os.chmod(helper, 0o755)
+    return helper, command_log
+
+
+def _connect_fake(s):
+    if not T.fill_connect_field(s, "Host", "fake.test"):
+        return False
+    T.fill_connect_field(s, "User", "tester")
+    s.write("\r")
+    for _ in range(20):
+        s.feed(0.5)
+        if _find_remote_row(s, "dir_link") and _find_remote_row(s, "file_link"):
+            return True
+    return False
+
+
+def _fake_commands(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return [line.rstrip("\n") for line in f]
+    except FileNotFoundError:
+        return []
+
+
 def _settled_in_pub(s, tries=20):
     """Poll until the remote pane has fully entered /pub: its child 'example' dir is listed AND the
     header path reads exactly /pub (header and listing agree)."""
@@ -89,6 +188,192 @@ def _settled_in_pub(s, tries=20):
 
 
 # ----------------------------------- tests -----------------------------------
+
+def test_remote_symlink_activation_probes_directory_first():
+    """A remote symlink activation uses cd as the referent probe. Directory links navigate;
+    failed probes retain the unchanged one-file download path, while explicit Download skips cd."""
+    print("TEST: parvion nav - remote symlink activation probes referent with cd ... ", end="", flush=True)
+    root = tempfile.mkdtemp(prefix="parvionsymlink_")
+    try:
+        helper, command_log = _make_symlink_backend(root)
+        base_env = {
+            "PARVION_SFTP_BIN": helper,
+            "PARVION_FAKE_COMMAND_LOG": command_log,
+            "PARVION_DEMO_QUEUE": "0",
+            "PARVION_DEMO_HASH": "1",  # Hold queued downloads; the fake peer remains control-only.
+            "PARVION_KEEPALIVE_SEC": "0",
+            "PARVION_TIMEOUT_SEC": "0",
+        }
+
+        # Double-clicking a link to a directory uses the same cd/list transaction as a plain dir.
+        with T.ParvionSession(root, env=base_env) as s:
+            if not _connect_fake(s):
+                print("FAIL - fake remote listing did not arrive"); return False
+            hit = _find_remote_row(s, "dir_link")
+            F.dclick(s, hit[1] + 1, hit[0] + 1, settle=0.8)
+            for _ in range(10):
+                s.feed(0.3)
+                if _remote_header_path(s) == "/dir_link" and _find_remote_row(s, "inside.txt"):
+                    break
+            if _remote_header_path(s) != "/dir_link" or not _find_remote_row(s, "inside.txt"):
+                print(f"FAIL - directory link did not navigate (header={_remote_header_path(s)!r})")
+                return False
+            commands = _fake_commands(command_log)
+            if not any(line == 'cd "/dir_link"' for line in commands):
+                print(f"FAIL - directory link did not probe/navigate with cd: {commands!r}")
+                return False
+            if any(line.startswith("parvion-stat ") for line in commands):
+                print(f"FAIL - removed stat protocol command was sent: {commands!r}")
+                return False
+
+        # Enter on a link to a file must try cd, then enqueue its original path on failure.
+        open(command_log, "w").close()
+        with T.ParvionSession(root, env=base_env) as s:
+            if not _connect_fake(s):
+                print("FAIL - fake remote listing did not arrive for file link"); return False
+            hit = _find_remote_row(s, "file_link")
+            s.click(hit[1] + 1, hit[0] + 1)
+            s.write("\r", settle=0.8)
+            for _ in range(10):
+                s.feed(0.3)
+                if T.grid_contains(s.screen()[0], "Transferring (1)"):
+                    break
+            commands = _fake_commands(command_log)
+            if not any(line == 'cd "/file_link"' for line in commands):
+                print(f"FAIL - file link did not probe with cd: {commands!r}")
+                return False
+            if _remote_header_path(s) != "/" or not T.grid_contains(s.screen()[0], "Transferring (1)"):
+                print(f"FAIL - failed probe did not queue one download (header={_remote_header_path(s)!r})")
+                return False
+            # A broken/inaccessible referent also fails cd and retains the transfer attempt.
+            hit = _find_remote_row(s, "broken_link")
+            s.click(hit[1] + 1, hit[0] + 1)
+            s.write("\r", settle=0.8)
+            for _ in range(10):
+                s.feed(0.3)
+                if T.grid_contains(s.screen()[0], "Transferring (2)"):
+                    break
+            commands = _fake_commands(command_log)
+            if not any(line == 'cd "/broken_link"' for line in commands):
+                print(f"FAIL - broken link did not probe with cd: {commands!r}")
+                return False
+            if _remote_header_path(s) != "/" or not T.grid_contains(s.screen()[0], "Transferring (2)"):
+                print("FAIL - broken-link probe did not preserve transfer fallback")
+                return False
+
+        # Context-menu Download remains a transfer action and must not perform the cd probe.
+        open(command_log, "w").close()
+        with T.ParvionSession(root, env=base_env) as s:
+            if not _connect_fake(s):
+                print("FAIL - fake remote listing did not arrive for explicit download"); return False
+            hit = _find_remote_row(s, "dir_link")
+            s.click(hit[1] + 1, hit[0] + 1, button=2)
+            download = T.find_text(s.screen()[0], "Download")
+            if download is None:
+                print("FAIL - Download action missing"); return False
+            s.click(download[1] + 1, download[0] + 1)
+            s.feed(0.5)
+            commands = _fake_commands(command_log)
+            if any(line.startswith("cd ") for line in commands):
+                print(f"FAIL - explicit Download probed the symlink: {commands!r}")
+                return False
+            if not T.grid_contains(s.screen()[0], "Transferring (1)"):
+                print("FAIL - explicit Download no longer queued the symlink")
+                return False
+
+        print("PASS")
+        return True
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+def test_remote_navigation_rolls_back_after_listing_failure():
+    """If cd succeeds but the destination ls fails, backend cwd rolls back to the still-visible
+    source. The retained source listing remains usable for a subsequent navigation."""
+    print("TEST: parvion nav - failed destination listing rolls back cwd ... ", end="", flush=True)
+    root = tempfile.mkdtemp(prefix="parvionnav_rollback_")
+    try:
+        helper, command_log = _make_symlink_backend(root)
+        base_env = {
+            "PARVION_SFTP_BIN": helper,
+            "PARVION_FAKE_COMMAND_LOG": command_log,
+            "PARVION_FAKE_FAIL_TARGET_LIST": "1",
+            "PARVION_DEMO_QUEUE": "0",
+            "PARVION_DEMO_HASH": "1",
+            "PARVION_KEEPALIVE_SEC": "0",
+            "PARVION_TIMEOUT_SEC": "0",
+        }
+        with T.ParvionSession(root, env=base_env) as s:
+            if not _connect_fake(s):
+                print("FAIL - fake remote listing did not arrive"); return False
+            hit = _find_remote_row(s, "dir_link")
+            F.dclick(s, hit[1] + 1, hit[0] + 1, settle=0.8)
+            for _ in range(15):
+                s.feed(0.3)
+                commands = _fake_commands(command_log)
+                if 'cd "/"' in commands:
+                    break
+            commands = _fake_commands(command_log)
+            try:
+                cd_pos = commands.index('cd "/dir_link"')
+                ls_pos = commands.index("ls", cd_pos + 1)
+                rollback_pos = commands.index('cd "/"', ls_pos + 1)
+            except ValueError:
+                print(f"FAIL - rollback command sequence missing/out of order: {commands!r}")
+                return False
+            if _remote_header_path(s) != "/" or not _find_remote_row(s, "real_dir"):
+                print(f"FAIL - source view was not retained (header={_remote_header_path(s)!r})")
+                return False
+            # Rollback completion must release the transaction for another ordinary navigation.
+            hit = _find_remote_row(s, "real_dir")
+            F.dclick(s, hit[1] + 1, hit[0] + 1, settle=0.8)
+            for _ in range(10):
+                s.feed(0.3)
+                if _remote_header_path(s) == "/real_dir" and _find_remote_row(s, "inside.txt"):
+                    break
+            if _remote_header_path(s) != "/real_dir" or not _find_remote_row(s, "inside.txt"):
+                print(f"FAIL - navigation stayed busy after rollback (header={_remote_header_path(s)!r})")
+                return False
+        print("PASS")
+        return True
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_remote_navigation_recovers_after_rollback_failure():
+    """If the compensating cd also fails, reconnect must restore the last committed source path."""
+    print("TEST: parvion nav - failed cwd rollback reconnects to committed path ... ", end="", flush=True)
+    root = tempfile.mkdtemp(prefix="parvionnav_recover_")
+    try:
+        helper, command_log = _make_symlink_backend(root)
+        env = {
+            "PARVION_SFTP_BIN": helper,
+            "PARVION_FAKE_COMMAND_LOG": command_log,
+            "PARVION_FAKE_FAIL_TARGET_LIST": "1",
+            "PARVION_FAKE_FAIL_ROLLBACK": "1",
+            "PARVION_DEMO_QUEUE": "0",
+            "PARVION_DEMO_HASH": "1",
+            "PARVION_KEEPALIVE_SEC": "0",
+            "PARVION_TIMEOUT_SEC": "0",
+        }
+        with T.ParvionSession(root, env=env) as s:
+            if not _connect_fake(s):
+                print("FAIL - fake remote listing did not arrive"); return False
+            hit = _find_remote_row(s, "dir_link")
+            F.dclick(s, hit[1] + 1, hit[0] + 1, settle=0.8)
+            recovered = False
+            for _ in range(40):
+                s.feed(0.5)
+                commands = _fake_commands(command_log)
+                if commands.count('cd "/"') >= 2 and _remote_header_path(s) == "/" and _find_remote_row(s, "real_dir"):
+                    recovered = True
+                    break
+            if not recovered:
+                print(f"FAIL - committed root was not restored: {_fake_commands(command_log)!r}")
+                return False
+        print("PASS")
+        return True
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
 
 def test_remote_enter_reveals_path_with_listing():
     """Entering a remote dir reveals the new path together with its listing (the deferred-commit
@@ -211,6 +496,9 @@ def test_remote_dotdot_normalizes():
 
 
 TESTS = [
+    test_remote_symlink_activation_probes_directory_first,
+    test_remote_navigation_rolls_back_after_listing_failure,
+    test_remote_navigation_recovers_after_rollback_failure,
     test_remote_enter_reveals_path_with_listing,
     test_double_doubleclick_does_not_overdescend,
     test_remote_dotdot_normalizes,

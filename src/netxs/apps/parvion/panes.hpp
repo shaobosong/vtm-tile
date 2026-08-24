@@ -232,6 +232,7 @@ namespace netxs::app::parvion
             if (idx < 0 || idx >= (si32)its.size()) return;
             auto& e = its[idx];
             if (e.is_dir)          st.remote->chdir(e.name);
+            else if (e.is_link)    st.remote->activate_link(e.name, e.size);
             else if (st.ctrl)      st.ctrl->enqueue_download(e.name, e.size);
             return;
         }
@@ -887,7 +888,7 @@ namespace netxs::app::parvion
                 st.delete_pending = faux;
             }
         }
-        else if (st.remote && st.remote->await == sftp_remote::c_none)
+        else if (st.remote && st.remote->control_idle())
         {
             st.create_pending.clear(); // mkdir/rename failed: no refreshed listing was produced.
             st.rename_pending.clear();
