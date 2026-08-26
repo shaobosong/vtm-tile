@@ -67,9 +67,12 @@ def state_progress(path):
 
 def pump_bounded(s, duration):
     """Drain terminal output for a fixed time; the shared harness extends while output flows."""
-    deadline = time.time() + duration
-    while time.time() < deadline:
-        ready, _, _ = select.select([s.master_fd], [], [], min(0.02, deadline - time.time()))
+    deadline = time.monotonic() + duration
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        ready, _, _ = select.select([s.master_fd], [], [], min(0.02, remaining))
         if not ready:
             continue
         try:
