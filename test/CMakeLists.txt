@@ -4,6 +4,12 @@ target_include_directories(tile_session_shutdown_test PRIVATE "${CMAKE_SOURCE_DI
 target_link_libraries(tile_session_shutdown_test PRIVATE Lua::Lua)
 add_test(NAME tile_session_shutdown_test COMMAND tile_session_shutdown_test)
 
+add_executable(parvion_control_transaction_test "parvion_control_transaction_test.cpp")
+target_include_directories(parvion_control_transaction_test PRIVATE "${CMAKE_SOURCE_DIR}/src"
+                                                                    ${LUA_INCLUDE_DIR})
+target_link_libraries(parvion_control_transaction_test PRIVATE Lua::Lua)
+add_test(NAME parvion_control_transaction_test COMMAND parvion_control_transaction_test)
+
 add_executable(tile_close_slot_test "tile_close_slot_test.cpp")
 target_include_directories(tile_close_slot_test PRIVATE "${CMAKE_SOURCE_DIR}/src"
                                                         ${LUA_INCLUDE_DIR})

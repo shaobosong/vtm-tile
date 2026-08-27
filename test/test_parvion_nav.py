@@ -79,8 +79,8 @@ def _remote_header(s):
     return (pos[0], path, col)
 
 
-def _make_symlink_backend(directory):
-    """Create a tiny deterministic parvionsftp protocol peer for symlink activation tests."""
+def _make_control_backend(directory):
+    """Create a deterministic parvionsftp protocol peer for control-transaction tests."""
     helper = os.path.join(directory, "fake-parvionsftp.py")
     command_log = os.path.join(directory, "commands.log")
     source = "#!/usr/bin/env python3\n" + textwrap.dedent(r'''
@@ -89,8 +89,14 @@ def _make_symlink_backend(directory):
         import sys
 
         command_log = os.environ["PARVION_FAKE_COMMAND_LOG"]
-        fail_target_list = os.environ.get("PARVION_FAKE_FAIL_TARGET_LIST") == "1"
-        fail_rollback = os.environ.get("PARVION_FAKE_FAIL_ROLLBACK") == "1"
+        failures = set(filter(None, os.environ.get("PARVION_FAKE_FAILURES", "").split(",")))
+        fail_target_list = "target-list" in failures
+        fail_rollback = "rollback" in failures
+        fail_mutation = "mutation" in failures
+        fail_recursive_list = "recursive-list" in failures
+        fail_mkdir = "mkdir" in failures
+        fail_mkdir_exists = "mkdir-exists" in failures
+        fail_mkdir_file = "mkdir-file" in failures
         rollback_marker = command_log + ".rollback-failed"
         cwd = "/"
 
@@ -119,18 +125,38 @@ def _make_symlink_backend(directory):
             elif cmd == "pwd":
                 event(0, f'Current directory is: "{cwd}"')
             elif cmd == "ls":
-                if cwd == "/dir_link" and fail_target_list:
+                listed = words[1] if len(words) > 1 else cwd
+                if listed == "/real_dir" and fail_recursive_list:
+                    event(2, "Unable to enumerate recursive delete target")
+                    event(1, "0")
+                elif cwd == "/dir_link" and fail_target_list:
                     event(2, "Unable to open destination listing")
                     event(1, "0")
                 else:
-                    if cwd == "/":
+                    listing_path = listed
+                    if listing_path == "/":
                         listing("lrwxrwxrwx 1 user group 0 Jan 1 00:00 dir_link -> real_dir", "dir_link")
                         listing("lrwxrwxrwx 1 user group 7 Jan 1 00:00 file_link -> real_file", "file_link")
                         listing("lrwxrwxrwx 1 user group 0 Jan 1 00:00 broken_link -> missing", "broken_link")
                         listing("drwxr-xr-x 1 user group 0 Jan 1 00:00 real_dir", "real_dir")
+                        if fail_mkdir_exists:
+                            listing("drwxr-xr-x 1 user group 0 Jan 1 00:00 upload_src", "upload_src")
+                        elif fail_mkdir_file:
+                            listing("-rw-r--r-- 1 user group 7 Jan 1 00:00 upload_src", "upload_src")
                     else:
                         listing("-rw-r--r-- 1 user group 3 Jan 1 00:00 inside.txt", "inside.txt")
                     event(1, "1")
+            elif cmd == "mv":
+                if fail_mutation:
+                    event(2, "Rename rejected")
+                    event(1, "0")
+                else:
+                    event(1, "1")
+            elif cmd == "mkdir" and (fail_mkdir or fail_mkdir_exists or fail_mkdir_file):
+                event(2, "mkdir rejected" if fail_mkdir else "mkdir: directory already exists")
+                event(1, "0")
+            elif cmd == "rm" or cmd == "rmdir" or cmd == "mkdir" or cmd == "parvion-touch":
+                event(1, "1")
             elif cmd == "cd":
                 target = words[1]
                 if target == "/dir_link" or target == "/real_dir":
@@ -155,6 +181,37 @@ def _make_symlink_backend(directory):
         f.write(source)
     os.chmod(helper, 0o755)
     return helper, command_log
+
+
+def _fake_env(helper, command_log, failures=(), **overrides):
+    env = {
+        "PARVION_SFTP_BIN": helper,
+        "PARVION_FAKE_COMMAND_LOG": command_log,
+        "PARVION_FAKE_FAILURES": ",".join(failures),
+        "PARVION_DEMO_QUEUE": "0",
+        "PARVION_KEEPALIVE_SEC": "0",
+        "PARVION_TIMEOUT_SEC": "0",
+    }
+    env.update(overrides)
+    return env
+
+
+def _right_click_action(s, hit, label):
+    s.click(hit[1] + 1, hit[0] + 1, button=2)
+    action = T.find_text(s.screen()[0], label)
+    if action is None:
+        return False
+    s.click(action[1] + 1, action[0] + 1)
+    return True
+
+
+def _wait_commands(s, command_log, predicate, tries=15, settle=0.3):
+    for _ in range(tries):
+        s.feed(settle)
+        commands = _fake_commands(command_log)
+        if predicate(commands):
+            return commands
+    return _fake_commands(command_log)
 
 
 def _connect_fake(s):
@@ -195,15 +252,8 @@ def test_remote_symlink_activation_probes_directory_first():
     print("TEST: parvion nav - remote symlink activation probes referent with cd ... ", end="", flush=True)
     root = tempfile.mkdtemp(prefix="parvionsymlink_")
     try:
-        helper, command_log = _make_symlink_backend(root)
-        base_env = {
-            "PARVION_SFTP_BIN": helper,
-            "PARVION_FAKE_COMMAND_LOG": command_log,
-            "PARVION_DEMO_QUEUE": "0",
-            "PARVION_DEMO_HASH": "1",  # Hold queued downloads; the fake peer remains control-only.
-            "PARVION_KEEPALIVE_SEC": "0",
-            "PARVION_TIMEOUT_SEC": "0",
-        }
+        helper, command_log = _make_control_backend(root)
+        base_env = _fake_env(helper, command_log, PARVION_DEMO_HASH="1")
 
         # Double-clicking a link to a directory uses the same cd/list transaction as a plain dir.
         with T.ParvionSession(root, env=base_env) as s:
@@ -292,16 +342,8 @@ def test_remote_navigation_rolls_back_after_listing_failure():
     print("TEST: parvion nav - failed destination listing rolls back cwd ... ", end="", flush=True)
     root = tempfile.mkdtemp(prefix="parvionnav_rollback_")
     try:
-        helper, command_log = _make_symlink_backend(root)
-        base_env = {
-            "PARVION_SFTP_BIN": helper,
-            "PARVION_FAKE_COMMAND_LOG": command_log,
-            "PARVION_FAKE_FAIL_TARGET_LIST": "1",
-            "PARVION_DEMO_QUEUE": "0",
-            "PARVION_DEMO_HASH": "1",
-            "PARVION_KEEPALIVE_SEC": "0",
-            "PARVION_TIMEOUT_SEC": "0",
-        }
+        helper, command_log = _make_control_backend(root)
+        base_env = _fake_env(helper, command_log, ("target-list",), PARVION_DEMO_HASH="1")
         with T.ParvionSession(root, env=base_env) as s:
             if not _connect_fake(s):
                 print("FAIL - fake remote listing did not arrive"); return False
@@ -344,17 +386,8 @@ def test_remote_navigation_recovers_after_rollback_failure():
     print("TEST: parvion nav - failed cwd rollback reconnects to committed path ... ", end="", flush=True)
     root = tempfile.mkdtemp(prefix="parvionnav_recover_")
     try:
-        helper, command_log = _make_symlink_backend(root)
-        env = {
-            "PARVION_SFTP_BIN": helper,
-            "PARVION_FAKE_COMMAND_LOG": command_log,
-            "PARVION_FAKE_FAIL_TARGET_LIST": "1",
-            "PARVION_FAKE_FAIL_ROLLBACK": "1",
-            "PARVION_DEMO_QUEUE": "0",
-            "PARVION_DEMO_HASH": "1",
-            "PARVION_KEEPALIVE_SEC": "0",
-            "PARVION_TIMEOUT_SEC": "0",
-        }
+        helper, command_log = _make_control_backend(root)
+        env = _fake_env(helper, command_log, ("target-list", "rollback"), PARVION_DEMO_HASH="1")
         with T.ParvionSession(root, env=env) as s:
             if not _connect_fake(s):
                 print("FAIL - fake remote listing did not arrive"); return False
@@ -370,6 +403,185 @@ def test_remote_navigation_recovers_after_rollback_failure():
             if not recovered:
                 print(f"FAIL - committed root was not restored: {_fake_commands(command_log)!r}")
                 return False
+        print("PASS")
+        return True
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_failed_mutation_reconciles_and_releases_transaction():
+    """A failed one-shot mutation still owns and completes its refresh before browsing resumes."""
+    print("TEST: parvion transaction - failed mutation reconciles and releases control ... ", end="", flush=True)
+    root = tempfile.mkdtemp(prefix="parviontxn_mutation_")
+    try:
+        helper, command_log = _make_control_backend(root)
+        env = _fake_env(helper, command_log, ("mutation",))
+        with T.ParvionSession(root, env=env) as s:
+            if not _connect_fake(s):
+                print("FAIL - fake remote listing did not arrive"); return False
+            hit = _find_remote_row(s, "real_dir")
+            if not _right_click_action(s, hit, "Rename"):
+                print("FAIL - Rename action missing"); return False
+            s.write("\x7f" * 16)
+            s.write("renamed_dir")
+            s.write("\r", settle=0.8)
+            commands = _wait_commands(s, command_log,
+                lambda lines: any(line.startswith("mv ") for line in lines) and lines.count("ls") >= 2)
+            mutation = next((i for i, line in enumerate(commands) if line.startswith("mv ")), -1)
+            refresh = next((i for i in range(mutation + 1, len(commands)) if commands[i] == "ls"), -1)
+            if mutation < 0 or refresh < 0:
+                print(f"FAIL - failed mutation was not followed by reconciliation: {commands!r}"); return False
+            if not _find_remote_row(s, "real_dir") or _remote_header_path(s) != "/":
+                print("FAIL - reconciliation did not retain the committed root view"); return False
+            # The reconciliation terminal event must release the transaction for normal navigation.
+            hit = _find_remote_row(s, "real_dir")
+            F.dclick(s, hit[1] + 1, hit[0] + 1, settle=0.8)
+            commands = _wait_commands(s, command_log, lambda lines:
+                any(i > refresh and lines[i].startswith("cd ") and "/real_dir" in lines[i] for i in range(len(lines))))
+            entered = next((i for i in range(refresh + 1, len(commands))
+                            if commands[i].startswith("cd ") and "/real_dir" in commands[i]), -1)
+            for _ in range(10):
+                if _remote_header_path(s) == "/real_dir":
+                    break
+                s.feed(0.3)
+            if entered < 0 or _remote_header_path(s) != "/real_dir":
+                print(f"FAIL - mutation transaction stayed active: {commands!r}"); return False
+        print("PASS")
+        return True
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_recursive_delete_aborts_before_commands_on_listing_failure():
+    """Delete planning is fail-safe: an unreadable subtree must emit no rm/rmdir commands."""
+    print("TEST: parvion transaction - failed delete walk emits no destructive commands ... ", end="", flush=True)
+    root = tempfile.mkdtemp(prefix="parviontxn_delete_")
+    try:
+        helper, command_log = _make_control_backend(root)
+        env = _fake_env(helper, command_log, ("recursive-list",))
+        with T.ParvionSession(root, env=env) as s:
+            if not _connect_fake(s):
+                print("FAIL - fake remote listing did not arrive"); return False
+            hit = _find_remote_row(s, "real_dir")
+            if not _right_click_action(s, hit, "Delete"):
+                print("FAIL - Delete action missing"); return False
+            s.write("\r", settle=0.8)  # Confirm.
+            commands = _wait_commands(s, command_log, lambda lines: 'ls "/real_dir"' in lines)
+            if 'ls "/real_dir"' not in commands:
+                print(f"FAIL - recursive walk did not start: {commands!r}"); return False
+            if any(line.startswith("rm ") or line.startswith("rmdir ") for line in commands):
+                print(f"FAIL - destructive commands followed a failed walk: {commands!r}"); return False
+            if not _find_remote_row(s, "real_dir") or _remote_header_path(s) != "/":
+                print("FAIL - failed delete walk damaged the committed view"); return False
+        print("PASS")
+        return True
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_recursive_upload_does_not_enqueue_after_mkdir_failure():
+    """Uploads are dependent work: no file may enter the queue when tree preparation fails."""
+    print("TEST: parvion transaction - failed mkdir prevents dependent uploads ... ", end="", flush=True)
+    root = tempfile.mkdtemp(prefix="parviontxn_upload_")
+    try:
+        source = os.path.join(root, "upload_src")
+        os.mkdir(source)
+        with open(os.path.join(source, "payload.txt"), "w", encoding="utf-8") as f:
+            f.write("payload")
+        helper, command_log = _make_control_backend(root)
+        env = _fake_env(helper, command_log, ("mkdir",), PARVION_DEMO_HASH="1")
+        with T.ParvionSession(root, env=env) as s:
+            if not _connect_fake(s):
+                print("FAIL - fake remote listing did not arrive"); return False
+            hit = T.find_text(s.screen()[0], "/upload_src")
+            if hit is None or hit[1] >= 50:
+                print("FAIL - local upload source not found"); return False
+            if not _right_click_action(s, hit, "Upload"):
+                print("FAIL - Upload action missing"); return False
+            commands = _wait_commands(s, command_log,
+                lambda lines: 'mkdir "/upload_src"' in lines and 'ls "/"' in lines and lines.count("ls") >= 2)
+            mkdir_i = next((i for i, line in enumerate(commands) if line == 'mkdir "/upload_src"'), -1)
+            probe_i = next((i for i in range(mkdir_i + 1, len(commands)) if commands[i] == 'ls "/"'), -1)
+            if mkdir_i < 0 or probe_i < 0:
+                print(f"FAIL - failed mkdir was not probed: {commands!r}"); return False
+            if any(line.startswith("mkdir ") for line in commands[probe_i + 1:]):
+                print(f"FAIL - mkdir continued after a missing directory: {commands!r}"); return False
+            if T.grid_contains(s.screen()[0], "payload.txt") or T.grid_contains(s.screen()[0], "Transferring (1)"):
+                print("FAIL - dependent upload was queued after mkdir failure"); return False
+            if T.grid_contains(s.screen()[0], "Queued ("):
+                print("FAIL - dependent upload was queued after mkdir failure"); return False
+        print("PASS")
+        return True
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_recursive_upload_enqueues_when_mkdir_already_exists():
+    """Re-uploading into an existing remote tree treats mkdir-exists as success and still queues files."""
+    print("TEST: parvion transaction - mkdir-exists still queues dependent uploads ... ", end="", flush=True)
+    root = tempfile.mkdtemp(prefix="parviontxn_mkdir_exists_")
+    try:
+        source = os.path.join(root, "upload_src")
+        os.mkdir(source)
+        with open(os.path.join(source, "payload.txt"), "w", encoding="utf-8") as f:
+            f.write("payload")
+        helper, command_log = _make_control_backend(root)
+        env = _fake_env(helper, command_log, ("mkdir-exists",), PARVION_DEMO_HASH="1")
+        with T.ParvionSession(root, env=env) as s:
+            if not _connect_fake(s):
+                print("FAIL - fake remote listing did not arrive"); return False
+            hit = T.find_text(s.screen()[0], "/upload_src")
+            if hit is None or hit[1] >= 50:
+                print("FAIL - local upload source not found"); return False
+            if not _right_click_action(s, hit, "Upload"):
+                print("FAIL - Upload action missing"); return False
+            commands = _wait_commands(s, command_log,
+                lambda lines: 'mkdir "/upload_src"' in lines and 'ls "/"' in lines)
+            mkdir_i = next((i for i, line in enumerate(commands) if line == 'mkdir "/upload_src"'), -1)
+            probe_i = next((i for i in range(mkdir_i + 1, len(commands)) if commands[i] == 'ls "/"'), -1)
+            if mkdir_i < 0 or probe_i < 0:
+                print(f"FAIL - mkdir-exists was not probed: {commands!r}"); return False
+            queued = False
+            for _ in range(12):
+                s.feed(0.3)
+                if T.grid_contains(s.screen()[0], "payload.txt") or T.grid_contains(s.screen()[0], "queued 1 upload"):
+                    queued = True
+                    break
+            if not queued:
+                print(f"FAIL - existing remote directory did not accept the upload: {commands!r}"); return False
+        print("PASS")
+        return True
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_recursive_upload_rejects_file_at_mkdir_target():
+    """A successful parent listing only recovers mkdir when the colliding entry is a directory."""
+    print("TEST: parvion transaction - file at mkdir target aborts and reconciles ... ", end="", flush=True)
+    root = tempfile.mkdtemp(prefix="parviontxn_mkdir_file_")
+    try:
+        source = os.path.join(root, "upload_src")
+        os.mkdir(source)
+        with open(os.path.join(source, "payload.txt"), "w", encoding="utf-8") as f:
+            f.write("payload")
+        helper, command_log = _make_control_backend(root)
+        env = _fake_env(helper, command_log, ("mkdir-file",), PARVION_DEMO_HASH="1")
+        with T.ParvionSession(root, env=env) as s:
+            if not _connect_fake(s):
+                print("FAIL - fake remote listing did not arrive"); return False
+            hit = T.find_text(s.screen()[0], "/upload_src")
+            if hit is None or hit[1] >= 50:
+                print("FAIL - local upload source not found"); return False
+            if not _right_click_action(s, hit, "Upload"):
+                print("FAIL - Upload action missing"); return False
+            commands = _wait_commands(s, command_log,
+                lambda lines: 'mkdir "/upload_src"' in lines and 'ls "/"' in lines and lines.count("ls") >= 2)
+            probe_i = next((i for i, line in enumerate(commands) if line == 'ls "/"'), -1)
+            refresh_i = next((i for i in range(probe_i + 1, len(commands)) if commands[i] == "ls"), -1)
+            if probe_i < 0 or refresh_i < 0:
+                print(f"FAIL - file collision did not reconcile: {commands!r}"); return False
+            if T.grid_contains(s.screen()[0], "Transferring (1)") or T.grid_contains(s.screen()[0], "Queued ("):
+                print("FAIL - file collision queued a dependent upload"); return False
         print("PASS")
         return True
     finally:
@@ -499,6 +711,11 @@ TESTS = [
     test_remote_symlink_activation_probes_directory_first,
     test_remote_navigation_rolls_back_after_listing_failure,
     test_remote_navigation_recovers_after_rollback_failure,
+    test_failed_mutation_reconciles_and_releases_transaction,
+    test_recursive_delete_aborts_before_commands_on_listing_failure,
+    test_recursive_upload_does_not_enqueue_after_mkdir_failure,
+    test_recursive_upload_enqueues_when_mkdir_already_exists,
+    test_recursive_upload_rejects_file_at_mkdir_target,
     test_remote_enter_reveals_path_with_listing,
     test_double_doubleclick_does_not_overdescend,
     test_remote_dotdot_normalizes,

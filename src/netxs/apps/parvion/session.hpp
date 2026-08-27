@@ -32,6 +32,8 @@
 #include <functional>
 #include <map>
 #include <set>
+#include <variant>
+#include <type_traits>
 
 #if !defined(_WIN32)
     #include <unistd.h>
@@ -310,6 +312,9 @@ namespace netxs::app::parvion
             #endif
             destroy_shm();
             running = false;
+            // A stopped helper defines a protocol-generation boundary. No queued terminal event
+            // from it may be observed by a transaction started on the next helper instance.
+            { auto lock = std::lock_guard{ inbox_mtx }; inbox.clear(); }
         }
 
         // Bind the local file an upcoming transfer's io_* requests operate on.
@@ -1035,43 +1040,163 @@ namespace netxs::app::parvion
     // calls chdir()/cdup(). poll() must be called on the UI thread.
     struct sftp_remote
     {
+        // `stage` tracks transport/authentication lifetime; a connection transaction may continue
+        // owning post-authentication path discovery or restoration while stage is s_connected.
         enum stage_t { s_idle, s_greeting, s_opening, s_connected, s_failed };
         enum cmd_t   { c_none, c_open, c_pwd, c_ls, c_cd, c_cd_rollback,
                        c_op,    // c_op: mkdir/rm/rmdir/mv, then re-list.
-                       c_rls,   // Recursive-walk listing (ls <path>) for a folder download/delete; result drives recop.
-                       c_recop, // A recop one-shot command (mkdir for upload, rm/rmdir for delete); advance regardless of result.
+                       c_rls,   // Recursive-walk listing, or an upload mkdir-exists parent probe.
+                       c_recop, // One-shot mkdir (upload) or rm/rmdir (delete). Failure is kind-specific.
                        c_keyfile }; // Pre-auth `keyfile <path>` registration; its Done advances to the next key or `open`.
         using steady_clock = std::chrono::steady_clock;
 
-        // A browse navigation is a transaction: the backend cwd may move before its listing is
-        // available, while `path`/`items` remain the last committed view. This single object owns
-        // every staged value and the rollback needed to keep backend cwd and visible state aligned.
-        struct navigation
+        // Exactly one control transaction owns the helper command stream. Its phase determines the
+        // one response that may advance it, and it owns every staged listing/cursor/failure needed
+        // by the multi-step flow. `path`/`items` remain the last committed view until a listing lands.
+        struct control_transaction
         {
-            enum phase_t  { idle, changing_directory, waiting_to_list, listing_destination, rolling_back };
-            enum origin_t { user, reconnect_restore };
-            phase_t phase = idle;
-            origin_t origin = user;
-            text source;
-            text target;
-            text fallback_name;       // Set only for Enter/double-click on a symlink.
-            si64 fallback_size = -1;
-            steady_clock::time_point list_due{};
+            enum class kind_t { none, connection, navigation, refresh, mutation, recursive, keepalive };
 
-            auto active() const { return phase != idle; }
-            auto has_fallback() const { return !fallback_name.empty(); }
+            struct connection
+            {
+                static constexpr auto kind = kind_t::connection;
+                enum class phase_t { retry_wait, waiting_greeting, registering_key, opening, discovering_path, restoring_path, listing };
+                phase_t phase = phase_t::waiting_greeting;
+                bool reconnect = faux;
+                text restore_path = "/";
+                text target;
+                size_t keyfile_i = 0;
+                si32 attempts = 0;
+                steady_clock::time_point retry_at{};
+
+                connection() = default;
+                connection(bool reconnect, text restore_path, si32 attempts = 0)
+                    : reconnect{ reconnect }, restore_path{ std::move(restore_path) }, attempts{ attempts } { }
+            };
+
+            struct navigation
+            {
+                static constexpr auto kind = kind_t::navigation;
+                enum class phase_t { changing_directory, waiting_to_list, listing_destination, rolling_back };
+                phase_t phase = phase_t::changing_directory;
+                text source;
+                text target;
+                text fallback_name;
+                si64 fallback_size = -1;
+                steady_clock::time_point list_due{};
+
+                navigation() = default;
+                navigation(text source, text target, text fallback_name = {}, si64 fallback_size = -1)
+                    : source{ std::move(source) }, target{ std::move(target) },
+                      fallback_name{ std::move(fallback_name) }, fallback_size{ fallback_size } { }
+                auto has_fallback() const { return !fallback_name.empty(); }
+            };
+
+            struct refresh
+            {
+                static constexpr auto kind = kind_t::refresh;
+                enum class phase_t { listing };
+                phase_t phase = phase_t::listing;
+                text source;
+                explicit refresh(text source = {}) : source{ std::move(source) } { }
+            };
+
+            struct mutation
+            {
+                static constexpr auto kind = kind_t::mutation;
+                enum class phase_t { executing, listing_after_success, listing_after_failure };
+                phase_t phase = phase_t::executing;
+                text source;
+                explicit mutation(text source = {}) : source{ std::move(source) } { }
+            };
+
+            struct recursive
+            {
+                static constexpr auto kind = kind_t::recursive;
+                enum class phase_t { collecting, listing, executing, probing_mkdir, listing_after_abort, listing_result };
+                enum class mode_t { download, delete_, upload };
+                struct dir { text remote; text local; };
+
+                phase_t phase = phase_t::collecting;
+                mode_t mode;
+                std::vector<dir> stack;
+                dir current;
+                std::vector<text> delete_files;
+                std::vector<text> delete_dirs;
+                std::vector<text> commands;
+                size_t command_i = 0;
+                bool commands_built = faux;
+                std::vector<queue_item> uploads;
+                size_t download_files = 0;
+                size_t failures = 0;
+                text completion_status;
+
+                explicit recursive(mode_t mode) : mode{ mode } { }
+            };
+
+            struct keepalive
+            {
+                static constexpr auto kind = kind_t::keepalive;
+                enum class phase_t { waiting };
+                phase_t phase = phase_t::waiting;
+            };
+
+            using state_t = std::variant<std::monostate, connection, navigation, refresh, mutation, recursive, keepalive>;
+            // Wire-response state must never survive its owning workflow.
+            cmd_t command = c_none;
+            std::vector<direntry> staged;
+            state_t state;
+
+            template<class Flow, class... Args>
+            auto start(Args&&... args) -> Flow&
+            {
+                command = c_none;
+                staged.clear();
+                return state.template emplace<Flow>(std::forward<Args>(args)...);
+            }
+            void reset()
+            {
+                command = c_none;
+                staged.clear();
+                state.template emplace<std::monostate>();
+            }
+            template<class Flow> auto get_if()       -> Flow*       { return std::get_if<Flow>(&state); }
+            template<class Flow> auto get_if() const -> Flow const* { return std::get_if<Flow>(&state); }
+            template<class Flow> auto is() const { return std::holds_alternative<Flow>(state); }
+            template<class Flow> auto is(typename Flow::phase_t phase) const
+            {
+                auto flow = get_if<Flow>();
+                return flow && flow->phase == phase;
+            }
+            auto kind() const -> kind_t
+            {
+                return std::visit([](auto const& flow)
+                {
+                    using flow_t = std::decay_t<decltype(flow)>;
+                    if constexpr (std::is_same_v<flow_t, std::monostate>) return kind_t::none;
+                    else return flow_t::kind;
+                }, state);
+            }
+            auto active() const { return !std::holds_alternative<std::monostate>(state); }
+            auto wire_busy() const { return command != c_none; }
+            auto ensure_collecting(recursive::mode_t mode) -> recursive*
+            {
+                if (auto flow = get_if<recursive>())
+                    return flow->phase == recursive::phase_t::collecting && flow->mode == mode ? flow : nullptr;
+                if (active()) return nullptr;
+                return &start<recursive>(mode);
+            }
         };
+        static_assert(std::is_move_assignable_v<control_transaction>);
 
         sftp_session          session;
         text                  exe;
         std::vector<text>     runargs; // Backend run-prefix: {"-r","parvionsftp"} for the multi-call self, else empty.
         stage_t               stage = s_idle;
-        cmd_t                 await = c_none;
         text                  path = "/";
-        navigation            nav;
+        control_transaction   txn;
         text                  last_reply;
         std::vector<direntry> items;
-        std::vector<direntry> pending;
         text                  status = "Not connected.";
         text                  host, user, pass;
         si32                  port = 22;
@@ -1147,19 +1272,8 @@ namespace netxs::app::parvion
         //              and `rmdir` each directory deepest-first (plain `rmdir` cannot recurse).
         //   upload   : a synchronous local tree-walk produces a parent-first `mkdir` list plus the
         //              per-file uploads; the mkdirs run first, then the uploads are enqueued.
-        enum recop_t { rec_none, rec_download, rec_delete, rec_upload };
-        struct rec_dir { text remote; text local; }; // local is unused for delete/upload.
-        recop_t                recop = rec_none;
-        std::vector<rec_dir>   rec_stack;       // Remote dirs still to list (download/delete), DFS order.
-        rec_dir                rec_cur;         // The dir whose `ls` result is currently being processed.
-        std::vector<text>      rec_delfiles;    // delete: absolute remote file paths to `rm`.
-        std::vector<text>      rec_deldirs;     // delete: absolute remote dir paths (preorder; rmdir'd reversed).
-        std::vector<text>      rec_cmds;        // FIFO of one-shot commands (mkdir/rm/rmdir) for the command phase.
-        size_t                 rec_cmd_i = 0;   // Index of the next command in rec_cmds to run.
-        bool                   rec_cmds_built = faux; // delete: rec_cmds assembled once the walk finished.
-        std::vector<queue_item> rec_uploads;    // upload: per-file uploads to enqueue once the mkdirs complete.
-        size_t                 rec_download_files = 0; // download: files queued by the active recursive walk.
-        text  remote_refresh_path;    // Displayed remote dir touched by an upload; re-list only if still displayed when idle.
+        // Transfer completion defers its pane refresh until the control transaction is idle.
+        text  remote_refresh_path;
         ui64  local_gen = 0;          // Bumped when a download completes into the displayed local dir (pane re-lists).
         // Async local delete (delete_local_async): the detached worker touches only this
         // shared block of atomics, never the pane or this object's non-atomic fields, so it
@@ -1183,8 +1297,6 @@ namespace netxs::app::parvion
         // Connection / Connection-SFTP option pages. load()ed in the constructor and applied onto
         // the live fields below (apply_settings); the dialog edits a copy and calls update_settings.
         parvion_settings cfg;
-        size_t connect_keyfile_i = 0; // Cursor into cfg.keyfiles during the pre-auth c_keyfile phase.
-
         // Control-connection liveness (FileZilla parity). The control session handles
         // browsing/keepalive only; transfers run on their own connections, so the control
         // link sits idle during transfers and long pauses and the server may time it out
@@ -1193,12 +1305,6 @@ namespace netxs::app::parvion
         // and, if it drops anyway, transparently reconnect and restore the current dir
         // (mirrors the engine's reconnect-on-broken-connection).
         steady_clock::time_point last_activity = steady_clock::now(); // Last control-session traffic (send or recv).
-        steady_clock::time_point retry_at{};        // Earliest time for the next reconnect attempt.
-        si32  keep_skip = 0;          // Outstanding keepalive replies to swallow (kept off the nav state machine).
-        bool  recovering = faux;      // Restoring a previously-established control link that dropped.
-        bool  restoring  = faux;      // After a reconnect's auth, cd back to resume_path instead of pwd.
-        text  resume_path = "/";      // Remote dir to restore after a reconnect.
-        si32  reconnect_tries = 0;    // Consecutive reconnect attempts since the link dropped.
         si32  keepalive_sec = 30;     // Idle seconds before a keepalive (env PARVION_KEEPALIVE_SEC; 0 = off). FileZilla uses 30s.
         si32  reconnect_delay_sec = 5;// Delay between reconnect attempts (FileZilla OPTION_RECONNECTDELAY default).
         si32  max_reconnect_tries = 10;// Cap on consecutive reconnect attempts (env PARVION_RECONNECT_TRIES; 0 = unlimited).
@@ -1319,10 +1425,17 @@ namespace netxs::app::parvion
         // stall on a reply that never comes. A drop flips this false within one poll, and
         // poll() then reconnects.
         auto connected() const { return stage == s_connected && session.alive(); }
-        // `await` is strictly a wire command in flight. Navigation can remain busy between its cd
-        // and delayed ls without a command outstanding, so callers must use this combined gate.
-        auto control_idle() const { return await == c_none && !nav.active(); }
-        auto browse_available() const { return connected() && recop == rec_none && control_idle(); }
+        // Connection transaction present and not sitting in reconnect backoff. Used by poll() and
+        // the watchdog so they do not re-encode stage vs txn.phase ad hoc.
+        auto handshake_active() const -> bool
+        {
+            auto conn = txn.get_if<control_transaction::connection>();
+            return conn && conn->phase != control_transaction::connection::phase_t::retry_wait;
+        }
+        // The transaction can remain busy between wire commands (for example, a delayed navigation
+        // listing), so callers must use this ownership gate rather than only checking `command`.
+        auto control_idle() const { return !txn.active(); }
+        auto browse_available() const { return connected() && control_idle(); }
 
         // After a transfer completes, is the destination directory still the one shown on
         // the destination side? Upload -> remote `path`; download -> local `local_dir`.
@@ -1377,7 +1490,7 @@ namespace netxs::app::parvion
             trace(dbg_debug,
                   "Received SFTP event " + text{ sftp_evt_name(m.type) }
                       + " stage=" + text{ stage_name(stage) }
-                      + " await=" + text{ cmd_name(await) });
+                      + " await=" + text{ cmd_name(txn.command) });
         }
         // Short connect-bar hint; mirrored into the log as a Status line.
         void mark(text s) { status = s; log_line(logtype::status, std::move(s)); dirty = true; }
@@ -1399,6 +1512,7 @@ namespace netxs::app::parvion
         {
             if (sec_req.is_passphrase) key_passphrases[sec_req.keyfile] = v;
             else                       pass = v; // Remember the working account password for this session.
+            last_activity = steady_clock::now(); // Re-arm the response watchdog after user think time.
             session.write_line(v);
             sec = sec_idle;
         }
@@ -1408,18 +1522,50 @@ namespace netxs::app::parvion
         {
             trace(dbg_debug, "Closing SFTP control connection (authentication cancelled)");
             session.stop();
+            txn.reset();
             sec = sec_idle;
             fail("Authentication cancelled.");
             stage = s_failed;
         }
         // Issue a user-visible SFTP command on the control session, logging it as
         // a Command line first (mirrors FileZilla logging the command it sends).
-        void send_cmd(view c)
+        auto issue_command(cmd_t command, view c, bool visible = true) -> bool
         {
-            trace(dbg_verbose, "Sending SFTP command: " + text{ c } + " (state " + text{ cmd_name(await) } + ")");
+            if (!txn.active() || txn.wire_busy())
+            {
+                trace(dbg_warning, "Refusing control command without an idle owning transaction: " + text{ c });
+                return faux;
+            }
+            txn.command = command;
+            trace(dbg_verbose, "Sending SFTP command: " + text{ c } + " (state " + text{ cmd_name(command) } + ")");
             last_activity = steady_clock::now();
-            log_line(logtype::command, text{ c });
+            if (visible) log_line(logtype::command, text{ c });
             session.write_line(c);
+            return true;
+        }
+        // Do not replace the workflow that owns an in-flight helper response.
+        template<class Flow, class... Args>
+        auto launch(cmd_t command, view c, bool visible, Args&&... args) -> Flow*
+        {
+            if (txn.active())
+            {
+                trace(dbg_warning, "Refusing to replace an active control transaction: " + text{ c });
+                return nullptr;
+            }
+            auto& flow = txn.start<Flow>(std::forward<Args>(args)...);
+            if (issue_command(command, c, visible)) return &flow;
+            if (!txn.wire_busy()) txn.reset();
+            return nullptr;
+        }
+        auto issue_followup(cmd_t command, view c, bool visible = true) -> bool
+        {
+            if (issue_command(command, c, visible)) return true;
+            if (!txn.wire_busy())
+            {
+                trace(dbg_warning, "Dropping control transaction after a follow-up command was refused: " + text{ c });
+                txn.reset();
+            }
+            return faux;
         }
         // Per-transfer outcome summary, mirroring CControlSocket::LogTransferResultMessage:
         // a Status "File transfer successful[, transferred X in Y]" or an Error
@@ -1498,18 +1644,14 @@ namespace netxs::app::parvion
         {
             session.stop();
             items.clear();
-            pending.clear();
             host = std::move(h);
             port = p;
             user = u.empty() ? text{ "anonymous" } : std::move(u);
             pass = std::move(pw);
             path = "/";
-            await = c_none;
-            nav = {};
+            txn.reset();
             remote_refresh_path.clear();
-            reset_recop(); // Drop any half-finished folder walk from a previous session.
             idle_pool.clear(); // Drop pooled transfer connections to the previous server.
-            recovering = faux; restoring = faux; reconnect_tries = 0; keep_skip = 0; // Fresh user-initiated connect, not a recovery.
             key_passphrases.clear(); pass_asked.clear(); account_asked = faux; // Fresh credentials: drop any cached passphrases.
             sec = sec_idle; last_preamble.clear(); last_instruction.clear();
             last_activity = steady_clock::now();
@@ -1526,6 +1668,7 @@ namespace netxs::app::parvion
                 stage = s_failed;
                 return;
             }
+            txn.start<control_transaction::connection>();
             stage = s_greeting;
         }
 
@@ -1534,16 +1677,12 @@ namespace netxs::app::parvion
             trace(dbg_debug, "Closing SFTP control connection (disconnect)");
             session.stop();
             stage = s_idle;
-            await = c_none;
-            nav = {};
+            txn.reset();
             remote_refresh_path.clear();
-            reset_recop(); // Drop any half-finished folder walk.
             idle_pool.clear(); // Close pooled transfer connections.
-            recovering = faux; restoring = faux; reconnect_tries = 0; keep_skip = 0; // User asked to disconnect: don't auto-reconnect.
             key_passphrases.clear(); pass_asked.clear(); account_asked = faux;
             sec = sec_idle; last_preamble.clear(); last_instruction.clear();
             items.clear();
-            pending.clear();
             mark("Not connected.");
         }
 
@@ -1557,18 +1696,27 @@ namespace netxs::app::parvion
                 // A passphrase/password prompt came due: raise the UI modal exactly once (the backend
                 // re-emits the sequence on a wrong answer, which re-arms sec_pending for a fresh modal).
                 if (sec == sec_pending && on_prompt_secret) { sec = sec_shown; on_prompt_secret(sec_req); }
-                if (!session.alive() && (stage == s_greeting || stage == s_opening))
+                if (!session.alive() && stage == s_connected)
                 {
-                    trace(dbg_warning, "Backend exited during " + text{ stage == s_greeting ? "greeting" : "authentication" } + ".");
-                    stage = s_failed;
-                    // A failed reconnect attempt: keep recovering and pace the next try; a
-                    // failed first connect: surface it (no auto-retry).
-                    if (recovering) { retry_at = steady_clock::now() + std::chrono::seconds{ reconnect_delay_sec }; mark("Reconnect attempt failed; retrying..."); }
-                    else mark("parvionsftp exited unexpectedly.");
+                    begin_recover(); // Authentication succeeded, even if path discovery is still active.
                 }
-                else if (!session.alive() && stage == s_connected)
+                else if (!session.alive() && handshake_active())
                 {
-                    begin_recover(); // An established control link dropped (idle timeout / network / server restart).
+                    auto conn = txn.get_if<control_transaction::connection>();
+                    if (!conn) { txn.reset(); stage = s_failed; mark("parvionsftp exited unexpectedly."); }
+                    else
+                    {
+                        trace(dbg_warning, "Backend exited during " + text{ stage == s_greeting ? "greeting" : "authentication" } + ".");
+                        if (conn->reconnect)
+                        {
+                            txn.command = c_none;
+                            conn->phase = control_transaction::connection::phase_t::retry_wait;
+                            conn->retry_at = steady_clock::now() + std::chrono::seconds{ reconnect_delay_sec };
+                            stage = s_idle;
+                            mark("Reconnect attempt failed; retrying...");
+                        }
+                        else { txn.reset(); stage = s_failed; mark("parvionsftp exited unexpectedly."); }
+                    }
                 }
             }
             drive_reconnect(); // Backoff-paced (re)connect attempts while recovering.
@@ -1579,16 +1727,17 @@ namespace netxs::app::parvion
             pump_hash(); // Drive checksum workers (own queue/pool; runs even when disconnected for local files).
             // A completed upload landed in the displayed remote dir: re-list it. Only when
             // the control session is idle, so we don't clobber an in-flight cd/ls (checked
-            // here, after pump_queue, so `await` reflects this tick's drained replies).
+            // here, after pump_queue, so txn.command reflects this tick's drained replies).
             if (!remote_refresh_path.empty() && browse_available())
             {
                 auto refresh_path = std::exchange(remote_refresh_path, text{});
-                if (refresh_path == path) list_dir();
+                if (refresh_path == path) begin_refresh(refresh_path);
             }
             // Test seam: a post-cd `ls` held by PARVION_DEBUG_LS_DELAY_MS is now due. No wire
-            // command is outstanding in this phase, but nav.active() keeps all other owners out.
-            if (nav.phase == navigation::waiting_to_list && steady_clock::now() >= nav.list_due)
-                start_navigation_listing();
+            // command is outstanding in this phase, but the transaction keeps all other owners out.
+            if (auto nav = txn.get_if<control_transaction::navigation>();
+                nav && nav->phase == control_transaction::navigation::phase_t::waiting_to_list
+                    && steady_clock::now() >= nav->list_due) start_navigation_listing();
             drive_recop(); // Pace a recursive folder download/upload/delete on the idle control session.
             // Fold async local-delete progress into local_gen (the timer re-lists the local pane
             // per tick, so rows vanish as items go). `running` is read before `done`: seeing 0
@@ -1606,23 +1755,24 @@ namespace netxs::app::parvion
                 }
             }
         }
+        // Same path poll() uses after drain(); tests feed parsed helper events without a live process.
+        void apply_event(sftp_msg const& m) { process(m); }
 
         // The established control link dropped: remember where we were and hand off to the
         // backoff-paced reconnect driver. The stale `items` stay on screen (pane shows the
         // "Reconnecting..." status) until the restored listing replaces them.
-        void begin_recover(bool preserve_attempts = faux)
+        void begin_recover()
         {
-            if (recovering) return;
-            preserve_attempts = preserve_attempts
-                             || (nav.active() && nav.origin == navigation::reconnect_restore);
-            recovering = true;
-            if (!preserve_attempts) reconnect_tries = 0;
-            resume_path = path;                 // cd back here once re-authed
-            await = c_none;
-            nav = {};                           // Drop staged paths, fallbacks and deferred listings.
-            keep_skip = 0;
+            auto old_conn = txn.get_if<control_transaction::connection>();
+            auto attempts = old_conn && old_conn->reconnect ? old_conn->attempts : 0;
+            if (txn.is<control_transaction::mutation>() || txn.is<control_transaction::recursive>())
+                fail("Control connection lost; the remote operation may be incomplete.");
+            if (txn.wire_busy())
+                trace(dbg_warning, "Replacing a wire-busy control transaction");
+            auto& conn = txn.start<control_transaction::connection>(true, path, attempts);
+            conn.phase = control_transaction::connection::phase_t::retry_wait;
+            conn.retry_at = steady_clock::now();
             remote_refresh_path.clear();
-            retry_at = steady_clock::now();     // first attempt immediately
             stage = s_idle;                     // leave s_connected; drive_reconnect() relaunches
             fail("Control connection lost. Reconnecting...");
             trace(dbg_debug, "Closing SFTP control connection (connection lost)");
@@ -1631,79 +1781,84 @@ namespace netxs::app::parvion
         // is back or we exhaust the attempt cap.
         void drive_reconnect()
         {
-            if (!recovering) return;
-            if (stage == s_greeting || stage == s_opening || stage == s_connected) return; // attempt in flight / already up
-            if (steady_clock::now() < retry_at) return;
-            if (max_reconnect_tries > 0 && reconnect_tries >= max_reconnect_tries)
+            auto conn = txn.get_if<control_transaction::connection>();
+            if (!conn || !conn->reconnect || conn->phase != control_transaction::connection::phase_t::retry_wait) return;
+            if (steady_clock::now() < conn->retry_at) return;
+            if (max_reconnect_tries > 0 && conn->attempts >= max_reconnect_tries)
             {
-                recovering = faux;
                 fail("Reconnect attempts exhausted. Press Connect to retry.");
+                txn.reset();
                 stage = s_failed;
                 return;
             }
             // Pace from the attempt's start so a fast failure (error -> s_failed, or backend
             // death) can't spin a hot retry loop before this delay elapses.
-            retry_at = steady_clock::now() + std::chrono::seconds{ reconnect_delay_sec };
-            ++reconnect_tries;
+            conn->retry_at = steady_clock::now() + std::chrono::seconds{ reconnect_delay_sec };
+            ++conn->attempts;
             do_reconnect();
         }
         void do_reconnect()
         {
+            auto conn_ptr = txn.get_if<control_transaction::connection>();
+            if (!conn_ptr) { txn.reset(); stage = s_failed; return; }
+            auto& conn = *conn_ptr;
             session.stop();
-            await = c_none;
-            nav = {};
-            keep_skip = 0;
-            restoring = true; // restore resume_path after auth (see complete()/c_open)
-            mark("Reconnecting to " + host + " (attempt " + std::to_string(reconnect_tries) + ")...");
+            txn.command = c_none;
+            txn.staged.clear();
+            conn.phase = control_transaction::connection::phase_t::waiting_greeting;
+            mark("Reconnecting to " + host + " (attempt " + std::to_string(conn.attempts) + ")...");
             session.runargs = runargs;
             if (cfg.compression) session.runargs.push_back("-C"); // SFTP compression (Settings -> SFTP).
             if (!session.launch(exe))
             {
                 trace(dbg_warning, "Could not create process");
                 trace(dbg_warning, "Failed to launch parvionsftp during reconnect: " + exe);
-                stage = s_failed;
-                retry_at = steady_clock::now() + std::chrono::seconds{ reconnect_delay_sec };
+                stage = s_idle;
+                conn.phase = control_transaction::connection::phase_t::retry_wait;
+                conn.retry_at = steady_clock::now() + std::chrono::seconds{ reconnect_delay_sec };
                 return;
             }
             pass_asked.clear(); account_asked = faux; last_preamble.clear(); last_instruction.clear(); // Fresh backend auth (keep cached passphrases for this server).
             stage = s_greeting;
             last_activity = steady_clock::now();
         }
-        // Inactivity/response watchdog (FileZilla CControlSocket OPTION_TIMEOUT parity). While the
-        // link is "waiting" -- a real command outstanding (await != c_none) or a keepalive pwd in
-        // flight (keep_skip > 0) -- if no control traffic has arrived within response_timeout_sec the
-        // SSH link is dead even though the backend helper hasn't noticed (silent half-open: no
+        // Inactivity/response watchdog (FileZilla CControlSocket OPTION_TIMEOUT parity). If no
+        // control traffic arrives while a command is outstanding, presume the SSH link dead even
+        // though the backend helper has not noticed the silent half-open (no
         // RST/FIN). Force recovery rather than wait for the helper's slower internal kill. last_activity
         // is reset on every inbound drain (poll(), so each streaming `ls` chunk re-arms it) and every
-        // outbound send, so a slow-but-alive listing never trips this. RST/FIN is still caught instantly
-        // via session.alive() in poll(); this covers only the silent case.
+        // outbound send, so a slow-but-alive listing never trips this. Interactive credential prompts
+        // pause the clock until provide_secret() re-arms it. RST/FIN is still caught instantly via
+        // session.alive() in poll(); this covers only the silent case.
         void maybe_watchdog()
         {
             if (response_timeout_sec <= 0) return;
-            if (stage != s_connected || !session.alive()) return;
-            if (recovering) return;                        // A recovery is already in flight; don't double-fire.
-            if (await == c_none && keep_skip == 0) return; // Link genuinely idle: nothing outstanding to time out.
+            if (!session.alive()) return;
+            if (stage != s_connected && !handshake_active()) return;
+            if (!txn.wire_busy()) return;
+            if (sec != sec_idle) return; // User think time at a password/passphrase modal is not link inactivity.
             if (steady_clock::now() - last_activity <= std::chrono::seconds{ response_timeout_sec }) return;
             trace(dbg_warning, "Control response timeout (" + std::to_string(response_timeout_sec) + "s); link presumed dead.");
+            if (stage != s_connected && txn.is<control_transaction::connection>())
+            {
+                fail_connection(txn.command, connection_failure_t::timeout);
+                return;
+            }
             begin_recover();
         }
         // Keep the idle control link warm with a cheap `pwd` (mirrors CFtpControlSocket's
         // keep-alive). It runs only when the link is genuinely idle (no nav command, no
-        // keepalive already outstanding); its reply is swallowed via keep_skip so it never
-        // disturbs the navigation state machine. Fires during transfers too -- that's when
+        // keepalive already outstanding). Keepalive itself owns the transaction slot, so its reply
+        // cannot be mistaken for another flow's terminal event. Fires during transfers too -- that's when
         // the control link is most likely to be idled out from under the post-upload refresh.
         void maybe_keepalive()
         {
             if (keepalive_sec <= 0) return;
             if (stage != s_connected || !session.alive()) return;
             auto now = steady_clock::now();
-            if (keep_skip > 0) return;    // A keepalive is still outstanding; maybe_watchdog() owns its timeout now.
             if (!control_idle()) return; // A command or deferred navigation owns the control session.
             if (now - last_activity < std::chrono::seconds{ keepalive_sec }) return;
-            ++keep_skip;
-            last_activity = now;
-            trace(dbg_verbose, "Sending keepalive command");
-            session.write_line("pwd");
+            launch<control_transaction::keepalive>(c_pwd, "pwd", faux);
         }
 
         void enqueue_download(text const& name, si64 size)
@@ -1756,33 +1911,35 @@ namespace netxs::app::parvion
         // into sub-directories. Additive: selecting several folders extends the same walk.
         void download_folder(text const& name)
         {
-            if (!connected() || name.empty() || recop == rec_delete || recop == rec_upload) return;
+            if (!connected() || name.empty()) return;
+            auto rec = txn.ensure_collecting(control_transaction::recursive::mode_t::download);
+            if (!rec) return;
             auto r = child_path(path, name, faux);
             auto l = child_path(local_dir, name, true);
             auto ec = std::error_code{}; fs::create_directories(fs::path{ l }, ec);
-            if (recop == rec_none) rec_download_files = 0;
-            recop = rec_download;
-            rec_stack.push_back({ r, l });
+            rec->stack.push_back({ r, l });
             mark("Downloading directory " + name + "...");
         }
         // Recursively remove a remote directory `name` (plain rmdir cannot recurse): walk it to collect
         // its files and sub-dirs, then rm/rmdir them deepest-first (driven later by drive_recop).
         void delete_folder(text const& name)
         {
-            if (!connected() || name.empty() || recop == rec_download || recop == rec_upload) return;
+            if (!connected() || name.empty()) return;
+            auto rec = txn.ensure_collecting(control_transaction::recursive::mode_t::delete_);
+            if (!rec) return;
             auto r = child_path(path, name, faux);
-            recop = rec_delete;
-            rec_deldirs.push_back(r);        // the folder itself, rmdir'd last.
-            rec_stack.push_back({ r, {} });
+            rec->delete_dirs.push_back(r);        // the folder itself, rmdir'd last.
+            rec->stack.push_back({ r, {} });
             mark("Deleting directory " + name + "...");
         }
         // Remove a single remote file as part of a (possibly mixed) delete selection: routed through
         // the same recop engine so it can't race a concurrent folder walk on the control session.
         void delete_remote_file(text const& name)
         {
-            if (!connected() || name.empty() || recop == rec_download || recop == rec_upload) return;
-            recop = rec_delete;
-            rec_delfiles.push_back(child_path(path, name, faux));
+            if (!connected() || name.empty()) return;
+            auto rec = txn.ensure_collecting(control_transaction::recursive::mode_t::delete_);
+            if (!rec) return;
+            rec->delete_files.push_back(child_path(path, name, faux));
         }
         // Remove local items (absolute paths, recursing into folders) on a detached worker so a
         // big subtree can't freeze the UI. The worker owns the shared atomics block only; poll()
@@ -1810,11 +1967,12 @@ namespace netxs::app::parvion
         // uploads are enqueued only once those mkdirs have run, so no upload outruns its parent dir.
         void upload_folder(text const& local_full, text const& name)
         {
-            if (!connected() || name.empty() || recop == rec_download || recop == rec_delete) return;
-            recop = rec_upload;
+            if (!connected() || name.empty()) return;
+            auto rec = txn.ensure_collecting(control_transaction::recursive::mode_t::upload);
+            if (!rec) return;
             auto rroot = child_path(path, name, faux);
-            rec_cmds.push_back("mkdir " + quote_name(rroot));
-            walk_local_for_upload(local_full, rroot);
+            rec->commands.push_back("mkdir " + quote_name(rroot));
+            walk_local_for_upload(*rec, local_full, rroot);
             mark("Uploading directory " + name + "...");
         }
         void clear_finished()
@@ -1918,26 +2076,19 @@ namespace netxs::app::parvion
         // Browsing and one-shot remote ops are blocked while a recursive folder operation owns the
         // control session (FileZilla disables navigation during a recursive operation), so a stray
         // cd/mkdir can't interleave with the walk's `ls` commands.
-        auto begin_navigation(text target, text fallback_name = {}, si64 fallback_size = -1,
-                              navigation::origin_t origin = navigation::user, text message = {}) -> bool
+        auto begin_navigation(text target, text fallback_name = {}, si64 fallback_size = -1, text message = {}) -> bool
         {
             if (!browse_available() || target.empty()) return faux;
-            nav = {};
-            nav.phase = navigation::changing_directory;
-            nav.origin = origin;
-            nav.source = path;
-            nav.target = std::move(target);
-            nav.fallback_name = std::move(fallback_name);
-            nav.fallback_size = fallback_size;
-            await = c_cd;
-            send_cmd("cd " + quote_name(nav.target));
+            auto quoted = "cd " + quote_name(target);
+            if (!launch<control_transaction::navigation>(c_cd, quoted, true, path, std::move(target), std::move(fallback_name), fallback_size))
+                return faux;
             if (!message.empty()) mark(std::move(message));
             return true;
         }
         void chdir(text const& name)
         {
             auto target = child_path(path, name, faux);
-            begin_navigation(target, {}, -1, navigation::user, "Entering " + target + "...");
+            begin_navigation(target, {}, -1, "Entering " + target + "...");
         }
         // A listing identifies a symlink but not its referent type. The normal remote cd command
         // follows links and authoritatively opens directories; failure retains file-like activation.
@@ -1959,40 +2110,39 @@ namespace netxs::app::parvion
             // committed path (and the title) is the real target, not e.g. "/home/user/..".
             auto full = newpath.front() == '/' ? newpath : child_path(path, newpath, faux);
             auto target = normalize_posix(full);
-            begin_navigation(target, {}, -1, navigation::user, "Entering " + target + "...");
+            begin_navigation(target, {}, -1, "Entering " + target + "...");
         }
-        // Remote file operations (psftp/parvionsftp verbs): each fires the command and then re-lists the
-        // current directory once the backend reports done (handled as c_op in command_done).
+        auto begin_mutation(text command, text message) -> bool
+        {
+            if (!browse_available()) return faux;
+            if (!launch<control_transaction::mutation>(c_op, command, true, path)) return faux;
+            mark(std::move(message));
+            return true;
+        }
+        // Remote file operations re-list the current directory through complete_mutation().
         auto remote_touch(text const& name) -> bool
         {
             if (!browse_available() || name.empty()) return faux;
-            await = c_op;
-            send_cmd("parvion-touch " + quote_name(child_path(path, name, faux)));
-            mark("Creating document " + name + "...");
-            return true;
+            return begin_mutation("parvion-touch " + quote_name(child_path(path, name, faux)),
+                                  "Creating document " + name + "...");
         }
         auto remote_mkdir(text const& name) -> bool
         {
             if (!browse_available() || name.empty()) return faux;
-            await = c_op;
-            send_cmd("mkdir " + quote_name(child_path(path, name, faux)));
-            mark("Creating directory " + name + "...");
-            return true;
+            return begin_mutation("mkdir " + quote_name(child_path(path, name, faux)),
+                                  "Creating directory " + name + "...");
         }
         void remote_remove(text const& name, bool is_dir)
         {
             if (!browse_available() || name.empty()) return;
-            await = c_op;
-            send_cmd((is_dir ? text{ "rmdir " } : text{ "rm " }) + quote_name(child_path(path, name, faux)));
-            mark("Deleting " + name + "...");
+            begin_mutation((is_dir ? text{ "rmdir " } : text{ "rm " }) + quote_name(child_path(path, name, faux)),
+                           "Deleting " + name + "...");
         }
         auto remote_rename(text const& oldname, text const& newname) -> bool
         {
             if (!browse_available() || oldname.empty() || newname.empty()) return faux;
-            await = c_op;
-            send_cmd("mv " + quote_name(child_path(path, oldname, faux)) + " " + quote_name(child_path(path, newname, faux)));
-            mark("Renaming " + oldname + " to " + newname + "...");
-            return true;
+            return begin_mutation("mv " + quote_name(child_path(path, oldname, faux)) + " " + quote_name(child_path(path, newname, faux)),
+                                  "Renaming " + oldname + " to " + newname + "...");
         }
         // Re-list the current remote directory when the control link is next idle (poll() drains it).
         void request_refresh() { remote_refresh_path = path; }
@@ -2001,7 +2151,7 @@ namespace netxs::app::parvion
         // Synchronous local tree-walk for an upload: append a parent-first `mkdir` for each local
         // sub-directory and stage a queue_item for each file, both rooted at the remote `rroot`.
         // Directories are recursed in sorted order so the mkdir list is always parent-before-child.
-        void walk_local_for_upload(text const& lroot, text const& rroot)
+        void walk_local_for_upload(control_transaction::recursive& rec, text const& lroot, text const& rroot)
         {
             auto subdirs = std::vector<std::pair<text, text>>{}; // (local, remote) sub-dirs to recurse, sorted.
             for (auto& e : read_local_dir(fs::path{ lroot }))
@@ -2011,7 +2161,7 @@ namespace netxs::app::parvion
                 auto rchild = child_path(rroot, e.name, faux);
                 if (e.is_dir)
                 {
-                    rec_cmds.push_back("mkdir " + quote_name(rchild));
+                    rec.commands.push_back("mkdir " + quote_name(rchild));
                     subdirs.emplace_back(lchild, rchild);
                 }
                 else
@@ -2023,81 +2173,69 @@ namespace netxs::app::parvion
                     it.dest_dir    = path;
                     it.size        = e.size < 0 ? 0 : e.size;
                     it.status      = queue_item::queued;
-                    rec_uploads.push_back(std::move(it));
+                    rec.uploads.push_back(std::move(it));
                 }
             }
-            for (auto& [l, r] : subdirs) walk_local_for_upload(l, r); // Recurse after this level's mkdirs.
+            for (auto& [l, r] : subdirs) walk_local_for_upload(rec, l, r); // Recurse after this level's mkdirs.
         }
         // Pace a recursive folder operation on the (idle) control session: one `ls` per pending dir
         // during the walk, then one queued mkdir/rm/rmdir per tick during the command phase. Called
         // from poll() once the session is connected and no other command is in flight.
         void drive_recop()
         {
-            if (recop == rec_none || !connected() || !control_idle()) return;
-            if (!rec_stack.empty()) // Walk phase: list the next remote dir.
+            auto rec = txn.get_if<control_transaction::recursive>();
+            if (!rec || !connected() || txn.wire_busy()) return;
+            if (!rec->stack.empty()) // Walk phase: list the next remote dir.
             {
-                rec_cur = rec_stack.back();
-                rec_stack.pop_back();
-                pending.clear();
-                mark("Retrieving directory listing of \"" + rec_cur.remote + "\"...");
-                await = c_rls;
-                send_cmd("ls " + quote_name(rec_cur.remote));
+                rec->current = rec->stack.back();
+                rec->stack.pop_back();
+                txn.staged.clear();
+                rec->phase = control_transaction::recursive::phase_t::listing;
+                mark("Retrieving directory listing of \"" + rec->current.remote + "\"...");
+                issue_followup(c_rls, "ls " + quote_name(rec->current.remote));
                 return;
             }
-            if (recop == rec_delete && !rec_cmds_built) // Walk done: assemble the removal commands.
+            if (rec->mode == control_transaction::recursive::mode_t::delete_ && !rec->commands_built)
             {
-                for (auto& f : rec_delfiles) rec_cmds.push_back("rm " + quote_name(f));
-                for (auto i = rec_deldirs.size(); i-- > 0;) rec_cmds.push_back("rmdir " + quote_name(rec_deldirs[i]));
-                rec_cmds_built = true;
+                for (auto& f : rec->delete_files) rec->commands.push_back("rm " + quote_name(f));
+                for (auto i = rec->delete_dirs.size(); i-- > 0;) rec->commands.push_back("rmdir " + quote_name(rec->delete_dirs[i]));
+                rec->commands_built = true;
             }
-            if (rec_cmd_i < rec_cmds.size()) // Command phase: mkdir (upload) / rm+rmdir (delete).
+            if (rec->command_i < rec->commands.size())
             {
-                await = c_recop;
-                send_cmd(rec_cmds[rec_cmd_i++]);
+                rec->phase = control_transaction::recursive::phase_t::executing;
+                issue_followup(c_recop, rec->commands[rec->command_i]);
                 return;
             }
-            finish_recop();
+            finish_recop(*rec);
         }
-        // Discard all recursive-operation state (on connect/disconnect), abandoning any walk in flight.
-        void reset_recop()
+        void finish_recop(control_transaction::recursive& rec)
         {
-            recop = rec_none;
-            rec_stack.clear(); rec_cmds.clear(); rec_cmd_i = 0; rec_cmds_built = faux;
-            rec_download_files = 0;
-            rec_delfiles.clear(); rec_deldirs.clear(); rec_uploads.clear();
-        }
-        void finish_recop()
-        {
-            auto was = recop;
-            auto download_files = rec_download_files;
-            auto upload_files = rec_uploads.size();
-            auto delete_items = rec_delfiles.size() + rec_deldirs.size();
-            recop = rec_none;
-            rec_stack.clear(); rec_cmds.clear(); rec_cmd_i = 0; rec_cmds_built = faux;
-            rec_download_files = 0;
-            rec_delfiles.clear(); rec_deldirs.clear();
-            if (was == rec_upload)
+            auto was = rec.mode;
+            auto download_files = rec.download_files;
+            auto upload_files = rec.uploads.size();
+            auto delete_items = rec.delete_files.size() + rec.delete_dirs.size();
+            if (was == control_transaction::recursive::mode_t::upload)
             {
-                for (auto& it : rec_uploads)
+                for (auto& it : rec.uploads)
                 {
                     it.id = ++transfer_id_seq;
                     queue.push_back(std::move(it)); // Dirs exist now: safe to upload.
                 }
-                rec_uploads.clear();
                 auto msg = text{ "Remote directory tree prepared." };
                 if (upload_files) msg = "Remote directory tree prepared; queued " + std::to_string(upload_files) + " upload(s).";
-                mark(std::move(msg));
-                remote_refresh_path = path; // Show the freshly-created remote tree if it is still displayed.
+                rec.completion_status = std::move(msg);
+                mark(rec.completion_status);
             }
-            else if (was == rec_delete)
+            else if (was == control_transaction::recursive::mode_t::delete_)
             {
                 auto msg = text{ "Delete operation finished" };
                 if (delete_items) msg += " (" + std::to_string(delete_items) + " item(s))";
                 msg += ".";
-                mark(std::move(msg));
-                list_dir(); // The subtree is gone: refresh the remote pane.
+                rec.completion_status = std::move(msg);
+                mark(rec.completion_status);
             }
-            else if (was == rec_download)
+            else if (was == control_transaction::recursive::mode_t::download)
             {
                 if (download_files) mark("Queued " + std::to_string(download_files) + " download(s).");
                 else                mark("No files found to download.");
@@ -2105,6 +2243,15 @@ namespace netxs::app::parvion
             // download: per-file downloads were enqueued during the walk and run on their own
             // connections; each completion bumps local_gen, which re-lists the local pane.
             dirty = true;
+            if (was == control_transaction::recursive::mode_t::delete_
+             || was == control_transaction::recursive::mode_t::upload)
+            {
+                txn.staged.clear();
+                rec.phase = control_transaction::recursive::phase_t::listing_result;
+                log_line(logtype::status, "Retrieving directory listing of \"" + path + "\"...");
+                issue_followup(c_ls, "ls");
+            }
+            else txn.reset();
         }
 
     private:
@@ -2650,70 +2797,223 @@ namespace netxs::app::parvion
                 else                                                        dispatch_strict();
             }
         }
-        void list_dir()
+        auto begin_refresh(text target) -> bool
         {
-            pending.clear();
+            if (!connected() || txn.active() || target != path) return faux;
+            if (!launch<control_transaction::refresh>(c_ls, "ls", true, std::move(target))) return faux;
             mark("Retrieving directory listing of \"" + path + "\"...");
-            await = c_ls;
-            send_cmd("ls");
+            return true;
         }
-
         void start_navigation_listing()
         {
-            if (nav.phase != navigation::waiting_to_list || await != c_none) return;
-            pending.clear();
-            nav.phase = navigation::listing_destination;
-            mark("Retrieving directory listing of \"" + nav.target + "\"...");
-            await = c_ls;
-            send_cmd("ls");
+            auto nav = txn.get_if<control_transaction::navigation>();
+            if (!nav || nav->phase != control_transaction::navigation::phase_t::waiting_to_list || txn.wire_busy()) return;
+            txn.staged.clear();
+            nav->phase = control_transaction::navigation::phase_t::listing_destination;
+            mark("Retrieving directory listing of \"" + nav->target + "\"...");
+            issue_followup(c_ls, "ls");
         }
 
         void start_navigation_rollback()
         {
-            if (!nav.active() || await != c_none) return;
-            pending.clear();
-            nav.phase = navigation::rolling_back;
-            await = c_cd_rollback;
-            send_cmd("cd " + quote_name(nav.source));
+            auto nav = txn.get_if<control_transaction::navigation>();
+            if (!nav || txn.wire_busy()) return;
+            txn.staged.clear();
+            nav->phase = control_transaction::navigation::phase_t::rolling_back;
+            if (issue_command(c_cd_rollback, "cd " + quote_name(nav->source))) return;
+            if (!txn.wire_busy())
+            {
+                txn.reset();
+                begin_recover();
+            }
         }
+
+        enum class connection_failure_t { command, timeout };
+        void fail_connection(cmd_t command, connection_failure_t reason = connection_failure_t::command)
+        {
+            auto conn_ptr = txn.get_if<control_transaction::connection>();
+            if (!conn_ptr) { invalid_completion("Connection failure without a connection transaction"); return; }
+            auto& conn = *conn_ptr;
+            if (reason == connection_failure_t::command && command == c_keyfile) send_next_keyfile_or_open();
+            else
+            {
+                txn.command = c_none;
+                if (conn.reconnect)
+                {
+                    session.stop();
+                    conn.phase = control_transaction::connection::phase_t::retry_wait;
+                    conn.retry_at = steady_clock::now() + std::chrono::seconds{ reconnect_delay_sec };
+                    stage = s_idle;
+                    mark(reason == connection_failure_t::timeout
+                       ? "Reconnect attempt timed out; retrying..."
+                       : "Reconnect attempt failed; retrying...");
+                }
+                else if (stage == s_connected)
+                {
+                    if (command == c_ls && conn.phase == control_transaction::connection::phase_t::listing)
+                    {
+                        path = conn.target.empty() ? path : conn.target;
+                        items.clear();
+                        ++gen;
+                    }
+                    txn.reset();
+                    fail(command == c_pwd
+                       ? "Could not determine the remote working directory; connection remains open."
+                       : "Could not retrieve the initial directory listing; connection remains open.");
+                }
+                else
+                {
+                    session.stop();
+                    txn.reset();
+                    stage = s_failed;
+                    if (reason == connection_failure_t::timeout) fail("Connection attempt timed out.");
+                    else if (!status.starts_with("Error:"))      fail("Connection attempt failed.");
+                }
+            }
+        }
+        void fail_navigation(cmd_t command)
+        {
+            auto nav_ptr = txn.get_if<control_transaction::navigation>();
+            if (!nav_ptr) { invalid_completion("Navigation failure without a navigation transaction"); return; }
+            auto& nav = *nav_ptr;
+            if (command == c_cd && nav.phase == control_transaction::navigation::phase_t::changing_directory)
+            {
+                auto fallback_name = nav.fallback_name;
+                auto fallback_size = nav.fallback_size;
+                txn.reset();
+                if (!fallback_name.empty()) enqueue_download(fallback_name, fallback_size);
+            }
+            else if (command == c_cd_rollback)
+            {
+                txn.reset();
+                begin_recover(); // Backend cwd is unknown; restore the committed path.
+            }
+            else if (command == c_ls && nav.phase == control_transaction::navigation::phase_t::listing_destination)
+            {
+                txn.staged.clear();
+                start_navigation_rollback();
+            }
+            else txn.reset();
+        }
+        void fail_refresh() { txn.reset(); }
+        void fail_mutation()
+        {
+            auto mutation = txn.get_if<control_transaction::mutation>();
+            if (!mutation) { invalid_completion("Mutation failure without a mutation transaction"); return; }
+            if (mutation->phase == control_transaction::mutation::phase_t::executing)
+            {
+                mutation->phase = control_transaction::mutation::phase_t::listing_after_failure;
+                txn.staged.clear();
+                issue_followup(c_ls, "ls");
+            }
+            else
+            {
+                txn.reset();
+                fail("Remote operation completed but its directory refresh failed.");
+            }
+        }
+        static auto recop_mkdir_target(view command) -> text
+        {
+            static constexpr auto prefix = view{ "mkdir " };
+            if (!command.starts_with(prefix)) return {};
+            auto q = command.substr(prefix.size());
+            if (q.size() >= 2 && q.front() == '"' && q.back() == '"')
+            {
+                auto out = text{};
+                out.reserve(q.size() - 2);
+                for (size_t i = 1; i + 1 < q.size(); ++i)
+                {
+                    if (q[i] == '"' && i + 1 < q.size() - 1 && q[i + 1] == '"') { out.push_back('"'); ++i; }
+                    else out.push_back(q[i]);
+                }
+                return out;
+            }
+            return text{ q };
+        }
+        static auto recop_mkdir_name(text const& target) -> view
+        {
+            auto pos = target.find_last_of('/');
+            return pos == text::npos ? view{ target } : view{ target }.substr(pos + 1);
+        }
+        void abort_recursive_upload()
+        {
+            auto rec = txn.get_if<control_transaction::recursive>();
+            if (!rec) { invalid_completion("Recursive upload abort without a recursive transaction"); return; }
+            rec->phase = control_transaction::recursive::phase_t::listing_after_abort;
+            txn.staged.clear();
+            if (issue_followup(c_ls, "ls")) return;
+            if (!txn.wire_busy()) txn.reset();
+            fail("Recursive upload aborted because a remote directory could not be prepared; directory refresh failed.");
+        }
+        void fail_recursive()
+        {
+            auto rec = txn.get_if<control_transaction::recursive>();
+            if (!rec) { invalid_completion("Recursive failure without a recursive transaction"); return; }
+            if (rec->phase == control_transaction::recursive::phase_t::listing)
+            {
+                auto mode = rec->mode;
+                auto queued = rec->download_files;
+                txn.reset();
+                if (mode == control_transaction::recursive::mode_t::download && queued)
+                    fail("Recursive download stopped after a listing failure; already discovered files remain queued.");
+                else if (mode == control_transaction::recursive::mode_t::delete_)
+                    fail("Recursive delete aborted because a directory could not be listed.");
+                else fail("Recursive operation aborted because a directory could not be listed.");
+            }
+            else if (rec->phase == control_transaction::recursive::phase_t::probing_mkdir)
+            {
+                abort_recursive_upload();
+            }
+            else if (rec->phase == control_transaction::recursive::phase_t::executing)
+            {
+                if (rec->mode == control_transaction::recursive::mode_t::upload)
+                {
+                    auto target = rec->command_i < rec->commands.size() ? recop_mkdir_target(rec->commands[rec->command_i]) : text{};
+                    if (target.empty())
+                    {
+                        abort_recursive_upload();
+                        return;
+                    }
+                    rec->phase = control_transaction::recursive::phase_t::probing_mkdir;
+                    txn.staged.clear();
+                    if (issue_command(c_rls, "ls " + quote_name(parent_path(target, faux)))) return;
+                    if (!txn.wire_busy()) abort_recursive_upload();
+                }
+                else if (rec->mode == control_transaction::recursive::mode_t::delete_)
+                {
+                    ++rec->failures;
+                    ++rec->command_i;
+                    rec->phase = control_transaction::recursive::phase_t::collecting;
+                }
+                else
+                {
+                    txn.reset();
+                    fail("Recursive operation aborted because a command failed.");
+                }
+            }
+            else if (rec->phase == control_transaction::recursive::phase_t::listing_after_abort)
+            {
+                txn.reset();
+                fail("Recursive upload aborted because a remote directory could not be prepared; directory refresh failed.");
+            }
+            else { txn.reset(); fail("Remote operation completed but its directory refresh failed."); }
+        }
+        void fail_keepalive() { txn.reset(); begin_recover(); }
 
         // One failure exit owns all cleanup for browse commands. `path`/`items` are committed only
         // by a successful destination listing, so every failure can safely preserve the old view.
         void command_failed(cmd_t command)
         {
-            await = c_none;
-            switch (command)
+            txn.command = c_none;
+            switch (txn.kind())
             {
-                case c_cd:
-                    if (nav.phase == navigation::changing_directory)
-                    {
-                        auto origin = nav.origin;
-                        auto fallback_name = nav.fallback_name;
-                        auto fallback_size = nav.fallback_size;
-                        nav = {};
-                        if (origin == navigation::reconnect_restore) begin_recover(true);
-                        else if (!fallback_name.empty()) enqueue_download(fallback_name, fallback_size);
-                    }
-                    else nav = {};
-                    break;
-                case c_cd_rollback:
-                    nav = {};
-                    begin_recover(); // Backend cwd is now unknown; restore the committed path.
-                    break;
-                case c_ls:
-                    pending.clear();
-                    if (nav.phase == navigation::listing_destination)
-                    {
-                        if (nav.origin == navigation::reconnect_restore)
-                        {
-                            nav = {};
-                            begin_recover(true);
-                        }
-                        else start_navigation_rollback();
-                    }
-                    break;
-                default:
-                    break;
+                case control_transaction::kind_t::connection: fail_connection(command); break;
+                case control_transaction::kind_t::navigation: fail_navigation(command); break;
+                case control_transaction::kind_t::refresh:    fail_refresh(); break;
+                case control_transaction::kind_t::mutation:   fail_mutation(); break;
+                case control_transaction::kind_t::recursive:  fail_recursive(); break;
+                case control_transaction::kind_t::keepalive:  fail_keepalive(); break;
+                case control_transaction::kind_t::none:       txn.reset(); break;
             }
         }
 
@@ -2735,10 +3035,12 @@ namespace netxs::app::parvion
                 case sftp_evt::error:
                     // A symlink activation deliberately asks cd to classify its referent. Failure is
                     // the expected file/broken-link branch; Done queues the original download.
-                    if (await == c_cd && nav.phase == navigation::changing_directory && nav.has_fallback())
+                    if (auto nav = txn.get_if<control_transaction::navigation>();
+                        txn.command == c_cd && nav
+                            && nav->phase == control_transaction::navigation::phase_t::changing_directory
+                            && nav->has_fallback())
                         trace(dbg_info, "Symlink directory probe failed: " + text{ m.first() });
                     else fail(text{ m.first() });
-                    if (stage != s_connected) stage = s_failed;
                     break;
                 case sftp_evt::ask_hostkey:
                 case sftp_evt::ask_hostkey_changed:
@@ -2781,48 +3083,40 @@ namespace netxs::app::parvion
                     last_preamble.clear(); last_instruction.clear();
                     break;
                 case sftp_evt::listentry:
-                    if (await == c_ls || await == c_rls) // Plain browse listing or a recursive-walk listing.
+                    if (txn.command == c_ls || txn.command == c_rls)
                     {
                         if (!m.list_text.empty()) log_line(logtype::listing, m.list_text);
                         auto e = to_direntry(m);
-                        if (e.name != "." && e.name != "..") pending.push_back(std::move(e));
+                        if (e.name != "." && e.name != "..") txn.staged.push_back(std::move(e));
                     }
                     else trace(dbg_warning, "List entry received outside list operation, ignoring.");
                     break;
                 case sftp_evt::reply:
-                    // A keepalive `pwd` reply: swallow it (don't log or advance the state
-                    // machine). psftp emits exactly one terminal event per command -- a
-                    // reply OR a done -- and keepalive's is the reply, so this consumes it
-                    // even if the user issued a real command in the meantime (FIFO order).
-                    if (keep_skip > 0) { --keep_skip; break; }
                     // The server's reply to the last command (FileZilla: Response).
                     if (!m.line.empty()) log_line(logtype::response, text{ m.first() });
-                    if (await == c_none && stage != s_greeting)
+                    if (txn.command == c_none && stage != s_greeting)
                     {
                         trace(dbg_info, "Skipping reply without active operation.");
                         break;
                     }
                     on_reply(m);
                     break;
-                // Done carries the command result code (FileZilla OnSftpEvent:
-                // only "1" is success). A failed browse command (e.g. cd/ls into a
-                // forbidden dir) must NOT advance the navigation state machine; the
-                // Error event above has already surfaced the reason via fail().
-                // A recursive-walk `ls` and a recop one-shot (mkdir/rm/rmdir) advance the operation
-                // regardless of the result code: a failed/empty ls is just an empty level, and a
-                // mkdir-exists / rmdir-nonempty must not stall the rest of the command sequence.
+                // Done result "1" is success; the owning transaction decides how to reconcile failure.
                 case sftp_evt::done:
-                    if (await == c_none)
+                    if (txn.command == c_none)
                     {
                         trace(dbg_info, "Skipping Done without active operation.");
                     }
-                    else if (await == c_keyfile) send_next_keyfile_or_open(); // Key registered; next key or open.
-                    else if (await == c_rls || await == c_recop) complete();
+                    else if (txn.command == c_keyfile)
+                    {
+                        txn.command = c_none;
+                        send_next_keyfile_or_open(); // Registration is advisory; open decides auth.
+                    }
                     else if (m.first() == "1") complete();
                     else
                     {
-                        trace(dbg_info, "SFTP command in state " + text{ cmd_name(await) } + " finished with result " + text{ m.first() });
-                        command_failed(await);
+                        trace(dbg_info, "SFTP command in state " + text{ cmd_name(txn.command) } + " finished with result " + text{ m.first() });
+                        command_failed(txn.command);
                     } // Failed browse cmd (cd/ls/op): it still terminated, so release the control session
                       // (else the in-flight guard would wedge navigation) and drop any staged path/ls.
                     break;
@@ -2854,27 +3148,35 @@ namespace netxs::app::parvion
         // connect_keys -> connect_open state sequence.
         void send_next_keyfile_or_open()
         {
-            while (connect_keyfile_i < cfg.keyfiles.size())
+            auto conn = txn.get_if<control_transaction::connection>();
+            if (!conn) { invalid_completion("Keyfile/open without a connection transaction"); return; }
+            while (conn->keyfile_i < cfg.keyfiles.size())
             {
-                auto& kf = cfg.keyfiles[connect_keyfile_i++];
+                auto& kf = cfg.keyfiles[conn->keyfile_i++];
                 if (kf.empty()) continue;
                 auto ec = std::error_code{};
                 if (!fs::is_regular_file(fs::path{ kf }, ec)) { log_line(logtype::status, "Skipping non-existing key file " + kf); continue; }
-                await = c_keyfile;
-                send_cmd("keyfile " + quote_name(kf));
+                conn->phase = control_transaction::connection::phase_t::registering_key;
+                if (!issue_command(c_keyfile, "keyfile " + quote_name(kf)))
+                {
+                    if (!txn.wire_busy()) { txn.reset(); stage = s_failed; }
+                }
                 return;
             }
-            await = c_open;
+            conn->phase = control_transaction::connection::phase_t::opening;
             mark("Authenticating...");
-            send_cmd("open " + quote_name(user + "@" + host) + " " + std::to_string(port));
+            if (!issue_command(c_open, "open " + quote_name(user + "@" + host) + " " + std::to_string(port)))
+            {
+                if (!txn.wire_busy()) { txn.reset(); stage = s_failed; }
+            }
         }
 
         void on_reply(sftp_msg const& m)
         {
-            if (stage == s_greeting) // The startup banner: register key files (if any), then open.
+            if (txn.is<control_transaction::connection>(control_transaction::connection::phase_t::waiting_greeting))
             {
                 stage = s_opening;
-                connect_keyfile_i = 0;
+                if (auto conn = txn.get_if<control_transaction::connection>()) conn->keyfile_i = 0;
                 send_next_keyfile_or_open();
                 return;
             }
@@ -2882,109 +3184,217 @@ namespace netxs::app::parvion
             complete(); // A Reply (e.g. pwd's path) also terminates a command.
         }
 
-        void complete()
+        void invalid_completion(view warning = "Control command completed outside its transaction phase")
         {
-            trace(dbg_verbose, "Parsing SFTP control response in state " + text{ cmd_name(await) });
-            switch (await)
+            trace(dbg_warning, text{ warning });
+            txn.reset();
+        }
+        void commit_staged_listing(bool mutation_failed = faux)
+        {
+            items = std::move(txn.staged);
+            sort_dir(items);
+            ++gen;
+            txn.reset();
+            if (mutation_failed) fail("Remote operation failed; directory listing reconciled.");
+            else mark("Directory listing of " + path + " successful");
+        }
+        void complete_connection(cmd_t command)
+        {
+            auto conn = txn.get_if<control_transaction::connection>();
+            if (!conn) { invalid_completion(); return; }
+            if (command == c_open)
             {
-                case c_open:
-                    stage = s_connected;
-                    recovering = faux; // Authentication succeeded; path restoration below still must complete.
-                    if (!restoring) reconnect_tries = 0;
-                    if (restoring) // Reconnect: cd back to where we were instead of landing in the home dir.
-                    {
-                        restoring = faux;
-                        await = c_none;
-                        auto target = resume_path.empty() ? text{ "/" } : resume_path;
-                        begin_navigation(target, {}, -1, navigation::reconnect_restore,
-                                         "Reconnected. Restoring " + target + "...");
-                    }
-                    else
-                    {
-                        await = c_pwd;
-                        send_cmd("pwd");
-                        mark("Connected. Retrieving directory listing...");
-                    }
-                    break;
-                case c_pwd:
-                    if (!last_reply.empty()) path = normalize_pwd(last_reply);
-                    list_dir();
-                    break;
-                case c_ls:
+                stage = s_connected;
+                if (conn->reconnect)
                 {
-                    auto restored = nav.phase == navigation::listing_destination
-                                 && nav.origin == navigation::reconnect_restore;
-                    items = std::move(pending);
-                    pending.clear();
-                    sort_dir(items);
-                    if (nav.phase == navigation::listing_destination)
-                    {
-                        path = nav.target; // Reveal path and destination items in the same completion.
-                        nav = {};
-                    }
-                    ++gen;
-                    await = c_none;
-                    if (restored) reconnect_tries = 0;
-                    mark("Directory listing of " + path + " successful");
-                    break;
+                    conn->target = conn->restore_path.empty() ? text{ "/" } : conn->restore_path;
+                    conn->phase = control_transaction::connection::phase_t::restoring_path;
+                    mark("Reconnected. Restoring " + conn->target + "...");
+                    issue_followup(c_cd, "cd " + quote_name(conn->target));
                 }
-                case c_cd_rollback:
-                    await = c_none;
-                    nav = {}; // Source items never moved; backend cwd is aligned again.
-                    break;
-                case c_cd:
-                    await = c_none;
-                    if (nav.phase == navigation::changing_directory)
-                    {
-                        nav.phase = navigation::waiting_to_list;
-                        nav.list_due = dbg_ls_delay_ms > 0
-                                     ? steady_clock::now() + std::chrono::milliseconds{ dbg_ls_delay_ms }
-                                     : steady_clock::now();
-                        if (dbg_ls_delay_ms <= 0) start_navigation_listing();
-                    }
-                    else
-                    {
-                        trace(dbg_warning, "cd completed without an active navigation transaction");
-                        nav = {};
-                    }
-                    break;
-                case c_op:   // mkdir/rm/rmdir/mv finished: refresh the current directory.
-                    list_dir();
-                    break;
-                case c_rls:  // A recursive-walk `ls <rec_cur.remote>` came back in `pending`.
+                else
                 {
-                    sort_dir(pending);
-                    for (auto& e : pending)
+                    conn->phase = control_transaction::connection::phase_t::discovering_path;
+                    issue_followup(c_pwd, "pwd");
+                    mark("Connected. Retrieving directory listing...");
+                }
+            }
+            else if (command == c_pwd)
+            {
+                conn->target = last_reply.empty() ? text{ "/" } : normalize_pwd(last_reply);
+                conn->phase = control_transaction::connection::phase_t::listing;
+                txn.staged.clear(); issue_followup(c_ls, "ls");
+            }
+            else if (command == c_cd && conn->phase == control_transaction::connection::phase_t::restoring_path)
+            {
+                conn->phase = control_transaction::connection::phase_t::listing;
+                txn.staged.clear(); issue_followup(c_ls, "ls");
+            }
+            else if (command == c_ls && conn->phase == control_transaction::connection::phase_t::listing)
+            {
+                path = conn->target;
+                items = std::move(txn.staged);
+                sort_dir(items);
+                ++gen;
+                txn.reset();
+                mark("Directory listing of " + path + " successful");
+            }
+            else invalid_completion();
+        }
+        void complete_navigation(cmd_t command)
+        {
+            auto nav_ptr = txn.get_if<control_transaction::navigation>();
+            if (!nav_ptr) { invalid_completion("Command completed without a navigation transaction"); return; }
+            auto& nav = *nav_ptr;
+            if (command == c_cd && nav.phase == control_transaction::navigation::phase_t::changing_directory)
+            {
+                nav.phase = control_transaction::navigation::phase_t::waiting_to_list;
+                nav.list_due = dbg_ls_delay_ms > 0
+                             ? steady_clock::now() + std::chrono::milliseconds{ dbg_ls_delay_ms }
+                             : steady_clock::now();
+                if (dbg_ls_delay_ms <= 0) start_navigation_listing();
+            }
+            else if (command == c_ls && nav.phase == control_transaction::navigation::phase_t::listing_destination)
+            {
+                auto target = nav.target;
+                items = std::move(txn.staged);
+                sort_dir(items);
+                path = target;
+                ++gen;
+                txn.reset();
+                mark("Directory listing of " + path + " successful");
+            }
+            else if (command == c_cd_rollback) txn.reset();
+            else invalid_completion("Command completed in an invalid navigation phase");
+        }
+        void complete_refresh(cmd_t command)
+        {
+            if (command == c_ls) commit_staged_listing();
+            else invalid_completion();
+        }
+        void complete_mutation(cmd_t command)
+        {
+            auto mutation = txn.get_if<control_transaction::mutation>();
+            if (!mutation) { invalid_completion(); return; }
+            if (command == c_op && mutation->phase == control_transaction::mutation::phase_t::executing)
+            {
+                mutation->phase = control_transaction::mutation::phase_t::listing_after_success;
+                txn.staged.clear(); issue_followup(c_ls, "ls");
+            }
+            else if (command == c_ls
+                  && (mutation->phase == control_transaction::mutation::phase_t::listing_after_success
+                   || mutation->phase == control_transaction::mutation::phase_t::listing_after_failure))
+            {
+                commit_staged_listing(mutation->phase == control_transaction::mutation::phase_t::listing_after_failure);
+            }
+            else invalid_completion();
+        }
+        void complete_recursive(cmd_t command)
+        {
+            auto rec_ptr = txn.get_if<control_transaction::recursive>();
+            if (!rec_ptr) { invalid_completion(); return; }
+            auto& rec = *rec_ptr;
+            if (command == c_rls && rec.phase == control_transaction::recursive::phase_t::listing)
+            {
+                if (rec.mode != control_transaction::recursive::mode_t::download
+                 && rec.mode != control_transaction::recursive::mode_t::delete_)
+                {
+                    invalid_completion("Recursive listing is only valid for download or delete walks");
+                    return;
+                }
+                sort_dir(txn.staged);
+                for (auto& e : txn.staged)
+                {
+                    auto rchild = child_path(rec.current.remote, e.name, faux);
+                    if (rec.mode == control_transaction::recursive::mode_t::download)
                     {
-                        auto rchild = child_path(rec_cur.remote, e.name, faux);
                         if (e.is_dir)
                         {
-                            if (recop == rec_download)
-                            {
-                                auto lchild = child_path(rec_cur.local, e.name, true);
-                                auto ec = std::error_code{}; fs::create_directories(fs::path{ lchild }, ec);
-                                rec_stack.push_back({ rchild, lchild });
-                            }
-                            else // rec_delete: recurse, and record the dir for a deepest-first rmdir.
-                            {
-                                rec_deldirs.push_back(rchild);
-                                rec_stack.push_back({ rchild, {} });
-                            }
+                            auto lchild = child_path(rec.current.local, e.name, true);
+                            auto ec = std::error_code{}; fs::create_directories(fs::path{ lchild }, ec);
+                            rec.stack.push_back({ rchild, lchild });
                         }
                         else
                         {
-                            if (recop == rec_download) { enqueue_download_path(rchild, child_path(rec_cur.local, e.name, true), e.size); ++rec_download_files; }
-                            else                       rec_delfiles.push_back(rchild); // rec_delete
+                            enqueue_download_path(rchild, child_path(rec.current.local, e.name, true), e.size);
+                            ++rec.download_files;
                         }
                     }
-                    pending.clear();
-                    await = c_none; // drive_recop() issues the next walk/command on the following poll.
-                    break;
+                    else if (rec.mode == control_transaction::recursive::mode_t::delete_)
+                    {
+                        if (e.is_dir) { rec.delete_dirs.push_back(rchild); rec.stack.push_back({ rchild, {} }); }
+                        else rec.delete_files.push_back(rchild);
+                    }
                 }
-                case c_recop: // A queued mkdir/rm/rmdir finished (success or not): let drive_recop continue.
-                    await = c_none;
-                    break;
-                default: break;
+                txn.staged.clear();
+                rec.phase = control_transaction::recursive::phase_t::collecting;
+            }
+            else if (command == c_rls && rec.phase == control_transaction::recursive::phase_t::probing_mkdir)
+            {
+                auto target = rec.command_i < rec.commands.size() ? recop_mkdir_target(rec.commands[rec.command_i]) : text{};
+                auto name = recop_mkdir_name(target);
+                auto is_dir = !name.empty() && std::any_of(txn.staged.begin(), txn.staged.end(), [&](auto const& e)
+                {
+                    return e.name == name && e.is_dir;
+                });
+                txn.staged.clear();
+                if (is_dir)
+                {
+                    ++rec.command_i;
+                    rec.phase = control_transaction::recursive::phase_t::collecting;
+                }
+                else abort_recursive_upload();
+            }
+            else if (command == c_recop && rec.phase == control_transaction::recursive::phase_t::executing)
+            {
+                ++rec.command_i;
+                rec.phase = control_transaction::recursive::phase_t::collecting;
+            }
+            else if (command == c_ls && rec.phase == control_transaction::recursive::phase_t::listing_result)
+            {
+                auto failures = rec.failures;
+                auto mode = rec.mode;
+                auto completion_status = std::move(rec.completion_status);
+                items = std::move(txn.staged); sort_dir(items); ++gen; txn.reset();
+                if (failures)
+                {
+                    auto noun = mode == control_transaction::recursive::mode_t::delete_ ? "delete"
+                              : mode == control_transaction::recursive::mode_t::upload  ? "upload"
+                              : "operation";
+                    fail("Recursive " + text{ noun } + " finished with " + std::to_string(failures) + " failed command(s).");
+                }
+                else if (!completion_status.empty())
+                {
+                    status = std::move(completion_status);
+                    dirty = true;
+                }
+                else mark("Directory listing of " + path + " successful");
+            }
+            else if (command == c_ls && rec.phase == control_transaction::recursive::phase_t::listing_after_abort)
+            {
+                items = std::move(txn.staged); sort_dir(items); ++gen; txn.reset();
+                fail("Recursive upload aborted because a remote directory could not be prepared; directory listing reconciled.");
+            }
+            else invalid_completion();
+        }
+        void complete_keepalive(cmd_t command)
+        {
+            if (command == c_pwd) txn.reset();
+            else invalid_completion();
+        }
+        void complete()
+        {
+            trace(dbg_verbose, "Parsing SFTP control response in state " + text{ cmd_name(txn.command) });
+            auto command = std::exchange(txn.command, c_none);
+            switch (txn.kind())
+            {
+                case control_transaction::kind_t::connection: complete_connection(command); break;
+                case control_transaction::kind_t::navigation: complete_navigation(command); break;
+                case control_transaction::kind_t::refresh:    complete_refresh(command); break;
+                case control_transaction::kind_t::mutation:   complete_mutation(command); break;
+                case control_transaction::kind_t::recursive:  complete_recursive(command); break;
+                case control_transaction::kind_t::keepalive:  complete_keepalive(command); break;
+                case control_transaction::kind_t::none:       invalid_completion(); break;
             }
         }
 
