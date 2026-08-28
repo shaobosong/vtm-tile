@@ -17,6 +17,7 @@
 #include "settings.hpp"
 #include "reorder.hpp"
 #include "proto.hpp"
+#include "control.hpp"
 #include "hashing.hpp"
 
 #include <thread>
@@ -1043,151 +1044,19 @@ namespace netxs::app::parvion
         // `stage` tracks transport/authentication lifetime; a connection transaction may continue
         // owning post-authentication path discovery or restoration while stage is s_connected.
         enum stage_t { s_idle, s_greeting, s_opening, s_connected, s_failed };
-        enum cmd_t   { c_none, c_open, c_pwd, c_ls, c_cd, c_cd_rollback,
-                       c_op,    // c_op: mkdir/rm/rmdir/mv, then re-list.
-                       c_rls,   // Recursive-walk listing, or an upload mkdir-exists parent probe.
-                       c_recop, // One-shot mkdir (upload) or rm/rmdir (delete). Failure is kind-specific.
-                       c_keyfile }; // Pre-auth `keyfile <path>` registration; its Done advances to the next key or `open`.
+        using cmd_t = control_command;
+        static constexpr auto c_none        = cmd_t::c_none;
+        static constexpr auto c_open        = cmd_t::c_open;
+        static constexpr auto c_pwd         = cmd_t::c_pwd;
+        static constexpr auto c_ls          = cmd_t::c_ls;
+        static constexpr auto c_cd          = cmd_t::c_cd;
+        static constexpr auto c_cd_rollback = cmd_t::c_cd_rollback;
+        static constexpr auto c_op          = cmd_t::c_op;     // mkdir/rm/rmdir/mv, then re-list.
+        static constexpr auto c_rls         = cmd_t::c_rls;    // Recursive listing or mkdir parent probe.
+        static constexpr auto c_recop       = cmd_t::c_recop;  // Recursive mkdir/rm/rmdir command.
+        static constexpr auto c_keyfile     = cmd_t::c_keyfile;
         using steady_clock = std::chrono::steady_clock;
-
-        // Exactly one control transaction owns the helper command stream. Its phase determines the
-        // one response that may advance it, and it owns every staged listing/cursor/failure needed
-        // by the multi-step flow. `path`/`items` remain the last committed view until a listing lands.
-        struct control_transaction
-        {
-            enum class kind_t { none, connection, navigation, refresh, mutation, recursive, keepalive };
-
-            struct connection
-            {
-                static constexpr auto kind = kind_t::connection;
-                enum class phase_t { retry_wait, waiting_greeting, registering_key, opening, discovering_path, restoring_path, listing };
-                phase_t phase = phase_t::waiting_greeting;
-                bool reconnect = faux;
-                text restore_path = "/";
-                text target;
-                size_t keyfile_i = 0;
-                si32 attempts = 0;
-                steady_clock::time_point retry_at{};
-
-                connection() = default;
-                connection(bool reconnect, text restore_path, si32 attempts = 0)
-                    : reconnect{ reconnect }, restore_path{ std::move(restore_path) }, attempts{ attempts } { }
-            };
-
-            struct navigation
-            {
-                static constexpr auto kind = kind_t::navigation;
-                enum class phase_t { changing_directory, waiting_to_list, listing_destination, rolling_back };
-                phase_t phase = phase_t::changing_directory;
-                text source;
-                text target;
-                text fallback_name;
-                si64 fallback_size = -1;
-                steady_clock::time_point list_due{};
-
-                navigation() = default;
-                navigation(text source, text target, text fallback_name = {}, si64 fallback_size = -1)
-                    : source{ std::move(source) }, target{ std::move(target) },
-                      fallback_name{ std::move(fallback_name) }, fallback_size{ fallback_size } { }
-                auto has_fallback() const { return !fallback_name.empty(); }
-            };
-
-            struct refresh
-            {
-                static constexpr auto kind = kind_t::refresh;
-                enum class phase_t { listing };
-                phase_t phase = phase_t::listing;
-                text source;
-                explicit refresh(text source = {}) : source{ std::move(source) } { }
-            };
-
-            struct mutation
-            {
-                static constexpr auto kind = kind_t::mutation;
-                enum class phase_t { executing, listing_after_success, listing_after_failure };
-                phase_t phase = phase_t::executing;
-                text source;
-                explicit mutation(text source = {}) : source{ std::move(source) } { }
-            };
-
-            struct recursive
-            {
-                static constexpr auto kind = kind_t::recursive;
-                enum class phase_t { collecting, listing, executing, probing_mkdir, listing_after_abort, listing_result };
-                enum class mode_t { download, delete_, upload };
-                struct dir { text remote; text local; };
-
-                phase_t phase = phase_t::collecting;
-                mode_t mode;
-                std::vector<dir> stack;
-                dir current;
-                std::vector<text> delete_files;
-                std::vector<text> delete_dirs;
-                std::vector<text> commands;
-                size_t command_i = 0;
-                bool commands_built = faux;
-                std::vector<queue_item> uploads;
-                size_t download_files = 0;
-                size_t failures = 0;
-                text completion_status;
-
-                explicit recursive(mode_t mode) : mode{ mode } { }
-            };
-
-            struct keepalive
-            {
-                static constexpr auto kind = kind_t::keepalive;
-                enum class phase_t { waiting };
-                phase_t phase = phase_t::waiting;
-            };
-
-            using state_t = std::variant<std::monostate, connection, navigation, refresh, mutation, recursive, keepalive>;
-            // Wire-response state must never survive its owning workflow.
-            cmd_t command = c_none;
-            std::vector<direntry> staged;
-            state_t state;
-
-            template<class Flow, class... Args>
-            auto start(Args&&... args) -> Flow&
-            {
-                command = c_none;
-                staged.clear();
-                return state.template emplace<Flow>(std::forward<Args>(args)...);
-            }
-            void reset()
-            {
-                command = c_none;
-                staged.clear();
-                state.template emplace<std::monostate>();
-            }
-            template<class Flow> auto get_if()       -> Flow*       { return std::get_if<Flow>(&state); }
-            template<class Flow> auto get_if() const -> Flow const* { return std::get_if<Flow>(&state); }
-            template<class Flow> auto is() const { return std::holds_alternative<Flow>(state); }
-            template<class Flow> auto is(typename Flow::phase_t phase) const
-            {
-                auto flow = get_if<Flow>();
-                return flow && flow->phase == phase;
-            }
-            auto kind() const -> kind_t
-            {
-                return std::visit([](auto const& flow)
-                {
-                    using flow_t = std::decay_t<decltype(flow)>;
-                    if constexpr (std::is_same_v<flow_t, std::monostate>) return kind_t::none;
-                    else return flow_t::kind;
-                }, state);
-            }
-            auto active() const { return !std::holds_alternative<std::monostate>(state); }
-            auto wire_busy() const { return command != c_none; }
-            auto ensure_collecting(recursive::mode_t mode) -> recursive*
-            {
-                if (auto flow = get_if<recursive>())
-                    return flow->phase == recursive::phase_t::collecting && flow->mode == mode ? flow : nullptr;
-                if (active()) return nullptr;
-                return &start<recursive>(mode);
-            }
-        };
-        static_assert(std::is_move_assignable_v<control_transaction>);
+        using control_transaction = parvion::control_transaction;
 
         sftp_session          session;
         text                  exe;
@@ -1490,7 +1359,7 @@ namespace netxs::app::parvion
             trace(dbg_debug,
                   "Received SFTP event " + text{ sftp_evt_name(m.type) }
                       + " stage=" + text{ stage_name(stage) }
-                      + " await=" + text{ cmd_name(txn.command) });
+                      + " command=" + text{ cmd_name(txn.command) });
         }
         // Short connect-bar hint; mirrored into the log as a Status line.
         void mark(text s) { status = s; log_line(logtype::status, std::move(s)); dirty = true; }
@@ -1765,7 +1634,7 @@ namespace netxs::app::parvion
         {
             auto old_conn = txn.get_if<control_transaction::connection>();
             auto attempts = old_conn && old_conn->reconnect ? old_conn->attempts : 0;
-            if (txn.is<control_transaction::mutation>() || txn.is<control_transaction::recursive>())
+            if (txn.is<control_transaction::mutation>() || txn.recursive())
                 fail("Control connection lost; the remote operation may be incomplete.");
             if (txn.wire_busy())
                 trace(dbg_warning, "Replacing a wire-busy control transaction");
@@ -1839,9 +1708,11 @@ namespace netxs::app::parvion
             if (sec != sec_idle) return; // User think time at a password/passphrase modal is not link inactivity.
             if (steady_clock::now() - last_activity <= std::chrono::seconds{ response_timeout_sec }) return;
             trace(dbg_warning, "Control response timeout (" + std::to_string(response_timeout_sec) + "s); link presumed dead.");
-            if (stage != s_connected && txn.is<control_transaction::connection>())
+            if (stage != s_connected)
             {
-                fail_connection(txn.command, connection_failure_t::timeout);
+                auto conn = txn.get_if<control_transaction::connection>();
+                if (!conn) { invalid_completion("Control timeout without a connection transaction"); return; }
+                fail_flow(*conn, txn.command, connection_failure_t::timeout);
                 return;
             }
             begin_recover();
@@ -1912,7 +1783,7 @@ namespace netxs::app::parvion
         void download_folder(text const& name)
         {
             if (!connected() || name.empty()) return;
-            auto rec = txn.ensure_collecting(control_transaction::recursive::mode_t::download);
+            auto rec = txn.ensure_collecting<control_transaction::rec_download>();
             if (!rec) return;
             auto r = child_path(path, name, faux);
             auto l = child_path(local_dir, name, true);
@@ -1925,10 +1796,10 @@ namespace netxs::app::parvion
         void delete_folder(text const& name)
         {
             if (!connected() || name.empty()) return;
-            auto rec = txn.ensure_collecting(control_transaction::recursive::mode_t::delete_);
+            auto rec = txn.ensure_collecting<control_transaction::rec_delete>();
             if (!rec) return;
             auto r = child_path(path, name, faux);
-            rec->delete_dirs.push_back(r);        // the folder itself, rmdir'd last.
+            rec->dirs.push_back(r);        // the folder itself, rmdir'd last.
             rec->stack.push_back({ r, {} });
             mark("Deleting directory " + name + "...");
         }
@@ -1937,9 +1808,9 @@ namespace netxs::app::parvion
         void delete_remote_file(text const& name)
         {
             if (!connected() || name.empty()) return;
-            auto rec = txn.ensure_collecting(control_transaction::recursive::mode_t::delete_);
+            auto rec = txn.ensure_collecting<control_transaction::rec_delete>();
             if (!rec) return;
-            rec->delete_files.push_back(child_path(path, name, faux));
+            rec->files.push_back(child_path(path, name, faux));
         }
         // Remove local items (absolute paths, recursing into folders) on a detached worker so a
         // big subtree can't freeze the UI. The worker owns the shared atomics block only; poll()
@@ -1968,10 +1839,10 @@ namespace netxs::app::parvion
         void upload_folder(text const& local_full, text const& name)
         {
             if (!connected() || name.empty()) return;
-            auto rec = txn.ensure_collecting(control_transaction::recursive::mode_t::upload);
+            auto rec = txn.ensure_collecting<control_transaction::rec_upload>();
             if (!rec) return;
             auto rroot = child_path(path, name, faux);
-            rec->commands.push_back("mkdir " + quote_name(rroot));
+            rec->commands.push_back({ rec_op::mkdir, rroot });
             walk_local_for_upload(*rec, local_full, rroot);
             mark("Uploading directory " + name + "...");
         }
@@ -2115,7 +1986,7 @@ namespace netxs::app::parvion
         auto begin_mutation(text command, text message) -> bool
         {
             if (!browse_available()) return faux;
-            if (!launch<control_transaction::mutation>(c_op, command, true, path)) return faux;
+            if (!launch<control_transaction::mutation>(c_op, command, true)) return faux;
             mark(std::move(message));
             return true;
         }
@@ -2149,9 +2020,9 @@ namespace netxs::app::parvion
 
     private:
         // Synchronous local tree-walk for an upload: append a parent-first `mkdir` for each local
-        // sub-directory and stage a queue_item for each file, both rooted at the remote `rroot`.
+        // sub-directory and stage a minimal upload descriptor for each file, both rooted at the remote `rroot`.
         // Directories are recursed in sorted order so the mkdir list is always parent-before-child.
-        void walk_local_for_upload(control_transaction::recursive& rec, text const& lroot, text const& rroot)
+        void walk_local_for_upload(control_transaction::rec_upload& rec, text const& lroot, text const& rroot)
         {
             auto subdirs = std::vector<std::pair<text, text>>{}; // (local, remote) sub-dirs to recurse, sorted.
             for (auto& e : read_local_dir(fs::path{ lroot }))
@@ -2161,19 +2032,12 @@ namespace netxs::app::parvion
                 auto rchild = child_path(rroot, e.name, faux);
                 if (e.is_dir)
                 {
-                    rec.commands.push_back("mkdir " + quote_name(rchild));
+                    rec.commands.push_back({ rec_op::mkdir, rchild });
                     subdirs.emplace_back(lchild, rchild);
                 }
                 else
                 {
-                    auto it = queue_item{};
-                    it.download    = false;
-                    it.local_path  = lchild;
-                    it.remote_path = rchild;
-                    it.dest_dir    = path;
-                    it.size        = e.size < 0 ? 0 : e.size;
-                    it.status      = queue_item::queued;
-                    rec.uploads.push_back(std::move(it));
+                    rec.uploads.push_back({ std::move(lchild), std::move(rchild), e.size < 0 ? 0 : e.size });
                 }
             }
             for (auto& [l, r] : subdirs) walk_local_for_upload(rec, l, r); // Recurse after this level's mkdirs.
@@ -2181,77 +2045,98 @@ namespace netxs::app::parvion
         // Pace a recursive folder operation on the (idle) control session: one `ls` per pending dir
         // during the walk, then one queued mkdir/rm/rmdir per tick during the command phase. Called
         // from poll() once the session is connected and no other command is in flight.
+        template<class Flow>
+        void start_rec_listing(Flow& rec)
+        {
+            rec.current = std::move(rec.stack.back());
+            rec.stack.pop_back();
+            txn.staged.clear();
+            rec.phase = Flow::phase_t::listing;
+            mark("Retrieving directory listing of \"" + rec.current.remote + "\"...");
+            issue_followup(c_rls, "ls " + quote_name(rec.current.remote));
+        }
+        void finish_recop(control_transaction::rec_download& rec)
+        {
+            if (rec.download_files) mark("Queued " + std::to_string(rec.download_files) + " download(s).");
+            else                    mark("No files found to download.");
+            dirty = true;
+            txn.reset();
+        }
+        void finish_recop(control_transaction::rec_delete& rec)
+        {
+            auto delete_items = rec.files.size() + rec.dirs.size();
+            auto msg = text{ "Delete operation finished" };
+            if (delete_items) msg += " (" + std::to_string(delete_items) + " item(s))";
+            msg += ".";
+            rec.completion_status = std::move(msg);
+            mark(rec.completion_status);
+            dirty = true;
+            txn.staged.clear();
+            rec.phase = control_transaction::rec_delete::phase_t::listing_result;
+            log_line(logtype::status, "Retrieving directory listing of \"" + path + "\"...");
+            issue_followup(c_ls, "ls");
+        }
+        void finish_recop(control_transaction::rec_upload& rec)
+        {
+            auto upload_files = rec.uploads.size();
+            for (auto& upload : rec.uploads)
+            {
+                auto it = queue_item{};
+                it.id = ++transfer_id_seq;
+                it.download = false;
+                it.local_path = std::move(upload.local_path);
+                it.remote_path = std::move(upload.remote_path);
+                it.dest_dir = path;
+                it.size = upload.size;
+                it.status = queue_item::queued;
+                queue.push_back(std::move(it)); // Dirs exist now: safe to upload.
+            }
+            auto msg = text{ "Remote directory tree prepared." };
+            if (upload_files) msg = "Remote directory tree prepared; queued " + std::to_string(upload_files) + " upload(s).";
+            rec.completion_status = std::move(msg);
+            mark(rec.completion_status);
+            dirty = true;
+            txn.staged.clear();
+            rec.phase = control_transaction::rec_upload::phase_t::listing_result;
+            log_line(logtype::status, "Retrieving directory listing of \"" + path + "\"...");
+            issue_followup(c_ls, "ls");
+        }
+        void drive_recop(control_transaction::rec_download& rec)
+        {
+            if (!rec.stack.empty()) start_rec_listing(rec);
+            else finish_recop(rec);
+        }
+        void drive_recop(control_transaction::rec_delete& rec)
+        {
+            if (!rec.stack.empty()) { start_rec_listing(rec); return; }
+            if (!rec.commands_built)
+            {
+                for (auto& file : rec.files) rec.commands.push_back({ rec_op::rm, file });
+                for (auto i = rec.dirs.size(); i-- > 0;) rec.commands.push_back({ rec_op::rmdir, rec.dirs[i] });
+                rec.commands_built = true;
+            }
+            if (rec.command_i < rec.commands.size())
+            {
+                rec.phase = control_transaction::rec_delete::phase_t::executing;
+                issue_followup(c_recop, rec_command_line(rec.commands[rec.command_i]));
+            }
+            else finish_recop(rec);
+        }
+        void drive_recop(control_transaction::rec_upload& rec)
+        {
+            if (rec.command_i < rec.commands.size())
+            {
+                rec.phase = control_transaction::rec_upload::phase_t::executing;
+                issue_followup(c_recop, rec_command_line(rec.commands[rec.command_i]));
+            }
+            else finish_recop(rec);
+        }
         void drive_recop()
         {
-            auto rec = txn.get_if<control_transaction::recursive>();
-            if (!rec || !connected() || txn.wire_busy()) return;
-            if (!rec->stack.empty()) // Walk phase: list the next remote dir.
-            {
-                rec->current = rec->stack.back();
-                rec->stack.pop_back();
-                txn.staged.clear();
-                rec->phase = control_transaction::recursive::phase_t::listing;
-                mark("Retrieving directory listing of \"" + rec->current.remote + "\"...");
-                issue_followup(c_rls, "ls " + quote_name(rec->current.remote));
-                return;
-            }
-            if (rec->mode == control_transaction::recursive::mode_t::delete_ && !rec->commands_built)
-            {
-                for (auto& f : rec->delete_files) rec->commands.push_back("rm " + quote_name(f));
-                for (auto i = rec->delete_dirs.size(); i-- > 0;) rec->commands.push_back("rmdir " + quote_name(rec->delete_dirs[i]));
-                rec->commands_built = true;
-            }
-            if (rec->command_i < rec->commands.size())
-            {
-                rec->phase = control_transaction::recursive::phase_t::executing;
-                issue_followup(c_recop, rec->commands[rec->command_i]);
-                return;
-            }
-            finish_recop(*rec);
-        }
-        void finish_recop(control_transaction::recursive& rec)
-        {
-            auto was = rec.mode;
-            auto download_files = rec.download_files;
-            auto upload_files = rec.uploads.size();
-            auto delete_items = rec.delete_files.size() + rec.delete_dirs.size();
-            if (was == control_transaction::recursive::mode_t::upload)
-            {
-                for (auto& it : rec.uploads)
-                {
-                    it.id = ++transfer_id_seq;
-                    queue.push_back(std::move(it)); // Dirs exist now: safe to upload.
-                }
-                auto msg = text{ "Remote directory tree prepared." };
-                if (upload_files) msg = "Remote directory tree prepared; queued " + std::to_string(upload_files) + " upload(s).";
-                rec.completion_status = std::move(msg);
-                mark(rec.completion_status);
-            }
-            else if (was == control_transaction::recursive::mode_t::delete_)
-            {
-                auto msg = text{ "Delete operation finished" };
-                if (delete_items) msg += " (" + std::to_string(delete_items) + " item(s))";
-                msg += ".";
-                rec.completion_status = std::move(msg);
-                mark(rec.completion_status);
-            }
-            else if (was == control_transaction::recursive::mode_t::download)
-            {
-                if (download_files) mark("Queued " + std::to_string(download_files) + " download(s).");
-                else                mark("No files found to download.");
-            }
-            // download: per-file downloads were enqueued during the walk and run on their own
-            // connections; each completion bumps local_gen, which re-lists the local pane.
-            dirty = true;
-            if (was == control_transaction::recursive::mode_t::delete_
-             || was == control_transaction::recursive::mode_t::upload)
-            {
-                txn.staged.clear();
-                rec.phase = control_transaction::recursive::phase_t::listing_result;
-                log_line(logtype::status, "Retrieving directory listing of \"" + path + "\"...");
-                issue_followup(c_ls, "ls");
-            }
-            else txn.reset();
+            if (!connected() || txn.wire_busy()) return;
+            if (auto rec_download = txn.get_if<control_transaction::rec_download>()) drive_recop(*rec_download);
+            else if (auto rec_delete = txn.get_if<control_transaction::rec_delete>()) drive_recop(*rec_delete);
+            else if (auto rec_upload = txn.get_if<control_transaction::rec_upload>()) drive_recop(*rec_upload);
         }
 
     private:
@@ -2800,7 +2685,7 @@ namespace netxs::app::parvion
         auto begin_refresh(text target) -> bool
         {
             if (!connected() || txn.active() || target != path) return faux;
-            if (!launch<control_transaction::refresh>(c_ls, "ls", true, std::move(target))) return faux;
+            if (!launch<control_transaction::refresh>(c_ls, "ls", true)) return faux;
             mark("Retrieving directory listing of \"" + path + "\"...");
             return true;
         }
@@ -2829,192 +2714,198 @@ namespace netxs::app::parvion
         }
 
         enum class connection_failure_t { command, timeout };
-        void fail_connection(cmd_t command, connection_failure_t reason = connection_failure_t::command)
+        void fail_flow(control_transaction::navigation& nav, cmd_t command)
         {
-            auto conn_ptr = txn.get_if<control_transaction::connection>();
-            if (!conn_ptr) { invalid_completion("Connection failure without a connection transaction"); return; }
-            auto& conn = *conn_ptr;
-            if (reason == connection_failure_t::command && command == c_keyfile) send_next_keyfile_or_open();
-            else
+            switch (nav.phase)
             {
-                txn.command = c_none;
-                if (conn.reconnect)
-                {
-                    session.stop();
-                    conn.phase = control_transaction::connection::phase_t::retry_wait;
-                    conn.retry_at = steady_clock::now() + std::chrono::seconds{ reconnect_delay_sec };
-                    stage = s_idle;
-                    mark(reason == connection_failure_t::timeout
-                       ? "Reconnect attempt timed out; retrying..."
-                       : "Reconnect attempt failed; retrying...");
-                }
-                else if (stage == s_connected)
-                {
-                    if (command == c_ls && conn.phase == control_transaction::connection::phase_t::listing)
+                case control_transaction::navigation::phase_t::changing_directory:
+                    if (command != c_cd) { invalid_completion("Navigation failed in an invalid command phase"); return; }
                     {
-                        path = conn.target.empty() ? path : conn.target;
-                        items.clear();
-                        ++gen;
+                        auto fallback_name = nav.fallback_name;
+                        auto fallback_size = nav.fallback_size;
+                        txn.reset();
+                        if (!fallback_name.empty()) enqueue_download(fallback_name, fallback_size);
                     }
+                    break;
+                case control_transaction::navigation::phase_t::listing_destination:
+                    if (command != c_ls) { invalid_completion("Navigation failed in an invalid command phase"); return; }
+                    txn.staged.clear();
+                    start_navigation_rollback();
+                    break;
+                case control_transaction::navigation::phase_t::rolling_back:
+                    if (command != c_cd_rollback) { invalid_completion("Navigation failed in an invalid command phase"); return; }
                     txn.reset();
-                    fail(command == c_pwd
-                       ? "Could not determine the remote working directory; connection remains open."
-                       : "Could not retrieve the initial directory listing; connection remains open.");
-                }
-                else
-                {
-                    session.stop();
+                    begin_recover(); // Backend cwd is unknown; restore the committed path.
+                    break;
+                case control_transaction::navigation::phase_t::waiting_to_list:
+                    invalid_completion("Navigation failed without an in-flight command");
+                    break;
+            }
+        }
+        void fail_flow(control_transaction::refresh&, cmd_t command)
+        {
+            if (command != c_ls) { invalid_completion(); return; }
+            txn.reset();
+        }
+        void fail_flow(control_transaction::mutation& mutation, cmd_t command)
+        {
+            switch (mutation.phase)
+            {
+                case control_transaction::mutation::phase_t::executing:
+                    if (command != c_op) { invalid_completion(); return; }
+                    mutation.phase = control_transaction::mutation::phase_t::listing_after_failure;
+                    txn.staged.clear();
+                    issue_followup(c_ls, "ls");
+                    break;
+                case control_transaction::mutation::phase_t::listing_after_success:
+                case control_transaction::mutation::phase_t::listing_after_failure:
+                    if (command != c_ls) { invalid_completion(); return; }
                     txn.reset();
-                    stage = s_failed;
-                    if (reason == connection_failure_t::timeout) fail("Connection attempt timed out.");
-                    else if (!status.starts_with("Error:"))      fail("Connection attempt failed.");
-                }
+                    fail("Remote operation completed but its directory refresh failed.");
+                    break;
             }
         }
-        void fail_navigation(cmd_t command)
+        void abort_recursive_upload(control_transaction::rec_upload& rec)
         {
-            auto nav_ptr = txn.get_if<control_transaction::navigation>();
-            if (!nav_ptr) { invalid_completion("Navigation failure without a navigation transaction"); return; }
-            auto& nav = *nav_ptr;
-            if (command == c_cd && nav.phase == control_transaction::navigation::phase_t::changing_directory)
-            {
-                auto fallback_name = nav.fallback_name;
-                auto fallback_size = nav.fallback_size;
-                txn.reset();
-                if (!fallback_name.empty()) enqueue_download(fallback_name, fallback_size);
-            }
-            else if (command == c_cd_rollback)
-            {
-                txn.reset();
-                begin_recover(); // Backend cwd is unknown; restore the committed path.
-            }
-            else if (command == c_ls && nav.phase == control_transaction::navigation::phase_t::listing_destination)
-            {
-                txn.staged.clear();
-                start_navigation_rollback();
-            }
-            else txn.reset();
-        }
-        void fail_refresh() { txn.reset(); }
-        void fail_mutation()
-        {
-            auto mutation = txn.get_if<control_transaction::mutation>();
-            if (!mutation) { invalid_completion("Mutation failure without a mutation transaction"); return; }
-            if (mutation->phase == control_transaction::mutation::phase_t::executing)
-            {
-                mutation->phase = control_transaction::mutation::phase_t::listing_after_failure;
-                txn.staged.clear();
-                issue_followup(c_ls, "ls");
-            }
-            else
-            {
-                txn.reset();
-                fail("Remote operation completed but its directory refresh failed.");
-            }
-        }
-        static auto recop_mkdir_target(view command) -> text
-        {
-            static constexpr auto prefix = view{ "mkdir " };
-            if (!command.starts_with(prefix)) return {};
-            auto q = command.substr(prefix.size());
-            if (q.size() >= 2 && q.front() == '"' && q.back() == '"')
-            {
-                auto out = text{};
-                out.reserve(q.size() - 2);
-                for (size_t i = 1; i + 1 < q.size(); ++i)
-                {
-                    if (q[i] == '"' && i + 1 < q.size() - 1 && q[i + 1] == '"') { out.push_back('"'); ++i; }
-                    else out.push_back(q[i]);
-                }
-                return out;
-            }
-            return text{ q };
-        }
-        static auto recop_mkdir_name(text const& target) -> view
-        {
-            auto pos = target.find_last_of('/');
-            return pos == text::npos ? view{ target } : view{ target }.substr(pos + 1);
-        }
-        void abort_recursive_upload()
-        {
-            auto rec = txn.get_if<control_transaction::recursive>();
-            if (!rec) { invalid_completion("Recursive upload abort without a recursive transaction"); return; }
-            rec->phase = control_transaction::recursive::phase_t::listing_after_abort;
+            rec.phase = control_transaction::rec_upload::phase_t::listing_after_abort;
             txn.staged.clear();
             if (issue_followup(c_ls, "ls")) return;
             if (!txn.wire_busy()) txn.reset();
             fail("Recursive upload aborted because a remote directory could not be prepared; directory refresh failed.");
         }
-        void fail_recursive()
+        void fail_flow(control_transaction::rec_download& rec, cmd_t command)
         {
-            auto rec = txn.get_if<control_transaction::recursive>();
-            if (!rec) { invalid_completion("Recursive failure without a recursive transaction"); return; }
-            if (rec->phase == control_transaction::recursive::phase_t::listing)
+            if (rec.phase != control_transaction::rec_download::phase_t::listing || command != c_rls)
             {
-                auto mode = rec->mode;
-                auto queued = rec->download_files;
-                txn.reset();
-                if (mode == control_transaction::recursive::mode_t::download && queued)
-                    fail("Recursive download stopped after a listing failure; already discovered files remain queued.");
-                else if (mode == control_transaction::recursive::mode_t::delete_)
+                invalid_completion("Recursive download failed outside its listing phase");
+                return;
+            }
+            auto queued = rec.download_files;
+            txn.reset();
+            if (queued) fail("Recursive download stopped after a listing failure; already discovered files remain queued.");
+            else        fail("Recursive operation aborted because a directory could not be listed.");
+        }
+        void fail_flow(control_transaction::rec_delete& rec, cmd_t command)
+        {
+            switch (rec.phase)
+            {
+                case control_transaction::rec_delete::phase_t::listing:
+                    if (command != c_rls) { invalid_completion(); return; }
+                    txn.reset();
                     fail("Recursive delete aborted because a directory could not be listed.");
-                else fail("Recursive operation aborted because a directory could not be listed.");
+                    break;
+                case control_transaction::rec_delete::phase_t::executing:
+                    if (command != c_recop) { invalid_completion(); return; }
+                    ++rec.failures;
+                    ++rec.command_i;
+                    rec.phase = control_transaction::rec_delete::phase_t::collecting;
+                    break;
+                case control_transaction::rec_delete::phase_t::listing_result:
+                    if (command != c_ls) { invalid_completion(); return; }
+                    txn.reset();
+                    fail("Remote operation completed but its directory refresh failed.");
+                    break;
+                case control_transaction::rec_delete::phase_t::collecting:
+                    invalid_completion("Recursive delete failed without an in-flight command");
+                    break;
             }
-            else if (rec->phase == control_transaction::recursive::phase_t::probing_mkdir)
+        }
+        void fail_flow(control_transaction::rec_upload& rec, cmd_t command)
+        {
+            switch (rec.phase)
             {
-                abort_recursive_upload();
-            }
-            else if (rec->phase == control_transaction::recursive::phase_t::executing)
-            {
-                if (rec->mode == control_transaction::recursive::mode_t::upload)
-                {
-                    auto target = rec->command_i < rec->commands.size() ? recop_mkdir_target(rec->commands[rec->command_i]) : text{};
-                    if (target.empty())
+                case control_transaction::rec_upload::phase_t::executing:
+                    if (command != c_recop) { invalid_completion(); return; }
+                    if (rec.command_i >= rec.commands.size() || rec.commands[rec.command_i].op != rec_op::mkdir)
                     {
-                        abort_recursive_upload();
+                        abort_recursive_upload(rec);
                         return;
                     }
-                    rec->phase = control_transaction::recursive::phase_t::probing_mkdir;
-                    txn.staged.clear();
-                    if (issue_command(c_rls, "ls " + quote_name(parent_path(target, faux)))) return;
-                    if (!txn.wire_busy()) abort_recursive_upload();
-                }
-                else if (rec->mode == control_transaction::recursive::mode_t::delete_)
-                {
-                    ++rec->failures;
-                    ++rec->command_i;
-                    rec->phase = control_transaction::recursive::phase_t::collecting;
-                }
-                else
-                {
+                    {
+                        auto const& target = rec.commands[rec.command_i].path;
+                        rec.phase = control_transaction::rec_upload::phase_t::probing_mkdir;
+                        txn.staged.clear();
+                        if (issue_command(c_rls, "ls " + quote_name(parent_path(target, faux)))) return;
+                    }
+                    if (!txn.wire_busy()) abort_recursive_upload(rec);
+                    break;
+                case control_transaction::rec_upload::phase_t::probing_mkdir:
+                    if (command != c_rls) { invalid_completion(); return; }
+                    abort_recursive_upload(rec);
+                    break;
+                case control_transaction::rec_upload::phase_t::listing_after_abort:
+                    if (command != c_ls) { invalid_completion(); return; }
                     txn.reset();
-                    fail("Recursive operation aborted because a command failed.");
+                    fail("Recursive upload aborted because a remote directory could not be prepared; directory refresh failed.");
+                    break;
+                case control_transaction::rec_upload::phase_t::listing_result:
+                    if (command != c_ls) { invalid_completion(); return; }
+                    txn.reset();
+                    fail("Remote operation completed but its directory refresh failed.");
+                    break;
+                case control_transaction::rec_upload::phase_t::collecting:
+                    invalid_completion("Recursive upload failed without an in-flight command");
+                    break;
+            }
+        }
+        void fail_flow(control_transaction::keepalive&, cmd_t command)
+        {
+            if (command != c_pwd) { invalid_completion(); return; }
+            txn.reset();
+            begin_recover();
+        }
+        void fail_flow(control_transaction::connection& conn,
+                       cmd_t command,
+                       connection_failure_t reason = connection_failure_t::command)
+        {
+            txn.command = c_none;
+            if (conn.reconnect)
+            {
+                session.stop();
+                conn.phase = control_transaction::connection::phase_t::retry_wait;
+                conn.retry_at = steady_clock::now() + std::chrono::seconds{ reconnect_delay_sec };
+                stage = s_idle;
+                mark(reason == connection_failure_t::timeout
+                   ? "Reconnect attempt timed out; retrying..."
+                   : "Reconnect attempt failed; retrying...");
+                return;
+            }
+            if (stage == s_connected)
+            {
+                switch (conn.phase)
+                {
+                    case control_transaction::connection::phase_t::discovering_path:
+                        if (command != c_pwd) { invalid_completion(); return; }
+                        txn.reset();
+                        fail("Could not determine the remote working directory; connection remains open.");
+                        return;
+                    case control_transaction::connection::phase_t::listing:
+                        if (command != c_ls) { invalid_completion(); return; }
+                        path = conn.target.empty() ? path : conn.target;
+                        items.clear();
+                        ++gen;
+                        txn.reset();
+                        fail("Could not retrieve the initial directory listing; connection remains open.");
+                        return;
+                    default:
+                        invalid_completion();
+                        return;
                 }
             }
-            else if (rec->phase == control_transaction::recursive::phase_t::listing_after_abort)
-            {
-                txn.reset();
-                fail("Recursive upload aborted because a remote directory could not be prepared; directory refresh failed.");
-            }
-            else { txn.reset(); fail("Remote operation completed but its directory refresh failed."); }
+            session.stop();
+            txn.reset();
+            stage = s_failed;
+            if (reason == connection_failure_t::timeout) fail("Connection attempt timed out.");
+            else if (!status.starts_with("Error:"))      fail("Connection attempt failed.");
         }
-        void fail_keepalive() { txn.reset(); begin_recover(); }
+        void fail_flow(std::monostate&, cmd_t) { txn.reset(); }
 
         // One failure exit owns all cleanup for browse commands. `path`/`items` are committed only
         // by a successful destination listing, so every failure can safely preserve the old view.
-        void command_failed(cmd_t command)
+        void command_failed()
         {
-            txn.command = c_none;
-            switch (txn.kind())
-            {
-                case control_transaction::kind_t::connection: fail_connection(command); break;
-                case control_transaction::kind_t::navigation: fail_navigation(command); break;
-                case control_transaction::kind_t::refresh:    fail_refresh(); break;
-                case control_transaction::kind_t::mutation:   fail_mutation(); break;
-                case control_transaction::kind_t::recursive:  fail_recursive(); break;
-                case control_transaction::kind_t::keepalive:  fail_keepalive(); break;
-                case control_transaction::kind_t::none:       txn.reset(); break;
-            }
+            auto command = std::exchange(txn.command, c_none);
+            std::visit([&](auto& flow) { fail_flow(flow, command); }, txn.state);
         }
 
         void process(sftp_msg const& m)
@@ -3083,7 +2974,7 @@ namespace netxs::app::parvion
                     last_preamble.clear(); last_instruction.clear();
                     break;
                 case sftp_evt::listentry:
-                    if (txn.command == c_ls || txn.command == c_rls)
+                    if (txn.accepts_listing())
                     {
                         if (!m.list_text.empty()) log_line(logtype::listing, m.list_text);
                         auto e = to_direntry(m);
@@ -3107,16 +2998,17 @@ namespace netxs::app::parvion
                     {
                         trace(dbg_info, "Skipping Done without active operation.");
                     }
-                    else if (txn.command == c_keyfile)
+                    else if (m.first() == "1"
+                          || txn.is<control_transaction::connection>(control_transaction::connection::phase_t::registering_key))
                     {
-                        txn.command = c_none;
-                        send_next_keyfile_or_open(); // Registration is advisory; open decides auth.
+                        // Key registration is advisory, so either terminal result advances the
+                        // connection flow; authentication by `open` decides whether the key works.
+                        complete();
                     }
-                    else if (m.first() == "1") complete();
                     else
                     {
                         trace(dbg_info, "SFTP command in state " + text{ cmd_name(txn.command) } + " finished with result " + text{ m.first() });
-                        command_failed(txn.command);
+                        command_failed();
                     } // Failed browse cmd (cd/ls/op): it still terminated, so release the control session
                       // (else the in-flight guard would wedge navigation) and drop any staged path/ls.
                     break;
@@ -3189,213 +3081,256 @@ namespace netxs::app::parvion
             trace(dbg_warning, text{ warning });
             txn.reset();
         }
-        void commit_staged_listing(bool mutation_failed = faux)
+        void commit_staged_listing(text new_path = {})
         {
+            if (!new_path.empty()) path = std::move(new_path);
             items = std::move(txn.staged);
             sort_dir(items);
             ++gen;
             txn.reset();
-            if (mutation_failed) fail("Remote operation failed; directory listing reconciled.");
-            else mark("Directory listing of " + path + " successful");
         }
-        void complete_connection(cmd_t command)
+        void complete_flow(control_transaction::connection& conn, cmd_t command)
         {
-            auto conn = txn.get_if<control_transaction::connection>();
-            if (!conn) { invalid_completion(); return; }
-            if (command == c_open)
+            switch (conn.phase)
             {
-                stage = s_connected;
-                if (conn->reconnect)
-                {
-                    conn->target = conn->restore_path.empty() ? text{ "/" } : conn->restore_path;
-                    conn->phase = control_transaction::connection::phase_t::restoring_path;
-                    mark("Reconnected. Restoring " + conn->target + "...");
-                    issue_followup(c_cd, "cd " + quote_name(conn->target));
-                }
-                else
-                {
-                    conn->phase = control_transaction::connection::phase_t::discovering_path;
-                    issue_followup(c_pwd, "pwd");
-                    mark("Connected. Retrieving directory listing...");
-                }
+                case control_transaction::connection::phase_t::registering_key:
+                    if (command != c_keyfile) { invalid_completion(); return; }
+                    send_next_keyfile_or_open();
+                    break;
+                case control_transaction::connection::phase_t::opening:
+                    if (command != c_open) { invalid_completion(); return; }
+                    stage = s_connected;
+                    if (conn.reconnect)
+                    {
+                        conn.target = conn.restore_path.empty() ? text{ "/" } : conn.restore_path;
+                        conn.phase = control_transaction::connection::phase_t::restoring_path;
+                        mark("Reconnected. Restoring " + conn.target + "...");
+                        issue_followup(c_cd, "cd " + quote_name(conn.target));
+                    }
+                    else
+                    {
+                        conn.phase = control_transaction::connection::phase_t::discovering_path;
+                        issue_followup(c_pwd, "pwd");
+                        mark("Connected. Retrieving directory listing...");
+                    }
+                    break;
+                case control_transaction::connection::phase_t::discovering_path:
+                    if (command != c_pwd) { invalid_completion(); return; }
+                    conn.target = last_reply.empty() ? text{ "/" } : normalize_pwd(last_reply);
+                    conn.phase = control_transaction::connection::phase_t::listing;
+                    txn.staged.clear();
+                    issue_followup(c_ls, "ls");
+                    break;
+                case control_transaction::connection::phase_t::restoring_path:
+                    if (command != c_cd) { invalid_completion(); return; }
+                    conn.phase = control_transaction::connection::phase_t::listing;
+                    txn.staged.clear();
+                    issue_followup(c_ls, "ls");
+                    break;
+                case control_transaction::connection::phase_t::listing:
+                    if (command != c_ls) { invalid_completion(); return; }
+                    commit_staged_listing(conn.target);
+                    mark("Directory listing of " + path + " successful");
+                    break;
+                case control_transaction::connection::phase_t::retry_wait:
+                case control_transaction::connection::phase_t::waiting_greeting:
+                    invalid_completion();
+                    break;
             }
-            else if (command == c_pwd)
+        }
+        void complete_flow(control_transaction::navigation& nav, cmd_t command)
+        {
+            switch (nav.phase)
             {
-                conn->target = last_reply.empty() ? text{ "/" } : normalize_pwd(last_reply);
-                conn->phase = control_transaction::connection::phase_t::listing;
-                txn.staged.clear(); issue_followup(c_ls, "ls");
+                case control_transaction::navigation::phase_t::changing_directory:
+                    if (command != c_cd) { invalid_completion("Command completed in an invalid navigation phase"); return; }
+                    nav.phase = control_transaction::navigation::phase_t::waiting_to_list;
+                    nav.list_due = dbg_ls_delay_ms > 0
+                                 ? steady_clock::now() + std::chrono::milliseconds{ dbg_ls_delay_ms }
+                                 : steady_clock::now();
+                    if (dbg_ls_delay_ms <= 0) start_navigation_listing();
+                    break;
+                case control_transaction::navigation::phase_t::listing_destination:
+                    if (command != c_ls) { invalid_completion("Command completed in an invalid navigation phase"); return; }
+                    commit_staged_listing(nav.target);
+                    mark("Directory listing of " + path + " successful");
+                    break;
+                case control_transaction::navigation::phase_t::rolling_back:
+                    if (command != c_cd_rollback) { invalid_completion("Command completed in an invalid navigation phase"); return; }
+                    txn.reset();
+                    break;
+                case control_transaction::navigation::phase_t::waiting_to_list:
+                    invalid_completion("Command completed while navigation had no command in flight");
+                    break;
             }
-            else if (command == c_cd && conn->phase == control_transaction::connection::phase_t::restoring_path)
+        }
+        void complete_flow(control_transaction::refresh&, cmd_t command)
+        {
+            if (command == c_ls)
             {
-                conn->phase = control_transaction::connection::phase_t::listing;
-                txn.staged.clear(); issue_followup(c_ls, "ls");
-            }
-            else if (command == c_ls && conn->phase == control_transaction::connection::phase_t::listing)
-            {
-                path = conn->target;
-                items = std::move(txn.staged);
-                sort_dir(items);
-                ++gen;
-                txn.reset();
+                commit_staged_listing();
                 mark("Directory listing of " + path + " successful");
             }
             else invalid_completion();
         }
-        void complete_navigation(cmd_t command)
+        void complete_flow(control_transaction::mutation& mutation, cmd_t command)
         {
-            auto nav_ptr = txn.get_if<control_transaction::navigation>();
-            if (!nav_ptr) { invalid_completion("Command completed without a navigation transaction"); return; }
-            auto& nav = *nav_ptr;
-            if (command == c_cd && nav.phase == control_transaction::navigation::phase_t::changing_directory)
+            switch (mutation.phase)
             {
-                nav.phase = control_transaction::navigation::phase_t::waiting_to_list;
-                nav.list_due = dbg_ls_delay_ms > 0
-                             ? steady_clock::now() + std::chrono::milliseconds{ dbg_ls_delay_ms }
-                             : steady_clock::now();
-                if (dbg_ls_delay_ms <= 0) start_navigation_listing();
+                case control_transaction::mutation::phase_t::executing:
+                    if (command != c_op) { invalid_completion(); return; }
+                    mutation.phase = control_transaction::mutation::phase_t::listing_after_success;
+                    txn.staged.clear();
+                    issue_followup(c_ls, "ls");
+                    break;
+                case control_transaction::mutation::phase_t::listing_after_success:
+                    if (command != c_ls) { invalid_completion(); return; }
+                    commit_staged_listing();
+                    mark("Directory listing of " + path + " successful");
+                    break;
+                case control_transaction::mutation::phase_t::listing_after_failure:
+                    if (command != c_ls) { invalid_completion(); return; }
+                    commit_staged_listing();
+                    fail("Remote operation failed; directory listing reconciled.");
+                    break;
             }
-            else if (command == c_ls && nav.phase == control_transaction::navigation::phase_t::listing_destination)
-            {
-                auto target = nav.target;
-                items = std::move(txn.staged);
-                sort_dir(items);
-                path = target;
-                ++gen;
-                txn.reset();
-                mark("Directory listing of " + path + " successful");
-            }
-            else if (command == c_cd_rollback) txn.reset();
-            else invalid_completion("Command completed in an invalid navigation phase");
         }
-        void complete_refresh(cmd_t command)
+        template<class OnDir, class OnFile>
+        void consume_walk_listing(text const& remote_dir, OnDir&& on_dir, OnFile&& on_file)
         {
-            if (command == c_ls) commit_staged_listing();
-            else invalid_completion();
+            sort_dir(txn.staged);
+            for (auto& e : txn.staged)
+            {
+                auto rchild = child_path(remote_dir, e.name, faux);
+                if (e.is_dir) on_dir(e, rchild);
+                else          on_file(e, rchild);
+            }
+            txn.staged.clear();
         }
-        void complete_mutation(cmd_t command)
+        void complete_flow(control_transaction::rec_download& rec, cmd_t command)
         {
-            auto mutation = txn.get_if<control_transaction::mutation>();
-            if (!mutation) { invalid_completion(); return; }
-            if (command == c_op && mutation->phase == control_transaction::mutation::phase_t::executing)
+            if (rec.phase != control_transaction::rec_download::phase_t::listing || command != c_rls)
             {
-                mutation->phase = control_transaction::mutation::phase_t::listing_after_success;
-                txn.staged.clear(); issue_followup(c_ls, "ls");
+                invalid_completion();
+                return;
             }
-            else if (command == c_ls
-                  && (mutation->phase == control_transaction::mutation::phase_t::listing_after_success
-                   || mutation->phase == control_transaction::mutation::phase_t::listing_after_failure))
-            {
-                commit_staged_listing(mutation->phase == control_transaction::mutation::phase_t::listing_after_failure);
-            }
-            else invalid_completion();
-        }
-        void complete_recursive(cmd_t command)
-        {
-            auto rec_ptr = txn.get_if<control_transaction::recursive>();
-            if (!rec_ptr) { invalid_completion(); return; }
-            auto& rec = *rec_ptr;
-            if (command == c_rls && rec.phase == control_transaction::recursive::phase_t::listing)
-            {
-                if (rec.mode != control_transaction::recursive::mode_t::download
-                 && rec.mode != control_transaction::recursive::mode_t::delete_)
+            consume_walk_listing(rec.current.remote,
+                [&](direntry const& e, text const& rchild)
                 {
-                    invalid_completion("Recursive listing is only valid for download or delete walks");
-                    return;
-                }
-                sort_dir(txn.staged);
-                for (auto& e : txn.staged)
+                    auto lchild = child_path(rec.current.local, e.name, true);
+                    auto ec = std::error_code{};
+                    fs::create_directories(fs::path{ lchild }, ec);
+                    rec.stack.push_back({ rchild, lchild });
+                },
+                [&](direntry const& e, text const& rchild)
                 {
-                    auto rchild = child_path(rec.current.remote, e.name, faux);
-                    if (rec.mode == control_transaction::recursive::mode_t::download)
-                    {
-                        if (e.is_dir)
-                        {
-                            auto lchild = child_path(rec.current.local, e.name, true);
-                            auto ec = std::error_code{}; fs::create_directories(fs::path{ lchild }, ec);
-                            rec.stack.push_back({ rchild, lchild });
-                        }
-                        else
-                        {
-                            enqueue_download_path(rchild, child_path(rec.current.local, e.name, true), e.size);
-                            ++rec.download_files;
-                        }
-                    }
-                    else if (rec.mode == control_transaction::recursive::mode_t::delete_)
-                    {
-                        if (e.is_dir) { rec.delete_dirs.push_back(rchild); rec.stack.push_back({ rchild, {} }); }
-                        else rec.delete_files.push_back(rchild);
-                    }
-                }
-                txn.staged.clear();
-                rec.phase = control_transaction::recursive::phase_t::collecting;
-            }
-            else if (command == c_rls && rec.phase == control_transaction::recursive::phase_t::probing_mkdir)
-            {
-                auto target = rec.command_i < rec.commands.size() ? recop_mkdir_target(rec.commands[rec.command_i]) : text{};
-                auto name = recop_mkdir_name(target);
-                auto is_dir = !name.empty() && std::any_of(txn.staged.begin(), txn.staged.end(), [&](auto const& e)
-                {
-                    return e.name == name && e.is_dir;
+                    enqueue_download_path(rchild, child_path(rec.current.local, e.name, true), e.size);
+                    ++rec.download_files;
                 });
-                txn.staged.clear();
-                if (is_dir)
-                {
-                    ++rec.command_i;
-                    rec.phase = control_transaction::recursive::phase_t::collecting;
-                }
-                else abort_recursive_upload();
-            }
-            else if (command == c_recop && rec.phase == control_transaction::recursive::phase_t::executing)
-            {
-                ++rec.command_i;
-                rec.phase = control_transaction::recursive::phase_t::collecting;
-            }
-            else if (command == c_ls && rec.phase == control_transaction::recursive::phase_t::listing_result)
-            {
-                auto failures = rec.failures;
-                auto mode = rec.mode;
-                auto completion_status = std::move(rec.completion_status);
-                items = std::move(txn.staged); sort_dir(items); ++gen; txn.reset();
-                if (failures)
-                {
-                    auto noun = mode == control_transaction::recursive::mode_t::delete_ ? "delete"
-                              : mode == control_transaction::recursive::mode_t::upload  ? "upload"
-                              : "operation";
-                    fail("Recursive " + text{ noun } + " finished with " + std::to_string(failures) + " failed command(s).");
-                }
-                else if (!completion_status.empty())
-                {
-                    status = std::move(completion_status);
-                    dirty = true;
-                }
-                else mark("Directory listing of " + path + " successful");
-            }
-            else if (command == c_ls && rec.phase == control_transaction::recursive::phase_t::listing_after_abort)
-            {
-                items = std::move(txn.staged); sort_dir(items); ++gen; txn.reset();
-                fail("Recursive upload aborted because a remote directory could not be prepared; directory listing reconciled.");
-            }
-            else invalid_completion();
+            rec.phase = control_transaction::rec_download::phase_t::collecting;
         }
-        void complete_keepalive(cmd_t command)
+        void complete_flow(control_transaction::rec_delete& rec, cmd_t command)
+        {
+            switch (rec.phase)
+            {
+                case control_transaction::rec_delete::phase_t::listing:
+                    if (command != c_rls) { invalid_completion(); return; }
+                    consume_walk_listing(rec.current.remote,
+                        [&](direntry const&, text const& rchild)
+                        {
+                            rec.dirs.push_back(rchild);
+                            rec.stack.push_back({ rchild, {} });
+                        },
+                        [&](direntry const&, text const& rchild)
+                        {
+                            rec.files.push_back(rchild);
+                        });
+                    rec.phase = control_transaction::rec_delete::phase_t::collecting;
+                    break;
+                case control_transaction::rec_delete::phase_t::executing:
+                    if (command != c_recop) { invalid_completion(); return; }
+                    ++rec.command_i;
+                    rec.phase = control_transaction::rec_delete::phase_t::collecting;
+                    break;
+                case control_transaction::rec_delete::phase_t::listing_result:
+                    if (command != c_ls) { invalid_completion(); return; }
+                    {
+                        auto failures = rec.failures;
+                        auto completion_status = std::move(rec.completion_status);
+                        commit_staged_listing();
+                        if (failures)
+                            fail("Recursive delete finished with " + std::to_string(failures) + " failed command(s).");
+                        else if (!completion_status.empty())
+                        {
+                            status = std::move(completion_status);
+                            dirty = true;
+                        }
+                        else mark("Directory listing of " + path + " successful");
+                    }
+                    break;
+                case control_transaction::rec_delete::phase_t::collecting:
+                    invalid_completion();
+                    break;
+            }
+        }
+        void complete_flow(control_transaction::rec_upload& rec, cmd_t command)
+        {
+            switch (rec.phase)
+            {
+                case control_transaction::rec_upload::phase_t::executing:
+                    if (command != c_recop) { invalid_completion(); return; }
+                    ++rec.command_i;
+                    rec.phase = control_transaction::rec_upload::phase_t::collecting;
+                    break;
+                case control_transaction::rec_upload::phase_t::probing_mkdir:
+                    if (command != c_rls || rec.command_i >= rec.commands.size()) { invalid_completion(); return; }
+                    {
+                        auto const& target = rec.commands[rec.command_i].path;
+                        auto pos = target.find_last_of('/');
+                        auto name = pos == text::npos ? view{ target } : view{ target }.substr(pos + 1);
+                        auto is_dir = !name.empty() && std::any_of(txn.staged.begin(), txn.staged.end(), [&](auto const& e)
+                        {
+                            return e.name == name && e.is_dir;
+                        });
+                        txn.staged.clear();
+                        if (is_dir)
+                        {
+                            ++rec.command_i;
+                            rec.phase = control_transaction::rec_upload::phase_t::collecting;
+                        }
+                        else abort_recursive_upload(rec);
+                    }
+                    break;
+                case control_transaction::rec_upload::phase_t::listing_after_abort:
+                    if (command != c_ls) { invalid_completion(); return; }
+                    commit_staged_listing();
+                    fail("Recursive upload aborted because a remote directory could not be prepared; directory listing reconciled.");
+                    break;
+                case control_transaction::rec_upload::phase_t::listing_result:
+                    if (command != c_ls) { invalid_completion(); return; }
+                    {
+                        auto completion_status = std::move(rec.completion_status);
+                        commit_staged_listing();
+                        status = std::move(completion_status);
+                        dirty = true;
+                    }
+                    break;
+                case control_transaction::rec_upload::phase_t::collecting:
+                    invalid_completion();
+                    break;
+            }
+        }
+        void complete_flow(control_transaction::keepalive&, cmd_t command)
         {
             if (command == c_pwd) txn.reset();
             else invalid_completion();
         }
+        void complete_flow(std::monostate&, cmd_t) { invalid_completion(); }
         void complete()
         {
             trace(dbg_verbose, "Parsing SFTP control response in state " + text{ cmd_name(txn.command) });
             auto command = std::exchange(txn.command, c_none);
-            switch (txn.kind())
-            {
-                case control_transaction::kind_t::connection: complete_connection(command); break;
-                case control_transaction::kind_t::navigation: complete_navigation(command); break;
-                case control_transaction::kind_t::refresh:    complete_refresh(command); break;
-                case control_transaction::kind_t::mutation:   complete_mutation(command); break;
-                case control_transaction::kind_t::recursive:  complete_recursive(command); break;
-                case control_transaction::kind_t::keepalive:  complete_keepalive(command); break;
-                case control_transaction::kind_t::none:       invalid_completion(); break;
-            }
+            std::visit([&](auto& flow) { complete_flow(flow, command); }, txn.state);
         }
 
         static void sort_dir(std::vector<direntry>& v)
