@@ -17,6 +17,7 @@
 #include "settings.hpp"
 #include "reorder.hpp"
 #include "proto.hpp"
+#include "resume.hpp"
 #include "control.hpp"
 #include "hashing.hpp"
 
@@ -1294,6 +1295,9 @@ namespace netxs::app::parvion
         // stall on a reply that never comes. A drop flips this false within one poll, and
         // poll() then reconnects.
         auto connected() const { return stage == s_connected && session.alive(); }
+        // A reconnect backoff has an idle stage but still owns a live connection transaction,
+        // so the controller remains disconnectable until both stage and transaction are idle.
+        auto can_disconnect() const -> bool { return stage != s_idle || txn.active(); }
         // Connection transaction present and not sitting in reconnect backoff. Used by poll() and
         // the watchdog so they do not re-encode stage vs txn.phase ad hoc.
         auto handshake_active() const -> bool
@@ -1544,14 +1548,29 @@ namespace netxs::app::parvion
         void disconnect()
         {
             trace(dbg_debug, "Closing SFTP control connection (disconnect)");
+
+            auto job_ids = std::vector<ui64>{};
+            job_ids.reserve(transfer_jobs.size());
+            for (auto const& job : transfer_jobs) job_ids.push_back(job.item_id);
+            for (auto id : job_ids) stop_job(id);
+
+            for (auto& item : queue)
+            {
+                if (item.status != queue_item::transferring) continue;
+                refresh_panes(item);
+                item.status = queue_item::failed;
+                item.error = "Disconnected.";
+                item.rate.speed = 0.0;
+            }
+
             session.stop();
-            stage = s_idle;
             txn.reset();
             remote_refresh_path.clear();
             idle_pool.clear(); // Close pooled transfer connections.
             key_passphrases.clear(); pass_asked.clear(); account_asked = faux;
             sec = sec_idle; last_preamble.clear(); last_instruction.clear();
             items.clear();
+            stage = s_idle;
             mark("Not connected.");
         }
 

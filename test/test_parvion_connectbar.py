@@ -6,8 +6,9 @@
 End-to-end TUI tests for the Quick Connect bar's input fields (connectbar.hpp):
 a left mouse *press* (not the click release) focuses the make_input child under
 the cursor, and a left press-drag scrubs the caret in real time, clamped to the
-field's text. Tab chords are consumed without moving focus. The Connect button
-still fires on the click.
+field's text. Tab chords are consumed without moving focus. Connect still fires
+on click (an empty host shows the hint); Disconnect follows history and is
+disabled while idle, so it cannot clear that hint.
 
 The caret position is asserted behaviorally — by typing after the gesture and
 checking where the character lands — because the harness's replay() does not
@@ -213,6 +214,38 @@ def test_connect_fires_on_click():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_disconnect_is_disabled_while_idle():
+    """The × button follows history exactly and cannot erase an idle validation hint."""
+    print("TEST: parvion connect bar - idle Disconnect is disabled after history ... ", end="", flush=True)
+    d = tempfile.mkdtemp(prefix="parvioncb_")
+    try:
+        with T.ParvionSession(d) as s:
+            chars = s.screen()[0]
+            connect = T.find_text(chars, " Connect ")
+            if connect is None:
+                print("FAIL - Connect button not found")
+                return False
+            history = T.find_text_on_row(chars, "▾", connect[0])
+            disconnect = T.find_text_on_row(chars, "×", connect[0])
+            if history is None or disconnect is None or disconnect[1] != history[1] + 3:
+                print(f"FAIL - expected Connect / history / Disconnect order: "
+                      f"history={history}, disconnect={disconnect}")
+                return False
+
+            s.click(connect[1] + 2, connect[0] + 1)
+            if not T.grid_contains(s.screen()[0], "Enter a host name."):
+                print("FAIL - Connect did not create the test hint")
+                return False
+            s.click(disconnect[1] + 1, disconnect[0] + 1)
+            if not T.grid_contains(s.screen()[0], "Enter a host name."):
+                print("FAIL - disabled Disconnect cleared the connect-bar hint")
+                return False
+            print("PASS")
+            return True
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_connect_button_visual_states():
     """The shared button owns distinct resting, hover, and held feedback."""
     print("TEST: parvion connect bar - shared button visual states ... ", end="", flush=True)
@@ -289,8 +322,9 @@ def test_responsive_narrow_bar_stays_interactive():
             row = T.row_text(chars, r)[:narrow_cols]
             compact = row.find(" » ")
             history = row.find("▾", compact + 3 if compact >= 0 else 0)
-            if compact < 0 or history != compact + 4:
-                print(f"FAIL - compact Connect/history are not flush: {row!r}")
+            disconnect = row.find("×", history + 1 if history >= 0 else 0)
+            if compact < 0 or history != compact + 4 or disconnect != history + 3:
+                print(f"FAIL - compact Connect/history/Disconnect are not flush: {row!r}")
                 return False
 
             # Empty-host Connect must still activate while compact. Reveal its
@@ -536,6 +570,7 @@ TESTS = [
     test_field_drag_scrolls_left,
     test_tab_and_shift_tab_are_noops,
     test_connect_fires_on_click,
+    test_disconnect_is_disabled_while_idle,
     test_connect_button_visual_states,
     test_connect_drag_off_cancels_click,
     test_responsive_narrow_bar_stays_interactive,

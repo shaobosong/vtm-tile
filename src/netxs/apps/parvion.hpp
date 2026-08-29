@@ -302,9 +302,9 @@ namespace netxs::app::parvion
                     }
                 });
             });
-            // Quick-connect bar: interactive Host/User/Pass/Port + Connect.
-            body->attach(make_connect_bar(ctrl.get()), { .column = 0, .row = 0 })
-                ->limits({ 1, 1 }, { -1, 1 });
+            // Quick-connect bar: interactive Host/User/Pass/Port + Connect/Disconnect.
+            auto connect_bar = body->attach(make_connect_bar(ctrl.get()), { .column = 0, .row = 0 });
+            connect_bar->limits({ 1, 1 }, { -1, 1 });
             // The resizable workspace is a true two-dimensional grid: Local and Remote
             // occupy the top row, while the bottom tabs span both columns. Its handles
             // preserve the old 1:1 pane and 3:2 panes:tabs defaults.
@@ -396,11 +396,12 @@ namespace netxs::app::parvion
             // so the Python regression tests can verify the Message-log selection survives live log
             // updates. Off (0) unless the env var is set, so normal runs are unaffected.
             auto log_tick = []{ auto e = std::getenv("PARVION_DEMO_LOG_TICK"); return e && *e ? std::atoi(e) : 0; }();
-            // Drive the SFTP controller from a periodic timer; repaint the remote pane on change.
-            window->invoke([&, ctrl, local_pane, local_st, remote_pane, queue_panel, log_tick](auto& boss)
+            // Drive the SFTP controller from a periodic timer; repaint the connect bar, remote pane, and queue on change.
+            window->invoke([&, ctrl, connect_bar, local_pane, local_st, remote_pane, queue_panel, log_tick](auto& boss)
             {
                 boss.base::template plugin<pro::timer>().actify(std::chrono::milliseconds{ 50 },
-                    [ctrl, lp = ptr::shadow(local_pane), local_st, rp = ptr::shadow(remote_pane), qp = ptr::shadow(queue_panel),
+                    [ctrl, cb = ptr::shadow(connect_bar), lp = ptr::shadow(local_pane), local_st,
+                     rp = ptr::shadow(remote_pane), qp = ptr::shadow(queue_panel),
                      log_tick, tickc = ptr::shared(si32{ 0 })](auto)
                     {
                         ctrl->poll();
@@ -421,6 +422,7 @@ namespace netxs::app::parvion
                         if (ctrl->dirty)
                         {
                             ctrl->dirty = faux;
+                            if (auto p = cb.lock()) p->base::deface();
                             if (auto p = rp.lock()) p->base::deface();
                             if (auto p = qp.lock()) p->base::deface();
                         }

@@ -4,10 +4,10 @@
 #pragma once
 
 // parvion/connectbar.hpp: FileZilla-style Quick Connect bar — editable Host / User /
-// Pass / Port fields + a Connect button, composed from retained Parvion
+// Pass / Port fields + Connect / Disconnect actions, composed from retained Parvion
 // components and rendered in the command_bar style.
 
-#include "panes.hpp" // theme, shared menus, and SFTP/controller types
+#include "session.hpp"
 #include "components/button.hpp"
 #include "components/popup_menu.hpp"
 #include "components/flex.hpp"
@@ -147,6 +147,7 @@ namespace netxs::app::parvion
         sftp_remote* ctrl = nullptr;    // SFTP controller driven by Connect.
         netxs::wptr<ui::base> form_wptr;   // Retained form (to deface after dropdown actions).
         netxs::wptr<ui::base> status_wptr; // Status label (to deface when the status text changes).
+        netxs::wptr<ui::base> disconnect_wptr; // Disconnect button (to repaint enabled state).
     };
 
     // Set the bar's status hint and repaint the separate retained status label.
@@ -164,6 +165,13 @@ namespace netxs::app::parvion
         if (port <= 0 || port > 65535) port = 22;
         st.ctrl->connect(st.fld[cf_host], port, st.fld[cf_user], st.fld[cf_pass]);
         cb_set_status(st, {}); // The controller drives status from here on.
+        if (auto p = st.disconnect_wptr.lock()) p->base::deface();
+    }
+    inline void cb_disconnect(connect_state& st)
+    {
+        if (st.ctrl) st.ctrl->disconnect();
+        cb_set_status(st, {});
+        if (auto p = st.disconnect_wptr.lock()) p->base::deface();
     }
 
     // The connect form has a deliberately specialized sizing policy, but all of
@@ -384,8 +392,18 @@ namespace netxs::app::parvion
             .palette = { .background = theme::surface },
         });
 
-        // The live hint label fills the remaining width to the right of the ▾
-        // button. Prefixing non-empty text preserves the historical one-cell inset.
+        // Enabled while a control session, handshake, reconnect transaction, or
+        // failed stage can still be torn down; idle is not a status-hint action.
+        auto disconnect = make_button({
+            .label = []{ return text{ "×" }; },
+            .on_activate = [sp](hids&, ui::base&){ cb_disconnect(*sp); },
+            .enabled = [sp]{ return sp->ctrl && sp->ctrl->can_disconnect(); },
+            .palette = { .background = theme::surface },
+        });
+        sp->disconnect_wptr = ptr::shadow(disconnect.widget);
+
+        // The live hint label fills the remaining width to the right of ×.
+        // Prefixing non-empty text preserves the historical one-cell inset.
         auto status = make_label({
             .value = [sp]{ return sp->status.empty() ? text{} : " " + sp->status; },
             .role = label_role::hint,
@@ -393,9 +411,10 @@ namespace netxs::app::parvion
         });
         sp->status_wptr = ptr::shadow(status.widget);
 
-        // [ fields+Connect form | ▾ | status ]: the form shrinks only between
-        // its historical max/min, the trigger remains fixed, and status consumes
-        // the remaining space. This keeps Connect flush with the dropdown.
+        // [ fields+Connect form | ▾ | × | status ]: the form shrinks only
+        // between its historical max/min, both compact controls remain fixed, and
+        // status consumes the remaining space. This keeps Connect flush with the
+        // dropdown and places Disconnect immediately after it.
         auto bar = flex::ctor();
         bar->attach(component{ form }, {
             .grow = 1,
@@ -405,6 +424,13 @@ namespace netxs::app::parvion
             .maximum = cb_form_width(),
         });
         bar->attach(std::move(drop), {
+            .grow = 0,
+            .shrink = 0,
+            .basis = 3,
+            .minimum = 3,
+            .maximum = 3,
+        });
+        bar->attach(std::move(disconnect), {
             .grow = 0,
             .shrink = 0,
             .basis = 3,
