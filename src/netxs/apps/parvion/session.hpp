@@ -20,6 +20,7 @@
 #include "resume.hpp"
 #include "control.hpp"
 #include "hashing.hpp"
+#include "chunk_retry.hpp"
 
 #include <thread>
 #include <mutex>
@@ -143,6 +144,8 @@ namespace netxs::app::parvion
         bool io_eof  = faux;                // upload: source exhausted (chunk end / EOF)
         bool io_done = faux;                // download: finalize requested (drain + stop)
         bool io_err  = faux;
+        bool io_open_err = faux;            // fopen/io_open_chunk failed for this transfer.
+        bool io_setup_err = faux;           // Shared-memory/map/handle setup failed for this helper.
         bool io_stop = faux;                // abort the I/O thread
 
         // Argv tokens inserted between the executable and "-v". When the backend is
@@ -158,7 +161,7 @@ namespace netxs::app::parvion
         auto launch(text const& exe) -> bool
         {
             #if !defined(_WIN32)
-            create_shm(); // best-effort; the helper falls back to errors if absent
+            create_shm(); // Failure is classified only if this transfer later requests the missing mapping.
             int ip[2], op[2];
             if (::pipe(ip)) return faux;
             if (::pipe(op)) { ::close(ip[0]); ::close(ip[1]); return faux; }
@@ -195,7 +198,7 @@ namespace netxs::app::parvion
             start_reader();
             return true;
             #else
-            create_shm(); // mapping handle is DuplicateHandle'd to the helper at io_open
+            create_shm(); // DuplicateHandle/io_open below reports a transfer-scoped setup failure.
             // Inheritable pipes: child stdin = inRd, child stdout = outWr.
             auto sa = SECURITY_ATTRIBUTES{ sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE };
             auto inRd = HANDLE{}, inWr = HANDLE{}, outRd = HANDLE{}, outWr = HANDLE{};
@@ -286,6 +289,12 @@ namespace netxs::app::parvion
 
         auto alive() const { return running.load(); }
 
+        auto local_io_failed() -> bool
+        {
+            auto lk = std::lock_guard{ io_mtx };
+            return io_err || io_open_err || io_setup_err;
+        }
+
         void stop()
         {
             // Hard-kill the helper first (FileZilla DoClose parity: process_->kill()). A helper
@@ -336,6 +345,9 @@ namespace netxs::app::parvion
             io_download = download;
             io_local_path = std::move(path);
             io_length = length;
+            io_err = faux;
+            io_open_err = faux;
+            io_setup_err = faux;
         }
 
         auto create_shm() -> bool
@@ -511,7 +523,11 @@ namespace netxs::app::parvion
                     {
                         // Clean completion: flush stdio + force/drop this file's trailing dirty range
                         // so there is no write-back burst when the transfer finishes.
-                        if (io_file) std::fflush(io_file);
+                        if (io_file && std::fflush(io_file) != 0)
+                        {
+                            auto lk = std::lock_guard{ io_mtx };
+                            io_err = true;
+                        }
                         io_pace(io_file, synced, paced, wpos, true);
                         return;
                     }
@@ -553,9 +569,11 @@ namespace netxs::app::parvion
                     auto want = buf_bytes;
                     if (remaining >= 0 && (si64)want > remaining) want = (size_t)remaining;
                     auto n = (want && io_file) ? std::fread((char*)shm_base + slot_off(slot), 1, want, io_file) : size_t{};
+                    auto short_error = io_file && (std::ferror(io_file) || (remaining >= 0 && n < want));
                     if (remaining >= 0) remaining -= (si64)n;
                     {
                         auto lk = std::lock_guard{ io_mtx };
+                        if (short_error) io_err = true;
                         if (n) ready_slots.push_back({ slot, n });
                         else   free_slots.push_back(slot);
                         if (n < want || remaining == 0) io_eof = true;
@@ -604,17 +622,37 @@ namespace netxs::app::parvion
                 io_file = std::fopen(lpath.c_str(), "rb");
                 if (io_file && off) io_seek64(io_file, off); // chunk/resume start (64-bit)
             }
-            if (!io_file && !io_hash_only) { write_line("--"); return; }
+            if (!io_file && !io_hash_only)
+            {
+                { auto lk = std::lock_guard{ io_mtx }; io_open_err = true; }
+                write_line("--");
+                return;
+            }
             auto cur = io_file ? (ui64)std::ftell(io_file) : (ui64)0;
-            start_io_thread(); // begins prefill (upload) / awaits flush queue (download)
+            auto mapping_reply = text{};
             #if defined(_WIN32)
             auto target = HANDLE{};
             if (hproc && ::DuplicateHandle(::GetCurrentProcess(), shm_map, hproc, &target, 0, FALSE, DUPLICATE_SAME_ACCESS))
-                 write_line("-" + std::to_string((uintptr_t)target) + " " + std::to_string(shm_size) + " " + std::to_string(cur));
-            else write_line("--");
+                 mapping_reply = "-" + std::to_string((uintptr_t)target) + " " + std::to_string(shm_size) + " " + std::to_string(cur);
+            else
+            {
+                { auto lk = std::lock_guard{ io_mtx }; io_setup_err = true; }
+                if (io_file) { std::fclose(io_file); io_file = nullptr; }
+                write_line("--");
+                return;
+            }
             #else
-            write_line("-3 " + std::to_string(shm_size) + " " + std::to_string(cur)); // child mmaps its inherited fd 3
+            if (shm_base && shm_fd >= 0) mapping_reply = "-3 " + std::to_string(shm_size) + " " + std::to_string(cur); // child mmaps its inherited fd 3
+            else
+            {
+                { auto lk = std::lock_guard{ io_mtx }; io_setup_err = true; }
+                if (io_file) { std::fclose(io_file); io_file = nullptr; }
+                write_line("--");
+                return;
+            }
             #endif
+            start_io_thread(); // begins prefill (upload) / awaits flush queue (download)
+            write_line(mapping_reply);
             // Credit-IO download: pre-grant every free ring slot now (after the open
             // reply, so the helper reads the mapping first). Each grant is the same
             // "-<offset> <buf_bytes>" line the legacy on_io_nextbuf used to reply with;
@@ -645,7 +683,12 @@ namespace netxs::app::parvion
         // is "-<buffer-offset> <bytes>" (or "-0" at upload EOF).
         void on_io_nextbuf(view arg)
         {
-            if (!shm_base) { write_line("--1"); return; }
+            if (!shm_base)
+            {
+                { auto lk = std::lock_guard{ io_mtx }; io_setup_err = true; }
+                write_line("--1");
+                return;
+            }
             if (io_download && credit_io_enabled())
             {
                 // One-way completion: "<off> <bytes>" -> queue the filled slot for disk
@@ -799,10 +842,12 @@ namespace netxs::app::parvion
         si64 length = -1;              // Chunk length (parallel); -1 = whole file.
         si64 done = 0;                 // Bytes transferred (accumulated deltas + resumed base).
         si32 chunk_index = 0;          // Index into the resumable state file's part table.
-        si64 persisted = -1;           // Last `done` written to the state file (skip no-op writes).
         bool opened = faux;            // Helper has opened the remote file (Info line during xfer).
-        enum stt { s_init, s_connecting, s_running, s_ok, s_err } state = s_init;
+        enum stt { s_connecting, s_running, s_ok, s_err } state = s_connecting;
         text error;
+        xfer_err_origin origin = xfer_err_origin::none;
+        bool done_seen = faux;
+        text done_code;
         enum awt { a_none, a_open, a_xfer, a_keyfile } await = a_none;
         size_t keyfile_i = 0; // Cursor into `keyfiles` during the pre-auth a_keyfile phase.
         std::function<void(logtype, text, si32)> logsink; // -> sftp_remote::log_line (set by cfg_worker).
@@ -817,7 +862,6 @@ namespace netxs::app::parvion
         {
             switch (s)
             {
-                case s_init:       return "init";
                 case s_connecting: return "connecting";
                 case s_running:    return "running";
                 case s_ok:         return "ok";
@@ -879,10 +923,31 @@ namespace netxs::app::parvion
         // offsets without the leader's TRUNC wiping their data.
         auto leader_ready() const { return opened || (state == s_running && done > 0) || state == s_ok; }
 
+        void reset_attempt_state()
+        {
+            origin = xfer_err_origin::none;
+            done_seen = faux;
+            done_code.clear();
+        }
+
+        void fail(xfer_err_origin cause, text why = {})
+        {
+            state = s_err;
+            origin = cause;
+            if (!why.empty() && error.empty()) error = std::move(why);
+            if (error.empty()) error = "Transfer failed";
+        }
+
+        void classify_failure()
+        {
+            fail(classify_xfer_error({ session.local_io_failed(), done_seen, done_code, session.alive() }));
+        }
+
         void begin()
         {
             session.stop();
             done = 0; opened = faux; error.clear(); await = a_none; state = s_connecting;
+            reset_attempt_state();
             pass_asked.clear(); last_preamble.clear(); last_instruction.clear(); // Fresh auth session.
             session.runargs = runargs;
             lg(logtype::trace, "Going to execute " + exe, dbg_verbose); // FileZilla connect.cpp parity.
@@ -890,8 +955,7 @@ namespace netxs::app::parvion
             {
                 lg(logtype::trace, "Could not create process", dbg_warning);
                 lg(logtype::error, "Failed to launch parvionsftp: " + exe);
-                state = s_err;
-                error = "Failed to launch parvionsftp";
+                fail(xfer_err_origin::local, "Failed to launch parvionsftp");
             }
         }
         void stop()
@@ -906,7 +970,8 @@ namespace netxs::app::parvion
         void rearm()
         {
             lg(logtype::trace, "Reusing connected SFTP worker in state " + text{ state_name(state) }, dbg_verbose);
-            done = 0; persisted = -1; opened = faux; error.clear();
+            done = 0; opened = faux; error.clear();
+            reset_attempt_state();
             state = s_running; await = a_xfer;
             send_xfer();
         }
@@ -914,7 +979,11 @@ namespace netxs::app::parvion
         {
             if (!busy()) return;
             for (auto& m : session.drain()) on(m);
-            if (!session.alive() && busy()) { state = s_err; if (error.empty()) error = "Connection closed"; }
+            if (!session.alive() && busy())
+            {
+                if (error.empty()) error = "Connection closed";
+                classify_failure();
+            }
         }
         void on(sftp_msg const& m)
         {
@@ -937,7 +1006,7 @@ namespace netxs::app::parvion
                         auto kf = sftp_keyfile_from_prompt(m.first());
                         auto pp = text{};
                         if (!pass_asked.count(kf) && passphrase_provider && passphrase_provider(kf, pp)) { pass_asked.insert(kf); session.write_line(pp); }
-                        else { state = s_err; if (error.empty()) error = "Key passphrase unavailable"; session.stop(); } // Workers never prompt.
+                        else { fail(xfer_err_origin::local, "Key passphrase unavailable"); session.stop(); } // Workers never prompt.
                     }
                     else session.write_line(pass); // Account password (unchanged; from the Quick Connect bar).
                     last_preamble.clear(); last_instruction.clear();
@@ -966,7 +1035,10 @@ namespace netxs::app::parvion
                     {
                         lg(logtype::trace, "Transfer command finished with result " + text{ m.first() }, dbg_info);
                         state = s_err;
+                        done_seen = true;
+                        done_code = text{ m.first() };
                         if (error.empty()) error = "Transfer failed";
+                        classify_failure();
                     }
                     break;
                 case sftp_evt::listentry:
@@ -1011,7 +1083,11 @@ namespace netxs::app::parvion
         {
             lg(logtype::trace, "Parsing SFTP worker response in state " + text{ await_name(await) }, dbg_verbose);
             if (await == a_open) { state = s_running; await = a_xfer; send_xfer(); }
-            else if (await == a_xfer) state = s_ok;
+            else if (await == a_xfer)
+            {
+                if (session.local_io_failed()) fail(xfer_err_origin::local);
+                else state = s_ok;
+            }
         }
         void send_xfer()
         {
@@ -1100,16 +1176,23 @@ namespace netxs::app::parvion
         std::vector<recent_server> recent;          // Quick Connect history (most-recent-first), persisted to disk.
         static constexpr auto recent_cap = size_t{ 16 };
 
-        // Transfer queue + active parent jobs. A job owns the planned chunk slots for one queue item;
-        // a parked slot has an s_init worker with no process, so it consumes no channel.
+        struct job_chunk
+        {
+            chunk_slot slot;
+            std::unique_ptr<xfer_worker> proc;
+            bool counted_attach = faux;
+            bool reused_attach = faux;
+        };
+
+        // Transfer queue + active parent jobs. Durable policy and ephemeral process
+        // attachment are paired here so neither parallel vector can drift.
         struct transfer_job
         {
             ui64 item_id = 0;
-            std::vector<std::unique_ptr<xfer_worker>> workers;
+            std::vector<job_chunk> chunks;
             text state_path;
             ui32 md_size = 0;
             bool resume = faux;
-            bool reused = faux;
             bool start_logged = faux;
             bool reuse_logged = faux;
             bool state_ready_written = faux;
@@ -1117,6 +1200,7 @@ namespace netxs::app::parvion
         std::vector<queue_item>   queue;
         std::vector<transfer_job> transfer_jobs;
         ui64 transfer_id_seq = 0;
+        ui64 pump_id = 0;
         size_t allocation_cursor = 0;
         // Idle connection pool (FileZilla CQueueView parity): finished workers stay connected here
         // so another chunk or file can skip open+auth. Active + idle transfer channels share the
@@ -1887,7 +1971,7 @@ namespace netxs::app::parvion
             for (auto i = size_t{}; i < transfer_jobs.size(); ++i)
             {
                 if (transfer_jobs[i].item_id != item_id) continue;
-                for (auto& w : transfer_jobs[i].workers) if (w) w->stop();
+                for (auto& chunk : transfer_jobs[i].chunks) if (chunk.proc) chunk.proc->stop();
                 transfer_jobs.erase(transfer_jobs.begin() + (std::ptrdiff_t)i);
                 if (allocation_cursor > i && allocation_cursor) --allocation_cursor;
                 if (allocation_cursor >= transfer_jobs.size()) allocation_cursor = 0;
@@ -1924,7 +2008,37 @@ namespace netxs::app::parvion
                 if (it.status == queue_item::queued && it.paused) { it.paused = faux; changed = true; }
                 else if (it.status == queue_item::failed || it.status == queue_item::succeeded)
                 {   // Re-queue to transfer again (Failed retries; Succeeded re-transfers).
-                    it.status = queue_item::queued; it.paused = faux; it.done = 0; it.rate.speed = 0.0; it.error.clear();
+                    auto keep_parallel_checkpoint = it.status == queue_item::failed && it.chunk_count > 1;
+                    it.status = queue_item::queued; it.paused = faux;
+                    if (!keep_parallel_checkpoint) it.done = 0;
+                    it.rate.speed = 0.0; it.error.clear();
+                    changed = true;
+                }
+            }
+            if (changed) dirty = true;
+        }
+        auto has_retryable_parts(ui64 item_id) const -> bool
+        {
+            auto job = find_transfer_job(item_id);
+            if (!job || job->chunks.size() <= 1) return faux;
+            for (auto const& chunk : job->chunks)
+                if (slot_retryable_connection(chunk.slot)) return true;
+            return faux;
+        }
+        // Explicitly re-arm only connection-origin parts. Local failures and server refusals remain
+        // exhausted; retrying the entire Failed parent is still available through queue_start.
+        template<class P> void queue_retry_failed_parts(P pred)
+        {
+            auto changed = faux;
+            for (auto& it : queue)
+            {
+                if (!pred(it) || it.status != queue_item::transferring || it.chunk_count <= 1) continue;
+                auto job = find_transfer_job(it.id);
+                if (!job) continue;
+                for (auto& chunk : job->chunks)
+                {
+                    if (chunk.proc || !slot_retryable_connection(chunk.slot)) continue;
+                    arm_manual_retry(chunk.slot, pump_id);
                     changed = true;
                 }
             }
@@ -2164,16 +2278,16 @@ namespace netxs::app::parvion
         {
             auto count = size_t{};
             for (auto& job : transfer_jobs)
-                for (auto& w : job.workers)
-                    if (w && w->busy()) ++count;
+                for (auto& chunk : job.chunks)
+                    if (chunk.proc && chunk.proc->busy()) ++count;
             return count;
         }
         auto connecting_worker_count() const -> size_t
         {
             auto count = size_t{};
             for (auto& job : transfer_jobs)
-                for (auto& w : job.workers)
-                    if (w && w->state == xfer_worker::s_connecting) ++count;
+                for (auto& chunk : job.chunks)
+                    if (chunk.proc && chunk.proc->state == xfer_worker::s_connecting) ++count;
             return count;
         }
         // Take a still-connected worker from the idle pool (dropping any the server has since closed),
@@ -2269,10 +2383,10 @@ namespace netxs::app::parvion
             job.item_id = item.id;
             if (chunks <= 1)
             {
-                auto slot = std::make_unique<xfer_worker>();
-                slot->offset = 0;
-                slot->length = -1;
-                job.workers.push_back(std::move(slot));
+                auto chunk = job_chunk{};
+                chunk.slot.offset = 0;
+                chunk.slot.length = -1;
+                job.chunks.push_back(std::move(chunk));
             }
             else
             {
@@ -2289,18 +2403,19 @@ namespace netxs::app::parvion
                 setup_parallel_state(job, item, parts);
                 for (auto c = size_t{}; c < parts.size(); ++c)
                 {
-                    auto slot = std::make_unique<xfer_worker>();
-                    slot->offset = (si64)parts[c].start;
-                    slot->length = (si64)parts[c].size;
-                    slot->chunk_index = (si32)c;
-                    slot->done = (si64)parts[c].transferred;
-                    slot->persisted = slot->done;
-                    if (slot->done >= slot->length) slot->state = xfer_worker::s_ok;
-                    job.workers.push_back(std::move(slot));
+                    auto chunk = job_chunk{};
+                    auto& slot = chunk.slot;
+                    slot.offset = (si64)parts[c].start;
+                    slot.length = (si64)parts[c].size;
+                    slot.index = (si32)c;
+                    slot.done = (si64)parts[c].transferred;
+                    slot.persisted = slot.done;
+                    if (slot.done >= slot.length) slot.phase = chunk_phase::succeeded;
+                    job.chunks.push_back(std::move(chunk));
                 }
             }
             auto base = si64{};
-            for (auto& w : job.workers) base += w->done;
+            for (auto& chunk : job.chunks) base += chunk.slot.done;
             item.done = base;
             transfer_jobs.push_back(std::move(job));
             dirty = true;
@@ -2364,7 +2479,9 @@ namespace netxs::app::parvion
         auto followers_ready(transfer_job& job, queue_item const& item) -> bool
         {
             if (item.download || job.resume) return true;
-            auto ready = !job.workers.empty() && job.workers.front()->leader_ready();
+            auto ready = !job.chunks.empty()
+                      && (job.chunks.front().slot.opened
+                       || job.chunks.front().slot.phase == chunk_phase::succeeded);
             if (ready && !job.state_ready_written && !job.state_path.empty())
             {
                 write_state_status(job.state_path, state_ready);
@@ -2375,38 +2492,55 @@ namespace netxs::app::parvion
         auto activate_next_chunk(transfer_job& job, queue_item& item) -> bool
         {
             if (busy_worker_count() >= max_connections) return faux;
-            auto chunk = size_t{ job.workers.size() };
-            for (auto i = size_t{}; i < job.workers.size(); ++i)
+            auto now = steady_clock::now();
+            auto chunk_index = size_t{ job.chunks.size() };
+            for (auto i = size_t{}; i < job.chunks.size(); ++i)
             {
-                if (job.workers[i]->state != xfer_worker::s_init) continue;
+                auto& candidate = job.chunks[i].slot;
+                if (!slot_dispatchable(candidate, pump_id, now, reconnect_delay_sec)) continue;
                 if (i && !followers_ready(job, item)) continue;
-                chunk = i;
+                chunk_index = i;
                 break;
             }
-            if (chunk == job.workers.size()) return faux;
+            if (chunk_index == job.chunks.size()) return faux;
 
             auto pooled = acquire_worker();
             auto reused = (bool)pooled;
             auto burst = (size_t)std::min(max_connections, parallel_connect_burst);
             if (!reused && connecting_worker_count() >= burst) return faux;
 
-            auto& slot = *job.workers[chunk];
+            auto& chunk = job.chunks[chunk_index];
+            auto& slot = chunk.slot;
             auto resumed = slot.done;
             auto range_start = slot.offset;
             auto range_size = slot.length;
+            auto retrying = slot.phase == chunk_phase::retry_wait;
             auto w = reused ? std::move(pooled) : std::make_unique<xfer_worker>();
             auto parallel = item.chunk_count > 1;
             cfg_worker(*w, item, parallel,
                        parallel ? range_start + resumed : 0,
                        parallel ? range_size - resumed : -1,
-                       parallel && !item.download && !job.resume && chunk == 0);
-            w->chunk_index = (si32)chunk;
+                       parallel && leader_should_initialize(item.download, job.resume, chunk_index,
+                                                            job.state_ready_written, slot.opened));
+            w->chunk_index = (si32)chunk_index;
+            slot.attempt_base = resumed;
+            slot.phase = chunk_phase::running;
+            chunk.counted_attach = retrying;
+            chunk.reused_attach = reused;
+            if (chunk.counted_attach) ++slot.attempts;
+
+            if (retrying)
+            {
+                log_line(logtype::status,
+                         "Retrying chunk " + std::to_string(chunk_index + 1) + "/" + std::to_string(job.chunks.size())
+                         + " of " + (item.download ? item.remote_path : item.local_path)
+                         + " (attempt " + std::to_string(slot.attempts) + ")");
+            }
 
             auto label = text{ item.download ? "download" : "upload" }
                        + " of " + (item.download ? item.remote_path : item.local_path);
             if (reused)
             {
-                job.reused = true;
                 if (!job.reuse_logged)
                 {
                     log_line(logtype::status, "Reusing connection for " + label + "...");
@@ -2430,8 +2564,7 @@ namespace netxs::app::parvion
             w->offset = parallel ? range_start + resumed : 0;
             w->length = parallel ? range_size - resumed : -1;
             w->done = resumed;
-            w->persisted = resumed;
-            job.workers[chunk] = std::move(w);
+            chunk.proc = std::move(w);
             // Preparing a parent job only creates parked chunk slots. The row becomes a
             // percentage-bearing transfer only when one of those slots has actually been
             // launched or rearmed on a pooled connection.
@@ -2596,18 +2729,19 @@ namespace netxs::app::parvion
         }
         void pump_queue()
         {
+            ++pump_id;
+            auto now = steady_clock::now();
             for (auto ji = size_t{}; ji < transfer_jobs.size(); )
             {
                 auto& job = transfer_jobs[ji];
                 auto itemp = find_queue_item(job.item_id);
                 if (!itemp)
                 {
-                    for (auto& w : job.workers) if (w) w->stop();
+                    for (auto& chunk : job.chunks) if (chunk.proc) chunk.proc->stop();
                     transfer_jobs.erase(transfer_jobs.begin() + (std::ptrdiff_t)ji);
                     continue;
                 }
                 auto& item = *itemp;
-                for (auto& w : job.workers) w->poll();
 
                 auto chunk_full = [&](size_t chunk) -> si64
                 {
@@ -2615,69 +2749,104 @@ namespace netxs::app::parvion
                     auto csz = (item.size + item.chunk_count - 1) / item.chunk_count;
                     return std::min(csz, item.size - (si64)chunk * csz);
                 };
-                // Persist live progress and detach completed sessions from their parent job. A small
-                // placeholder retains the chunk result while the authenticated connection enters the
-                // shared idle pool and can immediately be scheduled onto other work.
-                for (auto wi = size_t{}; wi < job.workers.size(); ++wi)
+                auto log_exhausted = [&](size_t wi)
                 {
-                    auto& w = job.workers[wi];
-                    if (!job.state_path.empty() && w->done != w->persisted)
+                    log_line(logtype::error,
+                             "Chunk " + std::to_string(wi + 1) + "/" + std::to_string(job.chunks.size())
+                             + " of " + (item.download ? item.remote_path : item.local_path)
+                             + ": reconnect attempts exhausted");
+                };
+
+                for (auto wi = size_t{}; wi < job.chunks.size(); ++wi)
+                {
+                    auto& chunk = job.chunks[wi];
+                    auto& slot = chunk.slot;
+
+                    // A live settings reduction can exhaust a parked reconnect before it launches.
+                    if (slot.phase == chunk_phase::retry_wait
+                     && !should_auto_retry(slot.origin, slot.attempts, max_reconnect_tries))
                     {
-                        write_state_transferred(job.state_path, job.md_size, (ui32)wi, (ui64)w->done);
-                        w->persisted = w->done;
+                        slot.phase = chunk_phase::failed;
+                        slot.error = "Reconnect attempts exhausted";
+                        log_exhausted(wi);
                     }
-                    if (w->state == xfer_worker::s_ok && w->session.alive())
+
+                    if (slot.phase != chunk_phase::running || !chunk.proc) continue;
+                    auto& proc = *chunk.proc;
+                    proc.poll();
+                    slot.done = proc.done; // Durable for both parallel and single-connection jobs.
+                    slot.opened = slot.opened || proc.opened;
+                    if (!job.state_path.empty() && slot.done != slot.persisted)
+                    {
+                        write_state_transferred(job.state_path, job.md_size, (ui32)wi, (ui64)slot.done);
+                        slot.persisted = slot.done;
+                    }
+
+                    if (proc.state == xfer_worker::s_ok)
                     {
                         auto full = chunk_full(wi);
-                        if (!job.state_path.empty() && w->persisted != full)
-                            write_state_transferred(job.state_path, job.md_size, (ui32)wi, (ui64)full);
-                        auto reusable = std::move(w);
-                        auto slot = std::make_unique<xfer_worker>();
-                        slot->chunk_index = (si32)wi;
-                        slot->state = xfer_worker::s_ok;
-                        slot->done = full;
-                        slot->persisted = full;
-                        if (item.chunk_count > 1)
+                        slot.done = full;
+                        slot.opened = true;
+                        slot.phase = chunk_phase::succeeded;
+                        slot.origin = xfer_err_origin::none;
+                        slot.error.clear();
+                        if (!job.state_path.empty() && slot.persisted != full)
                         {
-                            auto csz = (item.size + item.chunk_count - 1) / item.chunk_count;
-                            slot->offset = (si64)wi * csz;
-                            slot->length = full;
+                            write_state_transferred(job.state_path, job.md_size, (ui32)wi, (ui64)full);
+                            slot.persisted = full;
                         }
-                        w = std::move(slot);
-                        recycle_worker(std::move(reusable));
+                        recycle_worker(std::move(chunk.proc));
+                        chunk.counted_attach = faux;
+                        chunk.reused_attach = faux;
+                        continue;
+                    }
+                    if (proc.state == xfer_worker::s_err)
+                    {
+                        slot.origin = proc.origin;
+                        slot.error = proc.error;
+                        auto counted = chunk.counted_attach;
+                        auto reused = chunk.reused_attach;
+                        proc.stop();
+                        chunk.proc.reset();
+                        chunk.counted_attach = faux;
+                        chunk.reused_attach = faux;
+                        auto result = arm_failure(slot, counted, reused,
+                                                  max_reconnect_tries, now, pump_id);
+                        if (result == arm_failure_result::exhausted
+                         && slot.origin == xfer_err_origin::connection)
+                        {
+                            slot.error = "Reconnect attempts exhausted";
+                            log_exhausted(wi);
+                        }
                     }
                 }
 
                 auto total = si64{};
-                auto all_ok = true;
-                auto any_err = faux;
-                for (auto wi = size_t{}; wi < job.workers.size(); ++wi)
-                {
-                    auto& w = job.workers[wi];
-                    total += (w->state == xfer_worker::s_ok) ? chunk_full(wi) : w->done;
-                    if (!w->finished()) all_ok = faux;
-                    if (w->state == xfer_worker::s_err) { any_err = true; if (item.error.empty()) item.error = w->error; }
-                }
+                for (auto wi = size_t{}; wi < job.chunks.size(); ++wi)
+                    total += job.chunks[wi].slot.phase == chunk_phase::succeeded ? chunk_full(wi)
+                                                                                 : job.chunks[wi].slot.done;
+                if (!item.download && !job.resume && !job.chunks.empty() && job.chunks.front().slot.opened)
+                    followers_ready(job, item);
+                auto counts = counts_from_slots(job.chunks, !item.download, job.resume,
+                                                [](job_chunk const& chunk) -> chunk_slot const& { return chunk.slot; });
+                auto decision = decide_xfer_parent(counts);
                 item.done = total;
                 item.rate.sample(item.done, std::chrono::steady_clock::now());
                 dirty = true;
                 auto avg_speed = [&](si64 bytes){ return item.rate.average(bytes, (si64)(std::time(nullptr) - item.started)); };
                 auto run_bytes = [&](si64 bytes){ return std::max<si64>(0, bytes - item.rate.base); };
-                if (any_err && job.reused && run_bytes(total) == 0)
+                if (decision == xfer_parent_decision::failed)
                 {
-                    for (auto& w : job.workers) w->stop();
-                    idle_pool.clear();
-                    item.status = queue_item::queued; item.error.clear(); item.done = 0; item.rate.speed = 0.0;
-                }
-                else if (any_err)
-                {
+                    item.error.clear();
+                    for (auto& chunk : job.chunks)
+                        if (chunk.slot.phase == chunk_phase::failed && !chunk.slot.error.empty()) { item.error = chunk.slot.error; break; }
                     log_transfer_result(item, faux, run_bytes(total));
                     item.status = queue_item::failed;
                     item.rate.speed = avg_speed(item.done);
-                    for (auto& w : job.workers) w->stop();
+                    for (auto& chunk : job.chunks) if (chunk.proc) chunk.proc->stop();
                     refresh_panes(item);
                 }
-                else if (all_ok)
+                else if (decision == xfer_parent_decision::succeeded)
                 {
                     log_transfer_result(item, true, run_bytes(item.size > 0 ? item.size : total));
                     if (item.size > 0) item.done = item.size;

@@ -151,7 +151,9 @@ namespace
 
         auto job = sftp_remote::transfer_job{};
         job.item_id = active.id;
-        job.workers.push_back(std::make_unique<xfer_worker>());
+        job.chunks.emplace_back();
+        job.chunks.back().slot.phase = chunk_phase::running;
+        job.chunks.back().proc = std::make_unique<xfer_worker>();
         ctrl.transfer_jobs.push_back(std::move(job));
         ctrl.idle_pool.push_back(std::make_unique<xfer_worker>());
 

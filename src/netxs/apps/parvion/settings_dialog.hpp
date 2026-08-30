@@ -74,9 +74,9 @@ namespace netxs::app::parvion
         inline constexpr auto timeout_help = view{ "If no data is sent or received during an operation for longer than the specified time, the connection will be closed and Parvion will try to reconnect." };
         inline constexpr auto retries_label = view{ "Maximum number of retries:" };
         inline constexpr auto retries_range = view{ "(0-99, 0 for unlimited)" };
-        inline constexpr auto delay_label = view{ "Delay between failed login attempts:" };
+        inline constexpr auto delay_label = view{ "Delay between failed attempts:" };
         inline constexpr auto delay_range = view{ "(0-999 seconds)" };
-        inline constexpr auto reconnect_help = view{ "Please note that some servers might ban you if you try to reconnect too often or in too short intervals." };
+        inline constexpr auto reconnect_help = view{ "Parvion will retry a dropped control connection and a transfer chunk whose connection was lost this many times, waiting the configured delay between attempts. Local failures (disk, launching the helper, missing passphrase) and server refusals (permission, missing file, remote quota) are not retried. Please note that some servers might ban you if you try to reconnect too often or in too short intervals." };
     }
 
     namespace settings_sftp

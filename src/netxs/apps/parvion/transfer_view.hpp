@@ -276,6 +276,14 @@ namespace netxs::app::parvion
         add(bulk ? "&Start All" : "&Start", !any_target, [ctrl, target]{ ctrl->queue_start(target); });
         if (status == 0)
             add(bulk ? "&Pause All" : "&Pause", !any_target, [ctrl, target]{ ctrl->queue_pause(target); });
+        if (status == 0 && any_selected)
+        {
+            auto retryable = std::ranges::any_of(ctrl->queue, [ctrl, sel](queue_item const& it)
+            {
+                return sel(it) && ctrl->has_retryable_parts(it.id);
+            });
+            add("&Retry failed parts", !retryable, [ctrl, sel]{ ctrl->queue_retry_failed_parts(sel); });
+        }
         add(bulk ? "&Remove All" : "&Remove", !any_target, [ctrl, target, bulk, panel_wp, window_wp]
         {
             auto count = si32{}; for (auto& it : ctrl->queue) if (target(it)) ++count;
@@ -331,7 +339,7 @@ namespace netxs::app::parvion
     }
     // One transfer cell's rendered text + colour.
     inline auto xfer_cell(sftp_remote* ctrl, si32 status, si32 row, si32 key,
-                          xfer_progress_cache& progress) -> table_cell
+                          xfer_progress_cache& progress, si32 progress_width = 11) -> table_cell
     {
         auto rows = xfer_rows(ctrl, status);
         if (row < 0 || row >= (si32)rows.size()) return {};
@@ -369,16 +377,25 @@ namespace netxs::app::parvion
         if (key == q_progress)
         {
             auto job = ctrl->find_transfer_job(it.id);
-            auto live = job && job->workers.size() == ranges.size();
+            auto live = job && job->chunks.size() == ranges.size();
             if (live)
             {
-                auto& wkr = *job->workers[(size_t)child];
+                auto& slot = job->chunks[(size_t)child].slot;
                 auto full = (double)(end - start);
-                if (wkr.state == xfer_worker::s_ok) return xfer_progress_cell(progress, row, 1.0, "100.00%", theme::dir_fg);
-                auto fraction = full > 0.0 ? progressbar_fraction((double)wkr.done / full) : 0.0;
-                return xfer_progress_cell(progress, row, fraction, xfer_progress_text(fraction),
-                                          wkr.state == xfer_worker::s_err ? ui32{ theme::err_fg }
-                                                                          : ui32{ theme::text_fg });
+                if (slot.phase == chunk_phase::succeeded) return xfer_progress_cell(progress, row, 1.0, "100.00%", theme::dir_fg);
+                auto fraction = slot.phase != chunk_phase::idle && full > 0.0
+                              ? progressbar_fraction((double)slot.done / full)
+                              : 0.0;
+                auto label = slot.phase == chunk_phase::retry_wait
+                           ? "retry " + std::to_string(slot.attempts + 1)
+                           : slot.phase == chunk_phase::failed && !slot.error.empty()
+                           ? fit_ellipsis(slot.error, progress_width)
+                           : slot.phase == chunk_phase::idle
+                           ? text{ "queued" }
+                           : xfer_progress_text(fraction);
+                return xfer_progress_cell(progress, row, fraction, label,
+                                          slot.phase == chunk_phase::failed ? ui32{ theme::err_fg }
+                                                                            : ui32{ theme::text_fg });
             }
             if (it.status == queue_item::succeeded) return xfer_progress_cell(progress, row, 1.0, "100.00%", theme::dir_fg);
             if (it.status == queue_item::queued)    return xfer_progress_cell(progress, row, 0.0, "queued", theme::subtext);
@@ -418,7 +435,10 @@ namespace netxs::app::parvion
             *row_snapshot = xfer_rows(ctrl, status);
             return (si32)row_snapshot->size();
         };
-        cfg.cell      = [ctrl, status, progress](si32 row, si32 key){ return xfer_cell(ctrl, status, row, key, *progress); };
+        cfg.cell      = [ctrl, status, progress, cols](si32 row, si32 key)
+        {
+            return xfer_cell(ctrl, status, row, key, *progress, cols->col_w[(size_t)q_progress]);
+        };
         cfg.sort.compare   = [ctrl, row_snapshot](si32 row_a, si32 row_b, si32 key)
         {
             return xfer_compare(ctrl, *row_snapshot, row_a, row_b, key);
