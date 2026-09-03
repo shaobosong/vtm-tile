@@ -10,6 +10,7 @@
 #include "model.hpp"
 #include "proto.hpp"
 
+#include <ctime>
 #include <type_traits>
 #include <utility>
 #include <variant>
@@ -76,12 +77,15 @@ namespace netxs::app::parvion
             text target;
             text fallback_name;
             si64 fallback_size = -1;
+            time_t fallback_mtime = 0;
             steady_clock::time_point list_due{};
 
             navigation() = default;
-            navigation(text source, text target, text fallback_name = {}, si64 fallback_size = -1)
+            navigation(text source, text target, text fallback_name = {}, si64 fallback_size = -1,
+                       time_t fallback_mtime = 0)
                 : source{ std::move(source) }, target{ std::move(target) },
-                  fallback_name{ std::move(fallback_name) }, fallback_size{ fallback_size } { }
+                  fallback_name{ std::move(fallback_name) }, fallback_size{ fallback_size },
+                  fallback_mtime{ fallback_mtime } { }
             auto has_fallback() const { return !fallback_name.empty(); }
         };
 
@@ -132,6 +136,7 @@ namespace netxs::app::parvion
             text local_path;
             text remote_path;
             si64 size = 0;
+            time_t mtime = 0;
         };
 
         struct rec_upload

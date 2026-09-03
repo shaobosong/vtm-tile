@@ -66,6 +66,36 @@ def select_dropdown(s, current, target):
     return T.find_text(s.screen()[0], target) is not None
 
 
+def select_dropdown_keyboard(s, current, steps, target):
+    """Select a popup option without clicking rows that may extend below the dialog card."""
+    chars = s.screen()[0]
+    trigger = T.find_text(chars, current)
+    if not trigger:
+        return False
+    s.click(trigger[1] + 1, trigger[0] + 1)
+    s.write("\x1b[B" * steps + "\r")
+    s.feed(0.3)
+    return T.find_text(s.screen()[0], target) is not None
+
+
+def scroll_page_until_visible(s, needles, max_steps=64, room_below=0):
+    """Scroll the outer Settings page until every requested label is visible."""
+    wheel_x = max(1, T.COLS - 1)  # The outer vertical scrollbar, clear of nested x-only views.
+    wheel_y = max(2, min(T.ROWS - 2, T.ROWS // 2))
+    event = f"\x1b[<65;{wheel_x};{wheel_y}M".encode()
+    for step in range(max_steps + 1):
+        chars = s.screen()[0]
+        positions = [T.find_text(chars, needle) for needle in needles]
+        if (all(positions)
+                and positions[0][0] + room_below <= T.ROWS - 4):
+            return chars
+        if step == max_steps:
+            break
+        os.write(s.master_fd, event)
+        s.feed(0.1)
+    return None
+
+
 def settings_values(cfgdir):
     path = os.path.join(cfgdir, "parvion", "settings")
     values = {}
@@ -98,12 +128,16 @@ def test_sftp_component_structure():
             "Other SFTP options", "Enable compression", "Parallel transfers",
             "Enable parallel transfers for files larger than:", "MiB",
             "Maximum parallel transfer connections:", "Channel allocation:",
-            "Strict queue order",
+            "Strict queue order", "Conflict handling", "Existing files:", "Overwrite",
         )
         for needle in expected:
             if needle not in text:
                 print(f"FAIL - {needle!r} missing")
                 return False
+        if (text.count("Conflict handling") != 1
+                or text.find("Conflict handling") < text.find("Parallel transfers")):
+            print("FAIL - Conflict handling must be one groupbox at the bottom of the page")
+            return False
         allocation = T.find_text(chars, "Channel allocation:")
         if not allocation or "└" not in T.row_text(chars, allocation[0] + 1):
             print("FAIL - Parallel transfers reserved an unused scrollbar row")
@@ -191,6 +225,20 @@ def test_sftp_controls_persist_clamp_and_keep_dropdown_width():
             print("FAIL - hash dropdown missing")
             return False
         hash_arrow_before = T.row_text(chars, none[0]).find("▾", none[1])
+        overwrite = T.find_text(chars, "Overwrite")
+        if not overwrite:
+            print("FAIL - existing-file policy dropdown missing")
+            return False
+        conflict_arrow_before = T.row_text(chars, overwrite[0]).find("▾", overwrite[1])
+        if not select_dropdown_keyboard(s, "Overwrite", 4, "Rename"):
+            print("FAIL - existing-file policy dropdown selection failed")
+            return False
+        chars = s.screen()[0]
+        selected_conflict = T.find_text(chars, "Rename")
+        conflict_arrow_after = T.row_text(chars, selected_conflict[0]).find("▾", selected_conflict[1])
+        if conflict_arrow_before < 0 or conflict_arrow_after != conflict_arrow_before:
+            print(f"FAIL - conflict dropdown width changed ({conflict_arrow_before} -> {conflict_arrow_after})")
+            return False
 
         if not replace_parallel_field(s,
                 "Enable parallel transfers for files larger than:", "0"):
@@ -244,6 +292,7 @@ def test_sftp_controls_persist_clamp_and_keep_dropdown_width():
         "SFTP parallel transfer threshold unit": "3",
         "SFTP parallel max connections": "10",
         "SFTP transfer queue allocation": "1",
+        "SFTP existing file policy": "4",
         "Hash on transfer": "1",
         "Hash algorithm": "4",
     }
@@ -275,13 +324,10 @@ def test_narrow_sftp_groupbox_inner_clipping():
             if C.open_dialog(s) is None or goto_sftp(s) is None:
                 print("FAIL - SFTP page did not open")
                 return False
-            # Move below the internally bounded private-key table to the two
-            # groupboxes under test. Vertical wheel input passes through any
-            # nested horizontal-only viewport crossed along the way.
-            for _ in range(40):
-                os.write(s.master_fd, b"\x1b[<65;20;5M")
-            s.feed(0.6)
-            chars = s.screen()[0]
+            chars = scroll_page_until_visible(s, ("Enable compres", "Enable parallel"))
+            if chars is None:
+                print("FAIL - Compression and Parallel transfers were not revealed")
+                return False
             cases = (
                 ("Enable compres", "Enable compression"),
                 ("Enable parallel", "Enable parallel transfers for files larger than:"),
@@ -308,12 +354,11 @@ def test_small_parallel_transfers_horizontal_scrollview():
                 print("FAIL - SFTP page did not open")
                 return False
 
-            # Scroll the outer page until the Parallel transfers groupbox is
-            # visible. Keep the pointer above its nested horizontal viewport.
-            for _ in range(40):
-                os.write(s.master_fd, b"\x1b[<65;20;5M")
-            s.feed(0.6)
-            before = s.screen()[0]
+            before = scroll_page_until_visible(
+                s, ("Parallel transfe", "Enable parallel"), room_below=4)
+            if before is None:
+                print("FAIL - Parallel transfers groupbox was not revealed")
+                return False
             title = T.find_text(before, "Parallel transfe")
             leading = T.find_text(before, "Enable parallel")
             if not title or not leading:
@@ -365,13 +410,12 @@ def test_small_hash_and_compression_scrollviews():
             if C.open_dialog(s) is None or goto_sftp(s) is None:
                 print("FAIL - SFTP page did not open")
                 return False
-            for _ in range(40):
-                os.write(s.master_fd, b"\x1b[<65;20;5M")
-            s.feed(0.5)
-            for _ in range(4):
-                os.write(s.master_fd, b"\x1b[<64;20;5M")
-            s.feed(0.5)
-            before = s.screen()[0]
+            before = scroll_page_until_visible(s, (
+                "Hash verificatio", "Calculate target", "Other SFTP optio", "Enable compres",
+            ), room_below=7)
+            if before is None:
+                print("FAIL - narrow Hash or compression groupbox is incomplete")
+                return False
             hash_title = T.find_text(before, "Hash verificatio")
             hash_leading = T.find_text(before, "Calculate target")
             compression_title = T.find_text(before, "Other SFTP optio")
@@ -410,6 +454,51 @@ def test_small_hash_and_compression_scrollviews():
                 if border < 1 or row[border - 1] != " ":
                     print("FAIL - scrolling damaged an SFTP groupbox frame")
                     return False
+    finally:
+        T.ROWS, T.COLS = old_rows, old_cols
+    print("PASS")
+    return True
+
+
+def test_small_conflict_handling_horizontal_scrollview():
+    print("TEST: small Conflict handling groupbox scrolls horizontally ... ",
+          end="", flush=True)
+    cfg = tempfile.mkdtemp(prefix="pv_sftp_conflict_scroll_")
+    old_rows, old_cols = T.ROWS, T.COLS
+    T.ROWS, T.COLS = 20, 25
+    try:
+        with session(cfg) as s:
+            if C.open_dialog(s) is None or goto_sftp(s) is None:
+                print("FAIL - SFTP page did not open")
+                return False
+            before = scroll_page_until_visible(
+                s, ("Conflict handlin", "Existing files"), room_below=3)
+            if before is None:
+                print("FAIL - Conflict handling groupbox was not revealed")
+                return False
+            title = T.find_text(before, "Conflict handlin")
+            leading = T.find_text(before, "Existing files")
+            if not title or not leading:
+                print("FAIL - Conflict handling groupbox was not revealed")
+                return False
+            if "▂" not in T.row_text(before, title[0] + 2):
+                print("FAIL - Conflict handling scrollbar is missing")
+                return False
+
+            for _ in range(30):
+                os.write(s.master_fd,
+                         f"\x1b[<67;{leading[1] + 1};{leading[0] + 1}M".encode())
+            s.feed(0.5)
+            after = s.screen()[0]
+            dropdown = T.find_text(after, "Overwrite")
+            if not dropdown or T.find_text(after, "Existing files"):
+                print("FAIL - Conflict fields did not reveal the trailing dropdown")
+                return False
+            row = T.row_text(after, dropdown[0])
+            border = row.find("│", dropdown[1])
+            if border < 1 or row[border - 1] != " ":
+                print("FAIL - scrolling damaged the Conflict handling frame")
+                return False
     finally:
         T.ROWS, T.COLS = old_rows, old_cols
     print("PASS")
@@ -498,6 +587,7 @@ TESTS = [
     test_narrow_sftp_groupbox_inner_clipping,
     test_small_parallel_transfers_horizontal_scrollview,
     test_small_hash_and_compression_scrollviews,
+    test_small_conflict_handling_horizontal_scrollview,
     test_dropdown_open_preserves_scroll_and_hidden_trigger_closes_popup,
 ]
 

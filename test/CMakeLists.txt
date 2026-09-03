@@ -53,6 +53,16 @@ add_executable(parvion_chunk_retry_test "parvion_chunk_retry_test.cpp")
 target_include_directories(parvion_chunk_retry_test PRIVATE "${CMAKE_SOURCE_DIR}/src")
 add_test(NAME parvion_chunk_retry_test COMMAND parvion_chunk_retry_test)
 
+# Unit tests for pure enqueue-time destination conflict classification and numbered names.
+add_executable(parvion_conflict_test "parvion_conflict_test.cpp")
+target_include_directories(parvion_conflict_test PRIVATE "${CMAKE_SOURCE_DIR}/src")
+add_test(NAME parvion_conflict_test COMMAND parvion_conflict_test)
+
+# Unit tests for the filesystem-free conflict enqueue pump and ask continuations.
+add_executable(parvion_conflict_enqueue_test "parvion_conflict_enqueue_test.cpp")
+target_include_directories(parvion_conflict_enqueue_test PRIVATE "${CMAKE_SOURCE_DIR}/src")
+add_test(NAME parvion_conflict_enqueue_test COMMAND parvion_conflict_enqueue_test)
+
 # Unit test for the Parvion "Pin to Top" reorder (no-op must not wipe row contents).
 add_executable(parvion_pin_top_test "parvion_pin_top_test.cpp")
 target_include_directories(parvion_pin_top_test PRIVATE "${CMAKE_SOURCE_DIR}/src")

@@ -18,6 +18,7 @@
 #include "reorder.hpp"
 #include "proto.hpp"
 #include "resume.hpp"
+#include "conflict_enqueue.hpp"
 #include "control.hpp"
 #include "hashing.hpp"
 #include "chunk_retry.hpp"
@@ -1162,6 +1163,13 @@ namespace netxs::app::parvion
         secret_req_t          sec_req;              // The outstanding prompt (valid when sec != sec_idle).
         std::function<void(secret_req_t const&)> on_prompt_secret; // Raise the UI modal (set by parvion.hpp).
 
+        // The UI supplies the modal; the controller owns the continuation so a recursive walk can
+        // pause enqueueing without pausing transfers that already have workers.
+        std::function<void(text, std::function<void(conflict_choice)>)> on_conflict_ask;
+        std::shared_ptr<enqueue_batch> action_batch; // One pane selection (begin/end only).
+        std::shared_ptr<enqueue_batch> walk_batch;   // The current recursive folder operation.
+        ui64 ask_epoch = 0; // Bumped on connect/disconnect/recover so a stale ask dialog cannot commit.
+
         // Message Log (FileZilla-style typed protocol log). The queue panel's
         // "Message Log" tab renders the committed tail; the logger owns the
         // FileZilla-like detailed queue and generation gates. `status` (above)
@@ -1345,6 +1353,9 @@ namespace netxs::app::parvion
                 if (p == "new-file-first" || p == "1") cfg.transfer_allocation = allocation_new_file_first;
                 else if (p == "strict" || p == "0")    cfg.transfer_allocation = allocation_strict;
             }
+            //   PARVION_CONFLICT=overwrite|skip|newer|resume|rename|ask
+            if (auto e = std::getenv("PARVION_CONFLICT"))
+                if (*e) cfg.conflict_policy = conflict_policy_from_name(e);
             if (max_connections > 16) max_connections = 16; // sane ceiling
             parallel_connect_burst = std::clamp(parallel_connect_burst, ui32{ 1 }, ui32{ 16 });
             //   PARVION_KEEPALIVE_SEC=<n> idle seconds before a control keepalive (0 disables)
@@ -1611,6 +1622,7 @@ namespace netxs::app::parvion
             idle_pool.clear(); // Drop pooled transfer connections to the previous server.
             key_passphrases.clear(); pass_asked.clear(); account_asked = faux; // Fresh credentials: drop any cached passphrases.
             sec = sec_idle; last_preamble.clear(); last_instruction.clear();
+            invalidate_conflict_asks();
             last_activity = steady_clock::now();
             if (host.empty()) { mark("Enter a host name."); stage = s_failed; return; }
             mark("Connecting to " + host + "...");
@@ -1653,6 +1665,7 @@ namespace netxs::app::parvion
             idle_pool.clear(); // Close pooled transfer connections.
             key_passphrases.clear(); pass_asked.clear(); account_asked = faux;
             sec = sec_idle; last_preamble.clear(); last_instruction.clear();
+            invalidate_conflict_asks();
             items.clear();
             stage = s_idle;
             mark("Not connected.");
@@ -1739,6 +1752,9 @@ namespace netxs::app::parvion
             auto attempts = old_conn && old_conn->reconnect ? old_conn->attempts : 0;
             if (txn.is<control_transaction::mutation>() || txn.recursive())
                 fail("Control connection lost; the remote operation may be incomplete.");
+            // A lost control walk cannot safely continue an outstanding conflict continuation;
+            // already-queued transfers remain intact, while undiscovered/pending files are dropped.
+            invalidate_conflict_asks();
             if (txn.wire_busy())
                 trace(dbg_warning, "Replacing a wire-busy control transaction");
             auto& conn = txn.start<control_transaction::connection>(true, path, attempts);
@@ -1835,51 +1851,58 @@ namespace netxs::app::parvion
             launch<control_transaction::keepalive>(c_pwd, "pwd", faux);
         }
 
-        void enqueue_download(text const& name, si64 size)
+        void begin_enqueue_batch()
         {
-            if (!connected()) return;
-            auto it = queue_item{};
-            it.id          = ++transfer_id_seq;
-            it.download    = true;
-            it.remote_path = child_path(path, name, faux);
-            it.local_path  = child_path(local_dir, name, true);
-            it.dest_dir    = local_dir; // Refresh the local pane on completion if it still shows this dir.
-            it.size        = size;
-            it.status      = queue_item::queued;
-            queue.push_back(std::move(it));
-            dirty = true;
+            action_batch = make_enqueue_batch();
         }
-        void enqueue_upload(text const& local_path_, text const& name, si64 size)
+        void end_enqueue_batch()
+        {
+            action_batch.reset();
+        }
+        void enqueue_download(text const& name, si64 size, time_t mtime = 0)
         {
             if (!connected()) return;
-            auto it = queue_item{};
-            it.id          = ++transfer_id_seq;
-            it.download    = false;
-            it.local_path  = local_path_;
-            it.remote_path = child_path(path, name, faux);
-            it.dest_dir    = path; // Refresh the remote pane on completion if it still shows this dir.
-            it.size        = size;
-            it.status      = queue_item::queued;
-            queue.push_back(std::move(it));
-            dirty = true;
+            auto batch = action_batch ? action_batch : make_enqueue_batch();
+            offer_enqueue_request(batch, {
+                true,
+                child_path(local_dir, name, true),
+                child_path(path, name, faux),
+                local_dir,
+                size < 0 ? 0 : size,
+                mtime,
+            });
+        }
+        void enqueue_upload(text const& local_path_, text const& name, si64 size, time_t mtime = 0)
+        {
+            if (!connected()) return;
+            auto batch = action_batch ? action_batch : make_enqueue_batch();
+            offer_enqueue_request(batch, {
+                false,
+                local_path_,
+                child_path(path, name, faux),
+                path,
+                size < 0 ? 0 : size,
+                mtime,
+            });
         }
         // Enqueue a transfer between explicit absolute endpoints (used by the recursive folder walk,
         // where the file sits in a sub-directory rather than directly in the displayed pane). dest_dir
         // stays the displayed root so the destination pane refreshes once the subtree finishes.
-        void enqueue_download_path(text const& remote_full, text const& local_full, si64 size)
+        void enqueue_download_path(text const& remote_full, text const& local_full, si64 size, time_t mtime = 0)
         {
-            auto it = queue_item{};
-            it.id          = ++transfer_id_seq;
-            it.download    = true;
-            it.remote_path = remote_full;
-            it.local_path  = local_full;
-            it.dest_dir    = local_dir;
-            it.size        = size < 0 ? 0 : size;
-            it.status      = queue_item::queued;
-            queue.push_back(std::move(it));
-            dirty = true;
+            if (!connected()) return;
+            // Folder listings already own walk_batch. Headless get (parvionxfer/parvionmc)
+            // has neither pointer — one-shot, same as enqueue_download.
+            auto batch = walk_batch ? walk_batch : make_enqueue_batch();
+            offer_enqueue_request(batch, {
+                true,
+                local_full,
+                remote_full,
+                local_dir,
+                size < 0 ? 0 : size,
+                mtime,
+            });
         }
-
         // --- recursive folder operations (entry points; the work is paced by drive_recop) -----------
         // Download a remote directory `name` (under the current path) into local_dir/name, recursing
         // into sub-directories. Additive: selecting several folders extends the same walk.
@@ -1888,6 +1911,7 @@ namespace netxs::app::parvion
             if (!connected() || name.empty()) return;
             auto rec = txn.ensure_collecting<control_transaction::rec_download>();
             if (!rec) return;
+            ensure_walk_batch();
             auto r = child_path(path, name, faux);
             auto l = child_path(local_dir, name, true);
             auto ec = std::error_code{}; fs::create_directories(fs::path{ l }, ec);
@@ -1944,6 +1968,7 @@ namespace netxs::app::parvion
             if (!connected() || name.empty()) return;
             auto rec = txn.ensure_collecting<control_transaction::rec_upload>();
             if (!rec) return;
+            ensure_walk_batch();
             auto rroot = child_path(path, name, faux);
             rec->commands.push_back({ rec_op::mkdir, rroot });
             walk_local_for_upload(*rec, local_full, rroot);
@@ -2080,11 +2105,13 @@ namespace netxs::app::parvion
         // Browsing and one-shot remote ops are blocked while a recursive folder operation owns the
         // control session (FileZilla disables navigation during a recursive operation), so a stray
         // cd/mkdir can't interleave with the walk's `ls` commands.
-        auto begin_navigation(text target, text fallback_name = {}, si64 fallback_size = -1, text message = {}) -> bool
+        auto begin_navigation(text target, text fallback_name = {}, si64 fallback_size = -1,
+                              time_t fallback_mtime = 0, text message = {}) -> bool
         {
             if (!browse_available() || target.empty()) return faux;
             auto quoted = "cd " + quote_name(target);
-            if (!launch<control_transaction::navigation>(c_cd, quoted, true, path, std::move(target), std::move(fallback_name), fallback_size))
+            if (!launch<control_transaction::navigation>(c_cd, quoted, true, path, std::move(target),
+                                                         std::move(fallback_name), fallback_size, fallback_mtime))
                 return faux;
             if (!message.empty()) mark(std::move(message));
             return true;
@@ -2092,14 +2119,14 @@ namespace netxs::app::parvion
         void chdir(text const& name)
         {
             auto target = child_path(path, name, faux);
-            begin_navigation(target, {}, -1, "Entering " + target + "...");
+            begin_navigation(target, {}, -1, 0, "Entering " + target + "...");
         }
         // A listing identifies a symlink but not its referent type. The normal remote cd command
         // follows links and authoritatively opens directories; failure retains file-like activation.
-        void activate_link(text const& name, si64 size)
+        void activate_link(text const& name, si64 size, time_t mtime = 0)
         {
             if (name.empty()) return;
-            begin_navigation(child_path(path, name, faux), name, size);
+            begin_navigation(child_path(path, name, faux), name, size, mtime);
         }
         void cdup()
         {
@@ -2114,7 +2141,7 @@ namespace netxs::app::parvion
             // committed path (and the title) is the real target, not e.g. "/home/user/..".
             auto full = newpath.front() == '/' ? newpath : child_path(path, newpath, faux);
             auto target = normalize_posix(full);
-            begin_navigation(target, {}, -1, "Entering " + target + "...");
+            begin_navigation(target, {}, -1, 0, "Entering " + target + "...");
         }
         auto begin_mutation(text command, text message) -> bool
         {
@@ -2152,6 +2179,201 @@ namespace netxs::app::parvion
         void request_refresh() { remote_refresh_path = path; }
 
     private:
+        static auto local_mtime(text const& path) -> time_t
+        {
+            auto ec = std::error_code{};
+            auto stamp = fs::last_write_time(fs::path{ path }, ec);
+            return ec ? time_t{} : to_epoch(stamp);
+        }
+        // Follow-free occupancy: a dangling symlink still owns the dest name.
+        static auto local_dest_exists(text const& path) -> bool
+        {
+            auto ec = std::error_code{};
+            auto status = fs::symlink_status(fs::path{ path }, ec);
+            return !ec && status.type() != fs::file_type::not_found && status.type() != fs::file_type::none;
+        }
+
+        auto make_enqueue_batch() const -> std::shared_ptr<enqueue_batch>
+        {
+            auto batch = std::make_shared<enqueue_batch>();
+            batch->policy = cfg.conflict_policy;
+            return batch;
+        }
+        auto ensure_walk_batch() -> std::shared_ptr<enqueue_batch>
+        {
+            if (!walk_batch) walk_batch = action_batch ? action_batch : make_enqueue_batch();
+            return walk_batch;
+        }
+        void cancel_walk_batch()
+        {
+            if (walk_batch) walk_batch->cancelled = true;
+            walk_batch.reset();
+        }
+        void cancel_enqueue_batches()
+        {
+            cancel_walk_batch();
+            if (action_batch) action_batch->cancelled = true;
+            action_batch.reset();
+        }
+        void invalidate_conflict_asks()
+        {
+            ++ask_epoch;
+            cancel_enqueue_batches();
+        }
+
+        static auto parts_for_parallel_state(si64 size, ui32 chunks) -> std::vector<state_part>
+        {
+            auto parts = std::vector<state_part>{};
+            if (chunks <= 1 || size <= 0) return parts;
+            auto chunk_size = (si64)((size + chunks - 1) / chunks);
+            for (auto chunk = ui32{}; chunk < chunks; ++chunk)
+            {
+                auto start = (si64)chunk * chunk_size;
+                auto length = std::min(chunk_size, size - start);
+                if (length > 0) parts.push_back({ (ui64)start, (ui64)length, 0 });
+            }
+            return parts;
+        }
+
+        // Check the same PARVIONC2 identity that setup_parallel_state will use, but do so while
+        // the item is still a request. This lets the resume policy prevent the fresh-download
+        // resize before any worker or parallel setup is started.
+        auto state_file_usable_for(transfer_request const& req) const -> bool
+        {
+            auto size = std::max<si64>(0, req.size);
+            auto chunks = part_count(size);
+            if (chunks <= 1) return faux;
+
+            auto expected = parts_for_parallel_state(size, chunks);
+            auto found = std::vector<state_part>{};
+            auto identity = make_state_file_identity(req.download, fmt_server(host, port, user),
+                                                     req.local_path, req.remote_path);
+            return state_file_matches(identity, (ui64)size, expected, found);
+        }
+
+        auto conflict_inputs_for(transfer_request const& req) const -> conflict_inputs
+        {
+            auto in = conflict_inputs{};
+            in.download = req.download;
+            in.source_path = req.download ? req.remote_path : req.local_path;
+            in.dest_path = req.download ? req.local_path : req.remote_path;
+            in.source_size = std::max<si64>(0, req.size);
+            in.source_mtime = req.source_mtime;
+
+            if (req.download)
+            {
+                in.dest_exists = local_dest_exists(req.local_path);
+                if (in.dest_exists)
+                {
+                    auto size_ec = std::error_code{};
+                    auto size = fs::file_size(fs::path{ req.local_path }, size_ec);
+                    in.dest_size = size_ec ? si64{ -1 } : (si64)size;
+                    in.dest_mtime = local_mtime(req.local_path);
+                }
+            }
+            else if (parent_path(req.remote_path, faux) == path)
+            {
+                auto slash = req.remote_path.find_last_of('/');
+                auto name = slash == text::npos ? req.remote_path : req.remote_path.substr(slash + 1);
+                for (auto const& entry : items)
+                    if (entry.name == name)
+                    {
+                        in.dest_exists = true;
+                        in.dest_size = entry.size;
+                        in.dest_mtime = entry.mtime;
+                        break;
+                    }
+            }
+            in.state_file_usable = state_file_usable_for(req);
+            return in;
+        }
+
+        auto destination_occupied(transfer_request const& candidate,
+                                  std::shared_ptr<enqueue_batch> const& batch) const -> bool
+        {
+            if (conflict_inputs_for(candidate).dest_exists) return true;
+            auto const& dest = candidate.download ? candidate.local_path : candidate.remote_path;
+            for (auto const& queued : queue)
+                if (queued.download == candidate.download
+                 && same_queued_dest(candidate.download,
+                                      dest,
+                                      candidate.download ? queued.local_path : queued.remote_path))
+                    return true;
+            if (batch)
+                for (auto const& pending : batch->pending)
+                    if (pending.download == candidate.download
+                     && same_queued_dest(candidate.download,
+                                          dest,
+                                          candidate.download ? pending.local_path : pending.remote_path))
+                        return true;
+            return faux;
+        }
+        auto uniquify_request(transfer_request req, std::shared_ptr<enqueue_batch> const& batch) const
+            -> std::optional<transfer_request>
+        {
+            auto candidate = req;
+            for (auto number = ui64{ 1 }; number <= 10000; ++number)
+            {
+                if (req.download) candidate.local_path = numbered_name(req.local_path, number);
+                else              candidate.remote_path = numbered_name(req.remote_path, number);
+                if (!destination_occupied(candidate, batch)) return candidate;
+            }
+            return std::nullopt;
+        }
+
+        void commit_transfer_request(transfer_request req, conflict_action action)
+        {
+            if (action == skip)
+            {
+                log_line(logtype::status, "Skipping " + (req.download ? req.local_path : req.remote_path) + " (exists)");
+                return;
+            }
+            auto item = queue_item{};
+            item.id = ++transfer_id_seq;
+            item.download = req.download;
+            item.local_path = std::move(req.local_path);
+            item.remote_path = std::move(req.remote_path);
+            item.dest_dir = std::move(req.dest_dir);
+            item.size = std::max<si64>(0, req.size);
+            item.status = queue_item::queued;
+            queue.push_back(std::move(item));
+            dirty = true;
+        }
+
+        void pump_enqueue_requests(std::shared_ptr<enqueue_batch> const& batch)
+        {
+            pump_enqueue_batch(batch,
+                [this](transfer_request const& req){ return conflict_inputs_for(req); },
+                [this, batch](transfer_request req) -> std::optional<transfer_request>
+                {
+                    auto original = req.download ? req.local_path : req.remote_path;
+                    auto result = uniquify_request(std::move(req), batch);
+                    if (!result)
+                        log_line(logtype::error, "Could not find an unused name for " + original);
+                    return result;
+                },
+                [this](transfer_request req, conflict_action action)
+                {
+                    commit_transfer_request(std::move(req), action);
+                },
+                [this, batch](text const& destination, std::function<void(conflict_choice)> answer) mutable
+                {
+                    auto deliver = [this, batch, epoch = ask_epoch, answer = std::move(answer)](conflict_choice choice) mutable
+                    {
+                        if (!batch || batch->cancelled || epoch != ask_epoch || !connected()) return;
+                        answer(choice);
+                    };
+                    if (on_conflict_ask) on_conflict_ask(destination, std::move(deliver));
+                    else deliver(conflict_choice::overwrite_all);
+                });
+        }
+        void offer_enqueue_request(std::shared_ptr<enqueue_batch> const& batch, transfer_request req)
+        {
+            if (!batch || batch->cancelled) return;
+            batch->pending.push_back(std::move(req));
+            pump_enqueue_requests(batch);
+        }
+
         // Synchronous local tree-walk for an upload: append a parent-first `mkdir` for each local
         // sub-directory and stage a minimal upload descriptor for each file, both rooted at the remote `rroot`.
         // Directories are recursed in sorted order so the mkdir list is always parent-before-child.
@@ -2170,7 +2392,8 @@ namespace netxs::app::parvion
                 }
                 else
                 {
-                    rec.uploads.push_back({ std::move(lchild), std::move(rchild), e.size < 0 ? 0 : e.size });
+                    rec.uploads.push_back({ std::move(lchild), std::move(rchild),
+                                            e.size < 0 ? 0 : e.size, e.mtime });
                 }
             }
             for (auto& [l, r] : subdirs) walk_local_for_upload(rec, l, r); // Recurse after this level's mkdirs.
@@ -2193,6 +2416,7 @@ namespace netxs::app::parvion
             if (rec.download_files) mark("Queued " + std::to_string(rec.download_files) + " download(s).");
             else                    mark("No files found to download.");
             dirty = true;
+            walk_batch.reset();
             txn.reset();
         }
         void finish_recop(control_transaction::rec_delete& rec)
@@ -2211,19 +2435,18 @@ namespace netxs::app::parvion
         }
         void finish_recop(control_transaction::rec_upload& rec)
         {
+            auto batch = walk_batch;
+            if (batch)
+                for (auto& upload : rec.uploads)
+                    offer_enqueue_request(batch, {
+                        false,
+                        std::move(upload.local_path),
+                        std::move(upload.remote_path),
+                        path,
+                        upload.size,
+                        upload.mtime,
+                    });
             auto upload_files = rec.uploads.size();
-            for (auto& upload : rec.uploads)
-            {
-                auto it = queue_item{};
-                it.id = ++transfer_id_seq;
-                it.download = false;
-                it.local_path = std::move(upload.local_path);
-                it.remote_path = std::move(upload.remote_path);
-                it.dest_dir = path;
-                it.size = upload.size;
-                it.status = queue_item::queued;
-                queue.push_back(std::move(it)); // Dirs exist now: safe to upload.
-            }
             auto msg = text{ "Remote directory tree prepared." };
             if (upload_files) msg = "Remote directory tree prepared; queued " + std::to_string(upload_files) + " upload(s).";
             rec.completion_status = std::move(msg);
@@ -2231,11 +2454,19 @@ namespace netxs::app::parvion
             dirty = true;
             txn.staged.clear();
             rec.phase = control_transaction::rec_upload::phase_t::listing_result;
+            walk_batch.reset();
             log_line(logtype::status, "Retrieving directory listing of \"" + path + "\"...");
             issue_followup(c_ls, "ls");
         }
         void drive_recop(control_transaction::rec_download& rec)
         {
+            if (walk_batch && walk_batch->cancelled)
+            {
+                rec.stack.clear();
+                finish_recop(rec);
+                return;
+            }
+            if (walk_batch && walk_batch->waiting) return;
             if (!rec.stack.empty()) start_rec_listing(rec);
             else finish_recop(rec);
         }
@@ -2257,6 +2488,8 @@ namespace netxs::app::parvion
         }
         void drive_recop(control_transaction::rec_upload& rec)
         {
+            if (rec.phase == control_transaction::rec_upload::phase_t::listing_result
+             || rec.phase == control_transaction::rec_upload::phase_t::listing_after_abort) return;
             if (rec.command_i < rec.commands.size())
             {
                 rec.phase = control_transaction::rec_upload::phase_t::executing;
@@ -2390,15 +2623,7 @@ namespace netxs::app::parvion
             }
             else
             {
-                auto csz = (si64)((item.size + chunks - 1) / chunks);
-                auto parts = std::vector<state_part>{};
-                for (auto c = ui32{}; c < chunks; ++c)
-                {
-                    auto start = (si64)c * csz;
-                    auto len = std::min(csz, item.size - start);
-                    if (len <= 0) break;
-                    parts.push_back({ (ui64)start, (ui64)len, 0 });
-                }
+                auto parts = parts_for_parallel_state(item.size, chunks);
                 item.chunk_count = (ui32)parts.size();
                 setup_parallel_state(job, item, parts);
                 for (auto c = size_t{}; c < parts.size(); ++c)
@@ -2429,33 +2654,20 @@ namespace netxs::app::parvion
         {
             job.state_path.clear(); job.md_size = 0; job.resume = faux;
             auto dl = item.download;
-            auto ls = item.local_path.find_last_of("/\\"); // local separator (POSIX or Windows)
-            auto ldir  = ls == text::npos ? text{ "." } : (ls == 0 ? text{ "/" } : item.local_path.substr(0, ls));
-            auto lfile = ls == text::npos ? item.local_path : item.local_path.substr(ls + 1);
-            auto rs = item.remote_path.find_last_of('/');
-            auto rdir  = rs == text::npos ? text{ "/" } : (rs == 0 ? text{ "/" } : item.remote_path.substr(0, rs));
-            auto rfile = rs == text::npos ? item.remote_path : item.remote_path.substr(rs + 1);
-            auto server   = fmt_server(host, port, user);
-            auto rsafe    = safe_remote_path(rdir);
-            auto metadata = build_metadata(dl, server, item.local_path, rsafe, rfile);
-            auto key      = state_key(dl, server, ldir, lfile, rsafe, rfile);
-            auto spath    = state_path(ldir, lfile, dl, key);
-            auto e_total = ui64{}; auto e_status = ui32{}; auto e_md = text{}; auto e_parts = std::vector<state_part>{};
-            if (read_state_file(spath, e_total, e_status, e_md, e_parts)
-                && e_status != state_aborted && e_total == (ui64)item.size
-                && e_parts.size() == parts.size() && e_md == metadata)
+            auto identity = make_state_file_identity(dl, fmt_server(host, port, user),
+                                                     item.local_path, item.remote_path);
+            auto restored = std::vector<state_part>{};
+            if (state_file_matches(identity, (ui64)item.size, parts, restored))
             {
-                auto ok = true;
-                for (auto j = size_t{}; j < parts.size(); ++j)
-                    if (e_parts[j].start != parts[j].start || e_parts[j].size != parts[j].size
-                        || e_parts[j].transferred > parts[j].size) { ok = faux; break; }
-                if (ok) { parts = std::move(e_parts); job.resume = true; }
+                parts = std::move(restored);
+                job.resume = true;
             }
             if (!job.resume)
             {
                 // Download is ready immediately (no remote-open wait); upload waits
                 // until its leader truncates+opens the remote target.
-                write_state_file(spath, (ui64)item.size, parts, dl ? state_ready : state_waiting, metadata);
+                write_state_file(identity.path, (ui64)item.size, parts,
+                                 dl ? state_ready : state_waiting, identity.metadata);
                 if (dl)
                 {
                     // Size the existing local target to the download length instead of unlinking it.
@@ -2473,8 +2685,8 @@ namespace netxs::app::parvion
                     }
                 }
             }
-            job.state_path = spath;
-            job.md_size = (ui32)metadata.size();
+            job.state_path = identity.path;
+            job.md_size = (ui32)identity.metadata.size();
         }
         auto followers_ready(transfer_job& job, queue_item const& item) -> bool
         {
@@ -2911,8 +3123,9 @@ namespace netxs::app::parvion
                     {
                         auto fallback_name = nav.fallback_name;
                         auto fallback_size = nav.fallback_size;
+                        auto fallback_mtime = nav.fallback_mtime;
                         txn.reset();
-                        if (!fallback_name.empty()) enqueue_download(fallback_name, fallback_size);
+                        if (!fallback_name.empty()) enqueue_download(fallback_name, fallback_size, fallback_mtime);
                     }
                     break;
                 case control_transaction::navigation::phase_t::listing_destination:
@@ -2958,7 +3171,11 @@ namespace netxs::app::parvion
             rec.phase = control_transaction::rec_upload::phase_t::listing_after_abort;
             txn.staged.clear();
             if (issue_followup(c_ls, "ls")) return;
-            if (!txn.wire_busy()) txn.reset();
+            if (!txn.wire_busy())
+            {
+                txn.reset();
+                cancel_walk_batch();
+            }
             fail("Recursive upload aborted because a remote directory could not be prepared; directory refresh failed.");
         }
         void fail_flow(control_transaction::rec_download& rec, cmd_t command)
@@ -2970,6 +3187,7 @@ namespace netxs::app::parvion
             }
             auto queued = rec.download_files;
             txn.reset();
+            cancel_walk_batch();
             if (queued) fail("Recursive download stopped after a listing failure; already discovered files remain queued.");
             else        fail("Recursive operation aborted because a directory could not be listed.");
         }
@@ -3024,11 +3242,13 @@ namespace netxs::app::parvion
                 case control_transaction::rec_upload::phase_t::listing_after_abort:
                     if (command != c_ls) { invalid_completion(); return; }
                     txn.reset();
+                    cancel_walk_batch();
                     fail("Recursive upload aborted because a remote directory could not be prepared; directory refresh failed.");
                     break;
                 case control_transaction::rec_upload::phase_t::listing_result:
                     if (command != c_ls) { invalid_completion(); return; }
                     txn.reset();
+                    cancel_walk_batch();
                     fail("Remote operation completed but its directory refresh failed.");
                     break;
                 case control_transaction::rec_upload::phase_t::collecting:
@@ -3412,7 +3632,7 @@ namespace netxs::app::parvion
                 },
                 [&](direntry const& e, text const& rchild)
                 {
-                    enqueue_download_path(rchild, child_path(rec.current.local, e.name, true), e.size);
+                    enqueue_download_path(rchild, child_path(rec.current.local, e.name, true), e.size, e.mtime);
                     ++rec.download_files;
                 });
             rec.phase = control_transaction::rec_download::phase_t::collecting;
@@ -3491,6 +3711,7 @@ namespace netxs::app::parvion
                     break;
                 case control_transaction::rec_upload::phase_t::listing_after_abort:
                     if (command != c_ls) { invalid_completion(); return; }
+                    cancel_walk_batch();
                     commit_staged_listing();
                     fail("Recursive upload aborted because a remote directory could not be prepared; directory listing reconciled.");
                     break;

@@ -232,8 +232,8 @@ namespace netxs::app::parvion
             if (idx < 0 || idx >= (si32)its.size()) return;
             auto& e = its[idx];
             if (e.is_dir)          st.remote->chdir(e.name);
-            else if (e.is_link)    st.remote->activate_link(e.name, e.size);
-            else if (st.ctrl)      st.ctrl->enqueue_download(e.name, e.size);
+            else if (e.is_link)    st.remote->activate_link(e.name, e.size, e.mtime);
+            else if (st.ctrl)      st.ctrl->enqueue_download(e.name, e.size, e.mtime);
             return;
         }
         // Local pane: dir -> descend; file -> enqueue upload.
@@ -249,7 +249,7 @@ namespace netxs::app::parvion
             pane_try_relist(st, child_path(st.path, e.name, st.is_local));
         }
         else if (st.on_pick) st.on_pick(child_path(st.path, e.name, st.is_local));
-        else if (st.ctrl)    st.ctrl->enqueue_upload(child_path(st.path, e.name, true), e.name, e.size);
+        else if (st.ctrl)    st.ctrl->enqueue_upload(child_path(st.path, e.name, true), e.name, e.size, e.mtime);
     }
     // Full path of the activatable file under the row cursor, or empty when the cursor is on
     // ".." or a directory. Used by the picker's Open button (which activates the selection).
@@ -666,20 +666,22 @@ namespace netxs::app::parvion
     {
         if (!st.ctrl) return;
         auto& its = st.cur_items();
+        st.ctrl->begin_enqueue_batch();
         for (auto row : st.marked) if (row > 0 && row - 1 < (si32)its.size())
         {
             auto& e = its[(size_t)(row - 1)];
             if (st.remote) // Download: remote -> local.
             {
                 if (e.is_dir) st.ctrl->download_folder(e.name);
-                else          st.ctrl->enqueue_download(e.name, e.size);
+                else          st.ctrl->enqueue_download(e.name, e.size, e.mtime);
             }
             else // Upload: local -> remote.
             {
                 if (e.is_dir) st.ctrl->upload_folder(child_path(st.path, e.name, true), e.name);
-                else          st.ctrl->enqueue_upload(child_path(st.path, e.name, true), e.name, e.size);
+                else          st.ctrl->enqueue_upload(child_path(st.path, e.name, true), e.name, e.size, e.mtime);
             }
         }
+        st.ctrl->end_enqueue_batch();
     }
 
     inline auto pane_selected_item_count(pane_state const& st) -> si32 // Excludes the synthetic ".." row.

@@ -3,6 +3,9 @@
 
 #include "netxs/apps.hpp"
 
+#include <chrono>
+#include <filesystem>
+
 using namespace netxs;
 using namespace netxs::app::parvion;
 
@@ -153,6 +156,120 @@ int main()
         r.apply_event(done("0"));
         REQUIRE(r.txn.is<txn_t::navigation>(txn_t::navigation::phase_t::rolling_back));
         REQUIRE(r.txn.command == remote::c_cd_rollback);
+        return true;
+    });
+
+    tests.run("symlink fallback preserves source mtime", []
+    {
+        auto r = remote{};
+        arm_connected(r);
+        r.cfg.conflict_policy = conflict_newer;
+        auto root = std::filesystem::temp_directory_path()
+                  / ("parvion-symlink-mtime-" + std::to_string(
+                        std::chrono::steady_clock::now().time_since_epoch().count()));
+        struct cleanup
+        {
+            std::filesystem::path path;
+            ~cleanup() { std::error_code ec; std::filesystem::remove_all(path, ec); }
+        } guard{ root };
+        auto ec = std::error_code{};
+        std::filesystem::create_directories(root, ec);
+        REQUIRE(!ec);
+        r.local_dir = root.string();
+
+        r.activate_link("fresh.bin", 17, 123);
+        auto nav = r.txn.get_if<txn_t::navigation>();
+        REQUIRE(nav && nav->fallback_mtime == 123);
+        r.txn.command = remote::c_cd;
+        r.apply_event(done("0"));
+        REQUIRE(r.queue.size() == 1 && r.queue[0].size == 17);
+        r.queue.clear();
+
+        auto target = root / "newer.bin";
+        auto file = std::fopen(target.string().c_str(), "wb");
+        REQUIRE(file);
+        std::fclose(file);
+        r.activate_link("newer.bin", 17, 1);
+        r.txn.command = remote::c_cd;
+        r.apply_event(done("0"));
+        REQUIRE(r.queue.empty());
+        return true;
+    });
+
+    tests.run("headless download path enqueues without a walk batch", []
+    {
+        auto r = remote{};
+        arm_connected(r);
+        r.no_autostart = true;
+        REQUIRE(!r.walk_batch);
+        r.enqueue_download_path("/remote/file.bin", "/tmp/file.bin", 42, 7);
+        REQUIRE(r.queue.size() == 1);
+        REQUIRE(r.queue[0].download && r.queue[0].size == 42);
+        REQUIRE(r.queue[0].remote_path == "/remote/file.bin");
+        REQUIRE(r.queue[0].local_path == "/tmp/file.bin");
+        return true;
+    });
+
+    tests.run("stale conflict answers do not commit after reconnect", []
+    {
+        auto r = remote{};
+        arm_connected(r);
+        r.no_autostart = true;
+        r.cfg.conflict_policy = conflict_ask;
+        auto root = std::filesystem::temp_directory_path()
+                  / ("parvion-stale-ask-" + std::to_string(
+                        std::chrono::steady_clock::now().time_since_epoch().count()));
+        struct cleanup
+        {
+            std::filesystem::path path;
+            ~cleanup() { std::error_code ec; std::filesystem::remove_all(path, ec); }
+        } guard{ root };
+        auto ec = std::error_code{};
+        std::filesystem::create_directories(root, ec);
+        REQUIRE(!ec);
+        auto dest = root / "occupied.bin";
+        auto file = std::fopen(dest.string().c_str(), "wb");
+        REQUIRE(file);
+        std::fclose(file);
+        r.local_dir = root.string();
+        auto reply = std::function<void(conflict_choice)>{};
+        r.on_conflict_ask = [&](text, std::function<void(conflict_choice)> answer)
+        {
+            reply = std::move(answer);
+        };
+        r.enqueue_download("occupied.bin", 10, 100);
+        REQUIRE(r.queue.empty() && (bool)reply);
+        auto epoch = r.ask_epoch;
+        r.disconnect();
+        REQUIRE(r.ask_epoch != epoch);
+        arm_connected(r);
+        reply(conflict_choice::overwrite);
+        REQUIRE(r.queue.empty());
+        return true;
+    });
+
+    tests.run("dangling local symlink is an occupied download dest", []
+    {
+        auto r = remote{};
+        arm_connected(r);
+        r.no_autostart = true;
+        r.cfg.conflict_policy = conflict_skip;
+        auto root = std::filesystem::temp_directory_path()
+                  / ("parvion-dangling-" + std::to_string(
+                        std::chrono::steady_clock::now().time_since_epoch().count()));
+        struct cleanup
+        {
+            std::filesystem::path path;
+            ~cleanup() { std::error_code ec; std::filesystem::remove_all(path, ec); }
+        } guard{ root };
+        auto ec = std::error_code{};
+        std::filesystem::create_directories(root, ec);
+        REQUIRE(!ec);
+        std::filesystem::create_symlink(root / "missing.bin", root / "link.bin", ec);
+        REQUIRE(!ec);
+        r.local_dir = root.string();
+        r.enqueue_download("link.bin", 10, 100);
+        REQUIRE(r.queue.empty());
         return true;
     });
 
@@ -401,6 +518,7 @@ int main()
         auto r = remote{};
         arm_connected(r);
         r.no_autostart = true;
+        r.walk_batch = std::make_shared<enqueue_batch>();
         auto rec = r.txn.ensure_collecting<rec_upload>();
         REQUIRE(rec);
         rec->uploads.push_back({ "/local/source.bin", "/remote/target.bin", 123 });
@@ -417,6 +535,47 @@ int main()
         r.apply_event(done("1"));
         REQUIRE(!r.txn.active());
         REQUIRE(r.status == "Remote directory tree prepared; queued 1 upload(s).");
+        return true;
+    });
+
+    tests.run("upload result failure preserves an unrelated pane batch", []
+    {
+        auto r = remote{};
+        arm_connected(r);
+        auto rec = r.txn.ensure_collecting<rec_upload>();
+        REQUIRE(rec);
+        rec->phase = rec_upload::phase_t::listing_result;
+        r.txn.command = remote::c_ls;
+        r.begin_enqueue_batch();
+        REQUIRE(r.action_batch);
+        r.apply_event(done("0"));
+        REQUIRE(r.action_batch && !r.action_batch->cancelled);
+        REQUIRE(!r.walk_batch);
+        REQUIRE(r.status.starts_with("Error:"));
+        return true;
+    });
+
+    tests.run("upload files are offered once before result listing", []
+    {
+        auto r = remote{};
+        arm_connected(r);
+        r.no_autostart = true;
+        r.walk_batch = std::make_shared<enqueue_batch>();
+        auto rec = r.txn.ensure_collecting<rec_upload>();
+        REQUIRE(rec);
+        rec->uploads.push_back({ "/local/source.bin", "/remote/target.bin", 123 });
+        r.poll();
+        REQUIRE(r.txn.is<rec_upload>(rec_upload::phase_t::listing_result));
+        REQUIRE(r.queue.size() == 1);
+        REQUIRE(r.queue[0].local_path == "/local/source.bin");
+        REQUIRE(r.queue[0].remote_path == "/remote/target.bin");
+        r.txn.command = remote::c_none;
+        r.poll();
+        auto after = r.txn.get_if<rec_upload>();
+        REQUIRE(after && after->phase == rec_upload::phase_t::listing_result);
+        REQUIRE(r.queue.size() == 1);
+        REQUIRE(r.queue[0].local_path == "/local/source.bin");
+        REQUIRE(r.queue[0].remote_path == "/remote/target.bin");
         return true;
     });
 

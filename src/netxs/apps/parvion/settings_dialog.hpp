@@ -43,6 +43,7 @@ namespace netxs::app::parvion
         bool compression = faux;
         si32 threshold_unit = 2;
         si32 transfer_allocation = allocation_strict;
+        conflict_policy_t conflict_policy = conflict_overwrite;
         bool hash_on_transfer = faux;
         si32 hash_algo = 2;
         std::array<si32, 3> key_column_widths{ 18, 18, 28 };
@@ -88,6 +89,7 @@ namespace netxs::app::parvion
         inline constexpr auto threshold_label = view{ "Enable parallel transfers for files larger than:" };
         inline constexpr auto max_connections_label = view{ "Maximum parallel transfer connections:" };
         inline constexpr auto allocation_label = view{ "Channel allocation:" };
+        inline constexpr auto existing_policy_label = view{ "Existing files:" };
         inline constexpr auto max_connections_hint = view{ "(1-10)" };
         inline constexpr auto hash_label = view{ "Calculate target file hash during transfers:" };
         inline constexpr auto hash_none = view{ "None" };
@@ -774,6 +776,19 @@ namespace netxs::app::parvion
         });
         auto allocation_width = allocation_dropdown.widget->base::min_sz.x;
 
+        auto conflict_options = std::vector<dropdown_option>{};
+        for (auto policy = si32{}; policy < conflict_policy_count; ++policy)
+            conflict_options.push_back({ text{ conflict_policy_label(policy) } });
+        auto conflict_dropdown = make_dropdown({
+            .options = std::move(conflict_options),
+            .selected = [state]{ return (si32)state->conflict_policy; },
+            .on_change = [state](si32 selected)
+            {
+                state->conflict_policy = (conflict_policy_t)selected;
+            },
+        });
+        auto conflict_width = conflict_dropdown.widget->base::min_sz.x;
+
         auto threshold_controls = flex::ctor({
             .direction = flex_direction::row,
             .align_items = flex_align::stretch,
@@ -837,6 +852,29 @@ namespace netxs::app::parvion
             .content = std::move(parallel_scroll),
         });
 
+        auto conflict_fields = grid::ctor({
+            .columns = {
+                { .weight = 0, .minimum = cell_width(settings_sftp::existing_policy_label),
+                  .maximum = cell_width(settings_sftp::existing_policy_label) },
+                { .weight = 0, .minimum = 1, .maximum = 1 },
+                { .weight = 0, .minimum = conflict_width, .maximum = conflict_width },
+                { .weight = 1 },
+            },
+            .rows = { { .weight = 0, .minimum = 1, .maximum = 1 } },
+            .handle_mode = grid_handle_mode::hidden,
+        });
+        conflict_fields->attach(make_settings_label(settings_sftp::existing_policy_label),
+                                { .column = 0 });
+        conflict_fields->attach(std::move(conflict_dropdown), { .column = 2 });
+        auto conflict_scroll = make_scrollview({
+            .content = { conflict_fields },
+            .scroll_axes = axes::X_only,
+        });
+        auto conflict_box = make_groupbox({
+            .title = "Conflict handling",
+            .content = std::move(conflict_scroll),
+        });
+
         auto page = flex::ctor({
             .direction = flex_direction::column,
             .row_gap = 1,
@@ -847,6 +885,7 @@ namespace netxs::app::parvion
         page->attach(std::move(hash_box), { .shrink = 0 });
         page->attach(std::move(compression_box), { .shrink = 0 });
         page->attach(std::move(parallel_box), { .shrink = 0 });
+        page->attach(std::move(conflict_box), { .shrink = 0 });
         return { page };
     }
 
@@ -1460,6 +1499,7 @@ namespace netxs::app::parvion
         state->compression = state->draft.compression;
         state->threshold_unit = state->draft.threshold_unit;
         state->transfer_allocation = state->draft.transfer_allocation;
+        state->conflict_policy = state->draft.conflict_policy;
         state->hash_on_transfer = state->draft.hash_on_transfer;
         state->hash_algo = state->draft.hash_algo;
         state->log_debug_level = state->draft.log_debug_level;
@@ -1499,6 +1539,7 @@ namespace netxs::app::parvion
             state->draft.compression = state->compression;
             state->draft.threshold_unit = state->threshold_unit;
             state->draft.transfer_allocation = state->transfer_allocation;
+            state->draft.conflict_policy = state->conflict_policy;
             state->draft.hash_on_transfer = state->hash_on_transfer;
             state->draft.hash_algo = state->hash_algo;
             state->draft.log_debug_level = state->log_debug_level;

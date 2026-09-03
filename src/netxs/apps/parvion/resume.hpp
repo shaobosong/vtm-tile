@@ -252,4 +252,46 @@ namespace netxs::app::parvion
         if (!dir.empty() && dir.back() != '/') dir.push_back('/');
         return dir + local_file + ".parvion-" + (download ? "download" : "upload") + "-state." + sha2::hex(key).substr(0, 16);
     }
+
+    struct state_file_identity
+    {
+        text path;
+        text metadata;
+    };
+
+    inline auto make_state_file_identity(bool download, text const& server,
+                                         text const& local_path, text const& remote_path)
+        -> state_file_identity
+    {
+        auto ls = local_path.find_last_of("/\\");
+        auto ldir = ls == text::npos ? text{ "." } : (ls == 0 ? text{ "/" } : local_path.substr(0, ls));
+        auto lfile = ls == text::npos ? local_path : local_path.substr(ls + 1);
+        auto rs = remote_path.find_last_of('/');
+        auto rdir = rs == text::npos ? text{ "/" } : (rs == 0 ? text{ "/" } : remote_path.substr(0, rs));
+        auto rfile = rs == text::npos ? remote_path : remote_path.substr(rs + 1);
+        auto rsafe = safe_remote_path(rdir);
+        auto metadata = build_metadata(download, server, local_path, rsafe, rfile);
+        auto key = state_key(download, server, ldir, lfile, rsafe, rfile);
+        return { state_path(ldir, lfile, download, key), std::move(metadata) };
+    }
+
+    inline auto state_file_matches(state_file_identity const& identity, ui64 expected_total,
+                                   std::vector<state_part> const& expected,
+                                   std::vector<state_part>& found) -> bool
+    {
+        auto total = ui64{};
+        auto status = uint32_t{};
+        auto metadata = text{};
+        auto parts = std::vector<state_part>{};
+        if (!read_state_file(identity.path, total, status, metadata, parts)
+         || status == state_aborted || total != expected_total || metadata != identity.metadata
+         || parts.size() != expected.size())
+            return faux;
+        for (auto i = size_t{}; i < expected.size(); ++i)
+            if (parts[i].start != expected[i].start || parts[i].size != expected[i].size
+             || parts[i].transferred > expected[i].size)
+                return faux;
+        found = std::move(parts);
+        return true;
+    }
 }

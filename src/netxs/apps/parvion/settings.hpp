@@ -7,7 +7,7 @@
 // FileZilla's Connection and Connection/SFTP option pages (TLS options excluded):
 //   Connection : Timeout, Reconnect count, Reconnect delay.
 //   SFTP       : private key files, compression, parallel-transfer threshold + unit,
-//                shared transfer-channel budget and queue allocation policy.
+//                shared transfer-channel budget, queue allocation, and existing-file policy.
 //   Site       : saved SFTP connection profiles.
 //   Debug      : debug information level and raw directory listing.
 // Stored as a flat `key<TAB>value` file next to the Quick Connect history
@@ -16,6 +16,7 @@
 
 #include "logging.hpp"
 #include "model.hpp"
+#include "conflict.hpp"
 
 #include <cstdio>
 #include <cstdlib>
@@ -253,6 +254,7 @@ namespace netxs::app::parvion
         si32 threshold_unit  = 2;    // OPTION_SFTP_PARALLEL_THRESHOLD_UNIT  : 0..4 (default MiB).
         si32 max_connections = 4;    // Shared budget for all transfer connections: 1..10.
         si32 transfer_allocation = allocation_strict; // Slot allocation policy.
+        conflict_policy_t conflict_policy = conflict_overwrite; // Existing destination policy.
         std::vector<text> keyfiles;  // OPTION_SFTP_KEYFILES (one private-key path per entry).
         // Hash verification page (Edit -> Settings -> SFTP -> "Hash verification").
         bool hash_on_transfer = faux; // Auto-hash the target of every completed transfer.
@@ -277,6 +279,8 @@ namespace netxs::app::parvion
             threshold_unit  = std::clamp(threshold_unit, 0, sftp_unit_count - 1);
             max_connections = std::clamp(max_connections, 1, 10);
             transfer_allocation = std::clamp(transfer_allocation, 0, allocation_count - 1);
+            conflict_policy = (conflict_policy_t)std::clamp((si32)conflict_policy,
+                                                            0, conflict_policy_count - 1);
             hash_algo       = std::clamp(hash_algo, 0, hash_algo_count - 1);
             log_debug_level = std::clamp(log_debug_level, 0, 4);
         }
@@ -309,6 +313,7 @@ namespace netxs::app::parvion
                 else if (key == "SFTP parallel transfer threshold unit")  threshold_unit  = std::atoi(val.c_str());
                 else if (key == "SFTP parallel max connections")          max_connections = std::atoi(val.c_str());
                 else if (key == "SFTP transfer queue allocation")          transfer_allocation = std::atoi(val.c_str());
+                else if (key == "SFTP existing file policy")              conflict_policy = (conflict_policy_t)std::atoi(val.c_str());
                 else if (key == "Hash on transfer")                       hash_on_transfer = std::atoi(val.c_str()) != 0;
                 else if (key == "Hash algorithm")                         hash_algo        = std::atoi(val.c_str());
                 else if (key == "Logging Debug Level")                    log_debug_level  = std::atoi(val.c_str());
@@ -351,6 +356,7 @@ namespace netxs::app::parvion
             put("SFTP parallel transfer threshold unit", std::to_string(threshold_unit));
             put("SFTP parallel max connections", std::to_string(max_connections));
             put("SFTP transfer queue allocation", std::to_string(transfer_allocation));
+            put("SFTP existing file policy", std::to_string((si32)conflict_policy));
             put("Hash on transfer", std::to_string(hash_on_transfer ? 1 : 0));
             put("Hash algorithm", std::to_string(hash_algo));
             put("Logging Debug Level", std::to_string(log_debug_level));

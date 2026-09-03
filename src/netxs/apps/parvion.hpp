@@ -33,6 +33,7 @@
 #include "parvion/components/grid.hpp"
 #include "parvion/settings_dialog.hpp"
 #include "parvion/secret_dialog.hpp" // make_secret_dialog (live passphrase / password login modal)
+#include "parvion/conflict_dialog.hpp" // make_conflict_dialog (enqueue conflict-policy modal)
 
 namespace netxs::app::parvion
 {
@@ -389,6 +390,31 @@ namespace netxs::app::parvion
                             .is_retry = req.is_retry,
                             .secret = true,
                         }));
+                    });
+                };
+                // Enqueue-time destination conflicts use the same retained modal shell. The
+                // controller keeps the request/batch continuation; this callback only presents
+                // the choice and returns it after the overlay has been dismissed.
+                ctrl->on_conflict_ask = [wp = ptr::shadow(boss.This())](text destination,
+                                                                         std::function<void(conflict_choice)> answer)
+                {
+                    auto w = wp.lock();
+                    if (!w) { if (answer) answer(conflict_choice::cancel_rest); return; }
+                    w->base::enqueue([wp, destination = std::move(destination), answer = std::move(answer)](auto& win) mutable
+                    {
+                        auto dialog = make_conflict_dialog({
+                            .window_wp = wp,
+                            .destination = std::move(destination),
+                            .on_choice = std::move(answer),
+                        });
+                        win.base::attach(dialog);
+                        // Same deferred grab as Settings / secret: the shell is focusable, not
+                        // focused, so Esc/keyboard stay on the pane until we set focus after attach.
+                        auto gid = win.bell::indexer.luafx.get_gear().id;
+                        win.base::enqueue([dialog_wp = ptr::shadow(dialog), gid](auto&)
+                        {
+                            if (auto d = dialog_wp.lock()) pro::focus::set(d, gid, solo::on);
+                        });
                     });
                 };
             });
