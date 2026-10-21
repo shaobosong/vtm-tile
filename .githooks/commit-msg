@@ -1,0 +1,46 @@
+#!/bin/sh
+# Match the repository's sentence-style English commit subjects.
+if [ "$#" -ne 1 ] || [ ! -r "$1" ]; then
+    echo 'commit-msg: expected a readable commit message file' >&2
+    exit 1
+fi
+
+# Use Git's configured comment character and normalize CRLF/blank lines.
+message=$(git stripspace --strip-comments < "$1") || exit 1
+printf '%s\n' "$message" | LC_ALL=C awk '
+function reject(reason) {
+    print "commit-msg: " reason > "/dev/stderr"
+    print "Example: Fix Parvion scrollbar thumb rounding" > "/dev/stderr"
+    failed = 1
+}
+{
+    sub(/\r$/, "")
+    if (length($0) > 80)
+        reject("line " NR " exceeds 80 bytes (ASCII characters count as one byte)")
+}
+NR == 1 {
+    sub(/\r$/, "")
+    subject = $0
+    if (subject == "") {
+        reject("the commit subject must not be empty")
+        exit 1
+    }
+
+    # Preserve Git-generated merge subjects and autosquash workflows.
+    if (subject ~ /^Merge /) next
+    while (sub(/^(fixup!|squash!|amend!) /, "", subject)) {}
+
+    # Older commits also use a lowercase component prefix (parvion: ...).
+    scoped = sub(/^[a-z][a-z0-9_-]*: /, "", subject)
+    if ((!scoped && subject !~ /^[A-Z][A-Za-z-]*[ \t]+[^ \t]/) ||
+        (scoped && subject !~ /^[A-Za-z][A-Za-z-]*[ \t]+[^ \t]/))
+        reject("use an English sentence-style subject, starting with an action such as Add, Fix, or Refactor")
+    if (subject ~ /[.!?]$/)
+        reject("omit terminal punctuation from the subject")
+}
+NR == 2 {
+    sub(/\r$/, "")
+    if ($0 != "") reject("separate the subject and body with a blank line")
+}
+END { exit failed ? 1 : 0 }
+'
