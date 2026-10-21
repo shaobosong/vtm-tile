@@ -1,3 +1,12 @@
+if(WIN32)
+    add_executable(terminal_mouse_input_test "terminal_mouse_input_test.cpp")
+    add_test(NAME terminal_mouse_input_test
+             COMMAND terminal_mouse_input_test "$<TARGET_FILE:vtm-tile>")
+    set_tests_properties(terminal_mouse_input_test PROPERTIES
+        TIMEOUT 90
+        LABELS "tui;terminal;mouse;windows")
+endif()
+
 add_executable(tile_session_shutdown_test "tile_session_shutdown_test.cpp")
 target_include_directories(tile_session_shutdown_test PRIVATE "${CMAKE_SOURCE_DIR}/src"
                                                               ${LUA_INCLUDE_DIR})

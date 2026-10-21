@@ -4751,7 +4751,16 @@ namespace netxs::os
                         writebuf.mouse_vtm(gear, coord);
                         writesyn.notify_one();
                     }
-                    else if (encod == prot::w32) termlink->mouse(gear, moved, coord, encod, state);
+                    // Windows input-record readers still need MOUSE_EVENTs when an
+                    // application requests SGR/X11 encoding without enabling VT input.
+                    #if defined(_WIN32)
+                    else if (encod == prot::w32 || !termlink->vt_input_mode())
+                    #else
+                    else if (encod == prot::w32)
+                    #endif
+                    {
+                        termlink->mouse(gear, moved, coord, encod, state);
+                    }
                     else
                     {
                         if (state & mode::move
