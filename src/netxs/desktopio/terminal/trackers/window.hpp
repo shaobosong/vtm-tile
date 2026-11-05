@@ -54,7 +54,7 @@
                 {
                     default:
                     case 6: queue.report(owner.target->coord); break;
-                    case 5: queue.add("OK");                   break;
+                    case 5: queue.add("\x1b[0n");              break;
                     case-1: queue.add("VT420");                break;
                 }
                 owner.answer(queue);

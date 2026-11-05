@@ -81,7 +81,7 @@ namespace netxs::ansi
     static const auto csi_rep     = 'b'; // CSI n      b  — Repeat the preceding character n times.
     static const auto csi_tbc     = 'g'; // CSI n      g  — Reset tabstop value.
     static const auto csi_sgr     = 'm'; // CSI n [;k] m  — Select Graphic Rendition.
-    static const auto csi_dsr     = 'n'; // CSI n      n  — Device Status Report (DSR). n==5 -> "OK"; n==6 -> CSI r ; c R
+    static const auto csi_dsr     = 'n'; // CSI n      n  — Device Status Report (DSR). n==5 -> CSI 0 n; n==6 -> CSI r ; c R
     static const auto csi_scp     = 's'; // CSI        s  — Save cursor Position.
     static const auto csi_rcp     = 'u'; // CSI        u  — Restore cursor Position.
     static const auto csi__el     = 'K'; // CSI n      K  — Erase 0: from cursor to end, 1: from begin to cursor, 2: all line.

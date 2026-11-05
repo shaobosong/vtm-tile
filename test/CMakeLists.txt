@@ -1,4 +1,11 @@
 if(WIN32)
+    add_executable(terminal_dsr_test "terminal_dsr_test.cpp")
+    add_test(NAME terminal_dsr_test
+             COMMAND terminal_dsr_test "$<TARGET_FILE:vtm-tile>")
+    set_tests_properties(terminal_dsr_test PROPERTIES
+        TIMEOUT 30
+        LABELS "tui;terminal;windows")
+
     add_executable(terminal_mouse_input_test "terminal_mouse_input_test.cpp")
     add_test(NAME terminal_mouse_input_test
              COMMAND terminal_mouse_input_test "$<TARGET_FILE:vtm-tile>")
