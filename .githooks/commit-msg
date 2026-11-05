@@ -1,5 +1,5 @@
 #!/bin/sh
-# Match the repository's sentence-style English commit subjects.
+# Require an action-oriented subject followed by explanatory prose.
 if [ "$#" -ne 1 ] || [ ! -r "$1" ]; then
     echo 'commit-msg: expected a readable commit message file' >&2
     exit 1
@@ -10,7 +10,6 @@ message=$(git stripspace --strip-comments < "$1") || exit 1
 printf '%s\n' "$message" | LC_ALL=C awk '
 function reject(reason) {
     print "commit-msg: " reason > "/dev/stderr"
-    print "Example: Fix Parvion scrollbar thumb rounding" > "/dev/stderr"
     failed = 1
 }
 {
@@ -26,8 +25,10 @@ NR == 1 {
         exit 1
     }
 
-    # Preserve Git-generated merge subjects and autosquash workflows.
-    if (subject ~ /^Merge /) next
+    # Generated merges and fixup/squash commits may omit an explanation.
+    # amend! replaces the original message, so it still needs a body.
+    if (subject ~ /^Merge /) { generated = 1; next }
+    if (subject ~ /^(fixup!|squash!) /) generated = 1
     while (sub(/^(fixup!|squash!|amend!) /, "", subject)) {}
 
     # Older commits also use a lowercase component prefix (parvion: ...).
@@ -42,5 +43,18 @@ NR == 2 {
     sub(/\r$/, "")
     if ($0 != "") reject("separate the subject and body with a blank line")
 }
-END { exit failed ? 1 : 0 }
+NR > 2 && $0 ~ /[^ \t]/ && !body {
+    body = 1
+    # Require opening prose; lists and trailers can follow it.
+    if (!generated && ($0 ~ /^[ \t]*([-*+] |[0-9]+[.)] |#|>|```|~~~)/ ||
+                       tolower($0) ~ /^(signed-off-by|co-authored-by|acked-by|reviewed-by|tested-by|reported-by|suggested-by|fixes|refs|link):[ \t]/))
+        reject("start the body with an explanatory paragraph, before lists or trailers")
+}
+END {
+    if (!generated && !body)
+        reject("add a blank line and a paragraph explaining the change")
+    if (failed)
+        print "Example:\nCorrect terminal device status responses\n\nReturn the standard status sequence so applications can parse the reply." > "/dev/stderr"
+    exit failed ? 1 : 0
+}
 '
